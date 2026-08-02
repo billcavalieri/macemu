@@ -1051,7 +1051,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "cc etherhelpertool.c -framework Security -o $BUILT_PRODUCTS_DIR/etherhelpertool\n";
+			shellScript = "# Build the helper for the same architectures as the app.\n# A bare \"cc\" follows the build machine, which makes the helper thin\n# even when the app is universal -- it then cannot exec on the other\n# architecture (\"bad CPU type in executable\").\n# $ARCHS_STANDARD rather than $ARCHS: inside a script phase $ARCHS is\n# not fixed to the target setting -- some Xcode versions narrow it to a\n# single architecture even with ONLY_ACTIVE_ARCH = NO.\nARCH_FLAGS=\"\"\nfor arch in $ARCHS_STANDARD; do\n\tARCH_FLAGS=\"$ARCH_FLAGS -arch $arch\"\ndone\ncc $ARCH_FLAGS etherhelpertool.c -framework Security -o \"$BUILT_PRODUCTS_DIR/etherhelpertool\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
