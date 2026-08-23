@@ -116,6 +116,10 @@
 		E4C9A03E1FD55CDC00CABBF9 /* basic-dyngen-ops-x86_64_macos.hpp in Headers */ = {isa = PBXBuildFile; fileRef = E4C9A03D1FD55CDC00CABBF9 /* basic-dyngen-ops-x86_64_macos.hpp */; };
 		E4C9A0401FD55CE700CABBF9 /* ppc-dyngen-ops-x86_64_macos.hpp in Headers */ = {isa = PBXBuildFile; fileRef = E4C9A03F1FD55CE700CABBF9 /* ppc-dyngen-ops-x86_64_macos.hpp */; };
 		E4CBF46120CFC451009F40CC /* video_sdl.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E4CBF46020CFC451009F40CC /* video_sdl.cpp */; };
+		A10F9210BC10000000000005 /* ppc-mmu.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000002 /* ppc-mmu.cpp */; };
+		A10F9210BC10000000000006 /* ppc-mmu.hpp in Headers */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000001 /* ppc-mmu.hpp */; };
+		A10F9210BC10000000000007 /* ppc-mmu.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000002 /* ppc-mmu.cpp */; };
+		A10F9210BC10000000000008 /* mmu_harness.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000003 /* mmu_harness.cpp */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -398,6 +402,10 @@
 		E4C9A03D1FD55CDC00CABBF9 /* basic-dyngen-ops-x86_64_macos.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; name = "basic-dyngen-ops-x86_64_macos.hpp"; path = "dyngen_precompiled/basic-dyngen-ops-x86_64_macos.hpp"; sourceTree = "<group>"; };
 		E4C9A03F1FD55CE700CABBF9 /* ppc-dyngen-ops-x86_64_macos.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; name = "ppc-dyngen-ops-x86_64_macos.hpp"; path = "dyngen_precompiled/ppc-dyngen-ops-x86_64_macos.hpp"; sourceTree = "<group>"; };
 		E4CBF46020CFC451009F40CC /* video_sdl.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = video_sdl.cpp; path = ../../../BasiliskII/src/SDL/video_sdl.cpp; sourceTree = "<group>"; };
+		A10F9210BC10000000000001 /* ppc-mmu.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; path = "ppc-mmu.hpp"; sourceTree = "<group>"; };
+		A10F9210BC10000000000002 /* ppc-mmu.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = "ppc-mmu.cpp"; sourceTree = "<group>"; };
+		A10F9210BC10000000000003 /* mmu_harness.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = mmu_harness.cpp; sourceTree = "<group>"; };
+		A10F9210BC10000000000004 /* SheepShaver-MMUTests */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "SheepShaver-MMUTests"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -418,6 +426,13 @@
 				08CD42DC14B7B85B009CA2A2 /* Cocoa.framework in Frameworks */,
 				E447067025D904D500EA2C14 /* Metal.framework in Frameworks */,
 				08CD42E814B7B8AA009CA2A2 /* Carbon.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10F9210BC1000000000000B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -463,6 +478,7 @@
 			children = (
 				0856CCC114A99E1C000B1711 /* SheepShaver.app */,
 				0846E49A14B124DE00574779 /* libkpx_cpu.a */,
+				A10F9210BC10000000000004 /* SheepShaver-MMUTests */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -570,6 +586,7 @@
 				0856CDB214A99EEF000B1711 /* include */,
 				0856CDBB14A99EEF000B1711 /* sheepshaver_glue.cpp */,
 				0856CDBC14A99EEF000B1711 /* src */,
+				A10F9210BC1000000000000F /* tests */,
 			);
 			name = kpx_cpu;
 			path = ../kpx_cpu;
@@ -701,12 +718,22 @@
 				0856CDEA14A99EEF000B1711 /* ppc-instructions.hpp */,
 				0856CDEB14A99EEF000B1711 /* ppc-jit.cpp */,
 				0856CDEC14A99EEF000B1711 /* ppc-jit.hpp */,
+				A10F9210BC10000000000002 /* ppc-mmu.cpp */,
+				A10F9210BC10000000000001 /* ppc-mmu.hpp */,
 				0856CDED14A99EEF000B1711 /* ppc-operands.hpp */,
 				0856CDEE14A99EEF000B1711 /* ppc-operations.hpp */,
 				0856CDEF14A99EEF000B1711 /* ppc-registers.hpp */,
 				0856CDF014A99EEF000B1711 /* ppc-translate.cpp */,
 			);
 			path = ppc;
+			sourceTree = "<group>";
+		};
+		A10F9210BC1000000000000F /* tests */ = {
+			isa = PBXGroup;
+			children = (
+				A10F9210BC10000000000003 /* mmu_harness.cpp */,
+			);
+			path = tests;
 			sourceTree = "<group>";
 		};
 		0856CDF314A99EEF000B1711 /* mathlib */ = {
@@ -931,6 +958,7 @@
 				08163339158C121000C449F9 /* dis-asm.h in Headers */,
 				08003F8C1E0624D100A3ADAB /* basic-dyngen-ops-x86_32.hpp in Headers */,
 				08003F911E0624D100A3ADAB /* ppc-dyngen-ops.hpp in Headers */,
+				A10F9210BC10000000000006 /* ppc-mmu.hpp in Headers */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -975,6 +1003,22 @@
 			productReference = 0856CCC114A99E1C000B1711 /* SheepShaver.app */;
 			productType = "com.apple.product-type.application";
 		};
+		A10F9210BC10000000000009 /* SheepShaver-MMUTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10F9210BC1000000000000E /* Build configuration list for PBXNativeTarget "SheepShaver-MMUTests" */;
+			buildPhases = (
+				A10F9210BC1000000000000A /* Sources */,
+				A10F9210BC1000000000000B /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "SheepShaver-MMUTests";
+			productName = "SheepShaver-MMUTests";
+			productReference = A10F9210BC10000000000004 /* SheepShaver-MMUTests */;
+			productType = "com.apple.product-type.tool";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -1000,6 +1044,7 @@
 			targets = (
 				0856CCC014A99E1C000B1711 /* SheepShaver */,
 				0846E49914B124DE00574779 /* kpx_cpu */,
+				A10F9210BC10000000000009 /* SheepShaver-MMUTests */,
 			);
 		};
 /* End PBXProject section */
@@ -1073,6 +1118,7 @@
 				0846E4C214B1269600574779 /* basic-dyngen.cpp in Sources */,
 				0846E51314B128ED00574779 /* sheepshaver_glue.cpp in Sources */,
 				08163340158C125800C449F9 /* ppc-dis.c in Sources */,
+				A10F9210BC10000000000005 /* ppc-mmu.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1154,6 +1200,15 @@
 				087B91BE1B780FFC00825F7F /* sigsegv.cpp in Sources */,
 				087B91BF1B780FFC00825F7F /* video_blit.cpp in Sources */,
 				087B91C01B780FFC00825F7F /* vm_alloc.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10F9210BC1000000000000A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10F9210BC10000000000007 /* ppc-mmu.cpp in Sources */,
+				A10F9210BC10000000000008 /* mmu_harness.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1422,6 +1477,55 @@
 			};
 			name = Release;
 		};
+		A10F9210BC1000000000000C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++11";
+				CLANG_CXX_LIBRARY = "libc++";
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				HEADER_SEARCH_PATHS = (
+					../kpx_cpu/src,
+					../kpx_cpu/include,
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
+				PRODUCT_NAME = "SheepShaver-MMUTests";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				VALID_ARCHS = arm64;
+			};
+			name = Debug;
+		};
+		A10F9210BC1000000000000D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++11";
+				CLANG_CXX_LIBRARY = "libc++";
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				GCC_OPTIMIZATION_LEVEL = 3;
+				HEADER_SEARCH_PATHS = (
+					../kpx_cpu/src,
+					../kpx_cpu/include,
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
+				PRODUCT_NAME = "SheepShaver-MMUTests";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				VALID_ARCHS = arm64;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1451,6 +1555,15 @@
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
+		};
+		A10F9210BC1000000000000E /* Build configuration list for PBXNativeTarget "SheepShaver-MMUTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10F9210BC1000000000000C /* Debug */,
+				A10F9210BC1000000000000D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
 	};
