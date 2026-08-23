@@ -37,6 +37,10 @@
 #include "mon_disass.h"
 #endif
 
+#ifdef SHEEPSHAVER
+#include "nw_boot_contract.h"
+#endif
+
 #define DEBUG 0
 #include "debug.h"
 
@@ -345,6 +349,19 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 	dar_ = dsi.dar;
 	dsisr_ = dsi.dsisr;
 	pc() = dsi.vector;
+#ifdef SHEEPSHAVER
+#if NW_BOOT_LOG
+	{
+		ppc32_mmu &mmu = ppc32_guest_mmu();
+		const uint32 saved_msr = mmu.msr();
+		mmu.set_msr(saved_msr | ppc32_mmu::MSR_DR);
+		const ppc32_xlate_result hit =
+			mmu.translate(dsi.srr0, PPC32_XLATE_DR, 4);
+		mmu.set_msr(saved_msr);
+		nw_log_first_dsi(dsi.srr0, dsi.dar, hit.ok ? 1 : 0);
+	}
+#endif
+#endif
 }
 
 void powerpc_cpu::take_isi()
@@ -424,7 +441,11 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 	switch (spr) {
 	case powerpc_registers::SPR_DSISR:	dsisr_ = value; return true;
 	case powerpc_registers::SPR_DAR:	dar_ = value; return true;
-	case powerpc_registers::SPR_SDR1:	mmu.set_sdr1(value); return true;
+	case powerpc_registers::SPR_SDR1:
+#ifdef SHEEPSHAVER
+		nw_note_mtsdr1();
+#endif
+		mmu.set_sdr1(value); return true;
 	case powerpc_registers::SPR_SRR0:	srr0_ = value; return true;
 	case powerpc_registers::SPR_SRR1:	srr1_ = value; return true;
 	case powerpc_registers::SPR_SPRG0:	sprg_[0] = value; return true;

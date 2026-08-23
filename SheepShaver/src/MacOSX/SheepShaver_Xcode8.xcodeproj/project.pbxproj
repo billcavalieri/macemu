@@ -1261,6 +1261,7 @@
 					"_GNU_SOURCE=1",
 					_THREAD_SAFE,
 					_REENTRANT,
+					"NW_BOOT_LOG=1",
 				);
 				HEADER_SEARCH_PATHS = (
 					/Library/Frameworks/SDL2.framework/Headers,
@@ -1373,6 +1374,7 @@
 					_REENTRANT,
 					"BINCUE=1",
 					"USE_SDL_AUDIO=1",
+					"NW_BOOT_LOG=1",
 				);
 				GCC_SYMBOLS_PRIVATE_EXTERN = NO;
 				GCC_WARN_UNUSED_FUNCTION = YES;

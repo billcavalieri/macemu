@@ -107,6 +107,7 @@ creqv
 #include "xlowmem.h"
 #include "emul_op.h"
 #include "rom_patches.h"
+#include "nw_boot_contract.h"
 #include "../kpx_cpu/src/cpu/ppc/ppc-mmu.hpp"
 
 #if ENABLE_MON
@@ -139,6 +140,17 @@ static void ppc_take_data_dsi(uint32 fault_pc, uint32 ea, bool is_store)
 	oea_dar = dsi.dar;
 	oea_dsisr = dsi.dsisr;
 	pc = dsi.vector;
+#if NW_BOOT_LOG
+	{
+		ppc32_mmu &mmu = ppc32_guest_mmu();
+		const uint32 saved_msr = mmu.msr();
+		mmu.set_msr(saved_msr | ppc32_mmu::MSR_DR);
+		const ppc32_xlate_result hit =
+			mmu.translate(dsi.srr0, PPC32_XLATE_DR, 4);
+		mmu.set_msr(saved_msr);
+		nw_log_first_dsi(dsi.srr0, dsi.dar, hit.ok ? 1 : 0);
+	}
+#endif
 }
 
 static bool ppc_xlate_data(uint32 ea, unsigned width, bool is_store, uint32 *pa)
@@ -273,7 +285,9 @@ static bool ppc_mtspr_oea(uint32 spr, uint32 value)
 	switch (spr) {
 	case 18: oea_dsisr = value; return true;
 	case 19: oea_dar = value; return true;
-	case 25: mmu.set_sdr1(value); return true;
+	case 25:
+		nw_note_mtsdr1();
+		mmu.set_sdr1(value); return true;
 	case 26: oea_srr0 = value; return true;
 	case 27: oea_srr1 = value; return true;
 	case 272: oea_sprg[0] = value; return true;
@@ -1811,6 +1825,9 @@ void init_emul_ppc(void)
 	if (ROMType == ROMTYPE_NEWWORLD) {
 		ppc32_guest_mmu().set_phys_read32(emul_phys_read32, NULL);
 		ppc32_guest_mmu_enable(true);
+		nw_log_g1_hwinit();
+	} else {
+		nw_log_translator_off();
 	}
 
 	r[3] = ROMBase + 0x30d000;

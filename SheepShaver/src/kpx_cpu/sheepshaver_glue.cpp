@@ -33,6 +33,7 @@
 #include "cpu/ppc/ppc-operations.hpp"
 #include "cpu/ppc/ppc-instructions.hpp"
 #include "thunks.h"
+#include "nw_boot_contract.h"
 
 // Used for NativeOp trampolines
 #include "video.h"
@@ -862,6 +863,9 @@ void init_emul_ppc(void)
 	if (ROMType == ROMTYPE_NEWWORLD) {
 		ppc32_guest_mmu().set_phys_read32(guest_phys_read32, NULL);
 		ppc_cpu->enable_guest_mmu(true);
+		nw_log_g1_hwinit();
+	} else {
+		nw_log_translator_off();
 	}
 
 #if ENABLE_MON

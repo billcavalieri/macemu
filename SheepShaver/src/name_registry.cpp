@@ -382,6 +382,7 @@ void DoPatchNameRegistry(void)
 	if (!RegistryCStrEntryCreate(0, "Devices:device-tree", device_tree.addr())) {
 		if (ROMType == ROMTYPE_NEWWORLD) {
 			PatchNewWorldNameRegistry(device_tree.addr());
+			nw_log_g1_tree();
 			D(bug("done (New World MacRISC2).\n"));
 			return;
 		}

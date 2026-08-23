@@ -118,6 +118,26 @@ int main()
 		CHECK(!nw_htab_gate_pass(&gate));
 	}
 
+	/* Debug log needles Grok Build greps (NW-BOOT prefix on SheepShaver Debug). */
+	{
+		CHECK(strcmp(nw_boot_line_g0_newworld(),
+			"G0: DecodeROM 4 MiB NewWorld +0x30d064 NK +0x310000") == 0);
+		CHECK(strcmp(nw_boot_line_g1_tree(),
+			"G1: tree root compatible MacRISC2 Gestalt 406 /memory /cpus /chosen") == 0);
+		CHECK(strcmp(nw_boot_line_g1_kdp(),
+			"G1: Hnfo vs mtsdr1: Hnfo BATRangeInit saveKernelDataPtr adjacent") == 0);
+		CHECK(strcmp(nw_boot_line_g1_mtsdr1(),
+			"G1: Hnfo vs mtsdr1: mtsdr1") == 0);
+		CHECK(strcmp(nw_boot_line_g1_hwinit(),
+			"G1: HardwareInit handoff NK +0x310000 ConfigInfo +0x30d000") == 0);
+		CHECK(strcmp(nw_boot_line_g1_patch_skip(),
+			"G1: New World patch skip") == 0);
+		CHECK(strcmp(nw_boot_line_g2_first_dsi(),
+			"G2: first DSI SRR0=PC DR on HIT no second DSI") == 0);
+		CHECK(strcmp(nw_boot_line_g2_translator_off(),
+			"G2: translator off (Old World)") == 0);
+	}
+
 	const uint32_t ram_size = 4u * 1024u * 1024u;
 	std::vector<uint8_t> ram(ram_size, 0);
 

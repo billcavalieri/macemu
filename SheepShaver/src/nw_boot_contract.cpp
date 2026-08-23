@@ -4,6 +4,7 @@
 
 #include "nw_boot_contract.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* Must match rom_patches.h ROMTYPE_NEWWORLD. */
@@ -169,4 +170,108 @@ int nw_htab_gate_pass(const struct nw_htab_gate *gate)
 	if (gate == NULL)
 		return 0;
 	return gate->hnfo_valid_htab || gate->spr_log_mtsdr1;
+}
+
+const char *nw_boot_line_g0_newworld(void)
+{
+	return "G0: DecodeROM 4 MiB NewWorld +0x30d064 NK +0x310000";
+}
+
+const char *nw_boot_line_g1_tree(void)
+{
+	return "G1: tree root compatible MacRISC2 Gestalt 406 /memory /cpus /chosen";
+}
+
+const char *nw_boot_line_g1_kdp(void)
+{
+	return "G1: Hnfo vs mtsdr1: Hnfo BATRangeInit saveKernelDataPtr adjacent";
+}
+
+const char *nw_boot_line_g1_mtsdr1(void)
+{
+	return "G1: Hnfo vs mtsdr1: mtsdr1";
+}
+
+const char *nw_boot_line_g1_hwinit(void)
+{
+	return "G1: HardwareInit handoff NK +0x310000 ConfigInfo +0x30d000";
+}
+
+const char *nw_boot_line_g1_patch_skip(void)
+{
+	return "G1: New World patch skip";
+}
+
+const char *nw_boot_line_g2_first_dsi(void)
+{
+	return "G2: first DSI SRR0=PC DR on HIT no second DSI";
+}
+
+const char *nw_boot_line_g2_translator_off(void)
+{
+	return "G2: translator off (Old World)";
+}
+
+void nw_boot_log(const char *line)
+{
+#if NW_BOOT_LOG
+	if (line)
+		printf("NW-BOOT %s\n", line);
+	fflush(stdout);
+#else
+	(void)line;
+#endif
+}
+
+void nw_log_g0_decode(const uint8_t *rom, size_t size)
+{
+	if (nw_detect_decoded_rom(rom, size) == NW_DECODED_NEWWORLD)
+		nw_boot_log(nw_boot_line_g0_newworld());
+}
+
+void nw_log_g1_tree(void)
+{
+	nw_boot_log(nw_boot_line_g1_tree());
+}
+
+void nw_log_g1_kdp(const uint8_t *page)
+{
+	if (nw_kdp_hnfo_valid_htab(page) && nw_kdp_bat_range_init_present(page) &&
+	    nw_kdp_save_ptrs_adjacent(page))
+		nw_boot_log(nw_boot_line_g1_kdp());
+}
+
+void nw_note_mtsdr1(void)
+{
+	static int logged;
+	if (logged)
+		return;
+	logged = 1;
+	nw_boot_log(nw_boot_line_g1_mtsdr1());
+}
+
+void nw_log_g1_hwinit(void)
+{
+	nw_boot_log(nw_boot_line_g1_hwinit());
+}
+
+void nw_log_g1_patch_skip(int is_newworld)
+{
+	if (is_newworld)
+		nw_boot_log(nw_boot_line_g1_patch_skip());
+}
+
+void nw_log_first_dsi(uint32_t srr0, uint32_t dar, int dr_on_hit)
+{
+	static int logged;
+	if (logged)
+		return;
+	logged = 1;
+	if (srr0 != dar && dr_on_hit)
+		nw_boot_log(nw_boot_line_g2_first_dsi());
+}
+
+void nw_log_translator_off(void)
+{
+	nw_boot_log(nw_boot_line_g2_translator_off());
 }

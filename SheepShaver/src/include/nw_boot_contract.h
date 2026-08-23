@@ -98,6 +98,26 @@ int nw_htab_gate_pass(const struct nw_htab_gate *gate);
 uint32_t nw_be32_load(const uint8_t *mem, uint32_t off);
 void nw_be32_store(uint8_t *mem, uint32_t off, uint32_t value);
 
+/* Debug-only live boot log (NW_BOOT_LOG=1 on Xcode SheepShaver Debug). */
+const char *nw_boot_line_g0_newworld(void);
+const char *nw_boot_line_g1_tree(void);
+const char *nw_boot_line_g1_kdp(void);
+const char *nw_boot_line_g1_mtsdr1(void);
+const char *nw_boot_line_g1_hwinit(void);
+const char *nw_boot_line_g1_patch_skip(void);
+const char *nw_boot_line_g2_first_dsi(void);
+const char *nw_boot_line_g2_translator_off(void);
+
+void nw_boot_log(const char *line);
+void nw_log_g0_decode(const uint8_t *rom, size_t size);
+void nw_log_g1_tree(void);
+void nw_log_g1_kdp(const uint8_t *page);
+void nw_log_g1_hwinit(void);
+void nw_log_g1_patch_skip(int is_newworld);
+void nw_note_mtsdr1(void);
+void nw_log_first_dsi(uint32_t srr0, uint32_t dar, int dr_on_hit);
+void nw_log_translator_off(void);
+
 #ifdef __cplusplus
 }
 #endif

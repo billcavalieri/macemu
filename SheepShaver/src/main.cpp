@@ -207,6 +207,8 @@ bool InitAll(const char *vmdir)
 		kdp_params.sdr1 = NW_DEFAULT_SDR1;
 		nw_fill_kdp_be(kdp_page, sizeof(kdp_page), &kdp_params);
 		Host2Mac_memcpy(KERNEL_DATA_BASE, kdp_page, sizeof(kdp_page));
+		nw_log_g1_tree();
+		nw_log_g1_kdp(kdp_page);
 	} else if (ROMType == ROMTYPE_GOSSAMER) {
 		WriteMacInt32(KERNEL_DATA_BASE + 0xc80, RAMSize);
 		WriteMacInt32(KERNEL_DATA_BASE + 0xc84, RAMSize);

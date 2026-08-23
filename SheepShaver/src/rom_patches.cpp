@@ -153,6 +153,7 @@ bool DecodeROM(uint8 *data, uint32 size)
 	if (size == ROM_SIZE) {
 		// Plain ROM image
 		memcpy(ROMBaseHost, data, ROM_SIZE);
+		nw_log_g0_decode(ROMBaseHost, ROM_SIZE);
 		return true;
 	}
 	else if (strncmp((char *)data, "<CHRP-BOOT>", 11) == 0) {
@@ -197,6 +198,7 @@ bool DecodeROM(uint8 *data, uint32 size)
 			D(bug("Size of compressed data: %08x\n", image_size));
 			decode_lzss(data + image_offset, ROMBaseHost, image_size);
 		}
+		nw_log_g0_decode(ROMBaseHost, ROM_SIZE);
 		return true;
 	}
 	return false;
@@ -696,6 +698,8 @@ bool PatchROM(void)
 		ROMType = ROMTYPE_NEWWORLD;
 	else
 		return false;
+
+	nw_log_g1_patch_skip(ROMType == ROMTYPE_NEWWORLD);
 	
 	// Check that other ROM addresses point to really free regions
 	if (!check_rom_patch_space(CHECK_LOAD_PATCH_SPACE, 0x40))
