@@ -53,7 +53,6 @@ build:
 $ cd macemu/BasiliskII/src/MacOSX
 $ xcodebuild build -project BasiliskII.xcodeproj -configuration Release
 ```
-or same as Linux
 
 ##### Linux
 preparation (arm64 only): Install GMP and MPFR.
@@ -83,7 +82,6 @@ about changing Deployment Target: see BasiliskII
 $ cd macemu/SheepShaver/src/MacOSX
 $ xcodebuild build -project SheepShaver_Xcode8.xcodeproj -configuration Release
 ```
-or same as Linux
 
 ##### Linux
 ```
