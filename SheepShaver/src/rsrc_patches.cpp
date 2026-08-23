@@ -33,6 +33,7 @@
 #include "audio.h"
 #include "audio_defs.h"
 #include "thunks.h"
+#include "nw_boot_contract.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -206,6 +207,9 @@ void CheckLoad(uint32 type, int16 id, uint16 *p, uint32 size)
 
 	} else if (type == FOURCC('p','t','c','h') && id == 420) {
 		D(bug("ptch 420 found\n"));
+		if (ROMType == ROMTYPE_NEWWORLD) {
+			// 9.2.1 requires VM; Disable VM is Old World-only.
+		} else {
 		size >>= 1;
 		while (size--) {
 			if (PM(0,0xa030) && PM(1,0x5240) && PM(2,0x303c) && PM(3,0x0100) && PM(4,0xc06e) && PM(5,0xfef6)) {
@@ -237,6 +241,7 @@ void CheckLoad(uint32 type, int16 id, uint16 *p, uint32 size)
 				break;
 			}
 			p++;
+		}
 		}
 
 	} else if (type == FOURCC('g','p','c','h') && id == 16) {
@@ -302,7 +307,7 @@ void CheckLoad(uint32 type, int16 id, uint16 *p, uint32 size)
 			} else if (PM(0,0x207c) && PM(1,0xf300) && PM(2,0x0034)) {
 				// Don't read PowerMac ID (7.6, 7.6.1, 8.0, 8.1 with Zanzibar ROM)
 				p[0] = htons(0x303c);		// move.w #id,d0
-				p[1] = htons(0x3020);
+				p[1] = htons((uint16)nw_gestalt_machine_id(ROMType == ROMTYPE_NEWWORLD));
 				p[2] = htons(M68K_RTS);
 				D(bug(" patch 2 applied\n"));
 			} else if (PM(0,0x13fc) && PM(1,0x0081) && PM(2,0xf130) && PM(3,0xa030)) {

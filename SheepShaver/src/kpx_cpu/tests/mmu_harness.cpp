@@ -1,16 +1,15 @@
 /*
- *  mmu_harness.cpp - Host-side SheepShaver-MMUTests (WP2)
+ *  mmu_harness.cpp - Host-side SheepShaver-MMUTests (G1 + G2)
  *
  *  SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
  *
- *  Programs BAT + a synthetic HTAB and asserts BAT hit, HTAB hit, fault,
- *  IR-only vs DR-only, tlbie dropping a cached translation, and the G2
- *  HotInts accept: after a data DSI, MSR[DR]-on lwz of the faulting insn
- *  at SRR0 must HIT (BAT or HTAB) and must not take a second DSI.
- *  First DSI is not DSISR-only; AlignmentInt is still mfdsisr/mfdar.
+ *  G1: New World boot contract (tree nodes, Gestalt 406, KDP layout,
+ *  Hnfo-or-mtsdr1, BATRangeInit, saveKernelDataPtr adjacency). No ROM.
+ *  G2: BAT + synthetic HTAB; HotInts DSI accept (SRR0 lwz HIT).
  */
 
 #include "cpu/ppc/ppc-mmu.hpp"
+#include "nw_boot_contract.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -69,6 +68,56 @@ static void program_pte(uint8_t *ram, uint32_t sdr1, uint32_t vsid,
 
 int main()
 {
+	/* ---- G1 New World boot contract (no guest ROM) ---- */
+	{
+		CHECK(strcmp(nw_root_compatible(), "MacRISC2") == 0);
+		CHECK(nw_gestalt_machine_id(1) == 406);
+		CHECK(nw_gestalt_machine_id(0) == 0x3020u);
+		CHECK(nw_of_tree_has_required_nodes());
+		CHECK(NW_KDP_SAVE_KERNEL_DATA_PTR == NW_KDP_SAVE_RETURN_ADDR + 4);
+		CHECK(NW_KDP_BAT_RANGE_INIT_LONGS == 32);
+		CHECK(NW_NK_V2_OFFSET == 0x310000);
+		CHECK(nw_rom_type_is_newworld(5));
+		CHECK(!nw_rom_type_is_newworld(0));
+
+		std::vector<uint8_t> rom(NW_ROM_SIZE, 0);
+		memcpy(&rom[NW_NEWWORLD_SIG_OFFSET], "NewWorld", 8);
+		CHECK(nw_detect_decoded_rom(&rom[0], rom.size()) == NW_DECODED_NEWWORLD);
+		memcpy(&rom[NW_NEWWORLD_SIG_OFFSET], "Boot TNT", 8);
+		CHECK(nw_detect_decoded_rom(&rom[0], rom.size()) == NW_DECODED_OLDWORLD);
+
+		std::vector<uint8_t> kdp(NW_KDP_PAGE_SIZE, 0);
+		nw_kdp_params p;
+		memset(&p, 0, sizeof(p));
+		p.kdp_ea = 0x68ffe000u;
+		p.ram_base = 0;
+		p.ram_size = 64u * 1024u * 1024u;
+		p.rom_base = 0x40800000u;
+		p.htaborg = NW_DEFAULT_HTABORG;
+		p.ptegmask = NW_DEFAULT_PTEGMASK;
+		p.sdr1 = NW_DEFAULT_SDR1;
+		nw_fill_kdp_be(&kdp[0], kdp.size(), &p);
+		CHECK(nw_kdp_save_ptrs_adjacent(&kdp[0]));
+		CHECK(nw_be32_load(&kdp[0], NW_KDP_SAVE_KERNEL_DATA_PTR) == p.kdp_ea);
+		CHECK(nw_kdp_bat_range_init_present(&kdp[0]));
+		CHECK(nw_kdp_hnfo_valid_htab(&kdp[0]));
+		CHECK(nw_be32_load(&kdp[0], NW_KDP_HNFO_SIGNATURE) == (uint32_t)NW_HNFO_SIGNATURE);
+
+		nw_htab_gate gate;
+		gate.hnfo_valid_htab = nw_kdp_hnfo_valid_htab(&kdp[0]);
+		gate.spr_log_mtsdr1 = 0;
+		CHECK(nw_htab_gate_pass(&gate));
+
+		/* HTAB half of G1: mtsdr1 in the SPR log is enough without Hnfo HTAB. */
+		std::vector<uint8_t> empty(NW_KDP_PAGE_SIZE, 0);
+		gate.hnfo_valid_htab = nw_kdp_hnfo_valid_htab(&empty[0]);
+		gate.spr_log_mtsdr1 = 1;
+		CHECK(!gate.hnfo_valid_htab);
+		CHECK(nw_htab_gate_pass(&gate));
+		gate.spr_log_mtsdr1 = 0;
+		CHECK(!nw_htab_gate_pass(&gate));
+	}
+
 	const uint32_t ram_size = 4u * 1024u * 1024u;
 	std::vector<uint8_t> ram(ram_size, 0);
 

@@ -61,7 +61,7 @@ One guest physical address space. The MMU is the only translator from effective 
 
 ### WP1 — New World boot and nanokernel v2
 
-**Owner:** Macemu Engineer. Files: `rom_patches.cpp`, `rsrc_patches.cpp`, `name_registry.cpp`, `macos_util.cpp`, `SheepShaver/src/include`, `MacOSX` prefs.
+**Owner:** Macemu Engineer. Files: `rom_patches.cpp`, `rsrc_patches.cpp`, `name_registry.cpp`, `macos_util.cpp`, `SheepShaver/src/include/nw_boot_contract.h`, `nw_boot_contract.cpp`, `MacOSX` prefs. Host G1 asserts live in `SheepShaver-MMUTests` (`mmu_harness.cpp` + `nw_boot_contract.*`).
 
 1. Detect New World vs Old World at load. Keep the Old World 9.0.4 path working; gate New World on ROM signature / Nanokernel version.
 2. Stop applying Old World-only patches to a New World ROM. New World uses a different trampoline (tbxi + Open Firmware / BootX-style handoff, not the Old World reset vector patch set).
@@ -143,13 +143,13 @@ These three gates are locked. Do not invent extra probes — in particular **do 
 
 **G0 (WP0 / Swiftly).** `DecodeROM` in `SheepShaver/src/rom_patches.cpp` already takes the tbxi path (`lzss-offset` **or** `parcels-offset` / `parcels-size` with a `prcl` signature). After decode there is 4 MiB at `ROMBase`. Check NewWorld at `ROMBase+0x30d064` and nanokernel v2 at `ROMBase+0x310000`. Both ROM 1.6 (lzss, tome-extract) and the 9.2.1 install-set Mac OS ROM (parcels → prcl) must pass. iMac Update 1.1 / ROM 1.2.1 stays 9.0.4 regression only.
 
-**G1 (WP1).** Device tree root `compatible` is `MacRISC2`. Gestalt machine ID is always 406; the real machine identity is root `model`/`compatible`. Need `/memory` (reg banks), `/cpus`, `/chosen`. NK v2 ~`ROMBase+0x310000`. KDP Hnfo from `HardwareInit` skips the CPU probe / `mfsdr1`. Treat **either** `mtsdr1` in the SPR log **or** a valid HTAB already in the Hnfo block as the HTAB half of the gate. Plus `BATRangeInit` at KDP+0x2cc (32 longs). `saveKernelDataPtr` immediately after `saveReturnAddr`.
+**G1 (WP1).** Device tree root `compatible` is `MacRISC2`. Gestalt machine ID is always 406; the real machine identity is root `model`/`compatible`. Need `/memory` (reg banks), `/cpus`, `/chosen`. NK v2 ~`ROMBase+0x310000`. KDP Hnfo from `HardwareInit` skips the CPU probe / `mfsdr1`. Treat **either** `mtsdr1` in the SPR log **or** a valid HTAB already in the Hnfo block as the HTAB half of the gate. Plus `BATRangeInit` at KDP+0x2cc (32 longs). `saveKernelDataPtr` immediately after `saveReturnAddr`. Host harness: `SheepShaver-MMUTests` (`mmu_harness.cpp` + `nw_boot_contract.cpp`).
 
 **G2 (WP2).** First DSI is `DataStorageInt` in elliotnunn/NanoKernel `HotInts.s`, not a DSISR-only path (`AlignmentInt` is the one that does `mfdsisr`/`mfdar`). Sequence: SPRG0=KDP, SPRG1=saved r1, SPRG2=LR, SPRG3=VecTbl; save r0/r1 then `mfsrr0`→r10, `mfsrr1`→r11, SPRG2→r12, CR→r13; MSR[DR] ON; `lwz` the faulting insn at SRR0 into r27; go to MemRetry. **Accept:** take a data DSI, then the HotInts `lwz` of the faulting insn at SRR0 with MSR[DR] on must HIT (BAT or HTAB) and must not take a second DSI. Early nanokernel keeps the instruction side mapped. Old World 9.0.4 stays off the translator (IR/DR off / Old World gate). Host harness: `SheepShaver-MMUTests` (`SheepShaver/src/kpx_cpu/tests/mmu_harness.cpp` + `ppc-mmu.*`). Just-enough PPC32 MMU. Do not grow a chipset.
 
 ## Xcode
 
-Scheme `SheepShaver` (MacOSX target). `SheepShaver-MMUTests` is a native Debug tool target on `SheepShaver/src/MacOSX/SheepShaver_Xcode8.xcodeproj` for WP2 (`ARCHS=arm64`). `MACOSX_DEPLOYMENT_TARGET=26.0`, JIT entitlement `com.apple.security.cs.allow-jit`. Debug = interpreter + MMU logs. Release = JIT + damage. No new Unix configure path.
+Scheme `SheepShaver` (MacOSX target). `SheepShaver-MMUTests` is a native Debug tool target on `SheepShaver/src/MacOSX/SheepShaver_Xcode8.xcodeproj` for G1 (`nw_boot_contract.*`) and WP2 (`ARCHS=arm64`). `MACOSX_DEPLOYMENT_TARGET=26.0`, JIT entitlement `com.apple.security.cs.allow-jit`. Debug = interpreter + MMU logs. Release = JIT + damage. No new Unix configure path.
 
 ## Measurement
 

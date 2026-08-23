@@ -120,6 +120,8 @@
 		A10F9210BC10000000000006 /* ppc-mmu.hpp in Headers */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000001 /* ppc-mmu.hpp */; };
 		A10F9210BC10000000000007 /* ppc-mmu.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000002 /* ppc-mmu.cpp */; };
 		A10F9210BC10000000000008 /* mmu_harness.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000003 /* mmu_harness.cpp */; };
+		A10F9210BC10000000000012 /* nw_boot_contract.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000011 /* nw_boot_contract.cpp */; };
+		A10F9210BC10000000000013 /* nw_boot_contract.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000011 /* nw_boot_contract.cpp */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -406,6 +408,8 @@
 		A10F9210BC10000000000002 /* ppc-mmu.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = "ppc-mmu.cpp"; sourceTree = "<group>"; };
 		A10F9210BC10000000000003 /* mmu_harness.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = mmu_harness.cpp; sourceTree = "<group>"; };
 		A10F9210BC10000000000004 /* SheepShaver-MMUTests */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "SheepShaver-MMUTests"; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10F9210BC10000000000010 /* nw_boot_contract.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_boot_contract.h; sourceTree = "<group>"; };
+		A10F9210BC10000000000011 /* nw_boot_contract.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_boot_contract.cpp; path = ../nw_boot_contract.cpp; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -500,6 +504,7 @@
 				0856CD8E14A99EEF000B1711 /* include */,
 				0856CDB114A99EEF000B1711 /* kpx_cpu */,
 				0856CE0514A99EEF000B1711 /* macos_util.cpp */,
+				A10F9210BC10000000000011 /* nw_boot_contract.cpp */,
 				0856CE0614A99EEF000B1711 /* MacOSX */,
 				0856CE8814A99EF0000B1711 /* main.cpp */,
 				0856CE8914A99EF0000B1711 /* name_registry.cpp */,
@@ -555,6 +560,7 @@
 				0856CD9D14A99EEF000B1711 /* macos_util.h */,
 				0856CD9E14A99EEF000B1711 /* main.h */,
 				0856CD9F14A99EEF000B1711 /* name_registry.h */,
+				A10F9210BC10000000000010 /* nw_boot_contract.h */,
 				0879BD5B15A88F6300DC277D /* pict.h */,
 				0856CDA014A99EEF000B1711 /* prefs.h */,
 				0856CDA114A99EEF000B1711 /* prefs_editor.h */,
@@ -1140,6 +1146,7 @@
 				0856CFF314A99EF0000B1711 /* extfs.cpp in Sources */,
 				0856CFF414A99EF0000B1711 /* gfxaccel.cpp in Sources */,
 				0856D00914A99EF0000B1711 /* macos_util.cpp in Sources */,
+				A10F9210BC10000000000012 /* nw_boot_contract.cpp in Sources */,
 				0856D02514A99EF0000B1711 /* extfs_macosx.cpp in Sources */,
 				0856D05014A99EF1000B1711 /* prefs_macosx.mm in Sources */,
 				E44C461620D262B0000583AE /* if.c in Sources */,
@@ -1209,6 +1216,7 @@
 			files = (
 				A10F9210BC10000000000007 /* ppc-mmu.cpp in Sources */,
 				A10F9210BC10000000000008 /* mmu_harness.cpp in Sources */,
+				A10F9210BC10000000000013 /* nw_boot_contract.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1491,6 +1499,7 @@
 				HEADER_SEARCH_PATHS = (
 					../kpx_cpu/src,
 					../kpx_cpu/include,
+					../include,
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1515,6 +1524,7 @@
 				HEADER_SEARCH_PATHS = (
 					../kpx_cpu/src,
 					../kpx_cpu/include,
+					../include,
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				ONLY_ACTIVE_ARCH = YES;

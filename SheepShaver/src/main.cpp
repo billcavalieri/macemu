@@ -47,6 +47,7 @@
 #include "vm_alloc.h"
 #include "sigsegv.h"
 #include "thunks.h"
+#include "nw_boot_contract.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -192,6 +193,20 @@ bool InitAll(const char *vmdir)
 		WriteMacInt32(KERNEL_DATA_BASE + 0xf64, CPUClockSpeed);			// clock-frequency
 		WriteMacInt32(KERNEL_DATA_BASE + 0xf68, BusClockSpeed);			// bus-frequency
 		WriteMacInt32(KERNEL_DATA_BASE + 0xf6c, TimebaseSpeed);			// timebase-frequency
+
+		/* G1: Hnfo skips CPU probe / mfsdr1; BATRangeInit; saveKernelDataPtr adjacency. */
+		uint8 kdp_page[NW_KDP_PAGE_SIZE];
+		Mac2Host_memcpy(kdp_page, KERNEL_DATA_BASE, sizeof(kdp_page));
+		nw_kdp_params kdp_params;
+		kdp_params.kdp_ea = KernelDataAddr;
+		kdp_params.ram_base = RAMBase;
+		kdp_params.ram_size = RAMSize;
+		kdp_params.rom_base = ROMBase;
+		kdp_params.htaborg = NW_DEFAULT_HTABORG;
+		kdp_params.ptegmask = NW_DEFAULT_PTEGMASK;
+		kdp_params.sdr1 = NW_DEFAULT_SDR1;
+		nw_fill_kdp_be(kdp_page, sizeof(kdp_page), &kdp_params);
+		Host2Mac_memcpy(KERNEL_DATA_BASE, kdp_page, sizeof(kdp_page));
 	} else if (ROMType == ROMTYPE_GOSSAMER) {
 		WriteMacInt32(KERNEL_DATA_BASE + 0xc80, RAMSize);
 		WriteMacInt32(KERNEL_DATA_BASE + 0xc84, RAMSize);

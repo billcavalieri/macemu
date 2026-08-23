@@ -4,6 +4,9 @@
  *	prefs_macosx.mm - Enables access to SheepShaver preferences while
  *                    SheepShaver is running (on Mac OS X).
  *
+ *  New World: Gestalt machine ID is always 406. Real identity is the
+ *  OF root model/compatible (MacRISC2). There is no modelid pref.
+ *
  *  Copyright (C) 2007 Alexei Svitkine
  *
  *  This program is free software; you can redistribute it and/or modify
