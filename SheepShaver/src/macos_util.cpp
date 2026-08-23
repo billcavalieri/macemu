@@ -29,6 +29,8 @@
 #include "macos_util.h"
 #include "thunks.h"
 #include "prefs.h"
+#include "nw_boot_contract.h"
+#include "rom_patches.h"
 #include <algorithm>
 
 #define DEBUG 0
@@ -88,6 +90,12 @@ void MacOSUtilReset(void)
 #if 0
 	cc_tvect = 0;
 #endif
+}
+
+
+uint32 GestaltMachineType(void)
+{
+	return nw_gestalt_machine_id(ROMType == ROMTYPE_NEWWORLD);
 }
 
 

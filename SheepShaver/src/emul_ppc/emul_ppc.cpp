@@ -106,6 +106,9 @@ creqv
 #include "main.h"
 #include "xlowmem.h"
 #include "emul_op.h"
+#include "rom_patches.h"
+#include "nw_boot_contract.h"
+#include "../kpx_cpu/src/cpu/ppc/ppc-mmu.hpp"
 
 #if ENABLE_MON
 #include "mon.h"
@@ -125,6 +128,199 @@ uint32 lr, ctr;
 uint32 cr, xer;
 uint32 fpscr;
 uint32 pc;
+
+static uint32 oea_srr0, oea_srr1, oea_dar, oea_dsisr, oea_sprg[4];
+
+static void ppc_take_data_dsi(uint32 fault_pc, uint32 ea, bool is_store)
+{
+	ppc32_hotints_dsi dsi;
+	dsi.take_data_dsi(ppc32_guest_mmu(), fault_pc, ea, is_store);
+	oea_srr0 = dsi.srr0;
+	oea_srr1 = dsi.srr1;
+	oea_dar = dsi.dar;
+	oea_dsisr = dsi.dsisr;
+	pc = dsi.vector;
+#if NW_BOOT_LOG
+	{
+		ppc32_mmu &mmu = ppc32_guest_mmu();
+		const uint32 saved_msr = mmu.msr();
+		mmu.set_msr(saved_msr | ppc32_mmu::MSR_DR);
+		const ppc32_xlate_result hit =
+			mmu.translate(dsi.srr0, PPC32_XLATE_DR, 4);
+		mmu.set_msr(saved_msr);
+		nw_log_first_dsi(dsi.srr0, dsi.dar, hit.ok ? 1 : 0);
+	}
+#endif
+}
+
+static bool ppc_xlate_data(uint32 ea, unsigned width, bool is_store, uint32 *pa)
+{
+	if (!ppc32_guest_mmu_enabled()) {
+		*pa = ea;
+		return true;
+	}
+	ppc32_xlate_result xr = ppc32_guest_mmu().translate(ea, PPC32_XLATE_DR, width);
+	if (xr.ok) {
+		*pa = xr.pa;
+		return true;
+	}
+	ppc_take_data_dsi(pc - 4, ea, is_store);
+	return false;
+}
+
+static bool ppc_load8(uint32 ea, uint32 *dst)
+{
+	uint32 pa;
+	if (!ppc_xlate_data(ea, 1, false, &pa))
+		return false;
+	*dst = ReadMacInt8(pa);
+	return true;
+}
+
+static bool ppc_load16(uint32 ea, uint32 *dst)
+{
+	uint32 pa;
+	if (!ppc_xlate_data(ea, 2, false, &pa))
+		return false;
+	*dst = ReadMacInt16(pa);
+	return true;
+}
+
+static bool ppc_load32(uint32 ea, uint32 *dst)
+{
+	uint32 pa;
+	if (!ppc_xlate_data(ea, 4, false, &pa))
+		return false;
+	*dst = ReadMacInt32(pa);
+	return true;
+}
+
+static bool ppc_load64(uint32 ea, uint64 *dst)
+{
+	uint32 pa;
+	if (!ppc_xlate_data(ea, 8, false, &pa))
+		return false;
+	*dst = ReadMacInt64(pa);
+	return true;
+}
+
+static bool ppc_store8(uint32 ea, uint32 val)
+{
+	uint32 pa;
+	if (!ppc_xlate_data(ea, 1, true, &pa))
+		return false;
+	WriteMacInt8(pa, val);
+	return true;
+}
+
+static bool ppc_store16(uint32 ea, uint32 val)
+{
+	uint32 pa;
+	if (!ppc_xlate_data(ea, 2, true, &pa))
+		return false;
+	WriteMacInt16(pa, val);
+	return true;
+}
+
+static bool ppc_store32(uint32 ea, uint32 val)
+{
+	uint32 pa;
+	if (!ppc_xlate_data(ea, 4, true, &pa))
+		return false;
+	WriteMacInt32(pa, val);
+	return true;
+}
+
+static bool ppc_store64(uint32 ea, uint64 val)
+{
+	uint32 pa;
+	if (!ppc_xlate_data(ea, 8, true, &pa))
+		return false;
+	WriteMacInt64(pa, val);
+	return true;
+}
+
+static bool emul_phys_read32(void *, uint32_t pa, uint32_t *value)
+{
+	*value = ReadMacInt32(pa);
+	return true;
+}
+
+static bool ppc_mfspr_oea(uint32 spr, uint32 *value)
+{
+	ppc32_mmu &mmu = ppc32_guest_mmu();
+	switch (spr) {
+	case 18: *value = oea_dsisr; return true;
+	case 19: *value = oea_dar; return true;
+	case 25: *value = mmu.sdr1(); return true;
+	case 26: *value = oea_srr0; return true;
+	case 27: *value = oea_srr1; return true;
+	case 272: *value = oea_sprg[0]; return true;
+	case 273: *value = oea_sprg[1]; return true;
+	case 274: *value = oea_sprg[2]; return true;
+	case 275: *value = oea_sprg[3]; return true;
+	default:
+		break;
+	}
+	if (spr >= 528 && spr <= 535) {
+		unsigned i = (spr - 528) / 2;
+		uint32 u = 0, l = 0;
+		mmu.get_ibat(i, &u, &l);
+		*value = (spr & 1) ? l : u;
+		return true;
+	}
+	if (spr >= 536 && spr <= 543) {
+		unsigned i = (spr - 536) / 2;
+		uint32 u = 0, l = 0;
+		mmu.get_dbat(i, &u, &l);
+		*value = (spr & 1) ? l : u;
+		return true;
+	}
+	return false;
+}
+
+static bool ppc_mtspr_oea(uint32 spr, uint32 value)
+{
+	ppc32_mmu &mmu = ppc32_guest_mmu();
+	switch (spr) {
+	case 18: oea_dsisr = value; return true;
+	case 19: oea_dar = value; return true;
+	case 25:
+		nw_note_mtsdr1();
+		mmu.set_sdr1(value); return true;
+	case 26: oea_srr0 = value; return true;
+	case 27: oea_srr1 = value; return true;
+	case 272: oea_sprg[0] = value; return true;
+	case 273: oea_sprg[1] = value; return true;
+	case 274: oea_sprg[2] = value; return true;
+	case 275: oea_sprg[3] = value; return true;
+	default:
+		break;
+	}
+	if (spr >= 528 && spr <= 535) {
+		unsigned i = (spr - 528) / 2;
+		uint32 u = 0, l = 0;
+		mmu.get_ibat(i, &u, &l);
+		if (spr & 1)
+			l = value;
+		else
+			u = value;
+		mmu.set_ibat(i, u, l);
+		return true;
+	}
+	if (spr >= 536 && spr <= 543) {
+		unsigned i = (spr - 536) / 2;
+		uint32 u = 0, l = 0;
+		mmu.get_dbat(i, &u, &l);
+		if (spr & 1)
+			l = value;
+		else
+			u = value;
+		mmu.set_dbat(i, u, l);
+		return true;
+	}
+	return false;
+}
 
 // Convert 8-bit field mask (e.g. mtcrf) to bit mask
 static uint32 field2mask[256];
@@ -319,6 +515,13 @@ blr_nobranch:
 			break;
 		}
 
+		case 50:	// rfi
+			if (ppc32_guest_mmu_enabled()) {
+				ppc32_guest_mmu().set_msr(oea_srr1);
+				pc = oea_srr0;
+			}
+			break;
+
 		case 33:	// crnor
 			if ((cr & (0x80000000 >> ra)) || ((cr & (0x80000000 >> ((op >> 11) & 0x1f)))))
 				cr &= ~(0x80000000 >> rd);
@@ -467,12 +670,13 @@ static void emul31(uint32 op)
 			break;
 
 		case 20:	// lwarx
-			r[rd] = ReadMacInt32(r[rb] + (ra ? r[ra] : 0));
-			//!! set reservation bit
+			if (!ppc_load32(r[rb] + (ra ? r[ra] : 0), &r[rd]))
+				return;
 			break;
 
 		case 23:	// lwzx
-			r[rd] = ReadMacInt32(r[rb] + (ra ? r[ra] : 0));
+			if (!ppc_load32(r[rb] + (ra ? r[ra] : 0), &r[rd]))
+				return;
 			break;
 
 		case 24:	// slw
@@ -522,10 +726,13 @@ cntlzw_done:if (op & 1)
 				record(r[rd]);
 			break;
 
-		case 55:	// lwzux
-			r[ra] += r[rb];
-			r[rd] = ReadMacInt32(r[ra]);
+		case 55: {	// lwzux
+			uint32 ea = r[ra] + r[rb];
+			if (!ppc_load32(ea, &r[rd]))
+				return;
+			r[ra] = ea;
 			break;
+		}
 
 		case 60:	// andc
 			r[ra] = r[rd] & ~r[rb];
@@ -539,11 +746,16 @@ cntlzw_done:if (op & 1)
 				record(r[rd]);
 			break;
 
+		case 83:	// mfmsr
+			r[rd] = ppc32_guest_mmu_enabled() ? ppc32_guest_mmu().msr() : 0xf072;
+			break;
+
 		case 86:	// dcbf
 			break;
 
 		case 87:	// lbzx
-			r[rd] = ReadMacInt8(r[rb] + (ra ? r[ra] : 0));
+			if (!ppc_load8(r[rb] + (ra ? r[ra] : 0), &r[rd]))
+				return;
 			break;
 
 		case 104:	// neg
@@ -555,10 +767,13 @@ cntlzw_done:if (op & 1)
 				record(r[rd]);
 			break;
 
-		case 119:	// lbzux
-			r[ra] += r[rb];
-			r[rd] = ReadMacInt8(r[ra]);
+		case 119: {	// lbzux
+			uint32 ea = r[ra] + r[rb];
+			if (!ppc_load8(ea, &r[rd]))
+				return;
+			r[ra] = ea;
 			break;
+		}
 
 		case 124:	// nor
 			r[ra] = ~(r[rd] | r[rb]);
@@ -600,23 +815,38 @@ cntlzw_done:if (op & 1)
 			break;
 		}
 
+		case 146:	// mtmsr
+			if (ppc32_guest_mmu_enabled())
+				ppc32_guest_mmu().set_msr(r[rd]);
+			break;
+
 		case 150:	// stwcx
-			//!! check reserved bit
-			WriteMacInt32(r[rb] + (ra ? r[ra] : 0), r[rd]);
+			if (!ppc_store32(r[rb] + (ra ? r[ra] : 0), r[rd]))
+				return;
 			record(0);
 			break;
 
 		case 151:	// stwx
-			WriteMacInt32(r[rb] + (ra ? r[ra] : 0), r[rd]);
+			if (!ppc_store32(r[rb] + (ra ? r[ra] : 0), r[rd]))
+				return;
 			break;
 
-		case 183:	// stwux
-			r[ra] += r[rb];
-			WriteMacInt32(r[ra], r[rd]);
+		case 183: {	// stwux
+			uint32 ea = r[ra] + r[rb];
+			if (!ppc_store32(ea, r[rd]))
+				return;
+			r[ra] = ea;
+			break;
+		}
+
+		case 210:	// mtsr
+			if (ppc32_guest_mmu_enabled())
+				ppc32_guest_mmu().set_sr(ra & 0xf, r[rd]);
 			break;
 
 		case 215:	// stbx
-			WriteMacInt8(r[rb] + (ra ? r[ra] : 0), r[rd]);
+			if (!ppc_store8(r[rb] + (ra ? r[ra] : 0), r[rd]))
+				return;
 			break;
 
 		case 235:	// mullw
@@ -625,10 +855,13 @@ cntlzw_done:if (op & 1)
 				record(r[rd]);
 			break;
 
-		case 247:	// stbux
-			r[ra] += r[rb];
-			WriteMacInt8(r[ra], r[rd]);
+		case 247: {	// stbux
+			uint32 ea = r[ra] + r[rb];
+			if (!ppc_store8(ea, r[rd]))
+				return;
+			r[ra] = ea;
 			break;
+		}
 
 		case 266:	// add
 			r[rd] = r[ra] + r[rb];
@@ -637,7 +870,8 @@ cntlzw_done:if (op & 1)
 			break;
 
 		case 279:	// lhzx
-			r[rd] = ReadMacInt16(r[rb] + (ra ? r[ra] : 0));
+			if (!ppc_load16(r[rb] + (ra ? r[ra] : 0), &r[rd]))
+				return;
 			break;
 
 		case 284:	// eqv
@@ -646,10 +880,18 @@ cntlzw_done:if (op & 1)
 				record(r[ra]);
 			break;
 
-		case 311:	// lhzux
-			r[ra] += r[rb];
-			r[rd] = ReadMacInt16(r[ra]);
+		case 306:	// tlbie
+			if (ppc32_guest_mmu_enabled())
+				ppc32_guest_mmu().tlbie(r[rb]);
 			break;
+
+		case 311: {	// lhzux
+			uint32 ea = r[ra] + r[rb];
+			if (!ppc_load16(ea, &r[rd]))
+				return;
+			r[ra] = ea;
+			break;
+		}
 
 		case 316:	// xor
 			r[ra] = r[rd] ^ r[rb];
@@ -659,32 +901,52 @@ cntlzw_done:if (op & 1)
 
 		case 339: {	// mfspr
 			uint32 spr = ra | (rb << 5);
+			uint32 d;
+			if (ppc32_guest_mmu_enabled() && ppc_mfspr_oea(spr, &d)) {
+				r[rd] = d;
+				break;
+			}
 			switch (spr) {
 				case 1: r[rd] = xer; break;
 				case 8: r[rd] = lr; break;
 				case 9: r[rd] = ctr; break;
+				case 25: r[rd] = 0xdead001f; break;
 				default:
-					printf("Illegal mfspr opcode %08x at %08x\n", op, pc-4);
-					dump();
+					if (ppc32_guest_mmu_enabled())
+						r[rd] = 0;
+					else {
+						printf("Illegal mfspr opcode %08x at %08x\n", op, pc-4);
+						dump();
+					}
 			}
 			break;
 		}
 
-		case 343:	// lhax
-			r[rd] = (int32)(int16)ReadMacInt16(r[rb] + (ra ? r[ra] : 0));
+		case 343: {	// lhax
+			uint32 v;
+			if (!ppc_load16(r[rb] + (ra ? r[ra] : 0), &v))
+				return;
+			r[rd] = (int32)(int16)v;
 			break;
+		}
 
 		case 371:	// mftb
 			r[rd] = 0;	//!!
 			break;
 
-		case 375:	// lhaux
-			r[ra] += r[rb];
-			r[rd] = (int32)(int16)ReadMacInt16(r[ra]);
+		case 375: {	// lhaux
+			uint32 ea = r[ra] + r[rb];
+			uint32 v;
+			if (!ppc_load16(ea, &v))
+				return;
+			r[rd] = (int32)(int16)v;
+			r[ra] = ea;
 			break;
+		}
 
 		case 407:	// sthx
-			WriteMacInt16(r[rb] + (ra ? r[ra] : 0), r[rd]);
+			if (!ppc_store16(r[rb] + (ra ? r[ra] : 0), r[rd]))
+				return;
 			break;
 
 		case 412:	// orc
@@ -693,10 +955,13 @@ cntlzw_done:if (op & 1)
 				record(r[ra]);
 			break;
 
-		case 439:	// sthux
-			r[ra] += r[rb];
-			WriteMacInt16(r[ra], r[rd]);
+		case 439: {	// sthux
+			uint32 ea = r[ra] + r[rb];
+			if (!ppc_store16(ea, r[rd]))
+				return;
+			r[ra] = ea;
 			break;
+		}
 
 		case 444:	// or
 			r[ra] = r[rd] | r[rb];
@@ -713,13 +978,17 @@ cntlzw_done:if (op & 1)
 
 		case 467: {	// mtspr
 			uint32 spr = ra | (rb << 5);
+			if (ppc32_guest_mmu_enabled() && ppc_mtspr_oea(spr, r[rd]))
+				break;
 			switch (spr) {
 				case 1: xer = r[rd] & 0xe000007f; break;
 				case 8: lr = r[rd]; break;
 				case 9: ctr = r[rd]; break;
 				default:
-					printf("Illegal mtspr opcode %08x at %08x\n", op, pc-4);
-					dump();
+					if (!ppc32_guest_mmu_enabled()) {
+						printf("Illegal mtspr opcode %08x at %08x\n", op, pc-4);
+						dump();
+					}
 			}
 			break;
 		}
@@ -776,18 +1045,21 @@ cntlzw_done:if (op & 1)
 			int nb = xer & 0x7f;
 			int reg = rd;
 			for (int i=0; i<nb; i++) {
+				uint32 b;
+				if (!ppc_load8(addr + i, &b))
+					return;
 				switch (i & 3) {
 					case 0:
-						r[reg] = ReadMacInt8(addr + i) << 24;
+						r[reg] = b << 24;
 						break;
 					case 1:
-						r[reg] = (r[reg] & 0xff00ffff) | (ReadMacInt8(addr + i) << 16);
+						r[reg] = (r[reg] & 0xff00ffff) | (b << 16);
 						break;
 					case 2:
-						r[reg] = (r[reg] & 0xffff00ff) | (ReadMacInt8(addr + i) << 8);
+						r[reg] = (r[reg] & 0xffff00ff) | (b << 8);
 						break;
 					case 3:
-						r[reg] = (r[reg] & 0xffffff00) | ReadMacInt8(addr + i);
+						r[reg] = (r[reg] & 0xffffff00) | b;
 						reg = (reg + 1) & 0x1f;
 						break;
 				}
@@ -801,23 +1073,30 @@ cntlzw_done:if (op & 1)
 				record(r[ra]);
 			break;
 
+		case 595:	// mfsr
+			r[rd] = ppc32_guest_mmu_enabled() ? ppc32_guest_mmu().sr(ra & 0xf) : 0;
+			break;
+
 		case 597: {	// lswi
 			uint32 addr = ra ? r[ra] : 0;
 			int nb = rb ? rb : 32;
 			int reg = rd;
 			for (int i=0; i<nb; i++) {
+				uint32 b;
+				if (!ppc_load8(addr + i, &b))
+					return;
 				switch (i & 3) {
 					case 0:
-						r[reg] = ReadMacInt8(addr + i) << 24;
+						r[reg] = b << 24;
 						break;
 					case 1:
-						r[reg] = (r[reg] & 0xff00ffff) | (ReadMacInt8(addr + i) << 16);
+						r[reg] = (r[reg] & 0xff00ffff) | (b << 16);
 						break;
 					case 2:
-						r[reg] = (r[reg] & 0xffff00ff) | (ReadMacInt8(addr + i) << 8);
+						r[reg] = (r[reg] & 0xffff00ff) | (b << 8);
 						break;
 					case 3:
-						r[reg] = (r[reg] & 0xffffff00) | ReadMacInt8(addr + i);
+						r[reg] = (r[reg] & 0xffffff00) | b;
 						reg = (reg + 1) & 0x1f;
 						break;
 				}
@@ -872,7 +1151,8 @@ cntlzw_done:if (op & 1)
 			int reg = rd;
 			int shift = 24;
 			for (int i=0; i<nb; i++) {
-				WriteMacInt8(addr + i, (r[reg] >> shift));
+				if (!ppc_store8(addr + i, r[reg] >> shift))
+					return;
 				shift -= 8;
 				if ((i & 3) == 3) {
 					shift = 24;
@@ -888,7 +1168,8 @@ cntlzw_done:if (op & 1)
 			int reg = rd;
 			int shift = 24;
 			for (int i=0; i<nb; i++) {
-				WriteMacInt8(addr + i, (r[reg] >> shift));
+				if (!ppc_store8(addr + i, r[reg] >> shift))
+					return;
 				shift -= 8;
 				if ((i & 3) == 3) {
 					shift = 24;
@@ -1041,7 +1322,19 @@ void emul_ppc(uint32 start)
 //	printf("insn at %08lx changed %08lx->%08lx\n", pc-4, old_val, val);
 //	old_val = val;
 //}
-		uint32 op = ReadMacInt32(pc);
+		uint32 op;
+		if (ppc32_guest_mmu_enabled()) {
+			ppc32_xlate_result xr = ppc32_guest_mmu().translate(pc, PPC32_XLATE_IR, 4);
+			if (!xr.ok) {
+				oea_srr0 = pc;
+				oea_srr1 = ppc32_guest_mmu().msr();
+				ppc32_guest_mmu().set_msr(oea_srr1 & ~ppc32_mmu::MSR_EXC_CLEAR);
+				pc = 0x400;
+				continue;
+			}
+			op = ReadMacInt32(xr.pa);
+		} else
+			op = ReadMacInt32(pc);
 #if FLIGHT_RECORDER
 		record_step(op);
 #endif
@@ -1306,105 +1599,130 @@ bc_nobranch:
 			case 32: {	// lwz
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[rd] = ReadMacInt32(int16(op & 0xffff) + (ra ? r[ra] : 0));
+				if (!ppc_load32(int16(op & 0xffff) + (ra ? r[ra] : 0), &r[rd]))
+					break;
 				break;
 			}
 
 			case 33: {	// lwzu
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[ra] += int16(op & 0xffff);
-				r[rd] = ReadMacInt32(r[ra]);
+				uint32 ea = r[ra] + int16(op & 0xffff);
+				if (!ppc_load32(ea, &r[rd]))
+					break;
+				r[ra] = ea;
 				break;
 			}
 
 			case 34: {	// lbz
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[rd] = ReadMacInt8(int16(op & 0xffff) + (ra ? r[ra] : 0));
+				if (!ppc_load8(int16(op & 0xffff) + (ra ? r[ra] : 0), &r[rd]))
+					break;
 				break;
 			}
 
 			case 35: {	// lbzu
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[ra] += int16(op & 0xffff);
-				r[rd] = ReadMacInt8(r[ra]);
+				uint32 ea = r[ra] + int16(op & 0xffff);
+				if (!ppc_load8(ea, &r[rd]))
+					break;
+				r[ra] = ea;
 				break;
 			}
 
 			case 36: {	// stw
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				WriteMacInt32(int16(op & 0xffff) + (ra ? r[ra] : 0), r[rd]);
+				if (!ppc_store32(int16(op & 0xffff) + (ra ? r[ra] : 0), r[rd]))
+					break;
 				break;
 			}
 
 			case 37: {	// stwu
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[ra] += int16(op & 0xffff);
-				WriteMacInt32(r[ra], r[rd]);
+				uint32 ea = r[ra] + int16(op & 0xffff);
+				if (!ppc_store32(ea, r[rd]))
+					break;
+				r[ra] = ea;
 				break;
 			}
 
 			case 38: {	// stb
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				WriteMacInt8(int16(op & 0xffff) + (ra ? r[ra] : 0), r[rd]);
+				if (!ppc_store8(int16(op & 0xffff) + (ra ? r[ra] : 0), r[rd]))
+					break;
 				break;
 			}
 
 			case 39: {	// stbu
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[ra] += int16(op & 0xffff);
-				WriteMacInt8(r[ra], r[rd]);
+				uint32 ea = r[ra] + int16(op & 0xffff);
+				if (!ppc_store8(ea, r[rd]))
+					break;
+				r[ra] = ea;
 				break;
 			}
 
 			case 40: {	// lhz
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[rd] = ReadMacInt16(int16(op & 0xffff) + (ra ? r[ra] : 0));
+				if (!ppc_load16(int16(op & 0xffff) + (ra ? r[ra] : 0), &r[rd]))
+					break;
 				break;
 			}
 
 			case 41: {	// lhzu
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[ra] += int16(op & 0xffff);
-				r[rd] = ReadMacInt16(r[ra]);
+				uint32 ea = r[ra] + int16(op & 0xffff);
+				if (!ppc_load16(ea, &r[rd]))
+					break;
+				r[ra] = ea;
 				break;
 			}
 
 			case 42: {	// lha
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[rd] = (int32)(int16)ReadMacInt16(int16(op & 0xffff) + (ra ? r[ra] : 0));
+				uint32 v;
+				if (!ppc_load16(int16(op & 0xffff) + (ra ? r[ra] : 0), &v))
+					break;
+				r[rd] = (int32)(int16)v;
 				break;
 			}
 
 			case 43: {	// lhau
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[ra] += int16(op & 0xffff);
-				r[rd] = (int32)(int16)ReadMacInt16(r[ra]);
+				uint32 ea = r[ra] + int16(op & 0xffff);
+				uint32 v;
+				if (!ppc_load16(ea, &v))
+					break;
+				r[rd] = (int32)(int16)v;
+				r[ra] = ea;
 				break;
 			}
 
 			case 44: {	// sth
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				WriteMacInt16(int16(op & 0xffff) + (ra ? r[ra] : 0), r[rd]);
+				if (!ppc_store16(int16(op & 0xffff) + (ra ? r[ra] : 0), r[rd]))
+					break;
 				break;
 			}
 
 			case 45: {	// sthu
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				r[ra] += int16(op & 0xffff);
-				WriteMacInt16(r[ra], r[rd]);
+				uint32 ea = r[ra] + int16(op & 0xffff);
+				if (!ppc_store16(ea, r[rd]))
+					break;
+				r[ra] = ea;
 				break;
 			}
 
@@ -1413,7 +1731,8 @@ bc_nobranch:
 				uint32 ra = (op >> 16) & 0x1f;
 				uint32 addr = int16(op & 0xffff) + (ra ? r[ra] : 0);
 				while (rd <= 31) {
-					r[rd] = ReadMacInt32(addr);
+					if (!ppc_load32(addr, &r[rd]))
+						break;
 					rd++;
 					addr += 4;
 				}
@@ -1425,7 +1744,8 @@ bc_nobranch:
 				uint32 ra = (op >> 16) & 0x1f;
 				uint32 addr = int16(op & 0xffff) + (ra ? r[ra] : 0);
 				while (rd <= 31) {
-					WriteMacInt32(addr, r[rd]);
+					if (!ppc_store32(addr, r[rd]))
+						break;
 					rd++;
 					addr += 4;
 				}
@@ -1435,14 +1755,18 @@ bc_nobranch:
 			case 50: {	// lfd
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				fr[rd] = (double)ReadMacInt64(int16(op & 0xffff) + (ra ? r[ra] : 0));
+				uint64 v;
+				if (!ppc_load64(int16(op & 0xffff) + (ra ? r[ra] : 0), &v))
+					break;
+				fr[rd] = (double)v;
 				break;
 			}
 
 			case 54: {	// stfd
 				uint32 rd = (op >> 21) & 0x1f;
 				uint32 ra = (op >> 16) & 0x1f;
-				WriteMacInt64(int16(op & 0xffff) + (ra ? r[ra] : 0), (uint64)fr[rd]);
+				if (!ppc_store64(int16(op & 0xffff) + (ra ? r[ra] : 0), (uint64)fr[rd]))
+					break;
 				break;
 			}
 
@@ -1495,6 +1819,16 @@ void init_emul_ppc(void)
 	lr = ctr = 0;
 	cr = xer = 0;
 	fpscr = 0;
+	oea_srr0 = oea_srr1 = oea_dar = oea_dsisr = 0;
+	oea_sprg[0] = oea_sprg[1] = oea_sprg[2] = oea_sprg[3] = 0;
+
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		ppc32_guest_mmu().set_phys_read32(emul_phys_read32, NULL);
+		ppc32_guest_mmu_enable(true);
+		nw_log_g1_hwinit();
+	} else {
+		nw_log_translator_off();
+	}
 
 	r[3] = ROMBase + 0x30d000;
 

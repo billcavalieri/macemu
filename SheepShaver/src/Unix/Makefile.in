@@ -66,6 +66,7 @@ endif
 ## Files
 SRCS = ../main.cpp main_unix.cpp ../prefs.cpp ../prefs_items.cpp prefs_unix.cpp sys_unix.cpp \
     ../rom_patches.cpp ../rsrc_patches.cpp ../emul_op.cpp ../name_registry.cpp \
+    ../nw_boot_contract.cpp \
     ../macos_util.cpp ../timer.cpp timer_unix.cpp ../xpram.cpp xpram_unix.cpp \
     ../adb.cpp ../sony.cpp ../disk.cpp ../cdrom.cpp ../scsi.cpp \
     ../gfxaccel.cpp ../video.cpp ../audio.cpp ../ether.cpp ../thunks.cpp \
@@ -271,7 +272,7 @@ ppc-execute-impl.cpp: $(kpxsrcdir)/cpu/ppc/ppc-decode.cpp $(GENEXECPL) $(DYNGEND
 	$(CPP) $(CPPFLAGS) -DGENEXEC $< | $(PERL) $(GENEXECPL) > $@
 
 # PowerPC CPU tester
-TESTSRCS_ = mathlib/ieeefp.cpp mathlib/mathlib.cpp cpu/ppc/ppc-cpu.cpp cpu/ppc/ppc-decode.cpp cpu/ppc/ppc-execute.cpp cpu/ppc/ppc-translate.cpp test/test-powerpc.cpp $(MONSRCS) vm_alloc.cpp utils/utils-cpuinfo.cpp
+TESTSRCS_ = mathlib/ieeefp.cpp mathlib/mathlib.cpp cpu/ppc/ppc-cpu.cpp cpu/ppc/ppc-decode.cpp cpu/ppc/ppc-execute.cpp cpu/ppc/ppc-mmu.cpp cpu/ppc/ppc-translate.cpp test/test-powerpc.cpp $(MONSRCS) vm_alloc.cpp utils/utils-cpuinfo.cpp
 ifeq ($(USE_DYNGEN),yes)
 TESTSRCS_ += cpu/jit/jit-cache.cpp cpu/jit/basic-dyngen.cpp cpu/ppc/ppc-dyngen.cpp cpu/ppc/ppc-jit.cpp
 endif

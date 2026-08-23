@@ -571,11 +571,15 @@ void powerpc_cpu::execute_loadstore(uint32 opcode)
 	const uint32 a = RA::get(this, opcode);
 	const uint32 b = RB::get(this, opcode);
 	const uint32 ea = a + b;
+	uint32 pa;
+
+	if (!guest_data_xlate(ea, SZ, !LD, &pa))
+		return;
 
 	if (LD)
-		operand_RD::set(this, opcode, OP::apply(memory_helper<SZ, RX>::load(ea)));
+		operand_RD::set(this, opcode, OP::apply(memory_helper<SZ, RX>::load(pa)));
 	else
-		memory_helper<SZ, RX>::store(ea, operand_RS::get(this, opcode));
+		memory_helper<SZ, RX>::store(pa, operand_RS::get(this, opcode));
 
 	if (UP)
 		RA::set(this, opcode, ea);
@@ -603,10 +607,13 @@ void powerpc_cpu::execute_loadstore_multiple(uint32 opcode)
 */
 	int r = LD ? rD_field::extract(opcode) : rS_field::extract(opcode);
 	while (r <= 31) {
+		uint32 pa;
+		if (!guest_data_xlate(ea, 4, !LD, &pa))
+			return;
 		if (LD)
-			gpr(r) = vm_read_memory_4(ea);
+			gpr(r) = vm_read_memory_4(pa);
 		else
-			vm_write_memory_4(ea, gpr(r));
+			vm_write_memory_4(pa, gpr(r));
 		r++;
 		ea += 4;
 	}
@@ -633,18 +640,32 @@ void powerpc_cpu::execute_fp_loadstore(uint32 opcode)
 	uint64 v;
 
 	if (LD) {
-		if (DB)
-			v = vm_read_memory_8(ea);
-		else
-			v = fp_load_single_convert(vm_read_memory_4(ea));
+		uint32 pa;
+		if (DB) {
+			if (!guest_data_xlate(ea, 8, false, &pa))
+				return;
+			v = vm_read_memory_8(pa);
+		}
+		else {
+			if (!guest_data_xlate(ea, 4, false, &pa))
+				return;
+			v = fp_load_single_convert(vm_read_memory_4(pa));
+		}
 		operand_fp_dw_RD::set(this, opcode, v);
 	}
 	else {
 		v = operand_fp_dw_RS::get(this, opcode);
-		if (DB)
-			vm_write_memory_8(ea, v);
-		else
-			vm_write_memory_4(ea, fp_store_single_convert(v));
+		uint32 pa;
+		if (DB) {
+			if (!guest_data_xlate(ea, 8, true, &pa))
+				return;
+			vm_write_memory_8(pa, v);
+		}
+		else {
+			if (!guest_data_xlate(ea, 4, true, &pa))
+				return;
+			vm_write_memory_4(pa, fp_store_single_convert(v));
+		}
 	}
 
 	if (UP)
@@ -673,40 +694,39 @@ void powerpc_cpu::execute_load_string(uint32 opcode)
 		nb = 32;
 
 	int rd = rD_field::extract(opcode);
-#if 1
 	int i;
-	for (i = 0; nb - i >= 4; i += 4, rd = (rd + 1) & 0x1f)
-		gpr(rd) = vm_read_memory_4(ea + i);
+	for (i = 0; nb - i >= 4; i += 4, rd = (rd + 1) & 0x1f) {
+		uint32 pa;
+		if (!guest_data_xlate(ea + i, 4, false, &pa))
+			return;
+		gpr(rd) = vm_read_memory_4(pa);
+	}
 	switch (nb - i) {
-	case 1:
-		gpr(rd) = vm_read_memory_1(ea + i) << 24;
-		break;
-	case 2:
-		gpr(rd) = vm_read_memory_2(ea + i) << 16;
-		break;
-	case 3:
-		gpr(rd) = (vm_read_memory_2(ea + i) << 16) + (vm_read_memory_1(ea + i + 2) << 8);
+	case 1: {
+		uint32 pa;
+		if (!guest_data_xlate(ea + i, 1, false, &pa))
+			return;
+		gpr(rd) = vm_read_memory_1(pa) << 24;
 		break;
 	}
-#else
-	for (int i = 0; i < nb; i++) {
-		switch (i & 3) {
-		case 0:
-			gpr(rd) = vm_read_memory_1(ea + i) << 24;
-			break;
-		case 1:
-			gpr(rd) = (gpr(rd) & 0xff00ffff) | (vm_read_memory_1(ea + i) << 16);
-			break;
-		case 2:
-			gpr(rd) = (gpr(rd) & 0xffff00ff) | (vm_read_memory_1(ea + i) << 8);
-			break;
-		case 3:
-			gpr(rd) = (gpr(rd) & 0xffffff00) | vm_read_memory_1(ea + i);
-			rd = (rd + 1) & 0x1f;
-			break;
-		}
+	case 2: {
+		uint32 pa;
+		if (!guest_data_xlate(ea + i, 2, false, &pa))
+			return;
+		gpr(rd) = vm_read_memory_2(pa) << 16;
+		break;
 	}
-#endif
+	case 3: {
+		uint32 pa;
+		if (!guest_data_xlate(ea + i, 2, false, &pa))
+			return;
+		uint32 hi = vm_read_memory_2(pa);
+		if (!guest_data_xlate(ea + i + 2, 1, false, &pa))
+			return;
+		gpr(rd) = (hi << 16) + (vm_read_memory_1(pa) << 8);
+		break;
+	}
+	}
 
 	increment_pc(4);
 }
@@ -725,7 +745,10 @@ void powerpc_cpu::execute_store_string(uint32 opcode)
 	int rs = rS_field::extract(opcode);
 	int sh = 24;
 	for (int i = 0; i < nb; i++) {
-		vm_write_memory_1(ea + i, gpr(rs) >> sh);
+		uint32 pa;
+		if (!guest_data_xlate(ea + i, 1, true, &pa))
+			return;
+		vm_write_memory_1(pa, gpr(rs) >> sh);
 		sh -= 8;
 		if (sh < 0) {
 			sh = 24;
@@ -746,9 +769,12 @@ template< class RA >
 void powerpc_cpu::execute_lwarx(uint32 opcode)
 {
 	const uint32 ea = RA::get(this, opcode) + operand_RB::get(this, opcode);
-	uint32 reserve_data = vm_read_memory_4(ea);
+	uint32 pa;
+	if (!guest_data_xlate(ea, 4, false, &pa))
+		return;
+	uint32 reserve_data = vm_read_memory_4(pa);
 	regs().reserve_valid = 1;
-	regs().reserve_addr = ea;
+	regs().reserve_addr = pa;
 #if KPX_MAX_CPUS != 1
 	regs().reserve_data = reserve_data;
 #endif
@@ -760,16 +786,17 @@ template< class RA >
 void powerpc_cpu::execute_stwcx(uint32 opcode)
 {
 	const uint32 ea = RA::get(this, opcode) + operand_RB::get(this, opcode);
+	uint32 pa;
+	if (!guest_data_xlate(ea, 4, true, &pa))
+		return;
 	cr().clear(0);
 	if (regs().reserve_valid) {
-		if (regs().reserve_addr == ea /* physical_addr(EA) */
+		if (regs().reserve_addr == pa
 #if KPX_MAX_CPUS != 1
-			/* HACK: if another processor wrote to the reserved block,
-			   nothing happens, i.e. we should operate as if reserve == 0 */
-			&& regs().reserve_data == vm_read_memory_4(ea)
+			&& regs().reserve_data == vm_read_memory_4(pa)
 #endif
 			) {
-			vm_write_memory_4(ea, operand_RS::get(this, opcode));
+			vm_write_memory_4(pa, operand_RS::get(this, opcode));
 			cr().set(0, standalone_CR_EQ_field::mask());
 		}
 		regs().reserve_valid = 0;
@@ -1145,7 +1172,54 @@ void powerpc_cpu::execute_mffs(uint32 opcode)
 
 void powerpc_cpu::execute_mfmsr(uint32 opcode)
 {
-	operand_RD::set(this, opcode, 0xf072);
+	uint32 msr = 0xf072;
+	if (ppc32_guest_mmu_enabled())
+		msr = ppc32_guest_mmu().msr();
+	operand_RD::set(this, opcode, msr);
+	increment_pc(4);
+}
+
+void powerpc_cpu::execute_mtmsr(uint32 opcode)
+{
+	if (ppc32_guest_mmu_enabled())
+		ppc32_guest_mmu().set_msr(operand_RS::get(this, opcode));
+	increment_pc(4);
+}
+
+void powerpc_cpu::execute_mfsr(uint32 opcode)
+{
+	uint32 d = 0;
+	if (ppc32_guest_mmu_enabled())
+		d = ppc32_guest_mmu().sr(rA_field::extract(opcode) & 0xfu);
+	operand_RD::set(this, opcode, d);
+	increment_pc(4);
+}
+
+void powerpc_cpu::execute_mtsr(uint32 opcode)
+{
+	if (ppc32_guest_mmu_enabled())
+		ppc32_guest_mmu().set_sr(rA_field::extract(opcode) & 0xfu,
+					 operand_RS::get(this, opcode));
+	increment_pc(4);
+}
+
+void powerpc_cpu::execute_rfi(uint32 opcode)
+{
+	(void)opcode;
+	if (ppc32_guest_mmu_enabled()) {
+		ppc32_guest_mmu().set_msr(srr1_);
+		pc() = srr0_;
+		return;
+	}
+	increment_pc(4);
+}
+
+void powerpc_cpu::execute_tlbie(uint32 opcode)
+{
+	if (ppc32_guest_mmu_enabled()) {
+		ppc32_guest_mmu().tlbie(operand_RB::get(this, opcode));
+		invalidate_cache();
+	}
 	increment_pc(4);
 }
 
@@ -1154,6 +1228,11 @@ void powerpc_cpu::execute_mfspr(uint32 opcode)
 {
 	const uint32 spr = SPR::get(this, opcode);
 	uint32 d;
+	if (ppc32_guest_mmu_enabled() && mfspr_oea(spr, &d)) {
+		operand_RD::set(this, opcode, d);
+		increment_pc(4);
+		return;
+	}
 	switch (spr) {
 	case powerpc_registers::SPR_XER:	d = xer().get();break;
 	case powerpc_registers::SPR_LR:		d = lr();		break;
@@ -1180,6 +1259,11 @@ void powerpc_cpu::execute_mtspr(uint32 opcode)
 {
 	const uint32 spr = SPR::get(this, opcode);
 	const uint32 s = operand_RS::get(this, opcode);
+
+	if (ppc32_guest_mmu_enabled() && mtspr_oea(spr, s)) {
+		increment_pc(4);
+		return;
+	}
 
 	switch (spr) {
 	case powerpc_registers::SPR_XER:	xer().set(s);	break;
@@ -1290,7 +1374,10 @@ template< class RA, class RB >
 void powerpc_cpu::execute_dcbz(uint32 opcode)
 {
 	uint32 ea = RA::get(this, opcode) + RB::get(this, opcode);
-	vm_memset(ea - (ea % 32), 0, 32);
+	uint32 pa;
+	if (!guest_data_xlate(ea, 32, true, &pa))
+		return;
+	vm_memset(pa - (pa % 32), 0, 32);
 	increment_pc(4);
 }
 
@@ -1316,22 +1403,31 @@ void powerpc_cpu::execute_vector_load(uint32 opcode)
 {
 	uint32 ea = RA::get(this, opcode) + RB::get(this, opcode);
 	typename VD::type & vD = VD::ref(this, opcode);
+	uint32 pa;
 	switch (VD::element_size) {
 	case 1:
-		VD::set_element(vD, (ea & 0x0f), vm_read_memory_1(ea));
+		if (!guest_data_xlate(ea, 1, false, &pa))
+			return;
+		VD::set_element(vD, (ea & 0x0f), vm_read_memory_1(pa));
 		break;
 	case 2:
-		VD::set_element(vD, ((ea >> 1) & 0x07), vm_read_memory_2(ea & ~1));
+		if (!guest_data_xlate(ea & ~1, 2, false, &pa))
+			return;
+		VD::set_element(vD, ((ea >> 1) & 0x07), vm_read_memory_2(pa));
 		break;
 	case 4:
-		VD::set_element(vD, ((ea >> 2) & 0x03), vm_read_memory_4(ea & ~3));
+		if (!guest_data_xlate(ea & ~3, 4, false, &pa))
+			return;
+		VD::set_element(vD, ((ea >> 2) & 0x03), vm_read_memory_4(pa));
 		break;
 	case 8:
 		ea &= ~15;
-		vD.w[0] = vm_read_memory_4(ea +  0);
-		vD.w[1] = vm_read_memory_4(ea +  4);
-		vD.w[2] = vm_read_memory_4(ea +  8);
-		vD.w[3] = vm_read_memory_4(ea + 12);
+		if (!guest_data_xlate(ea, 16, false, &pa))
+			return;
+		vD.w[0] = vm_read_memory_4(pa +  0);
+		vD.w[1] = vm_read_memory_4(pa +  4);
+		vD.w[2] = vm_read_memory_4(pa +  8);
+		vD.w[3] = vm_read_memory_4(pa + 12);
 		break;
 	}
 	increment_pc(4);
@@ -1342,22 +1438,31 @@ void powerpc_cpu::execute_vector_store(uint32 opcode)
 {
 	uint32 ea = RA::get(this, opcode) + RB::get(this, opcode);
 	typename VS::type & vS = VS::ref(this, opcode);
+	uint32 pa;
 	switch (VS::element_size) {
 	case 1:
-		vm_write_memory_1(ea, VS::get_element(vS, (ea & 0x0f)));
+		if (!guest_data_xlate(ea, 1, true, &pa))
+			return;
+		vm_write_memory_1(pa, VS::get_element(vS, (ea & 0x0f)));
 		break;
 	case 2:
-		vm_write_memory_2(ea & ~1, VS::get_element(vS, ((ea >> 1) & 0x07)));
+		if (!guest_data_xlate(ea & ~1, 2, true, &pa))
+			return;
+		vm_write_memory_2(pa, VS::get_element(vS, ((ea >> 1) & 0x07)));
 		break;
 	case 4:
-		vm_write_memory_4(ea & ~3, VS::get_element(vS, ((ea >> 2) & 0x03)));
+		if (!guest_data_xlate(ea & ~3, 4, true, &pa))
+			return;
+		vm_write_memory_4(pa, VS::get_element(vS, ((ea >> 2) & 0x03)));
 		break;
 	case 8:
 		ea &= ~15;
-		vm_write_memory_4(ea +  0, vS.w[0]);
-		vm_write_memory_4(ea +  4, vS.w[1]);
-		vm_write_memory_4(ea +  8, vS.w[2]);
-		vm_write_memory_4(ea + 12, vS.w[3]);
+		if (!guest_data_xlate(ea, 16, true, &pa))
+			return;
+		vm_write_memory_4(pa +  0, vS.w[0]);
+		vm_write_memory_4(pa +  4, vS.w[1]);
+		vm_write_memory_4(pa +  8, vS.w[2]);
+		vm_write_memory_4(pa + 12, vS.w[3]);
 		break;
 	}
 	increment_pc(4);

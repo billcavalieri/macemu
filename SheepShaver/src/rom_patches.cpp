@@ -41,9 +41,12 @@
 #include "serial.h"
 #include "macos_util.h"
 #include "thunks.h"
+#include "nw_boot_contract.h"
 
 #define DEBUG 0
 #include "debug.h"
+
+typedef char nw_romtype_must_match[(ROMTYPE_NEWWORLD == 5) ? 1 : -1];
 
 
 // 68k breakpoint address
@@ -150,6 +153,7 @@ bool DecodeROM(uint8 *data, uint32 size)
 	if (size == ROM_SIZE) {
 		// Plain ROM image
 		memcpy(ROMBaseHost, data, ROM_SIZE);
+		nw_log_g0_decode(ROMBaseHost, ROM_SIZE);
 		return true;
 	}
 	else if (strncmp((char *)data, "<CHRP-BOOT>", 11) == 0) {
@@ -194,6 +198,7 @@ bool DecodeROM(uint8 *data, uint32 size)
 			D(bug("Size of compressed data: %08x\n", image_size));
 			decode_lzss(data + image_offset, ROMBaseHost, image_size);
 		}
+		nw_log_g0_decode(ROMBaseHost, ROM_SIZE);
 		return true;
 	}
 	return false;
@@ -693,6 +698,8 @@ bool PatchROM(void)
 		ROMType = ROMTYPE_NEWWORLD;
 	else
 		return false;
+
+	nw_log_g1_patch_skip(ROMType == ROMTYPE_NEWWORLD);
 	
 	// Check that other ROM addresses point to really free regions
 	if (!check_rom_patch_space(CHECK_LOAD_PATCH_SPACE, 0x40))
@@ -749,6 +756,10 @@ static bool patch_nanokernel_boot(void)
 	lp[0xac >> 2] = htonl(ROMBase + 0x460000);		// LA_EmulatorCode
 	lp[0x360 >> 2] = htonl(0);						// Physical RAM base (? on NewWorld ROM, this contains -1)
 	lp[0xfd8 >> 2] = htonl(ROMBase + 0x2a);		// 68k reset vector
+
+	// New World NK v2 programs SR/BAT/SDR itself. Hnfo skips CPU probe / mfsdr1.
+	if (ROMType == ROMTYPE_NEWWORLD)
+		return true;
 
 	// Skip SR/BAT/SDR init
 	loc = 0x310000;
@@ -1307,6 +1318,10 @@ static bool patch_nanokernel(void)
 	uint32 *lp;
 	uint32 base, loc;
 
+	// Old World-only: New World NK v2 keeps translation, HotInts, and FPU MSR.
+	if (ROMType == ROMTYPE_NEWWORLD)
+		return true;
+
 	// Patch Mixed Mode trap
 	static const uint8 virt2phys_dat[] = {0x7d, 0x1b, 0x43, 0x78, 0x3b, 0xa1, 0x03, 0x20};
 	if ((base = find_rom_data(0x313000, 0x314000, virt2phys_dat, sizeof(virt2phys_dat))) == 0) return false;
@@ -1499,10 +1514,7 @@ static bool patch_68k(void)
 	wp = (uint16 *)(ROMBaseHost + base);
 	*wp++ = htons(0x203c);			// move.l	#id,d0
 	*wp++ = htons(0);
-//	if (ROMType == ROMTYPE_NEWWORLD)
-//		*wp++ = htons(0x3035);		// (PowerMac 9500 ID)
-//	else
-		*wp++ = htons(0x3020);		// (PowerMac 9500 ID)
+	*wp++ = htons((uint16)nw_gestalt_machine_id(ROMType == ROMTYPE_NEWWORLD));
 	*wp++ = htons(0xb040);			// cmp.w	d0,d0
 	*wp = htons(0x4ed6);			// jmp	(a6)
 
@@ -1519,7 +1531,7 @@ static bool patch_68k(void)
 		lp[0x1c >> 2] = htonl(0x000108c4);
 		lp[0x24 >> 2] = htonl(0xc301bf26);
 		lp[0x28 >> 2] = htonl(0x00000861);
-		lp[0x58 >> 2] = htonl(0x30200000);
+		lp[0x58 >> 2] = htonl(((uint32)NW_GESTALT_MACHINE_ID) << 16);
 		lp[0x60 >> 2] = htonl(0x0000003d);
 	} else if (ROMType == ROMTYPE_ZANZIBAR) {
 		base = 0x12b70;

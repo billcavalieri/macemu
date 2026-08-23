@@ -33,6 +33,7 @@
 #include "cpu/ppc/ppc-jit.hpp"
 #endif
 #include "cpu/ppc/ppc-instructions.hpp"
+#include "cpu/ppc/ppc-mmu.hpp"
 #include <vector>
 
 class powerpc_cpu
@@ -249,6 +250,18 @@ private:
 	// Current execute() nested level
 	int execute_depth;
 
+	/* OEA exception/SPRG state for HotInts DataStorageInt. */
+	uint32 srr0_;
+	uint32 srr1_;
+	uint32 dar_;
+	uint32 dsisr_;
+	uint32 sprg_[4];
+
+	void take_data_dsi(uint32 ea, bool is_store);
+	void take_isi();
+	bool mfspr_oea(uint32 spr, uint32 *value) const;
+	bool mtspr_oea(uint32 spr, uint32 value);
+
 public:
 
 	// Initialization & finalization
@@ -285,6 +298,12 @@ public:
 	// Start emulation loop
 	void execute(uint32 entry);
 	void execute();
+
+	/* New World: translate; Old World 9.0.4 stays off (default). */
+	void enable_guest_mmu(bool on);
+	bool guest_mmu_enabled() const { return ppc32_guest_mmu_enabled(); }
+	bool guest_fetch(uint32 *opcode);
+	bool guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa);
 
 	// Interrupts handling
 	void trigger_interrupt();
@@ -433,6 +452,11 @@ private:
 	template< class Rc >
 	void execute_mffs(uint32 opcode);
 	void execute_mfmsr(uint32 opcode);
+	void execute_mtmsr(uint32 opcode);
+	void execute_mfsr(uint32 opcode);
+	void execute_mtsr(uint32 opcode);
+	void execute_rfi(uint32 opcode);
+	void execute_tlbie(uint32 opcode);
 	template< class SPR >
 	void execute_mfspr(uint32 opcode);
 	template< class TBR >

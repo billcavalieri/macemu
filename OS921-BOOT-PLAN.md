@@ -61,15 +61,16 @@ One guest physical address space. The MMU is the only translator from effective 
 
 ### WP1 — New World boot and nanokernel v2
 
-**Owner:** Macemu Engineer. Files: `rom_patches.cpp`, `rsrc_patches.cpp`, `name_registry.cpp`, `macos_util.cpp`, `SheepShaver/src/include`, `MacOSX` prefs.
+**Owner:** Macemu Engineer. Files: `rom_patches.cpp`, `rsrc_patches.cpp`, `name_registry.cpp`, `macos_util.cpp`, `SheepShaver/src/include/nw_boot_contract.h`, `nw_boot_contract.cpp`, `MacOSX` prefs. Host G1 asserts live in `SheepShaver-MMUTests` (`mmu_harness.cpp` + `nw_boot_contract.*`).
 
 1. Detect New World vs Old World at load. Keep the Old World 9.0.4 path working; gate New World on ROM signature / Nanokernel version.
 2. Stop applying Old World-only patches to a New World ROM. New World uses a different trampoline (tbxi + Open Firmware / BootX-style handoff, not the Old World reset vector patch set).
-3. Present a Name Registry and device tree 9.2.1 will accept: uni-n / PCI / video / ADB / CUDA-or-PMU / NVRAM / RAM. Start from `name_registry.cpp` and the NewSheep device-tree choices, then match what 9.2.1’s nanokernel probes.
-4. Nanokernel v2 exception vectors and timebase. DEC, decrementer, and `mftb` must be consistent.
+3. Present a Name Registry and device tree 9.2.1 will accept: uni-n / PCI / video / ADB / CUDA-or-PMU / NVRAM / RAM. Start from `name_registry.cpp` and the NewSheep device-tree choices, then match what 9.2.1’s nanokernel probes. Root `compatible` is `MacRISC2`. Gestalt machine ID is always 406; the real identity is root `model` / `compatible`. Required nodes: `/memory` (reg banks), `/cpus`, `/chosen`.
+4. Nanokernel v2 exception vectors and timebase. DEC, decrementer, and `mftb` must be consistent. NK v2 lives at ~`ROMBase+0x310000`.
 5. XPRAM / NVRAM shape for New World (`xpram.cpp`).
+6. Trampoline: `saveKernelDataPtr` immediately after `saveReturnAddr`. KDP `Hnfo` comes from `HardwareInit` and skips the CPU probe / `mfsdr1`. `BATRangeInit` at KDP+0x2cc (32 longs).
 
-**Done:** With the MMU still in a software-walk stub (WP2 can land in parallel after the first DSI), the nanokernel prints or reaches the first `tlbie`/`mtdec`/`mtsdr1`. Log those SPRs. Old World 9.0.4 still boots.
+**Done:** Device tree root `compatible` is `MacRISC2`, Gestalt machine ID is 406, and `/memory`, `/cpus`, `/chosen` exist. HTAB half of the gate is **either** `mtsdr1` in the SPR log **or** a valid HTAB already in the Hnfo block — plus `BATRangeInit` at KDP+0x2cc. `saveKernelDataPtr` is immediately after `saveReturnAddr`. Do **not** require `mfsdr1`. Old World 9.0.4 still boots.
 
 ### WP2 — PPC32 MMU (the boot gate)
 
@@ -92,7 +93,7 @@ Software TLB in front of the walk (page-granule, ASIDs or VSID+page). Every JIT 
 
 No identity map. No patching the nanokernel to skip VM.
 
-**Done:** A unit/harness (host-side, Xcode test target) that programs BAT + a synthetic HTAB and proves BAT hit / HTAB hit / fault, IR-only vs DR-only, and `tlbie` drops the cached translation. Then on the guest: nanokernel `mtsdr1` + first demand-zero page-in succeeds (DSI → handler → retry → no loop).
+**Done:** Host-side Xcode target `SheepShaver-MMUTests` (Debug, `ARCHS=arm64`) programs BAT + a synthetic HTAB and proves BAT hit, HTAB hit, fault, IR-only vs DR-only, and `tlbie` drops the cached translation. `mmu.translate(ea, ir/dr, width)` is the only map. G2 accept: after a data DSI, HotInts `lwz` of the faulting insn at SRR0 with MSR[DR] on must HIT (BAT or HTAB) and must not take a second DSI; early NK keeps the instruction side mapped. First DSI is not DSISR-only (`AlignmentInt` is `mfdsisr`/`mfdar`). Old World 9.0.4 stays off the translator. Guest CPU takes the same `DataStorageInt` entry (SRR0 = faulting PC) and retries without flooding the same `DAR`. Do **not** require `mfsdr1`. Just-enough PPC32 MMU. Do not grow a chipset.
 
 ### WP3 — ARM64 JIT on the MMU
 
@@ -126,19 +127,31 @@ Guest physical space is banks: RAM, ROM (Mac OS ROM + overlays), PCI/IO, video, 
 
 | Gate | What you see |
 |---|---|
-| G0 | App launches, New World ROM checksum OK, Old World 9.0.4 still boots |
-| G1 | Nanokernel v2 runs; `mtsdr1` / BAT fills appear in the SPR log |
-| G2 | First DSI handled; no flood of the same `DAR` |
-| G3 | 9.2.1 installer window (mouse + video) |
+| G0 | After DecodeROM, 4 MiB at `ROMBase`. NewWorld signature at `ROMBase+0x30d064`. Nanokernel v2 at `ROMBase+0x310000`. Both ROM 1.6 (`lzss-offset`, tome-extract) and the 9.2.1 install-set Mac OS ROM tbxi (`parcels-offset` / `parcels-size` → `prcl`) pass. iMac Update 1.1 / ROM 1.2.1 is 9.0.4 regression only. Old World 9.0.4 still boots. |
+| G1 | Root `compatible` is `MacRISC2`; Gestalt machine ID is always 406; real ID is root `model`/`compatible`. `/memory` (reg banks), `/cpus`, `/chosen` present. NK v2 ~`ROMBase+0x310000`. HTAB: `mtsdr1` in the SPR log **or** a valid HTAB already in the Hnfo block. `BATRangeInit` at KDP+0x2cc (32 longs). `saveKernelDataPtr` immediately after `saveReturnAddr`. Do **not** require `mfsdr1`. |
+| G2 | First DSI follows elliotnunn/NanoKernel `HotInts.s` `DataStorageInt`: SPRG0=KDP, SPRG1=saved r1, SPRG2=LR, SPRG3=VecTbl; save r0/r1 then `mfsrr0`→r10, `mfsrr1`→r11, SPRG2→r12, CR→r13; then MSR[DR] ON, `lwz` faulting insn at SRR0 into r27, go to MemRetry. Accept: that DR-on `lwz` at SRR0 must HIT (BAT or HTAB) and must not take a second DSI; early NK keeps the insn side mapped. `AlignmentInt` is the handler that does `mfdsisr`/`mfdar`. Do not treat first DSI as DSISR-only. Old World 9.0.4 stays off the translator. No same-`DAR` flood. Just-enough PPC32 MMU. Do not grow a chipset. |
+| G3 | 9.2.1 installer window (mouse + video) **and** the Debug `NW-BOOT` log still shows G2 (data DSI, SRR0 fetch of the faulting insn with MSR[DR] on hits BAT/HTAB, no second DSI). A window without that G2 line is not G3. Not a host assert. |
 | G4 | Installer writes the HFS target; reboot from that volume |
 | G5 | Finder desktop, menu bar, about box says 9.2.1 |
 | G6 | JIT on; measurements recorded |
 
 If a gate fails, fix that gate.
 
+## Locked G0–G2; locked G3 accept (Grok Build)
+
+G0–G2 are locked. Do not invent extra probes — in particular **do not require `mfsdr1`**. G3 is **not done**. The G3 accept below is locked so a window without the G2 log is not counted as G3.
+
+**G0 (WP0 / Swiftly).** `DecodeROM` in `SheepShaver/src/rom_patches.cpp` already takes the tbxi path (`lzss-offset` **or** `parcels-offset` / `parcels-size` with a `prcl` signature). After decode there is 4 MiB at `ROMBase`. Check NewWorld at `ROMBase+0x30d064` and nanokernel v2 at `ROMBase+0x310000`. Both ROM 1.6 (lzss, tome-extract) and the 9.2.1 install-set Mac OS ROM (parcels → prcl) must pass. iMac Update 1.1 / ROM 1.2.1 stays 9.0.4 regression only.
+
+**G1 (WP1).** Device tree root `compatible` is `MacRISC2`. Gestalt machine ID is always 406; the real machine identity is root `model`/`compatible`. Need `/memory` (reg banks), `/cpus`, `/chosen`. NK v2 ~`ROMBase+0x310000`. KDP Hnfo from `HardwareInit` skips the CPU probe / `mfsdr1`. Treat **either** `mtsdr1` in the SPR log **or** a valid HTAB already in the Hnfo block as the HTAB half of the gate. Plus `BATRangeInit` at KDP+0x2cc (32 longs). `saveKernelDataPtr` immediately after `saveReturnAddr`. Host harness: `SheepShaver-MMUTests` (`mmu_harness.cpp` + `nw_boot_contract.cpp`).
+
+**G2 (WP2).** First DSI is `DataStorageInt` in elliotnunn/NanoKernel `HotInts.s`, not a DSISR-only path (`AlignmentInt` is the one that does `mfdsisr`/`mfdar`). Sequence: SPRG0=KDP, SPRG1=saved r1, SPRG2=LR, SPRG3=VecTbl; save r0/r1 then `mfsrr0`→r10, `mfsrr1`→r11, SPRG2→r12, CR→r13; MSR[DR] ON; `lwz` the faulting insn at SRR0 into r27; go to MemRetry. **Accept:** take a data DSI, then the HotInts `lwz` of the faulting insn at SRR0 with MSR[DR] on must HIT (BAT or HTAB) and must not take a second DSI. Early nanokernel keeps the instruction side mapped. Old World 9.0.4 stays off the translator (IR/DR off / Old World gate). Host harness: `SheepShaver-MMUTests` (`SheepShaver/src/kpx_cpu/tests/mmu_harness.cpp` + `ppc-mmu.*`). Just-enough PPC32 MMU. Do not grow a chipset.
+
+**G3 accept (not done).** G3 is the 9.2.1 installer window **and** the Debug `NW-BOOT` log still shows G2 (data DSI, SRR0 fetch of the faulting insn with MSR[DR] on hits BAT/HTAB, no second DSI). A window without that G2 line is not G3. Not a host assert. Cloud cannot boot it. Old World 9.0.4 stays off the translator. No new harness gate. No ROM in git.
+
 ## Xcode
 
-Scheme `SheepShaver` (MacOSX target). Add `SheepShaver-MMUTests` for WP2. `ARCHS=arm64`, `MACOSX_DEPLOYMENT_TARGET=26.0`, JIT entitlement `com.apple.security.cs.allow-jit`. Debug = interpreter + MMU logs. Release = JIT + damage. No new Unix configure path.
+Scheme `SheepShaver` (MacOSX target). `SheepShaver-MMUTests` is a native Debug tool target on `SheepShaver/src/MacOSX/SheepShaver_Xcode8.xcodeproj` for G1 (`nw_boot_contract.*`) and WP2 (`ARCHS=arm64`). `MACOSX_DEPLOYMENT_TARGET=26.0`, JIT entitlement `com.apple.security.cs.allow-jit`. Debug = interpreter + MMU logs. Release = JIT + damage. No new Unix configure path.
 
 ## Measurement
 

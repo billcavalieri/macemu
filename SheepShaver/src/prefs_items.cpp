@@ -43,6 +43,7 @@ prefs_desc common_prefs_items[] = {
 	{"seriala", TYPE_STRING, false,     "device name of Mac serial port A"},
 	{"serialb", TYPE_STRING, false,     "device name of Mac serial port B"},
 	{"rom", TYPE_STRING, false,         "path of ROM file"},
+	/* New World Gestalt machine ID is always 406; identity is OF root model/compatible. Not a pref. */
 	{"bootdrive", TYPE_INT32, false,    "boot drive number"},
 	{"bootdriver", TYPE_INT32, false,   "boot driver number"},
 	{"ramsize", TYPE_INT32, false,      "size of Mac RAM in bytes"},

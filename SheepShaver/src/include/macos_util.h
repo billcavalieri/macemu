@@ -361,6 +361,7 @@ extern uint32 TimeToMacTime(time_t t);					// Convert time_t value to MacOS time
 extern time_t MacTimeToTime(uint32 t);				// Convert MacOS time to time_t value
 extern uint32 Mac_sysalloc(uint32 size);				// Allocate block in MacOS system heap zone
 extern void Mac_sysfree(uint32 addr);					// Release block occupied by the nonrelocatable block p
+extern uint32 GestaltMachineType(void);					// 406 on New World; Old World PowerMac 9500 ID
 
 // Construct four-character-code from string
 #define FOURCC(a,b,c,d) (((uint32)(a) << 24) | ((uint32)(b) << 16) | ((uint32)(c) << 8) | (uint32)(d))
