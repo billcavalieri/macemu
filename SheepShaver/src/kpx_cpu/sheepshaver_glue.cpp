@@ -29,6 +29,7 @@
 #include "block-alloc.hpp"
 #include "sigsegv.h"
 #include "cpu/ppc/ppc-cpu.hpp"
+#include "cpu/ppc/ppc-mmu.hpp"
 #include "cpu/ppc/ppc-operations.hpp"
 #include "cpu/ppc/ppc-instructions.hpp"
 #include "thunks.h"
@@ -841,6 +842,12 @@ sigsegv_return_t sigsegv_handler(sigsegv_info_t *sip)
  *  Initialize CPU emulation
  */
 
+static bool guest_phys_read32(void *, uint32_t pa, uint32_t *value)
+{
+	*value = vm_read_memory_4(pa);
+	return true;
+}
+
 void init_emul_ppc(void)
 {
 	// Get pointer to KernelData in host address space
@@ -851,6 +858,11 @@ void init_emul_ppc(void)
 	ppc_cpu->set_register(powerpc_registers::GPR(3), any_register((uint32)ROMBase + 0x30d000));
 	ppc_cpu->set_register(powerpc_registers::GPR(4), any_register(KernelDataAddr + 0x1000));
 	WriteMacInt32(XLM_RUN_MODE, MODE_68K);
+
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		ppc32_guest_mmu().set_phys_read32(guest_phys_read32, NULL);
+		ppc_cpu->enable_guest_mmu(true);
+	}
 
 #if ENABLE_MON
 	// Install "regs" command in cxmon

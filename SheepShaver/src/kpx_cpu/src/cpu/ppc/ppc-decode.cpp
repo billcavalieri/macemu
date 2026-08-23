@@ -725,6 +725,11 @@ const powerpc_cpu::instr_info_t powerpc_cpu::powerpc_ii_table[] = {
 	  PPC_I(MFMSR),
 	  X_form, 31, 83, CFLOW_NORMAL
 	},
+	{ "mfsr",
+	  EXECUTE_0(mfsr),
+	  PPC_I(MFSR),
+	  X_form, 31, 595, CFLOW_NORMAL
+	},
 	{ "mfspr",
 	  EXECUTE_1(mfspr, operand_SPR),
 	  PPC_I(MFSPR),
@@ -744,6 +749,11 @@ const powerpc_cpu::instr_info_t powerpc_cpu::powerpc_ii_table[] = {
 	  EXECUTE_0(mtcrf),
 	  PPC_I(MTCRF),
 	  XFX_form, 31, 144, CFLOW_NORMAL
+	},
+	{ "mtmsr",
+	  EXECUTE_0(mtmsr),
+	  PPC_I(MTMSR),
+	  X_form, 31, 146, CFLOW_NORMAL
 	},
 	{ "mtfsb0",
 	  EXECUTE_2(mtfsb, immediate_value<0>, RC_BIT_G),
@@ -769,6 +779,11 @@ const powerpc_cpu::instr_info_t powerpc_cpu::powerpc_ii_table[] = {
 	  EXECUTE_1(mtspr, operand_SPR),
 	  PPC_I(MTSPR),
 	  XFX_form, 31, 467, CFLOW_NORMAL
+	},
+	{ "mtsr",
+	  EXECUTE_0(mtsr),
+	  PPC_I(MTSR),
+	  X_form, 31, 210, CFLOW_NORMAL
 	},
 	{ "mtvscr",
 	  EXECUTE_0(mtvscr),
@@ -844,6 +859,11 @@ const powerpc_cpu::instr_info_t powerpc_cpu::powerpc_ii_table[] = {
 	  EXECUTE_GENERIC_ARITH(ppc_rlwnm, RA, RS, RB, MASK, OE_BIT_0, RC_BIT_G),
 	  PPC_I(RLWNM),
 	  M_form, 23, 0, CFLOW_NORMAL
+	},
+	{ "rfi",
+	  EXECUTE_0(rfi),
+	  PPC_I(RFI),
+	  XL_form, 19, 50, CFLOW_JUMP
 	},
 	{ "sc",
 	  EXECUTE_0(syscall),
@@ -1059,6 +1079,11 @@ const powerpc_cpu::instr_info_t powerpc_cpu::powerpc_ii_table[] = {
 	  EXECUTE_0(nop),
 	  PPC_I(SYNC),
 	  X_form, 31, 598, CFLOW_NORMAL
+	},
+	{ "tlbie",
+	  EXECUTE_0(tlbie),
+	  PPC_I(TLBIE),
+	  X_form, 31, 306, CFLOW_NORMAL
 	},
 	{ "xor",
 	  EXECUTE_GENERIC_ARITH(xor, RA, RS, RB, NONE, OE_BIT_0, RC_BIT_G),

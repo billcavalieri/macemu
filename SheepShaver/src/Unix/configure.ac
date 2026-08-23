@@ -1583,6 +1583,7 @@ if [[ "x$EMULATED_PPC" = "xyes" ]]; then
     ../kpx_cpu/src/cpu/ppc/ppc-cpu.cpp \
     ../kpx_cpu/src/cpu/ppc/ppc-decode.cpp \
     ../kpx_cpu/src/cpu/ppc/ppc-execute.cpp \
+    ../kpx_cpu/src/cpu/ppc/ppc-mmu.cpp \
     ../kpx_cpu/src/cpu/ppc/ppc-translate.cpp \
     ../kpx_cpu/src/utils/utils-cpuinfo.cpp"
   CPPFLAGS="$CPPFLAGS -I../kpx_cpu/include -I../kpx_cpu/src"

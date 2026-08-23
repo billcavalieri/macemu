@@ -139,6 +139,12 @@ void powerpc_cpu::init_registers()
 	lr() = 0;
 	ctr() = 0;
 	pc() = 0;
+	srr0_ = 0;
+	srr1_ = 0;
+	dar_ = 0;
+	dsisr_ = 0;
+	for (int i = 0; i < 4; i++)
+		sprg_[i] = 0;
 }
 
 void powerpc_cpu::init_flight_recorder()
@@ -269,6 +275,9 @@ void powerpc_cpu::initialize()
 	init_registers();
 	init_decode_cache();
 	execute_depth = 0;
+	srr0_ = srr1_ = dar_ = dsisr_ = 0;
+	for (int i = 0; i < 4; i++)
+		sprg_[i] = 0;
 
 	// Initialize block lookup table
 #if PPC_DECODE_CACHE || PPC_ENABLE_JIT
@@ -317,6 +326,138 @@ void powerpc_cpu::enable_jit(uint32 cache_size)
 	codegen.initialize();
 }
 #endif
+
+void powerpc_cpu::enable_guest_mmu(bool on)
+{
+	ppc32_guest_mmu_enable(on);
+#if PPC_ENABLE_JIT
+	if (on)
+		use_jit = false;
+#endif
+}
+
+void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
+{
+	ppc32_hotints_dsi dsi;
+	dsi.take_data_dsi(ppc32_guest_mmu(), pc(), ea, is_store);
+	srr0_ = dsi.srr0;
+	srr1_ = dsi.srr1;
+	dar_ = dsi.dar;
+	dsisr_ = dsi.dsisr;
+	pc() = dsi.vector;
+}
+
+void powerpc_cpu::take_isi()
+{
+	srr0_ = pc();
+	srr1_ = ppc32_guest_mmu().msr();
+	ppc32_guest_mmu().set_msr(srr1_ & ~ppc32_mmu::MSR_EXC_CLEAR);
+	pc() = 0x400;
+}
+
+bool powerpc_cpu::guest_fetch(uint32 *opcode)
+{
+	if (!ppc32_guest_mmu_enabled()) {
+		*opcode = vm_read_memory_4(pc());
+		return true;
+	}
+	ppc32_xlate_result r = ppc32_guest_mmu().translate(pc(), PPC32_XLATE_IR, 4);
+	if (!r.ok) {
+		take_isi();
+		return false;
+	}
+	*opcode = vm_read_memory_4(r.pa);
+	return true;
+}
+
+bool powerpc_cpu::guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa)
+{
+	if (!ppc32_guest_mmu_enabled()) {
+		*pa = ea;
+		return true;
+	}
+	ppc32_xlate_result r = ppc32_guest_mmu().translate(ea, PPC32_XLATE_DR, width);
+	if (r.ok) {
+		*pa = r.pa;
+		return true;
+	}
+	take_data_dsi(ea, is_store);
+	return false;
+}
+
+bool powerpc_cpu::mfspr_oea(uint32 spr, uint32 *value) const
+{
+	ppc32_mmu &mmu = ppc32_guest_mmu();
+	switch (spr) {
+	case powerpc_registers::SPR_DSISR:	*value = dsisr_; return true;
+	case powerpc_registers::SPR_DAR:	*value = dar_; return true;
+	case powerpc_registers::SPR_SDR1:	*value = mmu.sdr1(); return true;
+	case powerpc_registers::SPR_SRR0:	*value = srr0_; return true;
+	case powerpc_registers::SPR_SRR1:	*value = srr1_; return true;
+	case powerpc_registers::SPR_SPRG0:	*value = sprg_[0]; return true;
+	case powerpc_registers::SPR_SPRG1:	*value = sprg_[1]; return true;
+	case powerpc_registers::SPR_SPRG2:	*value = sprg_[2]; return true;
+	case powerpc_registers::SPR_SPRG3:	*value = sprg_[3]; return true;
+	default:
+		break;
+	}
+	if (spr >= powerpc_registers::SPR_IBAT0U && spr <= powerpc_registers::SPR_IBAT3L) {
+		unsigned i = (spr - powerpc_registers::SPR_IBAT0U) / 2;
+		uint32 u = 0, l = 0;
+		mmu.get_ibat(i, &u, &l);
+		*value = (spr & 1) ? l : u;
+		return true;
+	}
+	if (spr >= powerpc_registers::SPR_DBAT0U && spr <= powerpc_registers::SPR_DBAT3L) {
+		unsigned i = (spr - powerpc_registers::SPR_DBAT0U) / 2;
+		uint32 u = 0, l = 0;
+		mmu.get_dbat(i, &u, &l);
+		*value = (spr & 1) ? l : u;
+		return true;
+	}
+	return false;
+}
+
+bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
+{
+	ppc32_mmu &mmu = ppc32_guest_mmu();
+	switch (spr) {
+	case powerpc_registers::SPR_DSISR:	dsisr_ = value; return true;
+	case powerpc_registers::SPR_DAR:	dar_ = value; return true;
+	case powerpc_registers::SPR_SDR1:	mmu.set_sdr1(value); return true;
+	case powerpc_registers::SPR_SRR0:	srr0_ = value; return true;
+	case powerpc_registers::SPR_SRR1:	srr1_ = value; return true;
+	case powerpc_registers::SPR_SPRG0:	sprg_[0] = value; return true;
+	case powerpc_registers::SPR_SPRG1:	sprg_[1] = value; return true;
+	case powerpc_registers::SPR_SPRG2:	sprg_[2] = value; return true;
+	case powerpc_registers::SPR_SPRG3:	sprg_[3] = value; return true;
+	default:
+		break;
+	}
+	if (spr >= powerpc_registers::SPR_IBAT0U && spr <= powerpc_registers::SPR_IBAT3L) {
+		unsigned i = (spr - powerpc_registers::SPR_IBAT0U) / 2;
+		uint32 u = 0, l = 0;
+		mmu.get_ibat(i, &u, &l);
+		if (spr & 1)
+			l = value;
+		else
+			u = value;
+		mmu.set_ibat(i, u, l);
+		return true;
+	}
+	if (spr >= powerpc_registers::SPR_DBAT0U && spr <= powerpc_registers::SPR_DBAT3L) {
+		unsigned i = (spr - powerpc_registers::SPR_DBAT0U) / 2;
+		uint32 u = 0, l = 0;
+		mmu.get_dbat(i, &u, &l);
+		if (spr & 1)
+			l = value;
+		else
+			u = value;
+		mmu.set_dbat(i, u, l);
+		return true;
+	}
+	return false;
+}
 
 // Memory allocator returning powerpc_cpu objects aligned on 16-byte boundaries
 // FORMAT: [ alignment ] magic identifier, offset to malloc'ed data, powerpc_cpu data
@@ -581,7 +722,7 @@ void powerpc_cpu::execute(uint32 entry)
 #endif
 	execute_depth++;
 #if PPC_DECODE_CACHE || PPC_ENABLE_JIT
-	if (execute_depth == 1 || (PPC_ENABLE_JIT && PPC_REENTRANT_JIT)) {
+	if (!ppc32_guest_mmu_enabled() && (execute_depth == 1 || (PPC_ENABLE_JIT && PPC_REENTRANT_JIT))) {
 #if PPC_ENABLE_JIT
 		if (use_jit) {
 			block_info *bi = my_block_cache.find(pc());
@@ -721,7 +862,12 @@ void powerpc_cpu::execute(uint32 entry)
 #endif
   do_interpret:
 	for (;;) {
-		uint32 opcode = vm_read_memory_4(pc());
+		uint32 opcode;
+		if (!guest_fetch(&opcode)) {
+			if (!spcflags().empty() && !check_spcflags())
+				goto return_site;
+			continue;
+		}
 		const instr_info_t *ii = decode(opcode);
 #if PPC_EXECUTE_DUMP_STATE
 		if (dump_state)

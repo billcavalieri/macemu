@@ -24,6 +24,8 @@ ppc32_mmu::ppc32_mmu()
 {
 	phys_ = 0;
 	phys_size_ = 0;
+	phys_read32_ = 0;
+	phys_read32_ctx_ = 0;
 	tlb_next_ = 0;
 	reset();
 }
@@ -48,6 +50,12 @@ void ppc32_mmu::set_physical_memory(uint8_t *base, uint32_t size)
 {
 	phys_ = base;
 	phys_size_ = size;
+}
+
+void ppc32_mmu::set_phys_read32(phys_read32_fn fn, void *ctx)
+{
+	phys_read32_ = fn;
+	phys_read32_ctx_ = ctx;
 }
 
 void ppc32_mmu::set_msr(uint32_t value)
@@ -87,6 +95,22 @@ void ppc32_mmu::set_dbat(unsigned i, uint32_t upper, uint32_t lower)
 	}
 }
 
+void ppc32_mmu::get_ibat(unsigned i, uint32_t *upper, uint32_t *lower) const
+{
+	if (i < NBAT) {
+		*upper = ibatu_[i];
+		*lower = ibatl_[i];
+	}
+}
+
+void ppc32_mmu::get_dbat(unsigned i, uint32_t *upper, uint32_t *lower) const
+{
+	if (i < NBAT) {
+		*upper = dbatu_[i];
+		*lower = dbatl_[i];
+	}
+}
+
 void ppc32_mmu::tlbie(uint32_t ea)
 {
 	const uint32_t page = ea & ~0xfffu;
@@ -112,6 +136,8 @@ bool ppc32_mmu::relocation_on(ppc32_xlate_space space) const
 
 bool ppc32_mmu::phys_read32(uint32_t pa, uint32_t *value) const
 {
+	if (phys_read32_)
+		return phys_read32_(phys_read32_ctx_, pa, value);
 	if (phys_ == 0 || (uint64_t)pa + 4 > phys_size_)
 		return false;
 	const uint8_t *p = phys_ + pa;
@@ -248,4 +274,22 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 	}
 
 	return r;
+}
+
+static ppc32_mmu g_guest_mmu;
+static bool g_guest_mmu_enabled;
+
+ppc32_mmu &ppc32_guest_mmu()
+{
+	return g_guest_mmu;
+}
+
+void ppc32_guest_mmu_enable(bool on)
+{
+	g_guest_mmu_enabled = on;
+}
+
+bool ppc32_guest_mmu_enabled()
+{
+	return g_guest_mmu_enabled;
 }

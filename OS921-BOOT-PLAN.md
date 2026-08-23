@@ -93,7 +93,7 @@ Software TLB in front of the walk (page-granule, ASIDs or VSID+page). Every JIT 
 
 No identity map. No patching the nanokernel to skip VM.
 
-**Done:** Host-side Xcode target `SheepShaver-MMUTests` (Debug, `ARCHS=arm64`) programs BAT + a synthetic HTAB and proves BAT hit, HTAB hit, fault, IR-only vs DR-only, and `tlbie` drops the cached translation. `mmu.translate(ea, ir/dr, width)` is the only map. Then on the guest: first DSI follows elliotnunn/NanoKernel `HotInts.s` `DataStorageInt` (not a DSISR-only handler) and retries without flooding the same `DAR`. Do **not** require `mfsdr1`. Just-enough PPC32 MMU. Do not grow a chipset.
+**Done:** Host-side Xcode target `SheepShaver-MMUTests` (Debug, `ARCHS=arm64`) programs BAT + a synthetic HTAB and proves BAT hit, HTAB hit, fault, IR-only vs DR-only, and `tlbie` drops the cached translation. `mmu.translate(ea, ir/dr, width)` is the only map. G2 accept: after a data DSI, HotInts `lwz` of the faulting insn at SRR0 with MSR[DR] on must HIT (BAT or HTAB) and must not take a second DSI; early NK keeps the instruction side mapped. First DSI is not DSISR-only (`AlignmentInt` is `mfdsisr`/`mfdar`). Old World 9.0.4 stays off the translator. Guest CPU takes the same `DataStorageInt` entry (SRR0 = faulting PC) and retries without flooding the same `DAR`. Do **not** require `mfsdr1`. Just-enough PPC32 MMU. Do not grow a chipset.
 
 ### WP3 — ARM64 JIT on the MMU
 
@@ -129,7 +129,7 @@ Guest physical space is banks: RAM, ROM (Mac OS ROM + overlays), PCI/IO, video, 
 |---|---|
 | G0 | After DecodeROM, 4 MiB at `ROMBase`. NewWorld signature at `ROMBase+0x30d064`. Nanokernel v2 at `ROMBase+0x310000`. Both ROM 1.6 (`lzss-offset`, tome-extract) and the 9.2.1 install-set Mac OS ROM tbxi (`parcels-offset` / `parcels-size` → `prcl`) pass. iMac Update 1.1 / ROM 1.2.1 is 9.0.4 regression only. Old World 9.0.4 still boots. |
 | G1 | Root `compatible` is `MacRISC2`; Gestalt machine ID is always 406; real ID is root `model`/`compatible`. `/memory` (reg banks), `/cpus`, `/chosen` present. NK v2 ~`ROMBase+0x310000`. HTAB: `mtsdr1` in the SPR log **or** a valid HTAB already in the Hnfo block. `BATRangeInit` at KDP+0x2cc (32 longs). `saveKernelDataPtr` immediately after `saveReturnAddr`. Do **not** require `mfsdr1`. |
-| G2 | First DSI follows elliotnunn/NanoKernel `HotInts.s` `DataStorageInt`: SPRG0=KDP, SPRG1=saved r1, SPRG2=LR, SPRG3=VecTbl; save r0/r1 then `mfsrr0`→r10, `mfsrr1`→r11, SPRG2→r12, CR→r13; then MSR[DR] ON, `lwz` faulting insn at SRR0 into r27, go to MemRetry. `AlignmentInt` is the handler that does `mfdsisr`/`mfdar`. Do not treat first DSI as DSISR-only. No same-`DAR` flood. Just-enough PPC32 MMU. Do not grow a chipset. |
+| G2 | First DSI follows elliotnunn/NanoKernel `HotInts.s` `DataStorageInt`: SPRG0=KDP, SPRG1=saved r1, SPRG2=LR, SPRG3=VecTbl; save r0/r1 then `mfsrr0`→r10, `mfsrr1`→r11, SPRG2→r12, CR→r13; then MSR[DR] ON, `lwz` faulting insn at SRR0 into r27, go to MemRetry. Accept: that DR-on `lwz` at SRR0 must HIT (BAT or HTAB) and must not take a second DSI; early NK keeps the insn side mapped. `AlignmentInt` is the handler that does `mfdsisr`/`mfdar`. Do not treat first DSI as DSISR-only. Old World 9.0.4 stays off the translator. No same-`DAR` flood. Just-enough PPC32 MMU. Do not grow a chipset. |
 | G3 | 9.2.1 installer window (mouse + video) |
 | G4 | Installer writes the HFS target; reboot from that volume |
 | G5 | Finder desktop, menu bar, about box says 9.2.1 |
@@ -145,7 +145,7 @@ These three gates are locked. Do not invent extra probes — in particular **do 
 
 **G1 (WP1).** Device tree root `compatible` is `MacRISC2`. Gestalt machine ID is always 406; the real machine identity is root `model`/`compatible`. Need `/memory` (reg banks), `/cpus`, `/chosen`. NK v2 ~`ROMBase+0x310000`. KDP Hnfo from `HardwareInit` skips the CPU probe / `mfsdr1`. Treat **either** `mtsdr1` in the SPR log **or** a valid HTAB already in the Hnfo block as the HTAB half of the gate. Plus `BATRangeInit` at KDP+0x2cc (32 longs). `saveKernelDataPtr` immediately after `saveReturnAddr`.
 
-**G2 (WP2).** First DSI is `DataStorageInt` in elliotnunn/NanoKernel `HotInts.s`, not a DSISR-only path (`AlignmentInt` is the one that does `mfdsisr`/`mfdar`). Sequence: SPRG0=KDP, SPRG1=saved r1, SPRG2=LR, SPRG3=VecTbl; save r0/r1 then `mfsrr0`→r10, `mfsrr1`→r11, SPRG2→r12, CR→r13; MSR[DR] ON; `lwz` the faulting insn at SRR0 into r27; go to MemRetry. Host harness: `SheepShaver-MMUTests` (`SheepShaver/src/kpx_cpu/tests/mmu_harness.cpp` + `ppc-mmu.*`). Just-enough PPC32 MMU. Do not grow a chipset.
+**G2 (WP2).** First DSI is `DataStorageInt` in elliotnunn/NanoKernel `HotInts.s`, not a DSISR-only path (`AlignmentInt` is the one that does `mfdsisr`/`mfdar`). Sequence: SPRG0=KDP, SPRG1=saved r1, SPRG2=LR, SPRG3=VecTbl; save r0/r1 then `mfsrr0`→r10, `mfsrr1`→r11, SPRG2→r12, CR→r13; MSR[DR] ON; `lwz` the faulting insn at SRR0 into r27; go to MemRetry. **Accept:** take a data DSI, then the HotInts `lwz` of the faulting insn at SRR0 with MSR[DR] on must HIT (BAT or HTAB) and must not take a second DSI. Early nanokernel keeps the instruction side mapped. Old World 9.0.4 stays off the translator (IR/DR off / Old World gate). Host harness: `SheepShaver-MMUTests` (`SheepShaver/src/kpx_cpu/tests/mmu_harness.cpp` + `ppc-mmu.*`). Just-enough PPC32 MMU. Do not grow a chipset.
 
 ## Xcode
 

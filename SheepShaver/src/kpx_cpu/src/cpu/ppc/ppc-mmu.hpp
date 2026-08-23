@@ -45,16 +45,23 @@ class ppc32_mmu
 {
 public:
 	enum {
+		MSR_RI = 0x00000002,
 		MSR_DR = 0x00000010,
 		MSR_IR = 0x00000020,
-		MSR_PR = 0x00004000
+		MSR_PR = 0x00004000,
+		MSR_EE = 0x00008000,
+		/* Bits cleared on interrupt (EE, PR, FP, FE0, SE, BE, FE1, IR, DR, RI). */
+		MSR_EXC_CLEAR = 0x0000ef32
 	};
+
+	typedef bool (*phys_read32_fn)(void *ctx, uint32_t pa, uint32_t *value);
 
 	ppc32_mmu();
 
 	void reset();
 
 	void set_physical_memory(uint8_t *base, uint32_t size);
+	void set_phys_read32(phys_read32_fn fn, void *ctx);
 
 	void set_msr(uint32_t value);
 	uint32_t msr() const { return msr_; }
@@ -78,6 +85,9 @@ public:
 	 */
 	ppc32_xlate_result translate(uint32_t ea, ppc32_xlate_space space, unsigned width);
 
+	void get_ibat(unsigned i, uint32_t *upper, uint32_t *lower) const;
+	void get_dbat(unsigned i, uint32_t *upper, uint32_t *lower) const;
+
 private:
 	enum { NBAT = 4, NSR = 16, NTLB = 64 };
 
@@ -97,6 +107,8 @@ private:
 
 	uint8_t *phys_;
 	uint32_t phys_size_;
+	phys_read32_fn phys_read32_;
+	void *phys_read32_ctx_;
 	uint32_t msr_;
 	uint32_t sdr1_;
 	uint32_t sr_[NSR];
@@ -107,5 +119,46 @@ private:
 	tlb_entry tlb_[NTLB];
 	unsigned tlb_next_;
 };
+
+/*
+ * HotInts DataStorageInt (elliotnunn/NanoKernel HotInts.s).
+ *
+ * First DSI is identified by SRR0 (faulting insn) + a DR-on lwz of that
+ * insn. DAR/DSISR are filled because the architecture writes them and
+ * AlignmentInt reads them (mfdsisr/mfdar) — they are not how first DSI
+ * finds the store/load.
+ *
+ * SPRG0=KDP, SPRG1=saved r1, SPRG2=LR, SPRG3=VecTbl (handler contract).
+ */
+struct ppc32_hotints_dsi {
+	uint32_t srr0;
+	uint32_t srr1;
+	uint32_t dar;
+	uint32_t dsisr;
+	uint32_t vector;
+	uint32_t sprg[4];
+
+	void take_data_dsi(ppc32_mmu &mmu, uint32_t fault_pc, uint32_t fault_ea, bool is_store)
+	{
+		srr0 = fault_pc;
+		srr1 = mmu.msr();
+		dar = fault_ea;
+		/* Bit 1 = no translation; bit 6 = store. AlignmentInt reads these. */
+		dsisr = 0x40000000u | (is_store ? 0x02000000u : 0);
+		vector = 0x300;
+		mmu.set_msr(mmu.msr() & ~ppc32_mmu::MSR_EXC_CLEAR);
+	}
+
+	/* Handler: MSR[DR] ON, lwz at SRR0. Must HIT — no second DSI. */
+	ppc32_xlate_result lwz_faulting_insn(ppc32_mmu &mmu) const
+	{
+		mmu.set_msr(mmu.msr() | ppc32_mmu::MSR_DR);
+		return mmu.translate(srr0, PPC32_XLATE_DR, 4);
+	}
+};
+
+ppc32_mmu &ppc32_guest_mmu();
+void ppc32_guest_mmu_enable(bool on);
+bool ppc32_guest_mmu_enabled();
 
 #endif /* PPC_MMU_H */
