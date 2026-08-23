@@ -37,3 +37,21 @@ project.xcworkspace/
 # JetBrains IDE settings
 #
 *.idea
+
+#
+# SheepShaver guest media and local prefs (WP0). Never commit ROMs or images.
+# Keep SheepShaver/src/MacOSX/prefs.os921.template; ignore a filled-in "prefs".
+#
+Mac OS ROM
+*.smi
+*.smi.bin
+*.toast
+*.dmg
+*.iso
+*.dsk
+*.hfv
+*.img
+*.cdr
+*.hfs
+prefs
+.sheepshaver_prefs
