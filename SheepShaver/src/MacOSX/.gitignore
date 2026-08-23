@@ -5,3 +5,18 @@ SheepShaver.xcodeproj/*.pbxuser
 
 # autoconf build generated Info.plist file
 Info.plist
+
+# Local 9.2.1 G0 media and filled-in prefs (keep prefs.os921.template)
+Mac OS ROM
+*.smi
+*.smi.bin
+*.toast
+*.dmg
+*.iso
+*.dsk
+*.hfv
+*.img
+*.cdr
+*.hfs
+prefs
+.sheepshaver_prefs

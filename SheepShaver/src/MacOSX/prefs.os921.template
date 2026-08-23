@@ -1,0 +1,31 @@
+# SheepShaver text prefs for Mac OS 9.2.1 G0 (WP0).
+# Syntax: LoadPrefsFromStream in SheepShaver/src/prefs.cpp
+#   - one KEY VALUE line; first token is the key, rest of the line is the value
+#   - comments are a line that starts with # or ; (column 0; no leading spaces)
+#   - booleans are exactly "true" or "false"; ramsize is bytes (int32)
+#   - keep each line under 256 characters (parser buffer)
+#
+# Copy this file to a local "prefs" (gitignored) and replace the three
+# /ABSOLUTE/PATH/TO/... placeholders. Do not commit the filled-in file,
+# the ROM, .smi/.smi.bin, .toast, or disk images.
+#
+# G0 ROM: New World 1.6 (lzss) OR the 9.2.1 install-set System Folder tbxi
+# (parcels). Not iMac Update 1.1 / ROM 1.2.1 (that is 9.0.4 regression only).
+# See OS921-WP0-ROM.md for extract/copy steps and G0 byte checks.
+#
+# Darwin load order (prefs_unix.cpp, not Linux): --config PATH, else
+# ~/.sheepshaver_prefs, else a foo.sheepvm/prefs vmdir.
+
+rom /ABSOLUTE/PATH/TO/Mac OS ROM
+disk /ABSOLUTE/PATH/TO/macos921-blank.hfv
+cdrom /ABSOLUTE/PATH/TO/MacOS921.toast
+
+# 128 MiB. Default ramsize is 16 MiB, which is too small for 9.2.1.
+ramsize 134217728
+jit true
+
+# bootdrive 0 = first volume. bootdriver -62 = CD-ROM (cdrom.h CDROMRefNum).
+# G0 is DecodeROM; G3+ boots the 9.2.1 installer from cdrom onto disk.
+# After a successful install (G4), set bootdriver 0 to boot the HFS target.
+bootdrive 0
+bootdriver -62
