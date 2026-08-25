@@ -23,6 +23,12 @@ enum {
 	NW_NEWWORLD_SIG_OFFSET = 0x30d064,
 	NW_CONFIGINFO_OFFSET = 0x30d000,
 	NW_NK_V2_OFFSET = 0x310000,
+	/* 9.2.1 NK HotInts DataStorageInt: mfsprg r1,0; stmw r2,8(r1). */
+	NW_NK_DATA_STORAGE_INT = 0x3132a0,
+	NW_NK_DATA_STORAGE_INT_OP = 0x7c3042a6, /* mfsprg r1, SPRG0 */
+	/* Exception vector page copied to EA 0 (SPRG3 = VecTbl). */
+	NW_NK_VEC_TEMPLATE = 0x300000,
+	NW_NK_VEC_TEMPLATE_SIZE = 0x1000,
 	NW_KDP_PAGE_SIZE = 0x1000,
 
 	/* NKProcessorState trampoline (elliotnunn/NanoKernel). DO NOT reorder. */
@@ -85,6 +91,15 @@ uint32_t nw_gestalt_machine_id(int is_newworld);
 enum nw_decoded_rom_kind nw_detect_decoded_rom(const uint8_t *rom, size_t size);
 int nw_rom_type_is_newworld(int rom_type);	/* matches ROMTYPE_NEWWORLD */
 
+/*
+ * Host-side G0 decode. dest must be NW_ROM_SIZE (4 MiB).
+ * Accepts a plain 4 MiB image, CHRP lzss (ROM 1.6), or CHRP parcels/prcl
+ * (9.2.1 install-set tbxi). Returns 1 on success.
+ */
+int nw_decode_rom_image(const uint8_t *src, size_t src_size,
+			uint8_t *dest, size_t dest_size);
+int nw_g0_unpacked_ok(const uint8_t *rom, size_t size);
+
 const struct nw_of_node_spec *nw_of_tree_spec(size_t *count);
 int nw_of_tree_has_required_nodes(void);
 
@@ -115,8 +130,28 @@ void nw_log_g1_kdp(const uint8_t *page);
 void nw_log_g1_hwinit(void);
 void nw_log_g1_patch_skip(int is_newworld);
 void nw_note_mtsdr1(void);
+void nw_log_msr_dr(uint32_t msr);
 void nw_log_first_dsi(uint32_t srr0, uint32_t dar, int dr_on_hit);
 void nw_log_translator_off(void);
+void nw_log_pc(uint32_t pc, uint32_t msr);
+void nw_log_dr_xlate(uint32_t pc, uint32_t ea, int ok, uint32_t pa,
+		     uint32_t dbat0u, uint32_t dbat0l);
+
+/*
+ * Identity-map ROM pages into a caller-owned HTAB (VSID 0, 1:1 RPN).
+ * Used so a later DR-on lwz of the faulting insn at SRR0 can HIT (G2).
+ */
+void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
+			      uint32_t rom_base, uint32_t rom_size, uint32_t vsid);
+void nw_guest_seed_rom_htab(uint32_t sdr1);
+/* NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one. */
+void nw_guest_plant_nk_irq(uint32_t kdp);
+/* After first DSI: 1:1 BAT RAM+ROM so HotInts MemRetry can HIT under DR. */
+void nw_guest_map_ram_rom_identity(void);
+void nw_guest_map_kernel_data(void);
+/* 68k inner loop at ROM+0x366084: table is ROM+0x380000 + opcode*8. */
+int nw_guest_68k_dispatch(uint32_t *pc, uint32_t *r24, uint32_t *r27,
+			  uint32_t *r29);
 
 #ifdef __cplusplus
 }

@@ -56,9 +56,24 @@ After `DecodeROM` (`SheepShaver/src/rom_patches.cpp`): 4 MiB at `ROMBase`. G0 ac
 
 ## 6. Grok Build — G0 command / env
 
-Darwin `LoadPrefs` (`SheepShaver/src/Unix/prefs_unix.cpp`, non-Linux): `--config PATH`, else `~/.sheepshaver_prefs`, else `foo.sheepvm/prefs`. There is no prefs environment variable. Keys are in `SheepShaver/src/prefs_items.cpp`.
+Darwin `LoadPrefs` (`SheepShaver/src/Unix/prefs_unix.cpp`, non-Linux): `--config PATH`, else `~/.sheepshaver_prefs`, else `$HOME/Library/Application Support/SheepShaver/os921/prefs`, else `foo.sheepvm/prefs`. There is no prefs environment variable. Keys are in `SheepShaver/src/prefs_items.cpp`.
 
-Filled-in local prefs (not the `.template`):
+The helper writes a filled-in prefs **outside the repo** (never a ROM or `.toast`). After that, Xcode Run needs no arguments:
+
+```sh
+SheepShaver/src/MacOSX/setup-os921-prefs.sh
+# Xcode: SheepShaver_Xcode8.xcodeproj → scheme SheepShaver → Run
+# or:
+SheepShaver --config "$HOME/Library/Application Support/SheepShaver/os921/prefs"
+```
+
+Default paths (override with `SHEEP_OS921_ROM`, `SHEEP_OS921_CDROM`, `SHEEP_OS921_DISK`):
+
+- `rom`: `$HOME/Downloads/Mac OS ROM`
+- `cdrom`: `$HOME/Downloads/Mac OS 9.2.1.toast`
+- `disk`: `$HOME/Library/Application Support/SheepShaver/os921/macos921-blank.hfv` (2 GiB sparse zeros)
+
+Filled-in local prefs by hand (not the `.template`):
 
 ```sh
 cp SheepShaver/src/MacOSX/prefs.os921.template /ABSOLUTE/PATH/TO/os921/prefs
@@ -66,6 +81,8 @@ cp SheepShaver/src/MacOSX/prefs.os921.template /ABSOLUTE/PATH/TO/os921/prefs
 SheepShaver --config /ABSOLUTE/PATH/TO/os921/prefs
 ```
 
-Xcode scheme `SheepShaver` (`ARCHS=arm64`): Arguments Passed On Launch → `--config /ABSOLUTE/PATH/TO/os921/prefs`. Same as the CLI; no extra env.
+Xcode scheme `SheepShaver` (`ARCHS=arm64`): click Run. No `--config` if the Application Support prefs file exists. Optional: Arguments Passed On Launch → `--config /ABSOLUTE/PATH/TO/os921/prefs`.
+
+Host G0 (optional ROM, never from git): `SheepShaver-MMUTests` decodes `$SHEEP_OS921_ROM` or `$HOME/Downloads/Mac OS ROM` when that file exists.
 
 G0 is done when `DecodeROM` accepts the New World image as above. Old World 9.0.4 with ROM 1.2.1 must still boot on its own prefs.

@@ -219,6 +219,7 @@ struct powerpc_registers
 		SPR_CTR		= 9,
 		SPR_DSISR	= 18,
 		SPR_DAR		= 19,
+		SPR_DEC		= 22,
 		SPR_SDR1	= 25,
 		SPR_SRR0	= 26,
 		SPR_SRR1	= 27,

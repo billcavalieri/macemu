@@ -730,6 +730,11 @@ const powerpc_cpu::instr_info_t powerpc_cpu::powerpc_ii_table[] = {
 	  PPC_I(MFSR),
 	  X_form, 31, 595, CFLOW_NORMAL
 	},
+	{ "mfsrin",
+	  EXECUTE_0(mfsrin),
+	  PPC_I(MFSRIN),
+	  X_form, 31, 659, CFLOW_NORMAL
+	},
 	{ "mfspr",
 	  EXECUTE_1(mfspr, operand_SPR),
 	  PPC_I(MFSPR),
@@ -784,6 +789,11 @@ const powerpc_cpu::instr_info_t powerpc_cpu::powerpc_ii_table[] = {
 	  EXECUTE_0(mtsr),
 	  PPC_I(MTSR),
 	  X_form, 31, 210, CFLOW_NORMAL
+	},
+	{ "mtsrin",
+	  EXECUTE_0(mtsrin),
+	  PPC_I(MTSRIN),
+	  X_form, 31, 242, CFLOW_NORMAL
 	},
 	{ "mtvscr",
 	  EXECUTE_0(mtvscr),
@@ -1084,6 +1094,16 @@ const powerpc_cpu::instr_info_t powerpc_cpu::powerpc_ii_table[] = {
 	  EXECUTE_0(tlbie),
 	  PPC_I(TLBIE),
 	  X_form, 31, 306, CFLOW_NORMAL
+	},
+	{ "tlbia",
+	  EXECUTE_0(tlbia),
+	  PPC_I(TLBIA),
+	  X_form, 31, 370, CFLOW_NORMAL
+	},
+	{ "tlbsync",
+	  EXECUTE_0(tlbsync),
+	  PPC_I(TLBSYNC),
+	  X_form, 31, 566, CFLOW_NORMAL
 	},
 	{ "xor",
 	  EXECUTE_GENERIC_ARITH(xor, RA, RS, RB, NONE, OE_BIT_0, RC_BIT_G),

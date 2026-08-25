@@ -13,8 +13,10 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <vector>
+#include <sys/stat.h>
 
 static int g_pass;
 static int g_fail;
@@ -118,6 +120,105 @@ int main()
 		CHECK(!nw_htab_gate_pass(&gate));
 	}
 
+	/* G0: CHRP parse without a guest ROM in git. */
+	{
+		static const char chrp[] =
+			"<CHRP-BOOT>\n"
+			"h# 000040 constant parcels-offset\n"
+			"h# 000010 constant parcels-size\n";
+		std::vector<uint8_t> buf(0x50, 0);
+		memcpy(&buf[0], chrp, sizeof(chrp) - 1);
+		buf[0x40] = 'p'; buf[0x41] = 'r'; buf[0x42] = 'c'; buf[0x43] = 'l';
+		std::vector<uint8_t> dest((size_t)NW_ROM_SIZE, 0);
+		/* Payload is prcl but has no rom parcel — decode must fail, not crash. */
+		CHECK(!nw_decode_rom_image(&buf[0], buf.size(), &dest[0], dest.size()));
+		CHECK(!nw_g0_unpacked_ok(&dest[0], dest.size()));
+
+		std::vector<uint8_t> plain((size_t)NW_ROM_SIZE, 0);
+		memcpy(&plain[NW_NEWWORLD_SIG_OFFSET], "NewWorld", 8);
+		plain[NW_NK_V2_OFFSET] = 0x48;
+		CHECK(nw_decode_rom_image(&plain[0], plain.size(), &dest[0], dest.size()));
+		CHECK(nw_g0_unpacked_ok(&dest[0], dest.size()));
+	}
+
+	/* G0 file check: local Mac OS ROM, never loaded from git. */
+	{
+		const char *path = getenv("SHEEP_OS921_ROM");
+		char fallback[512];
+		fallback[0] = 0;
+		if (path == NULL || path[0] == 0) {
+			const char *home = getenv("HOME");
+			if (home) {
+				snprintf(fallback, sizeof(fallback),
+					 "%s/Downloads/Mac OS ROM", home);
+				path = fallback;
+			}
+		}
+		struct stat st;
+		if (path && stat(path, &st) == 0 && st.st_size > 0) {
+			std::vector<uint8_t> src((size_t)st.st_size);
+			FILE *f = fopen(path, "rb");
+			CHECK(f != NULL);
+			if (f) {
+				size_t n = fread(&src[0], 1, src.size(), f);
+				fclose(f);
+				CHECK(n == src.size());
+				CHECK(n >= 11 && memcmp(&src[0], "<CHRP-BOOT>", 11) == 0);
+				std::vector<uint8_t> dest((size_t)NW_ROM_SIZE, 0);
+				CHECK(nw_decode_rom_image(&src[0], src.size(),
+							  &dest[0], dest.size()));
+				CHECK(nw_g0_unpacked_ok(&dest[0], dest.size()));
+				CHECK(nw_detect_decoded_rom(&dest[0], dest.size())
+				      == NW_DECODED_NEWWORLD);
+				printf("G0: DecodeROM 4 MiB NewWorld from %s\n", path);
+				printf("G0: unpacked +0x30d064 '%.8s' NK0 %02x%02x%02x%02x\n",
+				       (char *)&dest[NW_NEWWORLD_SIG_OFFSET],
+				       dest[NW_NK_V2_OFFSET], dest[NW_NK_V2_OFFSET+1],
+				       dest[NW_NK_V2_OFFSET+2], dest[NW_NK_V2_OFFSET+3]);
+				/* SheepShaver PatchROM needs these regions empty (0 or 'kckc'). */
+				{
+					const uint32_t spaces[] = {
+						0x2fcf00, 0x2fcf80, 0x2fcfc0, 0x2fd100, 0x2fd118
+					};
+					for (unsigned s = 0; s < 5; s++) {
+						uint32_t base = spaces[s];
+						int empty = 1;
+						for (unsigned i = 0; i < 0x40; i += 4) {
+							uint32_t x = ((uint32_t)dest[base+i] << 24) |
+							             ((uint32_t)dest[base+i+1] << 16) |
+							             ((uint32_t)dest[base+i+2] << 8) |
+							             (uint32_t)dest[base+i+3];
+							if (x != 0 && x != 0x6b636b63u) {
+								empty = 0;
+								break;
+							}
+						}
+						printf("G0: patch-space +0x%06x %s\n",
+						       base, empty ? "free" : "occupied");
+					}
+				}
+				{
+					const uint8_t twi[] = {
+						0x0f, 0xff, 0x00, 0x00, 0x0f, 0xff, 0x00, 0x01,
+						0x0f, 0xff, 0x00, 0x02
+					};
+					int found = 0;
+					for (uint32_t o = 0x36e000; o < 0x36f000; o++) {
+						if (memcmp(&dest[o], twi, sizeof(twi)) == 0) {
+							printf("G0: 68k-emul twi at +0x%06x\n", o);
+							found = 1;
+							break;
+						}
+					}
+					if (!found)
+						printf("G0: 68k-emul twi not in 0x36e000-0x36f000\n");
+				}
+			}
+		} else {
+			printf("G0 file check skipped (no local Mac OS ROM)\n");
+		}
+	}
+
 	/* Debug log needles Grok Build greps (NW-BOOT prefix on SheepShaver Debug). */
 	{
 		CHECK(strcmp(nw_boot_line_g0_newworld(),
@@ -165,6 +266,28 @@ int main()
 			mmu.translate(0x80000010u, PPC32_XLATE_DR, 4);
 		CHECK(bat_first.ok);
 		CHECK(bat_first.pa == 0x00020010u);
+	}
+
+	/* ---- ROM identity PTEs (G2 insn-side HIT seed) ---- */
+	{
+		mmu.reset();
+		mmu.set_physical_memory(&ram[0], ram_size);
+		memset(&ram[0], 0, ram_size);
+		const uint32_t sdr1 = 0x00100000u;
+		const uint32_t rom_base = 0x40800000u;
+		nw_htab_program_rom_ptes(&ram[sdr1 & 0xffff0000u], 0x10000u, sdr1,
+					 rom_base, 0x400000u,
+					 (rom_base >> 8) & 0x00ffffffu);
+		mmu.set_msr(ppc32_mmu::MSR_DR);
+		mmu.set_sdr1(sdr1);
+		mmu.set_sr(4, (rom_base >> 8) & 0x00ffffffu);
+		const ppc32_xlate_result hit =
+			mmu.translate(rom_base + 0x310000u, PPC32_XLATE_DR, 4);
+		CHECK(hit.ok);
+		CHECK(hit.pa == rom_base + 0x310000u);
+		const ppc32_xlate_result miss =
+			mmu.translate(0x12345000u, PPC32_XLATE_DR, 4);
+		CHECK(!miss.ok);
 	}
 
 	/* ---- HTAB primary hash ---- */

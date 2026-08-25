@@ -48,6 +48,7 @@ public:
 		MSR_RI = 0x00000002,
 		MSR_DR = 0x00000010,
 		MSR_IR = 0x00000020,
+		MSR_IP = 0x00000040,
 		MSR_PR = 0x00004000,
 		MSR_EE = 0x00008000,
 		/* Bits cleared on interrupt (EE, PR, FP, FE0, SE, BE, FE1, IR, DR, RI). */
@@ -145,7 +146,7 @@ struct ppc32_hotints_dsi {
 		dar = fault_ea;
 		/* Bit 1 = no translation; bit 6 = store. AlignmentInt reads these. */
 		dsisr = 0x40000000u | (is_store ? 0x02000000u : 0);
-		vector = 0x300;
+		vector = (srr1 & ppc32_mmu::MSR_IP) ? 0xfff00300u : 0x300u;
 		mmu.set_msr(mmu.msr() & ~ppc32_mmu::MSR_EXC_CLEAR);
 	}
 

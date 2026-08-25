@@ -615,7 +615,11 @@ static bool load_mac_rom(void)
 	if (rom_fd < 0) {
 		rom_fd = open(ROM_FILE_NAME2, O_RDONLY);
 		if (rom_fd < 0) {
-			ErrorAlert(GetString(STR_NO_ROM_FILE_ERR));
+			char msg[512];
+			snprintf(msg, sizeof(msg), "%s\n%s",
+				 GetString(STR_NO_ROM_FILE_ERR),
+				 rom_path && *rom_path ? rom_path : "(no 'rom' key in prefs)");
+			ErrorAlert(msg);
 			return false;
 		}
 	}
@@ -725,6 +729,16 @@ static bool init_sdl()
 	setenv("SDL_HAS3BUTTONMOUSE", "1", true);
 #endif
 
+	SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+	SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
+	{
+		FILE *bf = fopen("/tmp/ss-g2-run.log", "a");
+		if (bf) {
+			fprintf(bf, "SDL_Init starting flags=%d\n", sdl_flags);
+			fflush(bf);
+			fclose(bf);
+		}
+	}
 	if (SDL_Init(sdl_flags) == -1) {
 		char str[256];
 		sprintf(str, "Could not initialize SDL: %s.\n", SDL_GetError());
@@ -732,25 +746,18 @@ static bool init_sdl()
 		return false;
 	}
 	atexit(SDL_Quit);
+	{
+		FILE *bf = fopen("/tmp/ss-g2-run.log", "a");
+		if (bf) {
+			fprintf(bf, "SDL_Init done\n");
+			fflush(bf);
+			fclose(bf);
+		}
+	}
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)
-	const int SDL_EVENT_TIMEOUT = 100;
-	for (int i = 0; i < SDL_EVENT_TIMEOUT; i++) {
-		SDL_Event event;
-		SDL_PollEvent(&event);
-#if SDL_VERSION_ATLEAST(3, 0, 0)
-		if (event.type == SDL_EVENT_DROP_FILE) {
-			sdl_vmdir = event.drop.data;
-			break;
-		}
-#else
-		if (event.type == SDL_DROPFILE) {
-			sdl_vmdir = event.drop.file;
-			break;
-		}
-#endif
-		SDL_Delay(1);
-	}
+	/* Drop-file poll omitted: SDL_PollEvent+Delay on first AppKit
+	 * attach can block far longer than 100ms in this environment. */
 #endif
 
 	// Don't let SDL catch SIGINT and SIGTERM signals
@@ -805,6 +812,7 @@ int main(int argc, char **argv)
 	// Print some info
 	printf(GetString(STR_ABOUT_TEXT1), VERSION_MAJOR, VERSION_MINOR);
 	printf(" %s\n", GetString(STR_ABOUT_TEXT2));
+	fflush(stdout);
 
 #if !EMULATED_PPC
 #ifdef SYSTEM_CLOBBERS_R2
@@ -917,7 +925,15 @@ int main(int argc, char **argv)
 	}
 
 	// Read preferences
+	{
+		FILE *bf = fopen("/tmp/ss-g2-run.log", "a");
+		if (bf) { fprintf(bf, "PrefsInit\n"); fflush(bf); fclose(bf); }
+	}
 	PrefsInit(vmdir, argc, argv);
+	{
+		FILE *bf = fopen("/tmp/ss-g2-run.log", "a");
+		if (bf) { fprintf(bf, "PrefsInit done\n"); fflush(bf); fclose(bf); }
+	}
 	// Only use nogui preference if not passed as command line argument
 	if (use_gui == -1)
 		use_gui = !PrefsFindBool("nogui");
@@ -929,8 +945,7 @@ int main(int argc, char **argv)
 	// which can interfere with keyboard shortcuts in the guest OS.
 	//
 	// HACK: disable these shortcuts, while leaving all other pieces of SDL2's
-	// menu bar in-place.
-	disable_SDL2_macosx_menu_bar_keyboard_shortcuts();
+	// menu bar in-place. Skip: [NSApp mainMenu] can block without a window.
 #endif
 #endif
 	

@@ -256,9 +256,14 @@ private:
 	uint32 dar_;
 	uint32 dsisr_;
 	uint32 sprg_[4];
+	uint32 dec_;
+	bool dec_pending_;
 
 	void take_data_dsi(uint32 ea, bool is_store);
 	void take_isi();
+	void take_sc();
+	void take_dec();
+	uint32 hotints_vector(uint32 vec) const;
 	bool mfspr_oea(uint32 spr, uint32 *value) const;
 	bool mtspr_oea(uint32 spr, uint32 value);
 
@@ -455,8 +460,12 @@ private:
 	void execute_mtmsr(uint32 opcode);
 	void execute_mfsr(uint32 opcode);
 	void execute_mtsr(uint32 opcode);
+	void execute_mfsrin(uint32 opcode);
+	void execute_mtsrin(uint32 opcode);
 	void execute_rfi(uint32 opcode);
 	void execute_tlbie(uint32 opcode);
+	void execute_tlbia(uint32 opcode);
+	void execute_tlbsync(uint32 opcode);
 	template< class SPR >
 	void execute_mfspr(uint32 opcode);
 	template< class TBR >

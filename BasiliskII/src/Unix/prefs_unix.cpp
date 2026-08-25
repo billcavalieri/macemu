@@ -21,6 +21,7 @@
 #include "sysdeps.h"
 #include <sys/stat.h>
 #include <errno.h>
+#include <stdio.h>
 #include <string>
 using std::string;
 
@@ -287,8 +288,8 @@ void LoadPrefs(const char *vmdir)
 	}
 
 	// Construct prefs path
+	char *home = getenv("HOME");
 	if (UserPrefsPath.empty()) {
-		char *home = getenv("HOME");
 		if (home)
 			prefs_path = string(home) + '/';
 		prefs_path += PREFS_FILE_NAME;
@@ -297,6 +298,43 @@ void LoadPrefs(const char *vmdir)
 
 	// Read preferences from settings file
 	FILE *f = fopen(prefs_path.c_str(), "r");
+#ifdef SHEEPSHAVER
+	/*
+	 * Xcode Run writes ~/.sheepshaver_prefs with defaults (no rom) on the
+	 * first launch. That file must not hide the WP0 prefs from
+	 * setup-os921-prefs.sh.
+	 */
+	string os921;
+	if (home)
+		os921 = string(home) +
+			"/Library/Application Support/SheepShaver/os921/prefs";
+	if (UserPrefsPath.empty() && !os921.empty()) {
+		if (f != NULL) {
+			LoadPrefsFromStream(f);
+			fclose(f);
+			f = NULL;
+			const char *rom = PrefsFindString("rom");
+			FILE *rf = (rom && *rom) ? fopen(rom, "rb") : NULL;
+			if (rf) {
+				fclose(rf);
+				printf("Using prefs %s\n", prefs_path.c_str());
+				return;
+			}
+		}
+		FILE *g = fopen(os921.c_str(), "r");
+		if (g != NULL) {
+			prefs_path = os921;
+			LoadPrefsFromStream(g);
+			fclose(g);
+			printf("Using prefs %s\n", prefs_path.c_str());
+			return;
+		}
+		if (PrefsFindString("rom")) {
+			printf("Using prefs %s\n", prefs_path.c_str());
+			return;
+		}
+	}
+#endif
 	if (f != NULL) {
 
 		// Prefs file found, load settings

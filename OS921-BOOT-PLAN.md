@@ -141,6 +141,14 @@ If a gate fails, fix that gate.
 
 G0–G2 are locked. Do not invent extra probes — in particular **do not require `mfsdr1`**. G3 is **not done**. The G3 accept below is locked so a window without the G2 log is not counted as G3.
 
+**Live (Debug hang-cap, `arm64-jit`).** Every successful Debug run of the 9.2.1 install-set Mac OS ROM tbxi prints G0–G2:
+
+- G0 `DecodeROM 4 MiB NewWorld +0x30d064 NK +0x310000`
+- G1 tree root `compatible MacRISC2` Gestalt 406; `mtsdr1`; HardwareInit handoff NK `+0x310000`
+- G2 first DSI `SRR0=PC` DR on HIT, no second DSI (`HotInts` `DataStorageInt` at ROM `+0x3132a0`)
+
+PPC32 software TLB + BATs (identity RAM/ROM) + ROM HTAB PTEs. G3 (installer window + that G2 line) is not done. Never commit ROM or disk images.
+
 **G0 (WP0 / Swiftly).** `DecodeROM` in `SheepShaver/src/rom_patches.cpp` already takes the tbxi path (`lzss-offset` **or** `parcels-offset` / `parcels-size` with a `prcl` signature). After decode there is 4 MiB at `ROMBase`. Check NewWorld at `ROMBase+0x30d064` and nanokernel v2 at `ROMBase+0x310000`. Both ROM 1.6 (lzss, tome-extract) and the 9.2.1 install-set Mac OS ROM (parcels → prcl) must pass. iMac Update 1.1 / ROM 1.2.1 stays 9.0.4 regression only.
 
 **G1 (WP1).** Device tree root `compatible` is `MacRISC2`. Gestalt machine ID is always 406; the real machine identity is root `model`/`compatible`. Need `/memory` (reg banks), `/cpus`, `/chosen`. NK v2 ~`ROMBase+0x310000`. KDP Hnfo from `HardwareInit` skips the CPU probe / `mfsdr1`. Treat **either** `mtsdr1` in the SPR log **or** a valid HTAB already in the Hnfo block as the HTAB half of the gate. Plus `BATRangeInit` at KDP+0x2cc (32 longs). `saveKernelDataPtr` immediately after `saveReturnAddr`. Host harness: `SheepShaver-MMUTests` (`mmu_harness.cpp` + `nw_boot_contract.cpp`).

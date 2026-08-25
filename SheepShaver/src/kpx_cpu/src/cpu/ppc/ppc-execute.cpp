@@ -40,6 +40,7 @@
 #ifdef SHEEPSHAVER
 #include "main.h"
 #include "prefs.h"
+#include "nw_boot_contract.h"
 #endif
 
 #if ENABLE_MON
@@ -59,6 +60,14 @@ void powerpc_cpu::execute_illegal(uint32 opcode)
 	fprintf(stderr, "Illegal instruction at %08x, opcode = %08x\n", pc(), opcode);
 
 #ifdef SHEEPSHAVER
+#if NW_BOOT_LOG
+	static int n_ill;
+	if (n_ill < 8) {
+		n_ill++;
+		printf("NW-BOOT illegal pc=%08x op=%08x\n", pc(), opcode);
+		fflush(stdout);
+	}
+#endif
 	if (PrefsFindBool("ignoreillegal")) {
 		increment_pc(4);
 		return;
@@ -1011,11 +1020,14 @@ void powerpc_cpu::execute_fp_round(uint32 opcode)
 
 void powerpc_cpu::execute_syscall(uint32 opcode)
 {
+	(void)opcode;
 #ifdef SHEEPSHAVER
-	execute_illegal(opcode);
-#else
-	cr().set_so(0, execute_do_syscall && !execute_do_syscall(this));
+	if (ppc32_guest_mmu_enabled()) {
+		take_sc();
+		return;
+	}
 #endif
+	cr().set_so(0, execute_do_syscall && !execute_do_syscall(this));
 	increment_pc(4);
 }
 
@@ -1181,8 +1193,13 @@ void powerpc_cpu::execute_mfmsr(uint32 opcode)
 
 void powerpc_cpu::execute_mtmsr(uint32 opcode)
 {
-	if (ppc32_guest_mmu_enabled())
-		ppc32_guest_mmu().set_msr(operand_RS::get(this, opcode));
+	if (ppc32_guest_mmu_enabled()) {
+		const uint32 msr = operand_RS::get(this, opcode);
+		ppc32_guest_mmu().set_msr(msr);
+#ifdef SHEEPSHAVER
+		nw_log_msr_dr(msr);
+#endif
+	}
 	increment_pc(4);
 }
 
@@ -1203,11 +1220,35 @@ void powerpc_cpu::execute_mtsr(uint32 opcode)
 	increment_pc(4);
 }
 
+void powerpc_cpu::execute_mfsrin(uint32 opcode)
+{
+	uint32 d = 0;
+	if (ppc32_guest_mmu_enabled()) {
+		const uint32 ea = operand_RB::get(this, opcode);
+		d = ppc32_guest_mmu().sr((ea >> 28) & 0xfu);
+	}
+	operand_RD::set(this, opcode, d);
+	increment_pc(4);
+}
+
+void powerpc_cpu::execute_mtsrin(uint32 opcode)
+{
+	if (ppc32_guest_mmu_enabled()) {
+		const uint32 ea = operand_RB::get(this, opcode);
+		ppc32_guest_mmu().set_sr((ea >> 28) & 0xfu,
+					 operand_RS::get(this, opcode));
+	}
+	increment_pc(4);
+}
+
 void powerpc_cpu::execute_rfi(uint32 opcode)
 {
 	(void)opcode;
 	if (ppc32_guest_mmu_enabled()) {
 		ppc32_guest_mmu().set_msr(srr1_);
+#ifdef SHEEPSHAVER
+		nw_log_msr_dr(srr1_);
+#endif
 		pc() = srr0_;
 		return;
 	}
@@ -1220,6 +1261,22 @@ void powerpc_cpu::execute_tlbie(uint32 opcode)
 		ppc32_guest_mmu().tlbie(operand_RB::get(this, opcode));
 		invalidate_cache();
 	}
+	increment_pc(4);
+}
+
+void powerpc_cpu::execute_tlbia(uint32 opcode)
+{
+	(void)opcode;
+	if (ppc32_guest_mmu_enabled()) {
+		ppc32_guest_mmu().tlbia();
+		invalidate_cache();
+	}
+	increment_pc(4);
+}
+
+void powerpc_cpu::execute_tlbsync(uint32 opcode)
+{
+	(void)opcode;
 	increment_pc(4);
 }
 

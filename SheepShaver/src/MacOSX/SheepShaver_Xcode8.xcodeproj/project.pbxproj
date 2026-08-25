@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 45;
+	objectVersion = 54;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -82,6 +82,12 @@
 		5D55CB40225584D000FF8E81 /* cdrom.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 5D55CB3F225584D000FF8E81 /* cdrom.cpp */; };
 		5DE93B46247C71F200B2C821 /* adb.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 5D3967BF2328D315003925D6 /* adb.cpp */; };
 		5DF4CB7F22B5BD5D00512A86 /* audio.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 5DF4CB7E22B5BD5D00512A86 /* audio.cpp */; };
+		A10F9210BC10000000000005 /* ppc-mmu.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000002 /* ppc-mmu.cpp */; };
+		A10F9210BC10000000000006 /* ppc-mmu.hpp in Headers */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000001 /* ppc-mmu.hpp */; };
+		A10F9210BC10000000000007 /* ppc-mmu.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000002 /* ppc-mmu.cpp */; };
+		A10F9210BC10000000000008 /* mmu_harness.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000003 /* mmu_harness.cpp */; };
+		A10F9210BC10000000000012 /* nw_boot_contract.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000011 /* nw_boot_contract.cpp */; };
+		A10F9210BC10000000000013 /* nw_boot_contract.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000011 /* nw_boot_contract.cpp */; };
 		A7B1921418C35D4700791D8D /* DiskType.m in Sources */ = {isa = PBXBuildFile; fileRef = A7B1921318C35D4700791D8D /* DiskType.m */; };
 		E413A40320CF7E6D00FBE967 /* video_sdl2.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */; };
 		E4150D1220D557820077C51A /* SDL2.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = E4150D1120D557820077C51A /* SDL2.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -116,12 +122,6 @@
 		E4C9A03E1FD55CDC00CABBF9 /* basic-dyngen-ops-x86_64_macos.hpp in Headers */ = {isa = PBXBuildFile; fileRef = E4C9A03D1FD55CDC00CABBF9 /* basic-dyngen-ops-x86_64_macos.hpp */; };
 		E4C9A0401FD55CE700CABBF9 /* ppc-dyngen-ops-x86_64_macos.hpp in Headers */ = {isa = PBXBuildFile; fileRef = E4C9A03F1FD55CE700CABBF9 /* ppc-dyngen-ops-x86_64_macos.hpp */; };
 		E4CBF46120CFC451009F40CC /* video_sdl.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E4CBF46020CFC451009F40CC /* video_sdl.cpp */; };
-		A10F9210BC10000000000005 /* ppc-mmu.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000002 /* ppc-mmu.cpp */; };
-		A10F9210BC10000000000006 /* ppc-mmu.hpp in Headers */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000001 /* ppc-mmu.hpp */; };
-		A10F9210BC10000000000007 /* ppc-mmu.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000002 /* ppc-mmu.cpp */; };
-		A10F9210BC10000000000008 /* mmu_harness.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000003 /* mmu_harness.cpp */; };
-		A10F9210BC10000000000012 /* nw_boot_contract.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000011 /* nw_boot_contract.cpp */; };
-		A10F9210BC10000000000013 /* nw_boot_contract.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000011 /* nw_boot_contract.cpp */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -344,17 +344,23 @@
 		5DDE950D2255C8B3004D0E79 /* audio_defs_macosx.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = audio_defs_macosx.h; path = ../../../BasiliskII/src/MacOSX/audio_defs_macosx.h; sourceTree = "<group>"; };
 		5DDE950E2255C8B3004D0E79 /* audio_macosx.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = audio_macosx.cpp; path = ../../../BasiliskII/src/MacOSX/audio_macosx.cpp; sourceTree = "<group>"; };
 		5DF4CB7E22B5BD5D00512A86 /* audio.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = audio.cpp; path = ../../../BasiliskII/src/audio.cpp; sourceTree = "<group>"; };
+		A10F9210BC10000000000001 /* ppc-mmu.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; path = "ppc-mmu.hpp"; sourceTree = "<group>"; };
+		A10F9210BC10000000000002 /* ppc-mmu.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = "ppc-mmu.cpp"; sourceTree = "<group>"; };
+		A10F9210BC10000000000003 /* mmu_harness.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = mmu_harness.cpp; sourceTree = "<group>"; };
+		A10F9210BC10000000000004 /* SheepShaver-MMUTests */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "SheepShaver-MMUTests"; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10F9210BC10000000000010 /* nw_boot_contract.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_boot_contract.h; sourceTree = "<group>"; };
+		A10F9210BC10000000000011 /* nw_boot_contract.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_boot_contract.cpp; path = ../nw_boot_contract.cpp; sourceTree = SOURCE_ROOT; };
 		A7B1921218C35D4700791D8D /* DiskType.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DiskType.h; sourceTree = "<group>"; };
 		A7B1921318C35D4700791D8D /* DiskType.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = DiskType.m; sourceTree = "<group>"; };
 		E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = video_sdl2.cpp; path = ../../../BasiliskII/src/SDL/video_sdl2.cpp; sourceTree = "<group>"; };
-		E4150D1120D557820077C51A /* SDL2.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SDL2.framework; path = /Library/Frameworks/SDL2.framework; sourceTree = "<group>"; };
+		E4150D1120D557820077C51A /* SDL2.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SDL2.framework; sourceTree = "<group>"; };
 		E41936C220CFE64D003A7654 /* SDLMain.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = SDLMain.h; path = ../../../BasiliskII/src/SDL/SDLMain.h; sourceTree = "<group>"; };
 		E41936C320CFE64D003A7654 /* SDLMain.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = SDLMain.m; path = ../../../BasiliskII/src/SDL/SDLMain.m; sourceTree = "<group>"; };
 		E4202600241250E2000508DF /* etherhelpertool.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = etherhelpertool.c; sourceTree = "<group>"; };
 		E4202602241250EE000508DF /* runtool.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = runtool.c; sourceTree = "<group>"; };
 		E420260424125182000508DF /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		E420260A2412540D000508DF /* etherhelpertool */ = {isa = PBXFileReference; lastKnownFileType = text; path = etherhelpertool; sourceTree = BUILT_PRODUCTS_DIR; };
-		E420910020D0C4FA0094654F /* SDL2.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SDL2.framework; path = /Library/Frameworks/SDL2.framework; sourceTree = "<group>"; };
+		E420910020D0C4FA0094654F /* SDL2.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SDL2.framework; sourceTree = "<group>"; };
 		E4302EE21FBFE7FA00A5B500 /* lowmem.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = lowmem.c; path = Darwin/lowmem.c; sourceTree = "<group>"; };
 		E444DC1420C8F06700DD29C9 /* pict.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = pict.c; path = ../pict.c; sourceTree = "<group>"; };
 		E447066F25D904D500EA2C14 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
@@ -404,12 +410,6 @@
 		E4C9A03D1FD55CDC00CABBF9 /* basic-dyngen-ops-x86_64_macos.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; name = "basic-dyngen-ops-x86_64_macos.hpp"; path = "dyngen_precompiled/basic-dyngen-ops-x86_64_macos.hpp"; sourceTree = "<group>"; };
 		E4C9A03F1FD55CE700CABBF9 /* ppc-dyngen-ops-x86_64_macos.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; name = "ppc-dyngen-ops-x86_64_macos.hpp"; path = "dyngen_precompiled/ppc-dyngen-ops-x86_64_macos.hpp"; sourceTree = "<group>"; };
 		E4CBF46020CFC451009F40CC /* video_sdl.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = video_sdl.cpp; path = ../../../BasiliskII/src/SDL/video_sdl.cpp; sourceTree = "<group>"; };
-		A10F9210BC10000000000001 /* ppc-mmu.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; path = "ppc-mmu.hpp"; sourceTree = "<group>"; };
-		A10F9210BC10000000000002 /* ppc-mmu.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = "ppc-mmu.cpp"; sourceTree = "<group>"; };
-		A10F9210BC10000000000003 /* mmu_harness.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = mmu_harness.cpp; sourceTree = "<group>"; };
-		A10F9210BC10000000000004 /* SheepShaver-MMUTests */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "SheepShaver-MMUTests"; sourceTree = BUILT_PRODUCTS_DIR; };
-		A10F9210BC10000000000010 /* nw_boot_contract.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_boot_contract.h; sourceTree = "<group>"; };
-		A10F9210BC10000000000011 /* nw_boot_contract.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_boot_contract.cpp; path = ../nw_boot_contract.cpp; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -734,14 +734,6 @@
 			path = ppc;
 			sourceTree = "<group>";
 		};
-		A10F9210BC1000000000000F /* tests */ = {
-			isa = PBXGroup;
-			children = (
-				A10F9210BC10000000000003 /* mmu_harness.cpp */,
-			);
-			path = tests;
-			sourceTree = "<group>";
-		};
 		0856CDF314A99EEF000B1711 /* mathlib */ = {
 			isa = PBXGroup;
 			children = (
@@ -939,6 +931,14 @@
 				0856D21414A9A6C6000B1711 /* IOKit.framework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		A10F9210BC1000000000000F /* tests */ = {
+			isa = PBXGroup;
+			children = (
+				A10F9210BC10000000000003 /* mmu_harness.cpp */,
+			);
+			path = tests;
 			sourceTree = "<group>";
 		};
 		E420260924125403000508DF /* Generated */ = {
@@ -1251,7 +1251,11 @@
 				CLANG_ENABLE_MODULE_DEBUGGING = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				FRAMEWORK_SEARCH_PATHS = /Library/Frameworks;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(SRCROOT)",
+					"$(HOME)/Library/Frameworks",
+					/Library/Frameworks,
+				);
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_ENABLE_FIX_AND_CONTINUE = YES;
 				GCC_OPTIMIZATION_LEVEL = 3;
@@ -1264,7 +1268,7 @@
 					"NW_BOOT_LOG=1",
 				);
 				HEADER_SEARCH_PATHS = (
-					/Library/Frameworks/SDL2.framework/Headers,
+					SDL2.framework/Headers,
 					./config/,
 					../Unix,
 					../MacOSX/Launcher,
@@ -1291,7 +1295,11 @@
 				CLANG_ENABLE_MODULE_DEBUGGING = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				FRAMEWORK_SEARCH_PATHS = /Library/Frameworks;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(SRCROOT)",
+					"$(HOME)/Library/Frameworks",
+					/Library/Frameworks,
+				);
 				GCC_DYNAMIC_NO_PIC = YES;
 				GCC_ENABLE_FIX_AND_CONTINUE = NO;
 				GCC_OPTIMIZATION_LEVEL = 3;
@@ -1303,7 +1311,7 @@
 					_REENTRANT,
 				);
 				HEADER_SEARCH_PATHS = (
-					/Library/Frameworks/SDL2.framework/Headers,
+					SDL2.framework/Headers,
 					./config/,
 					../Unix,
 					../MacOSX/Launcher,
@@ -1354,8 +1362,15 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CLANG_CXX_LIBRARY = "libc++";
 				CODE_SIGN_ENTITLEMENTS = SheepShaver.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				FRAMEWORK_SEARCH_PATHS = /Library/Frameworks;
+				DEVELOPMENT_TEAM = 3A6QJLRYR4;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(SRCROOT)",
+					"$(HOME)/Library/Frameworks",
+					/Library/Frameworks,
+				);
 				GCC_CW_ASM_SYNTAX = NO;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_ENABLE_FIX_AND_CONTINUE = NO;
@@ -1380,7 +1395,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				HEADER_SEARCH_PATHS = (
-					/Library/Frameworks/SDL2.framework/Headers,
+					SDL2.framework/Headers,
 					./config/,
 					../Unix,
 					../MacOSX/Launcher,
@@ -1409,8 +1424,9 @@
 					0x3000,
 				);
 				PRECOMPS_INCLUDE_HEADERS_FROM_BUILT_PRODUCTS_DIR = NO;
-				PRODUCT_BUNDLE_IDENTIFIER = net.cebix.sheepshaver;
+				PRODUCT_BUNDLE_IDENTIFIER = com.billcavalieri.sheepshaver;
 				PRODUCT_NAME = SheepShaver;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				VALID_ARCHS = "x86_64 arm64";
 				WARNING_LDFLAGS = "";
 			};
@@ -1425,9 +1441,16 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CLANG_CXX_LIBRARY = "libc++";
 				CODE_SIGN_ENTITLEMENTS = SheepShaver.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = NO;
-				FRAMEWORK_SEARCH_PATHS = /Library/Frameworks;
+				DEVELOPMENT_TEAM = 3A6QJLRYR4;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(SRCROOT)",
+					"$(HOME)/Library/Frameworks",
+					/Library/Frameworks,
+				);
 				GCC_CW_ASM_SYNTAX = NO;
 				GCC_DYNAMIC_NO_PIC = YES;
 				GCC_ENABLE_FIX_AND_CONTINUE = NO;
@@ -1451,7 +1474,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				HEADER_SEARCH_PATHS = (
-					/Library/Frameworks/SDL2.framework/Headers,
+					SDL2.framework/Headers,
 					./config/,
 					../Unix,
 					../MacOSX/Launcher,
@@ -1481,8 +1504,9 @@
 					0x3000,
 				);
 				PRECOMPS_INCLUDE_HEADERS_FROM_BUILT_PRODUCTS_DIR = NO;
-				PRODUCT_BUNDLE_IDENTIFIER = net.cebix.sheepshaver;
+				PRODUCT_BUNDLE_IDENTIFIER = com.billcavalieri.sheepshaver;
 				PRODUCT_NAME = SheepShaver;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				VALID_ARCHS = "x86_64 arm64";
 			};
 			name = Release;

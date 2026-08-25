@@ -19,6 +19,7 @@
  */
 
 #include "cpu/ppc/ppc-mmu.hpp"
+#include <stdio.h>
 
 ppc32_mmu::ppc32_mmu()
 {
@@ -66,6 +67,7 @@ void ppc32_mmu::set_msr(uint32_t value)
 void ppc32_mmu::set_sdr1(uint32_t value)
 {
 	sdr1_ = value;
+	tlbia();
 }
 
 void ppc32_mmu::set_sr(unsigned i, uint32_t value)
@@ -252,25 +254,35 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 
 	const bool insn = (space == PPC32_XLATE_IR);
 	uint32_t pa;
+	const char *how = "miss";
 
 	if (tlb_lookup(ea, insn, &pa)) {
+		how = "tlb";
 		r.ok = true;
 		r.pa = pa;
-		return r;
-	}
-
-	if (bat_hit(ea, insn, &pa)) {
+	} else if (bat_hit(ea, insn, &pa)) {
+		how = "bat";
 		tlb_insert(ea, pa, insn);
 		r.ok = true;
 		r.pa = pa;
-		return r;
-	}
-
-	if (htab_hit(ea, &pa)) {
+	} else if (htab_hit(ea, &pa)) {
+		how = "htab";
 		tlb_insert(ea, pa, insn);
 		r.ok = true;
 		r.pa = pa;
-		return r;
+	}
+
+	if (space == PPC32_XLATE_DR && !r.ok) {
+		static unsigned n;
+		if (n < 4) {
+			n++;
+			fprintf(stderr,
+				"NW-BOOT G2: xlatehow=%s ea=%08x msr=%08x sdr1=%08x sr=%08x dbat3=%08x/%08x\n",
+				how, (unsigned)ea, (unsigned)msr_, (unsigned)sdr1_,
+				(unsigned)sr_[(ea >> 28) & 0xfu],
+				(unsigned)dbatu_[3], (unsigned)dbatl_[3]);
+			fflush(stderr);
+		}
 	}
 
 	return r;

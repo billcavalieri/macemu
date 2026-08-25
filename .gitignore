@@ -41,6 +41,8 @@ project.xcworkspace/
 #
 # SheepShaver guest media and local prefs (WP0). Never commit ROMs or images.
 # Keep SheepShaver/src/MacOSX/prefs.os921.template; ignore a filled-in "prefs".
+# Local G0 files live under $HOME/Library/Application Support/SheepShaver/os921/
+# (setup-os921-prefs.sh). Do not copy a ROM or .toast into this tree.
 #
 Mac OS ROM
 *.smi
@@ -55,3 +57,5 @@ Mac OS ROM
 *.hfs
 prefs
 .sheepshaver_prefs
+os921-local/
+SheepShaver/src/MacOSX/SDL2.framework

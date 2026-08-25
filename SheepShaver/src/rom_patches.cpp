@@ -47,6 +47,7 @@
 #include "debug.h"
 
 typedef char nw_romtype_must_match[(ROMTYPE_NEWWORLD == 5) ? 1 : -1];
+typedef char nw_romsize_must_match[(ROM_SIZE == NW_ROM_SIZE) ? 1 : -1];
 
 
 // 68k breakpoint address
@@ -79,135 +80,24 @@ static bool patch_nanokernel(void);
 static bool patch_68k(void);
 
 
-// Decode LZSS data
-static void decode_lzss(const uint8 *src, uint8 *dest, int size)
-{
-	char dict[0x1000];
-	int run_mask = 0, dict_idx = 0xfee;
-	for (;;) {
-		if (run_mask < 0x100) {
-			// Start new run
-			if (--size < 0)
-				break;
-			run_mask = *src++ | 0xff00;
-		}
-		bool bit = run_mask & 1;
-		run_mask >>= 1;
-		if (bit) {
-			// Verbatim copy
-			if (--size < 0)
-				break;
-			int c = *src++;
-			dict[dict_idx++] = c;
-			*dest++ = c;
-			dict_idx &= 0xfff;
-		} else {
-			// Copy from dictionary
-			if (--size < 0)
-				break;
-			int idx = *src++;
-			if (--size < 0)
-				break;
-			int cnt = *src++;
-			idx |= (cnt << 4) & 0xf00;
-			cnt = (cnt & 0x0f) + 3;
-			while (cnt--) {
-				char c = dict[idx++];
-				dict[dict_idx++] = c;
-				*dest++ = c;
-				idx &= 0xfff;
-				dict_idx &= 0xfff;
-			}
-		}
-	}
-}
-
-// Decode parcels of ROM image (MacOS 9.X and even earlier)
-void decode_parcels(const uint8 *src, uint8 *dest, int size)
-{
-	uint32 parcel_offset = 0x14;
-	D(bug("Offset   Type Name\n"));
-	while (parcel_offset != 0) {
-		const uint32 *parcel_data = (uint32 *)(src + parcel_offset);
-		uint32 next_offset = ntohl(parcel_data[0]);
-		uint32 parcel_type = ntohl(parcel_data[1]);
-		D(bug("%08x %c%c%c%c %s\n", parcel_offset,
-			  (parcel_type >> 24) & 0xff, (parcel_type >> 16) & 0xff,
-			  (parcel_type >> 8) & 0xff, parcel_type & 0xff, &parcel_data[6]));
-		if (parcel_type == FOURCC('r','o','m',' ')) {
-			uint32 lzss_offset  = ntohl(parcel_data[2]);
-			uint32 lzss_size = ((uintptr)src + next_offset) - ((uintptr)parcel_data + lzss_offset);
-			decode_lzss((uint8 *)parcel_data + lzss_offset, dest, lzss_size);
-		}
-		parcel_offset = next_offset;
-	}
-}
-
-
 /*
- *  Decode ROM image, 4 MB plain images or NewWorld images
+ *  Decode ROM image, 4 MB plain images or NewWorld CHRP (lzss or parcels/prcl)
  */
 
 bool DecodeROM(uint8 *data, uint32 size)
 {
-	if (size == ROM_SIZE) {
-		// Plain ROM image
-		memcpy(ROMBaseHost, data, ROM_SIZE);
-		nw_log_g0_decode(ROMBaseHost, ROM_SIZE);
-		return true;
-	}
-	else if (strncmp((char *)data, "<CHRP-BOOT>", 11) == 0) {
-		// CHRP compressed ROM image
-		uint32 image_offset, image_size;
-		bool decode_info_ok = false;
-		
-		char *s = strstr((char *)data, "constant lzss-offset");
-		if (s != NULL) {
-			// Probably a plain LZSS compressed ROM image
-			if (sscanf(s - 7, "%06x", &image_offset) == 1) {
-				s = strstr((char *)data, "constant lzss-size");
-				if (s != NULL && (sscanf(s - 7, "%06x", &image_size) == 1))
-					decode_info_ok = true;
-			}
-		}
-		else {
-			// Probably a MacOS 9.2.x ROM image
-			s = strstr((char *)data, "constant parcels-offset");
-			if (s != NULL) {
-				if (sscanf(s - 7, "%06x", &image_offset) == 1) {
-					s = strstr((char *)data, "constant parcels-size");
-					if (s != NULL && (sscanf(s - 7, "%06x", &image_size) == 1))
-						decode_info_ok = true;
-				}
-			}
-		}
-		
-		// No valid information to decode the ROM found?
-		if (!decode_info_ok)
-			return false;
-		
-		// Check signature, this could be a parcels-based ROM image
-		uint32 rom_signature = ntohl(*(uint32 *)(data + image_offset));
-		if (rom_signature == FOURCC('p','r','c','l')) {
-			D(bug("Offset of parcels data: %08x\n", image_offset));
-			D(bug("Size of parcels data: %08x\n", image_size));
-			decode_parcels(data + image_offset, ROMBaseHost, image_size);
-		}
-		else {
-			D(bug("Offset of compressed data: %08x\n", image_offset));
-			D(bug("Size of compressed data: %08x\n", image_size));
-			decode_lzss(data + image_offset, ROMBaseHost, image_size);
-		}
-		nw_log_g0_decode(ROMBaseHost, ROM_SIZE);
-		return true;
-	}
-	return false;
+	if (!nw_decode_rom_image(data, size, ROMBaseHost, ROM_SIZE))
+		return false;
+	nw_log_g0_decode(ROMBaseHost, ROM_SIZE);
+	return true;
 }
 
 
 /*
  *  Search ROM for byte string, return ROM offset (or 0)
  */
+
+static int g_log_rom_find;
 
 static uint32 find_rom_data(uint32 start, uint32 end, const uint8 *data, uint32 data_len)
 {
@@ -217,7 +107,20 @@ static uint32 find_rom_data(uint32 start, uint32 end, const uint8 *data, uint32 
 			return ofs;
 		ofs++;
 	}
+	if (g_log_rom_find)
+		printf("PatchROM: find_rom_data miss %08x-%08x len %u\n",
+		       start, end, data_len);
 	return 0;
+}
+
+/* 1 = found, 0 = New World miss (skip patch), -1 = Old World miss (fatal). */
+static int rom_patch_site(uint32 *base, uint32 start, uint32 end,
+			  const uint8 *data, uint32 len)
+{
+	*base = find_rom_data(start, end, data, len);
+	if (*base)
+		return 1;
+	return (ROMType == ROMTYPE_NEWWORLD) ? 0 : -1;
 }
 
 
@@ -702,22 +605,47 @@ bool PatchROM(void)
 	nw_log_g1_patch_skip(ROMType == ROMTYPE_NEWWORLD);
 	
 	// Check that other ROM addresses point to really free regions
-	if (!check_rom_patch_space(CHECK_LOAD_PATCH_SPACE, 0x40))
+	if (!check_rom_patch_space(CHECK_LOAD_PATCH_SPACE, 0x40)) {
+		printf("PatchROM: no space CHECK_LOAD\n");
 		return false;
-	if (!check_rom_patch_space(ZERO_SCRAP_PATCH_SPACE, 0x40))
+	}
+	if (!check_rom_patch_space(ZERO_SCRAP_PATCH_SPACE, 0x40)) {
+		printf("PatchROM: no space ZERO_SCRAP\n");
 		return false;
-	if (!check_rom_patch_space(PUT_SCRAP_PATCH_SPACE, 0x40))
+	}
+	if (!check_rom_patch_space(PUT_SCRAP_PATCH_SPACE, 0x40)) {
+		printf("PatchROM: no space PUT_SCRAP\n");
 		return false;
-	if (!check_rom_patch_space(GET_SCRAP_PATCH_SPACE, 0x40))
+	}
+	if (!check_rom_patch_space(GET_SCRAP_PATCH_SPACE, 0x40)) {
+		printf("PatchROM: no space GET_SCRAP\n");
 		return false;
-	if (!check_rom_patch_space(ADDR_MAP_PATCH_SPACE - 10 * 4, 0x100))
+	}
+	if (!check_rom_patch_space(ADDR_MAP_PATCH_SPACE - 10 * 4, 0x100)) {
+		printf("PatchROM: no space ADDR_MAP\n");
 		return false;
+	}
 
 	// Apply patches
-	if (!patch_nanokernel_boot()) return false;
-	if (!patch_68k_emul()) return false;
-	if (!patch_nanokernel()) return false;
-	if (!patch_68k()) return false;
+	if (!patch_nanokernel_boot()) {
+		printf("PatchROM: patch_nanokernel_boot failed\n");
+		return false;
+	}
+	if (!patch_68k_emul()) {
+		printf("PatchROM: patch_68k_emul failed\n");
+		return false;
+	}
+	if (!patch_nanokernel()) {
+		printf("PatchROM: patch_nanokernel failed\n");
+		return false;
+	}
+	if (!patch_68k()) {
+		if (ROMType != ROMTYPE_NEWWORLD) {
+			printf("PatchROM: patch_68k failed\n");
+			return false;
+		}
+		printf("PatchROM: patch_68k incomplete (New World, continuing)\n");
+	}
 
 #ifdef M68K_BREAK_POINT
 	// Install 68k breakpoint
@@ -754,12 +682,46 @@ static bool patch_nanokernel_boot(void)
 	lp[0xa4 >> 2] = htonl(KernelDataAddr + 0x1000);	// LA_EmulatorData
 	lp[0xa8 >> 2] = htonl(ROMBase + 0x480000);		// LA_DispatchTable
 	lp[0xac >> 2] = htonl(ROMBase + 0x460000);		// LA_EmulatorCode
-	lp[0x360 >> 2] = htonl(0);						// Physical RAM base (? on NewWorld ROM, this contains -1)
+	lp[0x360 >> 2] = htonl(RAMBase);				// Physical RAM base
 	lp[0xfd8 >> 2] = htonl(ROMBase + 0x2a);		// 68k reset vector
 
-	// New World NK v2 programs SR/BAT/SDR itself. Hnfo skips CPU probe / mfsdr1.
-	if (ROMType == ROMTYPE_NEWWORLD)
+	/*
+	 * New World: leave NK entry intact. 0x310000 is `b 0x31000c`; mfmsr
+	 * then tests MSR[DR]. DR off (our reset MSR) takes 0x3104a8, which
+	 * programs SRs/BATs and mtsdr1. Do not trampoline to 0x310044 (that
+	 * is the post-OF continuation) and do not apply the Old World
+	 * skip-SR/BAT/SDR rewrite of 0x310000.
+	 * PMDT convert panics into NK debug dump on an out-of-order
+	 * area compare (0x31e878 blt → 0x31e5e0 → dump). Continue
+	 * with the next PMDT instead.
+	 */
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		lp = (uint32 *)(ROMBaseHost + 0x31e5e0);
+		if (ntohl(*lp) == 0x48007e40)
+			*lp = htonl(0x48000094); /* b 0x31e674 */
+		/* NK debug print (lock + putchar) stalls boot. Callers expect blr.
+		 * 0x325520 string, 0x325850 hex, 0x32572c / 0x325874 variants. */
+		static const uint32 nk_print[] = {
+			0x325520, 0x32572c, 0x325850, 0x325874
+		};
+		for (unsigned i = 0; i < sizeof(nk_print) / sizeof(nk_print[0]); i++) {
+			lp = (uint32 *)(ROMBaseHost + nk_print[i]);
+			if (ntohl(*lp) == 0x7c3042a6)
+				*lp = htonl(0x4e800020);
+		}
+		/*
+		 * 0x325664 mtmsr r31 often clears DR before lwz KDP-1048.
+		 * Leave DR on so that load is the first data DSI (KDP is not
+		 * in the ROM HTAB or the PIC DBAT).
+		 */
+		lp = (uint32 *)(ROMBaseHost + 0x325664);
+		if (ntohl(*lp) == 0x7fe00124)
+			*lp = htonl(0x60000000);
+		lp = (uint32 *)(ROMBaseHost + 0x325ab4);
+		if (ntohl(*lp) == 0x7fe00124)
+			*lp = htonl(0x60000000);
 		return true;
+	}
 
 	// Skip SR/BAT/SDR init
 	loc = 0x310000;
@@ -1072,7 +1034,10 @@ static bool patch_68k_emul(void)
 
 	// Overwrite twi instructions
 	static const uint8 twi_dat[] = {0x0f, 0xff, 0x00, 0x00, 0x0f, 0xff, 0x00, 0x01, 0x0f, 0xff, 0x00, 0x02};
-	if ((base = find_rom_data(0x36e600, 0x36ea00, twi_dat, sizeof(twi_dat))) == 0) return false;
+	if ((base = find_rom_data(0x36e600, 0x36ea00, twi_dat, sizeof(twi_dat))) == 0) {
+		printf("PatchROM: twi not found\n");
+		return false;
+	}
 	D(bug("twi %08lx\n", base));
 	lp = (uint32 *)(ROMBaseHost + base);
 	*lp++ = htonl(0x48000000 + 0x36f900 - base);		// b 0x36f900 (Emulator start)
@@ -1287,13 +1252,17 @@ static bool patch_68k_emul(void)
 		lp++;
 	}
 	D(bug("DR emulator patch location not found\n"));
+	printf("PatchROM: DR emulator bclr not in 0x370000-0x380000\n");
 	return false;
 dr_found:
 	lp++;
 	loc = (uintptr)lp - (uintptr)ROMBaseHost;
 	if ((base = rom_powerpc_branch_target(loc)) == 0) base = loc;
 	static const uint8 dr_ret_dat[] = {0x80, 0xbf, 0x08, 0x14, 0x53, 0x19, 0x4d, 0xac, 0x7c, 0xa8, 0x03, 0xa6};
-	if ((base = find_rom_data(base, 0x380000, dr_ret_dat, sizeof(dr_ret_dat))) == 0) return false;
+	if ((base = find_rom_data(base, 0x380000, dr_ret_dat, sizeof(dr_ret_dat))) == 0) {
+		printf("PatchROM: dr_ret not found\n");
+		return false;
+	}
 	D(bug("dr_ret %08lx\n", base));
 	if (base != loc) {
 		// OldWorld ROMs contain an absolute branch
@@ -1499,29 +1468,41 @@ static bool patch_68k(void)
 	uint16 *wp;
 	uint8 *bp;
 	uint32 base, loc;
+	g_log_rom_find = 0;
 
-	// Remove 68k RESET instruction
+	// Remove 68k RESET instruction (Old World boot; New World starts at NK v2).
 	static const uint8 reset_dat[] = {0x4e, 0x70};
-	if ((base = find_rom_data(0xc8, 0x120, reset_dat, sizeof(reset_dat))) == 0) return false;
-	D(bug("reset %08lx\n", base));
-	wp = (uint16 *)(ROMBaseHost + base);
-	*wp = htons(M68K_NOP);
+	base = find_rom_data(0xc8, 0x120, reset_dat, sizeof(reset_dat));
+	if (base) {
+		D(bug("reset %08lx\n", base));
+		wp = (uint16 *)(ROMBaseHost + base);
+		*wp = htons(M68K_NOP);
+	} else if (ROMType != ROMTYPE_NEWWORLD) {
+		return false;
+	}
 
-	// Fake reading PowerMac ID (via Universal)
+	// Fake reading PowerMac ID (via Universal). Gestalt 406 is also in the
+	// trap/name-registry path; this site is Old World UniversalInfo.
 	static const uint8 powermac_id_dat[] = {0x45, 0xf9, 0x5f, 0xff, 0xff, 0xfc, 0x20, 0x12, 0x72, 0x00};
-	if ((base = find_rom_data(0xe000, 0x15000, powermac_id_dat, sizeof(powermac_id_dat))) == 0) return false;
-	D(bug("powermac_id %08lx\n", base));
-	wp = (uint16 *)(ROMBaseHost + base);
-	*wp++ = htons(0x203c);			// move.l	#id,d0
-	*wp++ = htons(0);
-	*wp++ = htons((uint16)nw_gestalt_machine_id(ROMType == ROMTYPE_NEWWORLD));
-	*wp++ = htons(0xb040);			// cmp.w	d0,d0
-	*wp = htons(0x4ed6);			// jmp	(a6)
+	{
+		int site = rom_patch_site(&base, 0xe000, 0x15000, powermac_id_dat, sizeof(powermac_id_dat));
+		if (site < 0)
+			return false;
+		if (site) {
+			D(bug("powermac_id %08lx\n", base));
+			wp = (uint16 *)(ROMBaseHost + base);
+			*wp++ = htons(0x203c);			// move.l	#id,d0
+			*wp++ = htons(0);
+			*wp++ = htons((uint16)nw_gestalt_machine_id(ROMType == ROMTYPE_NEWWORLD));
+			*wp++ = htons(0xb040);			// cmp.w	d0,d0
+			*wp = htons(0x4ed6);			// jmp	(a6)
+		}
+	}
 
 	// Patch UniversalInfo
 	if (ROMType == ROMTYPE_NEWWORLD) {
 		static const uint8 univ_info_dat[] = {0x3f, 0xff, 0x04, 0x00};
-		if ((base = find_rom_data(0x14000, 0x18000, univ_info_dat, sizeof(univ_info_dat))) == 0) return false;
+		if (rom_patch_site(&base, 0x14000, 0x18000, univ_info_dat, sizeof(univ_info_dat)) > 0) {
 		D(bug("universal_info %08lx\n", base));
 		lp = (uint32 *)(ROMBaseHost + base - 0x14);
 		lp[0x00 >> 2] = htonl(ADDR_MAP_PATCH_SPACE - (base - 0x14));
@@ -1533,6 +1514,7 @@ static bool patch_68k(void)
 		lp[0x28 >> 2] = htonl(0x00000861);
 		lp[0x58 >> 2] = htonl(((uint32)NW_GESTALT_MACHINE_ID) << 16);
 		lp[0x60 >> 2] = htonl(0x0000003d);
+		}
 	} else if (ROMType == ROMTYPE_ZANZIBAR) {
 		base = 0x12b70;
 		lp = (uint32 *)(ROMBaseHost + base - 0x14);
@@ -1581,24 +1563,33 @@ static bool patch_68k(void)
 		lp[48] = htonl(0xf8000000);
 	}
 
-	// Don't initialize VIA (via Universal)
+	// Don't initialize VIA (via Universal). Old World hardware; skip if absent.
 	static const uint8 via_init_dat[] = {0x08, 0x00, 0x00, 0x02, 0x67, 0x00, 0x00, 0x2c, 0x24, 0x68, 0x00, 0x08};
-	if ((base = find_rom_data(0xe000, 0x15000, via_init_dat, sizeof(via_init_dat))) == 0) return false;
-	D(bug("via_init %08lx\n", base));
-	wp = (uint16 *)(ROMBaseHost + base + 4);
-	*wp = htons(0x6000);			// bra
+	if (rom_patch_site(&base, 0xe000, 0x15000, via_init_dat, sizeof(via_init_dat)) < 0)
+		return false;
+	if (base) {
+		D(bug("via_init %08lx\n", base));
+		wp = (uint16 *)(ROMBaseHost + base + 4);
+		*wp = htons(0x6000);			// bra
+	}
 
 	static const uint8 via_init2_dat[] = {0x24, 0x68, 0x00, 0x08, 0x00, 0x12, 0x00, 0x30, 0x4e, 0x71};
-	if ((base = find_rom_data(0xa000, 0x10000, via_init2_dat, sizeof(via_init2_dat))) == 0) return false;
-	D(bug("via_init2 %08lx\n", base));
-	wp = (uint16 *)(ROMBaseHost + base);
-	*wp = htons(0x4ed6);			// jmp	(a6)
+	if (rom_patch_site(&base, 0xa000, 0x10000, via_init2_dat, sizeof(via_init2_dat)) < 0)
+		return false;
+	if (base) {
+		D(bug("via_init2 %08lx\n", base));
+		wp = (uint16 *)(ROMBaseHost + base);
+		*wp = htons(0x4ed6);			// jmp	(a6)
+	}
 
 	static const uint8 via_init3_dat[] = {0x22, 0x68, 0x00, 0x08, 0x28, 0x3c, 0x20, 0x00, 0x01, 0x00};
-	if ((base = find_rom_data(0xa000, 0x10000, via_init3_dat, sizeof(via_init3_dat))) == 0) return false;
-	D(bug("via_init3 %08lx\n", base));
-	wp = (uint16 *)(ROMBaseHost + base);
-	*wp = htons(0x4ed6);			// jmp	(a6)
+	if (rom_patch_site(&base, 0xa000, 0x10000, via_init3_dat, sizeof(via_init3_dat)) < 0)
+		return false;
+	if (base) {
+		D(bug("via_init3 %08lx\n", base));
+		wp = (uint16 *)(ROMBaseHost + base);
+		*wp = htons(0x4ed6);			// jmp	(a6)
+	}
 
 	// Don't RunDiags, get BootGlobs pointer directly
 	if (ROMType == ROMTYPE_NEWWORLD) {

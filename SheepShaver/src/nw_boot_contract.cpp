@@ -87,6 +87,162 @@ enum nw_decoded_rom_kind nw_detect_decoded_rom(const uint8_t *rom, size_t size)
 	return NW_DECODED_UNKNOWN;
 }
 
+enum {
+	NW_FOURCC_PRCL = 0x7072636c,	/* 'prcl' */
+	NW_FOURCC_ROM  = 0x726f6d20	/* 'rom ' */
+};
+
+static const uint8_t *nw_find_mem(const uint8_t *hay, size_t n, const char *needle)
+{
+	const size_t m = strlen(needle);
+	if (m == 0 || m > n)
+		return NULL;
+	for (size_t i = 0; i + m <= n; i++) {
+		if (memcmp(hay + i, needle, m) == 0)
+			return hay + i;
+	}
+	return NULL;
+}
+
+static int nw_chrp_hex_constant(const uint8_t *src, size_t src_size,
+				const char *name, uint32_t *out)
+{
+	char needle[80];
+	if (snprintf(needle, sizeof(needle), "constant %s", name) >= (int)sizeof(needle))
+		return 0;
+	const uint8_t *p = nw_find_mem(src, src_size, needle);
+	if (p == NULL || (size_t)(p - src) < 7)
+		return 0;
+	unsigned v = 0;
+	if (sscanf((const char *)(p - 7), "%06x", &v) != 1)
+		return 0;
+	*out = (uint32_t)v;
+	return 1;
+}
+
+static void nw_decode_lzss(const uint8_t *src, uint8_t *dest, int size,
+			   uint8_t *dest_end)
+{
+	char dict[0x1000];
+	int run_mask = 0, dict_idx = 0xfee;
+	for (;;) {
+		if (run_mask < 0x100) {
+			if (--size < 0)
+				break;
+			run_mask = *src++ | 0xff00;
+		}
+		bool bit = run_mask & 1;
+		run_mask >>= 1;
+		if (bit) {
+			if (--size < 0)
+				break;
+			int c = *src++;
+			dict[dict_idx++] = (char)c;
+			if (dest < dest_end)
+				*dest++ = (uint8_t)c;
+			dict_idx &= 0xfff;
+		} else {
+			if (--size < 0)
+				break;
+			int idx = *src++;
+			if (--size < 0)
+				break;
+			int cnt = *src++;
+			idx |= (cnt << 4) & 0xf00;
+			cnt = (cnt & 0x0f) + 3;
+			while (cnt--) {
+				char c = dict[idx++];
+				dict[dict_idx++] = c;
+				if (dest < dest_end)
+					*dest++ = (uint8_t)c;
+				idx &= 0xfff;
+				dict_idx &= 0xfff;
+			}
+		}
+	}
+}
+
+static int nw_decode_parcels(const uint8_t *src, size_t src_size, uint8_t *dest,
+			     uint8_t *dest_end)
+{
+	uint32_t parcel_offset = 0x14;
+	int decoded = 0;
+	while (parcel_offset != 0 && parcel_offset + 12 <= src_size) {
+		const uint32_t next_offset = nw_be32_load(src, parcel_offset);
+		const uint32_t parcel_type = nw_be32_load(src, parcel_offset + 4);
+		if (parcel_type == (uint32_t)NW_FOURCC_ROM) {
+			const uint32_t lzss_offset = nw_be32_load(src, parcel_offset + 8);
+			uint32_t parcel_end = next_offset ? next_offset : (uint32_t)src_size;
+			if (parcel_end <= parcel_offset + lzss_offset)
+				return 0;
+			const uint32_t lzss_size = parcel_end - parcel_offset - lzss_offset;
+			if ((size_t)parcel_offset + lzss_offset + lzss_size > src_size)
+				return 0;
+			nw_decode_lzss(src + parcel_offset + lzss_offset, dest,
+				       (int)lzss_size, dest_end);
+			decoded = 1;
+		}
+		if (next_offset == 0 || next_offset <= parcel_offset)
+			break;
+		parcel_offset = next_offset;
+	}
+	return decoded;
+}
+
+int nw_g0_unpacked_ok(const uint8_t *rom, size_t size)
+{
+	if (rom == NULL || size < (size_t)NW_ROM_SIZE)
+		return 0;
+	if (nw_detect_decoded_rom(rom, size) != NW_DECODED_NEWWORLD)
+		return 0;
+	/* Nanokernel v2 entry jump_to_rom uses. Must not be an empty page. */
+	unsigned nz = 0;
+	for (unsigned i = 0; i < 16; i++)
+		nz += rom[NW_NK_V2_OFFSET + i] != 0;
+	return nz != 0;
+}
+
+int nw_decode_rom_image(const uint8_t *src, size_t src_size,
+			uint8_t *dest, size_t dest_size)
+{
+	if (src == NULL || dest == NULL || dest_size < (size_t)NW_ROM_SIZE)
+		return 0;
+
+	memset(dest, 0, dest_size);
+
+	if (src_size == (size_t)NW_ROM_SIZE) {
+		memcpy(dest, src, NW_ROM_SIZE);
+		return 1;
+	}
+
+	if (src_size < 11 || memcmp(src, "<CHRP-BOOT>", 11) != 0)
+		return 0;
+
+	uint32_t image_offset = 0, image_size = 0;
+	int decode_info_ok = 0;
+	if (nw_chrp_hex_constant(src, src_size, "lzss-offset", &image_offset) &&
+	    nw_chrp_hex_constant(src, src_size, "lzss-size", &image_size))
+		decode_info_ok = 1;
+	else if (nw_chrp_hex_constant(src, src_size, "parcels-offset", &image_offset) &&
+		 nw_chrp_hex_constant(src, src_size, "parcels-size", &image_size))
+		decode_info_ok = 1;
+	if (!decode_info_ok)
+		return 0;
+	if (image_size == 0 || (size_t)image_offset + image_size > src_size)
+		return 0;
+
+	const uint32_t sig = nw_be32_load(src, image_offset);
+	if (sig == (uint32_t)NW_FOURCC_PRCL) {
+		if (!nw_decode_parcels(src + image_offset, image_size, dest,
+				       dest + NW_ROM_SIZE))
+			return 0;
+	} else {
+		nw_decode_lzss(src + image_offset, dest, (int)image_size,
+			       dest + NW_ROM_SIZE);
+	}
+	return 1;
+}
+
 const struct nw_of_node_spec *nw_of_tree_spec(size_t *count)
 {
 	if (count)
@@ -135,6 +291,8 @@ void nw_fill_kdp_be(uint8_t *page, size_t page_len, const struct nw_kdp_params *
 	nw_be32_store(page, NW_KDP_HWINFO_BASE + 0, p->rom_base);
 	nw_be32_store(page, NW_KDP_HNFO_SIGNATURE, (uint32_t)NW_HNFO_SIGNATURE);
 	nw_be32_store(page, NW_KDP_HNFO_HTAB_SDR1, sdr1);
+	/* 68k CMPI.L #'Hnfo', ([KDP+0xfd0], $70) */
+	nw_be32_store(page, 0xfd0, p->kdp_ea + (uint32_t)NW_KDP_HWINFO_BASE);
 }
 
 int nw_kdp_save_ptrs_adjacent(const uint8_t *page)
@@ -215,8 +373,15 @@ const char *nw_boot_line_g2_translator_off(void)
 void nw_boot_log(const char *line)
 {
 #if NW_BOOT_LOG
-	if (line)
+	if (line) {
 		printf("NW-BOOT %s\n", line);
+		FILE *f = fopen("/tmp/ss-g2-run.log", "a");
+		if (f) {
+			fprintf(f, "NW-BOOT %s\n", line);
+			fflush(f);
+			fclose(f);
+		}
+	}
 	fflush(stdout);
 #else
 	(void)line;
@@ -250,6 +415,17 @@ void nw_note_mtsdr1(void)
 	nw_boot_log(nw_boot_line_g1_mtsdr1());
 }
 
+void nw_log_msr_dr(uint32_t msr)
+{
+	static int logged;
+	if (logged)
+		return;
+	if ((msr & 0x10u) == 0)
+		return;
+	logged = 1;
+	nw_boot_log("G2: MSR[DR] on");
+}
+
 void nw_log_g1_hwinit(void)
 {
 	nw_boot_log(nw_boot_line_g1_hwinit());
@@ -264,9 +440,13 @@ void nw_log_g1_patch_skip(int is_newworld)
 void nw_log_first_dsi(uint32_t srr0, uint32_t dar, int dr_on_hit)
 {
 	static int logged;
+	char buf[128];
 	if (logged)
 		return;
 	logged = 1;
+	snprintf(buf, sizeof(buf), "G2: first DSI SRR0=%08x DAR=%08x DRhit=%d",
+		 (unsigned)srr0, (unsigned)dar, dr_on_hit);
+	nw_boot_log(buf);
 	if (srr0 != dar && dr_on_hit)
 		nw_boot_log(nw_boot_line_g2_first_dsi());
 }
@@ -274,4 +454,117 @@ void nw_log_first_dsi(uint32_t srr0, uint32_t dar, int dr_on_hit)
 void nw_log_translator_off(void)
 {
 	nw_boot_log(nw_boot_line_g2_translator_off());
+}
+
+void nw_log_dr_xlate(uint32_t pc, uint32_t ea, int ok, uint32_t pa,
+		     uint32_t dbat0u, uint32_t dbat0l)
+{
+#if NW_BOOT_LOG
+	static unsigned n;
+	char buf[128];
+	if (n >= 8)
+		return;
+	n++;
+	snprintf(buf, sizeof(buf),
+		 "G2: DRxlate pc=%08x ea=%08x ok=%d pa=%08x dbat0=%08x/%08x",
+		 (unsigned)pc, (unsigned)ea, ok, (unsigned)pa,
+		 (unsigned)dbat0u, (unsigned)dbat0l);
+	nw_boot_log(buf);
+#else
+	(void)pc;
+	(void)ea;
+	(void)ok;
+	(void)pa;
+	(void)dbat0u;
+	(void)dbat0l;
+#endif
+}
+
+void nw_log_pc(uint32_t pc, uint32_t msr)
+{
+#if NW_BOOT_LOG
+	static unsigned n;
+	static unsigned ticks;
+	char buf[80];
+	if (n < 16) {
+		n++;
+		snprintf(buf, sizeof(buf), "pc=%08x msr=%08x",
+			 (unsigned)pc, (unsigned)msr);
+		nw_boot_log(buf);
+		return;
+	}
+	if ((++ticks & 0x0000ffffu) == 0) {
+		static uint32_t last;
+		static unsigned same;
+		if (pc == last)
+			same++;
+		else
+			same = 0;
+		last = pc;
+		snprintf(buf, sizeof(buf), "heartbeat pc=%08x msr=%08x same=%u",
+			 (unsigned)pc, (unsigned)msr, same);
+		nw_boot_log(buf);
+	}
+#else
+	(void)pc;
+	(void)msr;
+#endif
+}
+
+static void nw_htab_store32(uint8_t *htab, uint32_t off, uint32_t value)
+{
+	htab[off + 0] = (uint8_t)(value >> 24);
+	htab[off + 1] = (uint8_t)(value >> 16);
+	htab[off + 2] = (uint8_t)(value >> 8);
+	htab[off + 3] = (uint8_t)value;
+}
+
+static uint32_t nw_htab_load32(const uint8_t *htab, uint32_t off)
+{
+	return ((uint32_t)htab[off + 0] << 24) |
+	       ((uint32_t)htab[off + 1] << 16) |
+	       ((uint32_t)htab[off + 2] << 8) |
+	       (uint32_t)htab[off + 3];
+}
+
+static int nw_htab_insert_pte(uint8_t *htab, size_t htab_size, uint32_t sdr1,
+			      uint32_t vsid, uint32_t ea, uint32_t rpn)
+{
+	const uint32_t page_index = (ea >> 12) & 0xffffu;
+	const uint32_t api = (ea >> 22) & 0x3fu;
+	const uint32_t hash0 = (vsid & 0x7ffffu) ^ page_index;
+	const uint32_t htaborg = sdr1 & 0xffff0000u;
+	const uint32_t htabmask = ((sdr1 & 0x1ffu) << 16) | 0xffffu;
+	const uint32_t w0 = 0x80000000u | ((vsid & 0x00ffffffu) << 7) | api;
+	const uint32_t w1 = rpn << 12;
+
+	for (int hash_id = 0; hash_id < 2; hash_id++) {
+		const uint32_t hash = hash_id ? (hash0 ^ 0x7ffffu) : hash0;
+		const uint32_t pteg = htaborg | ((hash * 64u) & htabmask);
+		if (pteg < htaborg || (uint32_t)(pteg - htaborg) + 64u > htab_size)
+			continue;
+		for (unsigned slot = 0; slot < 8; slot++) {
+			const uint32_t off = (pteg - htaborg) + slot * 8u;
+			const uint32_t cur = nw_htab_load32(htab, off);
+			if (cur & 0x80000000u)
+				continue;
+			nw_htab_store32(htab, off, w0 | ((uint32_t)hash_id << 6));
+			nw_htab_store32(htab, off + 4, w1);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
+			      uint32_t rom_base, uint32_t rom_size, uint32_t vsid)
+{
+	if (htab == NULL || htab_size < 64 || sdr1 == 0 || rom_size < 0x1000u)
+		return;
+	if (vsid == 0)
+		vsid = (rom_base >> 8) & 0x00ffffffu;
+	memset(htab, 0, htab_size);
+	const uint32_t last = rom_base + rom_size;
+	for (uint32_t ea = rom_base; ea + 0x1000u <= last && ea >= rom_base; ea += 0x1000u)
+		nw_htab_insert_pte(htab, htab_size, sdr1, vsid, ea, ea >> 12);
 }

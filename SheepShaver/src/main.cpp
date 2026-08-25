@@ -171,7 +171,8 @@ bool InitAll(const char *vmdir)
 		Mac_memset(of_dev_tree, 0, 4 * sizeof(uint32));
 		uint32 vector_lookup_tbl = SheepMem::Reserve(128);
 		uint32 vector_mask_tbl = SheepMem::Reserve(64);
-		Mac_memset(KERNEL_DATA_BASE + 0xb80, 0x3d, 0x80);
+		/* Leave HWInfo zeroed (KernelData memset above). 0x3d poison
+		 * showed up as 68k A0=0x3d3d3d3d and stalled boot. */
 		Mac_memset(vector_lookup_tbl, 0, 128);
 		Mac_memset(vector_mask_tbl, 0, 64);
 		WriteMacInt32(KERNEL_DATA_BASE + 0xb80, ROMBase);

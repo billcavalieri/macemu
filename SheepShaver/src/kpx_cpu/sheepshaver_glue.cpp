@@ -849,6 +849,258 @@ static bool guest_phys_read32(void *, uint32_t pa, uint32_t *value)
 	return true;
 }
 
+void nw_guest_seed_rom_htab(uint32_t sdr1)
+{
+	static uint32_t logged_sdr1;
+	/* Always reprogram: NK later stwbrx-zeros the HTAB. */
+	const uint32_t htaborg = sdr1 & 0xffff0000u;
+	uint32_t htab_bytes = ((sdr1 & 0x1ffu) + 1u) << 16;
+	if (sdr1 == 0 || htab_bytes == 0 || htab_bytes > 0x200000u)
+		return;
+	if (htaborg < RAMBase ||
+	    (uint64_t)htaborg + htab_bytes > (uint64_t)RAMBase + RAMSize)
+		return;
+	uint8 *htab = Mac2HostAddr(htaborg);
+	if (htab == NULL)
+		return;
+	const uint32_t vsid =
+		ppc32_guest_mmu().sr((ROMBase >> 28) & 0xfu) & 0x00ffffffu;
+	nw_htab_program_rom_ptes(htab, htab_bytes, sdr1, ROMBase, 0x500000u, vsid);
+	ppc32_guest_mmu().tlbia();
+	if (htaborg >= 0x2000) {
+		const uint32_t kdp = htaborg - 0x2000;
+		const uint32_t ci = ROMBase + 0x30d000;
+		WriteMacInt32(ci + 0x9c, kdp);
+		WriteMacInt32(ci + 0xa0, kdp);
+		WriteMacInt32(ci + 0xa4, kdp + 0x1000);
+		WriteMacInt32(ci + 0x360, RAMBase);
+		nw_guest_plant_nk_irq(kdp);
+	}
+#if NW_BOOT_LOG
+	if (logged_sdr1 != sdr1) {
+		logged_sdr1 = sdr1;
+		char buf[80];
+		snprintf(buf, sizeof(buf), "G2: ROM PTEs HTABORG=%08x size=%u",
+			 (unsigned)htaborg, (unsigned)htab_bytes);
+		nw_boot_log(buf);
+	}
+#endif
+}
+
+void nw_guest_map_ram_rom_identity(void)
+{
+	static int done;
+	if (done)
+		return;
+	done = 1;
+	ppc32_mmu &mmu = ppc32_guest_mmu();
+	uint32_t ram_bl = 0;
+	uint32_t ram_block = 0x20000u; /* 128 KiB BAT minimum */
+	while (ram_block < RAMSize && ram_bl < 0x1fffu) {
+		ram_block <<= 1;
+		ram_bl = (ram_bl << 1) | 1u;
+	}
+	const uint32_t ram_bepi = RAMBase & 0xfffe0000u;
+	const uint32_t ramu = ram_bepi | (ram_bl << 2) | 3u; /* Vs+Vp */
+	const uint32_t raml = ram_bepi | 0x02u; /* PP = R/W supervisor */
+	mmu.set_dbat(0, ramu, raml);
+	mmu.set_ibat(0, ramu, raml);
+	/* 8 MiB: 68k emulator is memcpy'd to ROM+4MiB (ROM_AREA_SIZE 5MiB). */
+	const uint32_t rom_bl = 0x3fu;
+	const uint32_t rom_bepi = ROMBase & 0xfffe0000u;
+	const uint32_t romu = rom_bepi | (rom_bl << 2) | 3u;
+	const uint32_t roml = rom_bepi | 0x02u;
+	mmu.set_dbat(1, romu, roml);
+	mmu.set_ibat(1, romu, roml);
+	/* Probe at 0x68f36991. 128KiB so we do not cover KERNEL_DATA
+	 * at 0x68ffe000. */
+	const uint32_t mag_bepi = 0x68f20000u;
+	const uint32_t mag_bl = 0;
+	const uint32_t magu = mag_bepi | (mag_bl << 2) | 3u;
+	const uint32_t mag_pa = (RAMBase + 0x1000000u) & 0xfffe0000u;
+	const uint32_t magl = mag_pa | 0x02u;
+	mmu.set_dbat(2, magu, magl);
+	WriteMacInt32(mag_pa + (0x68f36991u - mag_bepi), 0x40000000u);
+	/* 68k emu lwz r1,0x2818 — extra lowmem / Apple kernel-data ptr. */
+	const uint32_t low_pa = RAMBase + 0x200000u;
+	const uint32_t lowu = 3u; /* BEPI 0, BL 0 = 128KiB, Vs+Vp */
+	const uint32_t lowl = low_pa | 0x02u;
+	mmu.set_dbat(3, lowu, lowl);
+	if (ReadMacInt32(ROMBase + NW_NK_VEC_TEMPLATE) == 0x7c3143a6u) {
+		for (uint32 i = 0; i < NW_NK_VEC_TEMPLATE_SIZE; i += 4) {
+			const uint32 w = ReadMacInt32(ROMBase + NW_NK_VEC_TEMPLATE + i);
+			WriteMacInt32(i, w);
+			WriteMacInt32(low_pa + i, w);
+		}
+	}
+	/* 0x2804 = kernel data (must be in RAM BAT). 0x2818 = IRQ nest. */
+	WriteMacInt32(low_pa + XLM_KERNEL_DATA, KERNEL_DATA_BASE);
+	WriteMacInt32(low_pa + XLM_IRQ_NEST, 0);
+	mmu.set_ibat(3, lowu, lowl);
+	WriteMacInt32(low_pa, 0x4e800020u);
+	/* 68k mem probe at 0x20000: CMPI.L #-1 terminator. */
+	if (RAMSize > 0x20008u)
+		WriteMacInt32(RAMBase + 0x20008u, 0xffffffffu);
+	mmu.tlbia();
+#if NW_BOOT_LOG
+	{
+		char buf[96];
+		snprintf(buf, sizeof(buf),
+			 "G3: identity BAT RAM %08x/%08x ROM %08x/%08x",
+			 (unsigned)ramu, (unsigned)raml,
+			 (unsigned)romu, (unsigned)roml);
+		nw_boot_log(buf);
+	}
+#endif
+}
+
+void nw_guest_map_kernel_data(void)
+{
+	ppc32_mmu &mmu = ppc32_guest_mmu();
+	/* 128KiB identity at 0x68fe0000 covers KERNEL_DATA_BASE. */
+	const uint32_t bepi = 0x68fe0000u;
+	mmu.set_dbat(2, bepi | 3u, bepi | 0x02u);
+	WriteMacInt32(KERNEL_DATA_BASE + 0x5f0, ROMBase + 0x366084u);
+	WriteMacInt32(KERNEL_DATA_BASE + 0x65c, KERNEL_DATA_BASE + 0x1000u);
+	WriteMacInt32(KERNEL_DATA_BASE + 0x660, 0);
+	WriteMacInt32(KERNEL_DATA_BASE + 0x1074, ROMBase + 0x380000u);
+	WriteMacInt32(KERNEL_DATA_BASE + 0x1078, ROMBase + 0x366084u);
+	/* 0x36ca78 lwz r5, 0x80c(r31); r31 is KERNEL_DATA+0x1000. */
+	WriteMacInt32(KERNEL_DATA_BASE + 0x180c, ROMBase + 0x325520u);
+	WriteMacInt32(KERNEL_DATA_BASE + 0x1884, ROMBase + 0x325520u);
+	WriteMacInt32(KERNEL_DATA_BASE + 0xfd0, KERNEL_DATA_BASE + 0xb80);
+	WriteMacInt32(KERNEL_DATA_BASE + 0xbf0, 0x486e666fu);
+#if NW_BOOT_LOG
+	{
+		static int logged;
+		if (!logged) {
+			logged = 1;
+			nw_boot_log("G3: BAT2 kernel data 68fe0000, 0x5f0=68k loop");
+		}
+	}
+#endif
+}
+
+int nw_guest_68k_dispatch(uint32_t *pc, uint32_t *r24, uint32_t *r27,
+			  uint32_t *r29)
+{
+	extern uint32 ROMBase;
+	const uint32_t table = ROMBase + 0x380000u;
+	uint32_t op;
+	if (*r27 > 0xffffu) {
+		op = ReadMacInt16(*r24);
+		*r24 += 2;
+		*r27 = (uint32_t)(int32_t)(int16_t)op;
+	} else {
+		op = *r27 & 0xffffu;
+	}
+	/* 4EFA JMP (d16,PC): handler does lhaux r27,r24,r27 with r27=opcode
+	 * and jumps into ROM data. EA is the extension word plus d16. */
+	if (op == 0x4efau) {
+		const int32 d = (int16_t)ReadMacInt16(*r24);
+		*r24 += d;
+		*r27 = 0xffffffffu;
+		*r29 = table;
+		*pc = ROMBase + 0x366084u;
+#if NW_BOOT_LOG
+		{
+			char buf[80];
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k JMP d16 pc=%08x", (unsigned)*r24);
+			nw_boot_log(buf);
+		}
+#endif
+		return 1;
+	}
+	if (op == 0x4ef9u) {
+		*r24 = ReadMacInt32(*r24);
+		*r27 = 0xffffffffu;
+		*r29 = table;
+		*pc = ROMBase + 0x366084u;
+#if NW_BOOT_LOG
+		{
+			char buf[80];
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k JMP abs pc=%08x", (unsigned)*r24);
+			nw_boot_log(buf);
+		}
+#endif
+		return 1;
+	}
+	if (op == 0x46fcu || op == 0x44fcu) {
+		*r24 += 2;
+		*r27 = 0xffffffffu;
+		*r29 = table;
+		*pc = ROMBase + 0x366084u;
+#if NW_BOOT_LOG
+		nw_boot_log("G3: 68k MOVE SR skip");
+#endif
+		return 1;
+	}
+	if (op == 0x4e70u) {
+		*r27 = 0xffffffffu;
+		*r29 = table;
+		*pc = ROMBase + 0x366084u;
+#if NW_BOOT_LOG
+		nw_boot_log("G3: 68k RESET nop");
+#endif
+		return 1;
+	}
+	const uint32_t tgt = table + op * 8u;
+	if (tgt < ROMBase || tgt + 8u > ROMBase + ROM_SIZE)
+		return 0;
+	*r29 = tgt;
+	*pc = tgt;
+#if NW_BOOT_LOG
+	{
+		static unsigned n;
+		if (n < 32) {
+			n++;
+			char buf[96];
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k op=%04x to=%08x pc=%08x [%08x %08x %08x %08x]",
+				 (unsigned)op, (unsigned)tgt, (unsigned)*r24,
+				 (unsigned)ReadMacInt32(tgt),
+				 (unsigned)ReadMacInt32(tgt + 4),
+				 (unsigned)ReadMacInt32(tgt + 8),
+				 (unsigned)ReadMacInt32(tgt + 12));
+			nw_boot_log(buf);
+		}
+	}
+#endif
+	return 1;
+}
+
+void nw_guest_plant_nk_irq(uint32_t kdp)
+{
+	/* 0x3259c0: lwz r28, -2272(r1); r28==0 returns -1 forever. */
+	const uint32_t slot = kdp - 2272u;
+	if (kdp < 0x2000u)
+		return;
+	if (slot < RAMBase || slot + 4 > RAMBase + RAMSize)
+		return;
+	if (kdp >= 4 && kdp - 4 >= RAMBase && ReadMacInt32(kdp - 4) == 0)
+		WriteMacInt32(kdp - 4, kdp);
+	/*
+	 * NK 1:1-BATs this pointer (DBAT3) then spins on lbz 2(r28) bit 2.
+	 * Refresh 0xFF every plant: NK zeros low RAM after the first mtsdr1.
+	 */
+	const uint32_t pic = RAMBase + 0x10000u;
+	WriteMacInt32(pic, 0xffffffffu);
+	WriteMacInt32(pic + 4, 0xffffffffu);
+	if (ReadMacInt32(slot) == 0)
+		WriteMacInt32(slot, pic);
+#if NW_BOOT_LOG
+	{
+		static int logged;
+		if (!logged) {
+			logged = 1;
+			nw_boot_log("G2: plant NK IRQ ptr KDP-2272");
+		}
+	}
+#endif
+}
+
 void init_emul_ppc(void)
 {
 	// Get pointer to KernelData in host address space
@@ -863,6 +1115,16 @@ void init_emul_ppc(void)
 	if (ROMType == ROMTYPE_NEWWORLD) {
 		ppc32_guest_mmu().set_phys_read32(guest_phys_read32, NULL);
 		ppc_cpu->enable_guest_mmu(true);
+		/* NK 0x3104a8 walks NKSystemInfo in r5 (bank size at +52). */
+		const uint32 sysinfo = SheepMem::Reserve(0x120);
+		Mac_memset(sysinfo, 0, 0x120);
+		WriteMacInt32(sysinfo + 0, RAMSize);
+		WriteMacInt32(sysinfo + 4, RAMBase);
+		WriteMacInt32(sysinfo + 48, RAMBase);
+		WriteMacInt32(sysinfo + 52, RAMSize);
+		ppc_cpu->set_register(powerpc_registers::GPR(5), any_register(sysinfo));
+		ppc32_guest_mmu().set_sdr1(NW_DEFAULT_SDR1);
+		nw_guest_seed_rom_htab(NW_DEFAULT_SDR1);
 		nw_log_g1_hwinit();
 	} else {
 		nw_log_translator_off();
