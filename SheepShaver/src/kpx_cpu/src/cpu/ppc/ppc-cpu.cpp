@@ -3819,6 +3819,13 @@ void powerpc_cpu::execute(uint32 entry)
 #endif
 						}
 					}
+					/* Live 4aefec8d: restore printed then
+					 * hung at 503256cc without 0x900.
+					 * Arm pending; next timeslice take_dec.
+					 * took_900 stays 0 until take_dec.
+					 * Do not execute the hang insn. */
+					dec_pending_ = true;
+					continue;
 				}
 			}
 			nw_dec_repin_if_left();
