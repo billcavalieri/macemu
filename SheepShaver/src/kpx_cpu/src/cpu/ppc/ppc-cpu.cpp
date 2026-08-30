@@ -284,6 +284,20 @@ static int nw_dec_pre_900_msr0_off(uint32 rom_off)
 		return 1;
 	return 0;
 }
+/* Live 4aefec8d: DEC armed after G2 (dec=00001000)
+ * but take_dec never ran. Guest died at 503256cc
+ * msr=00000010 during picspin; the 0x1000 countdown
+ * never finished. First 0x900 is pending as soon as
+ * PC is on the 50325/50326 walk (not the DSI
+ * handler). Hold extra 0x900 only after leave. */
+static int nw_dec_first_900_walk(uint32 rom_off)
+{
+	if (nw_dec_took_900 || nw_dec_in_handler)
+		return 0;
+	if (rom_off >= 0x325000u && rom_off < 0x327000u)
+		return 1;
+	return 0;
+}
 static void nw_dec_plant_pic_idle(uint32 pic)
 {
 	if (pic < RAMBase ||
@@ -3565,6 +3579,19 @@ void powerpc_cpu::execute(uint32 entry)
 					nw_guest_first_data_dsi_seen() ? 1 : 0;
 				nw_dec_note_msr(msr_now);
 				nw_arm_dec_after_g2();
+				if (first_dsi &&
+				    !nw_dec_took_900 &&
+				    !nw_dec_in_handler) {
+					extern uint32 ROMBase;
+					const uint32 p = pc();
+					const uint32 off =
+						(p >= ROMBase &&
+						 p < ROMBase + 0x500000u)
+							? p - ROMBase
+							: 0xffffffffu;
+					if (nw_dec_first_900_walk(off))
+						dec_pending_ = true;
+				}
 				if (nw_dec_in_handler &&
 				    pc() == nw_dec_handler_srr0) {
 					/* Live 7543d747: handler rfi left
