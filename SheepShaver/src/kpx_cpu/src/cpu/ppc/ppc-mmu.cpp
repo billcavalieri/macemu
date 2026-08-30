@@ -184,7 +184,8 @@ bool ppc32_mmu::bat_hit(uint32_t ea, bool insn, uint32_t *pa) const
 
 bool ppc32_mmu::ivt_hit(uint32_t ea, uint32_t *pa) const
 {
-	/* Exception page only. Matches the 4 KiB NK VecTbl copy to EA 0. */
+	/* Exception page only (EA 0..0xFFF, DSI at 0x300). Does not cover
+	 * KDP-1048 (live miss ea=17efdbe8) or any other RAM/ROM page. */
 	if (!ivt_mapped_ || ea >= 0x1000u)
 		return false;
 	*pa = ea;

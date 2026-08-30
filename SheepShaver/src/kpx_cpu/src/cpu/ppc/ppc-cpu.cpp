@@ -2236,7 +2236,6 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 			ppc32_guest_mmu().set_msr(srr1_);
 			return;
 		}
-		nw_guest_map_ram_rom_identity();
 		{
 			extern uint32 RAMBase, RAMSize, ROMBase;
 			const int guest_ea =
@@ -2272,32 +2271,14 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 				return;
 			}
 		}
-		{
-			ppc32_mmu &mmu = ppc32_guest_mmu();
-			const uint32 saved_msr = mmu.msr();
-			mmu.set_msr(srr1_);
-			const ppc32_xlate_result covered =
-				mmu.translate(ea, PPC32_XLATE_DR, 4);
-			if (covered.ok) {
-				pc() = srr0_;
-#if NW_BOOT_LOG
-				nw_guest_seed_rom_htab(mmu.sdr1());
-				static unsigned n_dsi_retry;
-				n_dsi_retry++;
-				if (n_dsi_retry <= 8) {
-					char buf[128];
-					snprintf(buf, sizeof(buf),
-						 "G3: DSI retry n=%u SRR0=%08x DAR=%08x pa=%08x op=%08x",
-						 n_dsi_retry, (unsigned)dsi.srr0,
-						 (unsigned)dsi.dar, (unsigned)covered.pa,
-						 (unsigned)vm_read_memory_4(dsi.srr0));
-					nw_boot_log(buf);
-				}
-#endif
-				return;
-			}
-			mmu.set_msr(saved_msr);
-		}
+		/*
+		 * Identity RAM/ROM BATs are for HotInts MemRetry after this
+		 * DSI has already missed. Planting them before the miss
+		 * (or retrying the DAR once they cover it) swallows G2:
+		 * HotInts never runs and there is no xlatehow=miss.
+		 */
+		nw_guest_note_first_data_dsi();
+		nw_guest_map_ram_rom_identity();
 		if (vm_read_memory_4(handler) == NW_NK_DATA_STORAGE_INT_OP)
 			pc() = handler;
 #if NW_BOOT_LOG
@@ -3094,7 +3075,11 @@ void powerpc_cpu::execute(uint32 entry)
 							 (unsigned)pc(),
 							 (unsigned)msr_now);
 						nw_boot_log(buf);
-						nw_guest_map_ram_rom_identity();
+						/* Do not identity-map RAM here.
+						 * A 128 MiB DBAT at RAMBase
+						 * (10000fff/10000002) covers
+						 * KDP-1048 (17efdbe8) and the
+						 * first data DSI never fires. */
 					}
 					if (ir_trace < 40) {
 						ir_trace++;

@@ -589,6 +589,86 @@ int main()
 		CHECK(!ppc32_guest_mmu_enabled());
 	}
 
+	/*
+	 * Live 9.2.1 packet after PR #4: identity RAM BAT 10000fff/10000002
+	 * (128 MiB at 0x10000000) covers KDP-1048 ea=17efdbe8. That is why
+	 * xlatehow=miss and G2 HIT vanished — not the 4 KiB IVT, not ROM PTEs.
+	 */
+	{
+		const uint32_t kdp_m1048 = 0x17efdbe8u;
+		const uint32_t ram_batu = 0x10000fffu;
+		const uint32_t ram_batl = 0x10000002u;
+
+		mmu.reset();
+		mmu.set_physical_memory(&ram[0], ram_size);
+		memset(&ram[0], 0, ram_size);
+		mmu.set_msr(ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR);
+		mmu.set_ivt_mapped(true);
+		mmu.set_sdr1(0x17f00000u);
+
+		CHECK(mmu.translate(NW_DSI_VECTOR_EA, PPC32_XLATE_IR, 4).ok);
+		CHECK(!mmu.translate(kdp_m1048, PPC32_XLATE_DR, 4).ok);
+
+		mmu.set_dbat(0, ram_batu, ram_batl);
+		mmu.tlbia();
+		const ppc32_xlate_result swallowed =
+			mmu.translate(kdp_m1048, PPC32_XLATE_DR, 4);
+		CHECK(swallowed.ok);
+		CHECK(swallowed.pa == kdp_m1048);
+	}
+
+	/*
+	 * G2 live shape: data DSI at KDP-1048, insn page mapped, IVT 0x300
+	 * planted, DR-on lwz at SRR0 HITs, original DAR still misses.
+	 * Do not treat a post-DSI identity RAM BAT as the G2 HIT.
+	 */
+	{
+		mmu.reset();
+		mmu.set_physical_memory(&ram[0], ram_size);
+		memset(&ram[0], 0, ram_size);
+
+		const uint32_t fault_pc = 0x00004000u;
+		const uint32_t store_ea = 0x17efdbe8u;
+		const uint32_t handler = 0x00005000u;
+		nw_fill_dsi_vector_be(&ram[0], ram_size, handler);
+		be32_store(&ram[0], fault_pc, 0x90840000u);
+
+		mmu.set_dbat(0, 0x00000002u, 0x00000000u);
+		mmu.set_ibat(0, 0x00000002u, 0x00000000u);
+		mmu.set_msr(ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR);
+		mmu.set_ivt_mapped(true);
+
+		const ppc32_xlate_result data_miss =
+			mmu.translate(store_ea, PPC32_XLATE_DR, 4);
+		CHECK(!data_miss.ok);
+
+		ppc32_hotints_dsi dsi;
+		dsi.take_data_dsi(mmu, fault_pc, store_ea, true);
+		CHECK(dsi.srr0 == fault_pc);
+		CHECK(dsi.dar == store_ea);
+		CHECK(dsi.srr0 != dsi.dar);
+		CHECK(dsi.vector == (uint32_t)NW_DSI_VECTOR_EA);
+		CHECK(nw_be32_load(&ram[0], NW_DSI_VECTOR_EA) != 0);
+
+		const ppc32_xlate_result vec =
+			mmu.translate(NW_DSI_VECTOR_EA, PPC32_XLATE_IR, 4);
+		CHECK(vec.ok);
+		CHECK(nw_be32_load(&ram[0], vec.pa) != 0);
+
+		const ppc32_xlate_result lwz = dsi.lwz_faulting_insn(mmu);
+		CHECK(lwz.ok);
+		CHECK(lwz.pa == fault_pc);
+		CHECK(!mmu.translate(store_ea, PPC32_XLATE_DR, 4).ok);
+
+		/* Identity RAM BAT after the miss is MemRetry, not G2. */
+		mmu.set_dbat(1, 0x10000fffu, 0x10000002u);
+		mmu.tlbia();
+		const ppc32_xlate_result memretry =
+			mmu.translate(store_ea, PPC32_XLATE_DR, 4);
+		CHECK(memretry.ok);
+		CHECK(memretry.pa == store_ea);
+	}
+
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

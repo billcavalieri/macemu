@@ -887,12 +887,22 @@ void nw_guest_seed_rom_htab(uint32_t sdr1)
 #endif
 }
 
+static int nw_identity_after_dsi;
+
+void nw_guest_note_first_data_dsi(void)
+{
+	nw_identity_after_dsi = 1;
+}
+
 void nw_guest_map_ram_rom_identity(void)
 {
 	static int done;
-	if (done)
+	if (!nw_identity_after_dsi || done)
 		return;
 	done = 1;
+	/* After the first data DSI only. A RAM BAT big enough for 128 MiB
+	 * (prefs ramsize) covers KDP-1048 at 0x17efdbe8; planting it at
+	 * first IR+DR swallows the miss HotInts needs. */
 	ppc32_mmu &mmu = ppc32_guest_mmu();
 	uint32_t ram_bl = 0;
 	uint32_t ram_block = 0x20000u; /* 128 KiB BAT minimum */

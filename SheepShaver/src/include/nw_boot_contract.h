@@ -152,7 +152,10 @@ void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
 void nw_guest_seed_rom_htab(uint32_t sdr1);
 /* NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one. */
 void nw_guest_plant_nk_irq(uint32_t kdp);
-/* After first DSI: 1:1 BAT RAM+ROM so HotInts MemRetry can HIT under DR. */
+/* After first DSI: 1:1 BAT RAM+ROM so HotInts MemRetry can HIT under DR.
+ * No-op until nw_guest_note_first_data_dsi() — planting at first IR+DR
+ * covers KDP-1048 and swallows G2. */
+void nw_guest_note_first_data_dsi(void);
 void nw_guest_map_ram_rom_identity(void);
 void nw_guest_map_kernel_data(void);
 /* Write the DSI slot at EA 0x300 (host RAM image, no guest ROM). */
