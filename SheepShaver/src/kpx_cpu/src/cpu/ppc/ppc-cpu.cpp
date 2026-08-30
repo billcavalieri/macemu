@@ -257,6 +257,18 @@ static int nw_dec_leave_50325a9c_wait(uint32 rom_off)
 		return 1;
 	return 0;
 }
+/* Live 3530b06f: hold pc=503259e0 msr=00007672
+ * op=2f9c0000 (cmpwi r28,0). After leave, r28==0
+ * is an empty PIC slot, not a live callback.
+ * Fill known PIC EA. Do not skip. Do not or-in EE. */
+static int nw_dec_leave_503259e0_wait(uint32 rom_off)
+{
+	if (!nw_dec_did_leave || !nw_dec_took_900)
+		return 0;
+	if (rom_off == 0x3259e0u)
+		return 1;
+	return 0;
+}
 static int nw_dec_leave_no_skip(uint32 rom_off)
 {
 	if (nw_dec_leave_50325(rom_off) ||
@@ -23185,6 +23197,30 @@ void powerpc_cpu::execute(uint32 entry)
 							 * to 503265bc ori r0,r0,
 							 * 0x2000. Do not smash a
 							 * live r8. Do not mill. */
+							if (nw_dec_leave_503259e0_wait(rom_off)) {
+								nw_dec_plant_pic_idle(pic_ea);
+								if (pic == 0) {
+									gpr(28) = pic_ea;
+									gpr(30) = nw_nk_irq_status_idle();
+								} else if (pic == pic_ea)
+									gpr(30) = nw_nk_irq_status_idle();
+#if NW_BOOT_LOG
+								{
+									static int n28;
+									if (!n28) {
+										n28 = 1;
+										char buf[144];
+										snprintf(buf, sizeof(buf),
+											 "G3: DEC leave 503259e0 wait was=%08x use=%08x r30=%08x op=%08x",
+											 (unsigned)pic,
+											 (unsigned)gpr(28),
+											 (unsigned)gpr(30),
+											 (unsigned)opw);
+										nw_boot_log(buf);
+									}
+								}
+#endif
+							}
 							if (nw_dec_leave_50325a9c_wait(rom_off)) {
 								const uint32 prim =
 									opw >> 26;
@@ -23240,6 +23276,13 @@ void powerpc_cpu::execute(uint32 entry)
 								    0x41820000u &&
 								    was == 0xffffffffu)
 									gpr(8) = 0;
+								else if (was == 0)
+									/* Live 3530b06f: r8 wait
+									 * was=0 (not a live pointer
+									 * like 503266a7). Empty
+									 * list → terminator -1.
+									 * Do not smash a live r8. */
+									gpr(8) = 0xffffffffu;
 #if NW_BOOT_LOG
 								{
 									static int nr8;
