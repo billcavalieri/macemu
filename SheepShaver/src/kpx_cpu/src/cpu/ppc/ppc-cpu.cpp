@@ -3485,7 +3485,7 @@ void powerpc_cpu::execute(uint32 entry)
 			    (pc() >= ROMBase + 0x460c00u &&
 			     pc() < ROMBase + 0x460c40u) ||
 			    (pc() >= ROMBase + 0x380000u &&
-			     pc() < ROMBase + 0x400000u)) {
+			     pc() < ROMBase + 0x400000u))) {
 #if NW_BOOT_LOG
 				static int blrl;
 				if (!blrl) {
