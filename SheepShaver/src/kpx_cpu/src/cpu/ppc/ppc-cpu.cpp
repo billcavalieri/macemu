@@ -83,6 +83,7 @@ static uint32 nw_dec_handler_xer;
  * so leave does not invent EE or collapse to 0. */
 static uint32 nw_dec_last_real_msr;
 static int nw_dec_did_leave;
+static int nw_dec_second_take;
 static void nw_dec_note_msr(uint32 msr)
 {
 	const uint32 ir_dr =
@@ -3649,15 +3650,38 @@ void powerpc_cpu::execute(uint32 entry)
 						 * Do not nest. Do not or-in EE. */
 						if (nw_dec_did_leave &&
 						    !nw_dec_ee_on(msr_now)) {
+							/* Live cf12cf07: hold at
+							 * 503265bc op=60002000
+							 * (ori r0,r0,0x2000)
+							 * after r8 sentinel path.
+							 * One extra 0x900 so NK
+							 * can tick; take_dec
+							 * re-pins. Then hold.
+							 * Do not or-in EE. */
+							if (!nw_dec_second_take) {
+								nw_dec_second_take = 1;
+#if NW_BOOT_LOG
+								{
+									static int n2;
+									if (!n2) {
+										n2 = 1;
+										char buf[144];
+										snprintf(buf, sizeof(buf),
+											 "G3: DEC second take after leave pc=%08x msr=%08x dec=%08x op=%08x",
+											 (unsigned)pc(),
+											 (unsigned)msr_now,
+											 (unsigned)dec_,
+											 (unsigned)vm_read_memory_4(pc()));
+										nw_boot_log(buf);
+									}
+								}
+#endif
+								take_dec();
+								if (dec_ < nw_dec_arm_value())
+									dec_ = 0x00100000u;
+								continue;
+							}
 							dec_pending_ = false;
-							/* Live 13ab796b: hold
-							 * left DEC=ffffffff;
-							 * unsigned wait-until-0
-							 * never exited. Signed
-							 * underflow did not
-							 * unstick 5032663c.
-							 * Zero DEC. Block 0x900
-							 * only. Do not or-in EE. */
 							if (dec_ & 0x80000000u)
 								dec_ = 0;
 #if NW_BOOT_LOG
@@ -23054,25 +23078,23 @@ void powerpc_cpu::execute(uint32 entry)
 								nw_boot_log(buf);
 							}
 #endif
-							/* Live 751b8ba3: 50326674
-							 * op=2c08ffff cmpwi r8,-1.
-							 * PIC idle + DEC=0 did not
-							 * unstick. Wait is r8, not
-							 * DEC/PIC. bne: r8=-1;
-							 * beq: r8=0. Do not mill. */
+							/* Live cf12cf07: r8 wait
+							 * was=503266a7 nxt=40820008
+							 * (bne +8). Forcing r8=-1
+							 * took the sentinel
+							 * fallthrough; hold moved
+							 * to 503265bc ori r0,r0,
+							 * 0x2000. Do not smash a
+							 * live r8. Do not mill. */
 							if (nw_dec_leave_50326_wait(rom_off) &&
 							    opw == 0x2c08ffffu) {
 								const uint32 nxt =
 									vm_read_memory_4(pc() + 4);
 								const uint32 was = gpr(8);
 								if ((nxt & 0xfffe0000u) ==
-								    0x40820000u)
-									gpr(8) = 0xffffffffu;
-								else if ((nxt & 0xfffe0000u) ==
-									 0x41820000u)
+								    0x41820000u &&
+								    was == 0xffffffffu)
 									gpr(8) = 0;
-								else
-									gpr(8) = 0xffffffffu;
 #if NW_BOOT_LOG
 								{
 									static int nr8;
