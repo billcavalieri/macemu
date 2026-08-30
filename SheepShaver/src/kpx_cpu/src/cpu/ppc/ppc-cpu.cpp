@@ -22449,26 +22449,27 @@ void powerpc_cpu::execute(uint32 entry)
 					const uint32 pic = gpr(28);
 					const uint32 opw = vm_read_memory_4(pc());
 #if NW_BOOT_LOG
-					static int spun;
-					if (!spun) {
-						spun = 1;
+					static unsigned nspin;
+					if (nspin < 8) {
+						nspin++;
 						char buf[128];
 						snprintf(buf, sizeof(buf),
-							 "G2: picspin r28=%08x pc=%08x off=%08x op=%08x mill=%d",
-							 (unsigned)pic, (unsigned)pc(),
+							 "G2: picspin n=%u r28=%08x pc=%08x off=%08x op=%08x mill=%d",
+							 nspin, (unsigned)pic,
+							 (unsigned)pc(),
 							 (unsigned)rom_off, (unsigned)opw,
 							 nw_guest_first_data_dsi_seen());
 						nw_boot_log(buf);
 					}
 #endif
 					/*
-					 * Live fa989e08: skipbr at +0x325a9c
-					 * hit 0 times. Heartbeats are
-					 * +0x325a14 (G2 lbz) and beq
-					 * +0x325a20 (4182fc40). Skip those
-					 * after the first data DSI only —
-					 * 0x325a14 must still miss once for
-					 * G2. PIC idle 0. Do not mill 68k.
+					 * Live 855f81f6: beq skip at +0x325a20
+					 * fired; then heartbeats stuck on
+					 * mill-era +0x325a9c (not a branch).
+					 * After first data DSI, skip every
+					 * picspin off, including OLD_B.
+					 * +0x325a14 still misses once (G2).
+					 * PIC idle 0. Do not mill 68k.
 					 */
 					if (nw_guest_first_data_dsi_seen()) {
 						if (pic >= RAMBase &&
@@ -22484,12 +22485,13 @@ void powerpc_cpu::execute(uint32 entry)
 						if (nw_nk_picspin_skip_after_g2(rom_off,
 										opw)) {
 #if NW_BOOT_LOG
-							static int left;
-							if (!left) {
-								left = 1;
+							static unsigned nleft;
+							if (nleft < 8) {
+								nleft++;
 								char buf[128];
 								snprintf(buf, sizeof(buf),
-									 "G2: picspin idle r28=%08x r30=%08x skip pc=%08x off=%08x op=%08x",
+									 "G2: picspin idle n=%u r28=%08x r30=%08x skip pc=%08x off=%08x op=%08x",
+									 nleft,
 									 (unsigned)pic,
 									 (unsigned)gpr(30),
 									 (unsigned)pc(),

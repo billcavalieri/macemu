@@ -558,12 +558,14 @@ int nw_nk_picspin_is_g2_dsi_off(uint32_t off)
 
 int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op)
 {
-	if (!nw_nk_picspin_rom_off(off))
-		return 0;
-	if (off == (uint32_t)NW_NK_PICSPIN_LBZ ||
-	    off == (uint32_t)NW_NK_PICSPIN_BEQ)
-		return 1;
-	return nw_ppc_is_branch(op);
+	(void)op;
+	/*
+	 * Live 855f81f6: OLD_B +0x325a9c ran ×2634 after the beq skip.
+	 * That insn is not a branch, so a branch-only skip never fired.
+	 * After G2, skip every listed picspin off. Caller must not invoke
+	 * this until nw_guest_note_first_data_dsi() (0x325a14 is G2).
+	 */
+	return nw_nk_picspin_rom_off(off);
 }
 
 void nw_nk_irq_fill_pic_be(uint8_t *mem, size_t mem_size, uint32_t pic_ea)

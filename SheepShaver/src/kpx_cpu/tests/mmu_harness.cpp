@@ -764,12 +764,19 @@ int main()
 						  NW_NK_PICSPIN_LBZ_OP));
 		CHECK(nw_nk_picspin_skip_after_g2(NW_NK_PICSPIN_BEQ,
 						  NW_NK_PICSPIN_BEQ_OP));
-		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_PICSPIN_OLD_B,
-						   0x60000000u));
+		/* Live 855f81f6: OLD_B is not a branch and must still skip. */
+		CHECK(nw_nk_picspin_skip_after_g2(NW_NK_PICSPIN_OLD_B,
+						  0x60000000u));
 		CHECK(nw_nk_picspin_skip_after_g2(NW_NK_PICSPIN_OLD_B,
 						  NW_NK_PICSPIN_BEQ_OP));
+		CHECK(nw_nk_picspin_skip_after_g2(NW_NK_PICSPIN_OLD_A,
+						  0x60000000u));
+		CHECK(nw_nk_picspin_skip_after_g2(NW_NK_PICSPIN_OLD_C,
+						  0x60000000u));
 		CHECK(!nw_nk_picspin_skip_after_g2(0x366084u,
 						   NW_NK_PICSPIN_BEQ_OP));
+		CHECK(!nw_nk_picspin_skip_after_g2(0x366084u,
+						   0x60000000u));
 
 		CHECK(ppc32_mmu::bat_overlaps(pic_batu, pic_batl, ram_base,
 					      ram_base + ram_size));

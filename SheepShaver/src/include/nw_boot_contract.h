@@ -152,11 +152,11 @@ void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
 void nw_guest_seed_rom_htab(uint32_t sdr1);
 /*
  * NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one.
- * Live fa989e08: G2 HIT at ROM+0x325a14 (lbz r30,2(r28), ea=10010002),
- * then beq 0x4182fc40 at +0x325a20. Mill-era PCs +0x325a9c/0x325998/
- * +0x325c94 hit 0 times — hook the live lbz/beq, not only those.
- * 0x325a14 is the G2 DSI PC: do not skip it until
- * nw_guest_note_first_data_dsi(). PIC idle stays 0.
+ * Live 855f81f6: G2 HIT at ROM+0x325a14 (lbz still misses before skip).
+ * Skip of beq +0x325a20 fired; heartbeats then stuck on mill-era
+ * +0x325a9c (OLD_B) because skip_after_g2 only skipped branches.
+ * After first data DSI, skip every picspin ROM off (including OLD_B
+ * non-branches). Do not skip +0x325a14 before that DSI. PIC idle 0.
  */
 enum {
 	NW_NK_IRQ_KDP_OFF = 2272,
