@@ -220,6 +220,29 @@ static int nw_dec_is_walk_off(uint32 rom_off)
 		return 1;
 	return 0;
 }
+/* Live 13ab796b: hold pc=5032663c msr=00002010 dec=ffffffff.
+ * Not skip-listed (past CLOUD_HI_4). PIC plant only ran on
+ * listed/50325xxx so the wait never saw idle. Do not skip
+ * 50326xxx / do not execute creqv CLOUD_LO_4. */
+static int nw_dec_leave_50326_wait(uint32 rom_off)
+{
+	if (!nw_dec_did_leave)
+		return 0;
+	if (rom_off < 0x326000u || rom_off >= 0x327000u)
+		return 0;
+	if (rom_off >= (uint32)NW_NK_CLOUD_LO_4 &&
+	    rom_off <= (uint32)NW_NK_CLOUD_HI_4)
+		return 0;
+	return 1;
+}
+static int nw_dec_leave_no_skip(uint32 rom_off)
+{
+	if (nw_dec_leave_50325(rom_off) ||
+	    nw_dec_is_walk_off(rom_off) ||
+	    nw_dec_leave_50326_wait(rom_off))
+		return 1;
+	return 0;
+}
 static void nw_dec_plant_pic_idle(uint32 pic)
 {
 	if (pic < RAMBase ||
@@ -3627,23 +3650,27 @@ void powerpc_cpu::execute(uint32 entry)
 						if (nw_dec_did_leave &&
 						    !nw_dec_ee_on(msr_now)) {
 							dec_pending_ = false;
-							/* Live 0b9c914c: hold
-							 * reloaded DEC, so the
-							 * 00002010 walk at
-							 * 50326644 never saw
-							 * underflow. Block
-							 * 0x900 only. Do not
-							 * or-in EE. */
+							/* Live 13ab796b: hold
+							 * left DEC=ffffffff;
+							 * unsigned wait-until-0
+							 * never exited. Signed
+							 * underflow did not
+							 * unstick 5032663c.
+							 * Zero DEC. Block 0x900
+							 * only. Do not or-in EE. */
+							if (dec_ & 0x80000000u)
+								dec_ = 0;
 #if NW_BOOT_LOG
 							static int nhold;
 							if (!nhold) {
 								nhold = 1;
-								char buf[112];
+								char buf[144];
 								snprintf(buf, sizeof(buf),
-									 "G3: DEC hold after leave pc=%08x msr=%08x dec=%08x",
+									 "G3: DEC hold after leave pc=%08x msr=%08x dec=%08x op=%08x",
 									 (unsigned)pc(),
 									 (unsigned)msr_now,
-									 (unsigned)dec_);
+									 (unsigned)dec_,
+									 (unsigned)vm_read_memory_4(pc()));
 								nw_boot_log(buf);
 							}
 #endif
@@ -22973,7 +23000,7 @@ void powerpc_cpu::execute(uint32 entry)
 					nw_nk_picspin_rom_off(rom_off) ||
 					nw_nk_picspin_cycle_off(rom_off);
 				if (!nw_dec_in_handler &&
-				    (listed || nw_dec_leave_50325(rom_off))) {
+				    (listed || nw_dec_leave_no_skip(rom_off))) {
 					const uint32 pic = gpr(28);
 					const uint32 opw = vm_read_memory_4(pc());
 #if NW_BOOT_LOG
@@ -23009,13 +23036,11 @@ void powerpc_cpu::execute(uint32 entry)
 						 * NULL callback (04cecd36 /
 						 * 68fff0dc). Do not clobber. */
 						nw_dec_plant_pic_idle(pic_ea);
-						if (!(nw_dec_leave_50325(rom_off) ||
-						      nw_dec_is_walk_off(rom_off))) {
+						if (!nw_dec_leave_no_skip(rom_off)) {
 							nw_dec_plant_pic_idle(pic);
 							gpr(30) = nw_nk_irq_status_idle();
 						}
-						if (nw_dec_leave_50325(rom_off) ||
-						    nw_dec_is_walk_off(rom_off)) {
+						if (nw_dec_leave_no_skip(rom_off)) {
 #if NW_BOOT_LOG
 							static int nwalk;
 							if (!nwalk) {
@@ -23027,6 +23052,21 @@ void powerpc_cpu::execute(uint32 entry)
 									 (unsigned)ppc32_guest_mmu().msr(),
 									 (unsigned)rom_off);
 								nw_boot_log(buf);
+							}
+#endif
+#if NW_BOOT_LOG
+							if (nw_dec_leave_50326_wait(rom_off)) {
+								static int n26;
+								if (!n26) {
+									n26 = 1;
+									char buf[112];
+									snprintf(buf, sizeof(buf),
+										 "G3: DEC leave 50326 wait pc=%08x msr=%08x op=%08x",
+										 (unsigned)pc(),
+										 (unsigned)ppc32_guest_mmu().msr(),
+										 (unsigned)opw);
+									nw_boot_log(buf);
+								}
 							}
 #endif
 						} else if (nw_nk_picspin_skip_after_g2(rom_off,
