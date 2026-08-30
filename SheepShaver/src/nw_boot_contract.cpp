@@ -402,7 +402,7 @@ const char *nw_boot_line_g3_fb_guest(void)
 
 const char *nw_boot_line_g3_fb_none(void)
 {
-	return "G3: FB guest dirty none reason=no NQD the_buffer==copy";
+	return "G3: FB guest dirty none reason=EE=0 DEC never yielded walk";
 }
 
 int nw_video_fb_in_ram(uint32_t fb_ea, uint32_t ram_base, uint32_t ram_size,
@@ -446,6 +446,25 @@ int nw_dec_take_after_g2(int first_dsi)
 int nw_dec_ee_on(uint32_t msr)
 {
 	return (msr & (uint32_t)NW_MSR_EE) != 0;
+}
+
+int nw_dec_can_yield(uint32_t msr)
+{
+	const uint32_t need =
+		(uint32_t)NW_MSR_EE | (uint32_t)NW_MSR_IR;
+	return ((msr & need) == need) ? 1 : 0;
+}
+
+int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
+				   int nqd, int dirty)
+{
+	if (!first_dsi)
+		return 0;
+	if (nqd || dirty)
+		return 0;
+	/* Live c81f88bd msr=00002000: DEC/0x900 cannot fire. Guest
+	 * never reaches VideoDoDriverIO / NQD. Do not mill-skip. */
+	return nw_dec_can_yield(msr) ? 0 : 1;
 }
 
 int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base)

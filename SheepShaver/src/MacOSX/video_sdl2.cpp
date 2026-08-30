@@ -1855,7 +1855,7 @@ static bool is_fullscreen(SDL_Window * window)
 }
 
 #ifdef SHEEPSHAVER
-int VideoGuestPresent(void)
+int VideoGuestPresent(uint32 msr)
 {
 	unsigned boxes = 0;
 
@@ -1888,17 +1888,27 @@ int VideoGuestPresent(void)
 		static int logged;
 		if (logged < 4) {
 			logged++;
-			char buf[160];
-			snprintf(buf, sizeof(buf),
-				 "%s base=%08x inRAM=%d nqd=%d",
-				 nw_boot_line_g3_fb_none(),
-				 (unsigned)screen_base,
-				 nw_video_fb_in_ram(screen_base, RAMBase,
-						     RAMSize, the_buffer_size),
-				 nqd_ever_dirty);
+			const int blocked = nw_video_guest_paint_blocked(
+				1, msr, nqd_ever_dirty, 0);
+			char buf[176];
+			if (blocked)
+				snprintf(buf, sizeof(buf),
+					 "%s msr=%08x inRAM=%d nqd=%d",
+					 nw_boot_line_g3_fb_none(),
+					 (unsigned)msr,
+					 nw_video_fb_in_ram(screen_base,
+							     RAMBase, RAMSize,
+							     the_buffer_size),
+					 nqd_ever_dirty);
+			else
+				snprintf(buf, sizeof(buf),
+					 "G3: FB guest dirty none reason=no NQD the_buffer==copy msr=%08x nqd=%d",
+					 (unsigned)msr, nqd_ever_dirty);
 			nw_boot_log(buf);
 		}
 	}
+#else
+	(void)msr;
 #endif
 	return 0;
 }

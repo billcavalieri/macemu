@@ -59,8 +59,9 @@ void VideoPresent(void)
 {
 }
 
-int VideoGuestPresent(void)
+int VideoGuestPresent(uint32 msr)
 {
+	(void)msr;
 	return 0;
 }
 #endif

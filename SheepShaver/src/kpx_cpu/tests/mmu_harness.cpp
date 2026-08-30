@@ -250,7 +250,7 @@ int main()
 		CHECK(strcmp(nw_boot_line_g3_fb_guest(),
 			"G3: FB guest dirty") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_none(),
-			"G3: FB guest dirty none reason=no NQD the_buffer==copy") == 0);
+			"G3: FB guest dirty none reason=EE=0 DEC never yielded walk") == 0);
 	}
 
 	const uint32_t ram_size = 4u * 1024u * 1024u;
@@ -1268,6 +1268,26 @@ int main()
 		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_C, 0x60000000u));
 		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_EE, 0x60000000u));
 		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_EE, 0x4e800020u));
+		CHECK(NW_NK_WALK_EE_N == 0x325604u);
+		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_EE_N,
+						     0x60000000u));
+		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_A, 0x60000000u));
+		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_MILL_68K,
+						     0x4e800020u));
+		CHECK(NW_MSR_LIVE_EE_OFF == 0x00002000u);
+		CHECK(!nw_dec_can_yield((uint32_t)NW_MSR_LIVE_EE_OFF));
+		CHECK(!nw_dec_can_yield((uint32_t)NW_MSR_EE)); /* EE, IR off */
+		CHECK(nw_dec_can_yield((uint32_t)NW_MSR_EE |
+					 (uint32_t)NW_MSR_IR));
+		CHECK(nw_video_guest_paint_blocked(
+			1, (uint32_t)NW_MSR_LIVE_EE_OFF, 0, 0));
+		CHECK(!nw_video_guest_paint_blocked(
+			1, (uint32_t)NW_MSR_EE | (uint32_t)NW_MSR_IR, 0, 0));
+		CHECK(!nw_video_guest_paint_blocked(
+			1, (uint32_t)NW_MSR_LIVE_EE_OFF, 1, 0));
+		CHECK(!nw_video_guest_paint_blocked(
+			1, (uint32_t)NW_MSR_LIVE_EE_OFF, 0, 1));
+		CHECK(!nw_video_guest_paint_blocked(0, 0, 0, 0));
 		CHECK(NW_GUEST_FB_RAM_OFF == 0x800000u);
 		CHECK(nw_video_fb_in_ram(0x10000000u + (uint32_t)NW_GUEST_FB_RAM_OFF,
 					 0x10000000u, 0x08000000u,

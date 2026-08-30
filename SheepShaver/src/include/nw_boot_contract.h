@@ -134,7 +134,7 @@ const char *nw_boot_line_g3_native_op(void);
 const char *nw_boot_line_g3_dec_arm(void);
 const char *nw_boot_line_g3_walk_dec_ee(void);
 const char *nw_boot_line_g3_fb_guest(void);
-const char *nw_boot_line_g3_fb_none(void);	/* named reason, not host n=1 */
+const char *nw_boot_line_g3_fb_none(void);	/* named reason: EE=0, not host n=1 */
 
 /*
  * Clip a dirty rect to the screen. Returns 1 if the result is non-empty.
@@ -180,11 +180,22 @@ int nw_handle_interrupt_skip_nested(int use_native, uint32_t r1,
  */
 enum {
 	NW_MSR_EE = 0x00008000,
-	NW_DEC_ARM_AFTER_G2 = 0x1000
+	NW_MSR_IR = 0x00000020,
+	NW_DEC_ARM_AFTER_G2 = 0x1000,
+	NW_MSR_LIVE_EE_OFF = 0x00002000	/* live c81f88bd at 50325600 */
 };
 uint32_t nw_dec_arm_value(void);
 int nw_dec_take_after_g2(int first_dsi);
 int nw_dec_ee_on(uint32_t msr);
+/* take_dec after G2 requires EE+IR. Live 00002000 has neither.
+ * Do not mill-skip the walk. Do not flip EE. */
+int nw_dec_can_yield(uint32_t msr);
+/*
+ * After G2, EE/IR off so DEC never yields: guest never reaches
+ * VideoDoDriverIO / NQD / FB writes. 1 = the_buffer==copy for that reason.
+ */
+int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
+				   int nqd, int dirty);
 
 void nw_boot_log(const char *line);
 void nw_log_g0_decode(const uint8_t *rom, size_t size);
@@ -274,7 +285,8 @@ enum {
 	NW_NK_WALK_A = 0x327b54,
 	NW_NK_WALK_B = 0x327b50,	/* live dee26adb ×38; not skip */
 	NW_NK_WALK_C = 0x327b60,	/* live dee26adb ×37; not skip */
-	NW_NK_WALK_EE = 0x325600	/* live c81f88bd; do not skip */
+	NW_NK_WALK_EE = 0x325600,	/* live c81f88bd; do not skip */
+	NW_NK_WALK_EE_N = 0x325604	/* live heartbeat +4; not skip */
 };
 uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
 uint8_t nw_nk_irq_status_idle(void);

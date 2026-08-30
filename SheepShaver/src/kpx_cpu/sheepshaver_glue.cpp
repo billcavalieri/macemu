@@ -1309,7 +1309,7 @@ void HandleInterrupt(powerpc_registers *r)
 	// the redraw thread (video_sdl2.cpp). Do not mill 68k as G3.
 	SDL_PumpEvents();
 	if (nw_guest_first_data_dsi_seen())
-		VideoGuestPresent();
+		VideoGuestPresent(ppc32_guest_mmu().msr());
 #endif
 
 	// Do nothing if interrupts are disabled
