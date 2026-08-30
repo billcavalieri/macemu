@@ -67,11 +67,17 @@ static uint32 g3_pc0(uint32 pc)
 		return pc - ROMBase;
 	return pc;
 }
-/* Live 46577d78: 0x900 lands at 50326420. Do not re-take or picspin
- * until rfi. Do not mill the walk. */
+/* Live 58b12272: 0x900 to=50313200 srr0=50325600. Stay in-handler
+ * until rfi. Do not mill the walk. Do not picspin-skip here. */
 static int nw_dec_in_handler;
 static uint32 nw_dec_handler_srr0;
 static uint32 nw_dec_handler_from;
+/* D-form twi: OPCD=3, TO=31. Live illegal 0fff0005 at 50324140. */
+static int nw_ppc_twi_uncond(uint32 opcode)
+{
+	return ((opcode >> 26) == 3) &&
+	       (((opcode >> 21) & 0x1fu) == 31u);
+}
 static int g3_ea_data(uint32 a)
 {
 	a = g3_rom0(a);
@@ -2432,6 +2438,32 @@ void powerpc_cpu::take_sc()
 #ifdef SHEEPSHAVER
 	/* NK debug/panic path: sc r0=0x2e after a NULL callback. */
 	if (gpr(0) == 0x2eu) {
+		if (nw_dec_in_handler) {
+			/* Live 58b12272: after DEC 0x900, sc 0x2e then
+			 * twi 0fff0005 aborts. rfi to srr0 so the
+			 * handler can leave. Do not or-in EE. Do not
+			 * mill the walk. Next interpret loop logs
+			 * G3: DEC handler left. */
+			mmu.set_msr(srr1_);
+			nw_log_msr_dr(srr1_);
+			nw_log_msr_write("rfi", srr0_, srr1_);
+			pc() = srr0_;
+#if NW_BOOT_LOG
+			{
+				static int n;
+				if (!n) {
+					n = 1;
+					char buf[96];
+					snprintf(buf, sizeof(buf),
+						 "G3: DEC sc 0x2e rfi srr0=%08x srr1=%08x",
+						 (unsigned)srr0_,
+						 (unsigned)srr1_);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+			return;
+		}
 #if NW_BOOT_LOG
 		static unsigned n2e;
 		if (n2e < 4) {
@@ -22614,6 +22646,32 @@ void powerpc_cpu::execute(uint32 entry)
 				goto return_site;
 			continue;
 		}
+#ifdef SHEEPSHAVER
+		/* Live 58b12272: twi pad after DEC 0x900 is not in
+		 * ppc-decode; execute_illegal aborts. rfi to srr0.
+		 * Do not mill the walk. Do not or-in EE. */
+		if (nw_dec_in_handler && nw_ppc_twi_uncond(opcode)) {
+			ppc32_guest_mmu().set_msr(srr1_);
+			nw_log_msr_dr(srr1_);
+			nw_log_msr_write("rfi", srr0_, srr1_);
+			pc() = srr0_;
+#if NW_BOOT_LOG
+			{
+				static int n;
+				if (!n) {
+					n = 1;
+					char buf[96];
+					snprintf(buf, sizeof(buf),
+						 "G3: DEC twi pad rfi opcode=%08x srr0=%08x",
+						 (unsigned)opcode,
+						 (unsigned)srr0_);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+			continue;
+		}
+#endif
 		const instr_info_t *ii = decode(opcode);
 #if PPC_EXECUTE_DUMP_STATE
 		if (dump_state)

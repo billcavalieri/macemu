@@ -1281,6 +1281,12 @@ int main()
 		/* Live 46577d78 0x900 = 50326420. Runtime does not skip
 		 * while in the handler; skip-list itself is unchanged. */
 		CHECK(NW_NK_CLOUD_LO_4 == 0x326420u);
+		/* Live 58b12272: after DEC 0x900, sc 0x2e then twi
+		 * 0fff0005 at 50324140. Do not mill that PC. */
+		CHECK(!nw_nk_picspin_skip_after_g2(0x324140u, 0x0fff0005u));
+		CHECK(!nw_nk_picspin_skip_after_g2(0x32412cu, 0x44000002u));
+		CHECK(((0x0fff0005u >> 26) == 3) &&
+		      (((0x0fff0005u >> 21) & 0x1fu) == 31u));
 		CHECK(nw_ppc_pc_in_dec_handler(rom + (uint32_t)NW_NK_CLOUD_LO_4,
 						 rom));
 		CHECK(nw_ppc_pc_in_dec_handler(rom + 0x3264f0u, rom));
