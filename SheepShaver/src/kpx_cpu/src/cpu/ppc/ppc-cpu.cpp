@@ -23054,6 +23054,41 @@ void powerpc_cpu::execute(uint32 entry)
 								nw_boot_log(buf);
 							}
 #endif
+							/* Live 751b8ba3: 50326674
+							 * op=2c08ffff cmpwi r8,-1.
+							 * PIC idle + DEC=0 did not
+							 * unstick. Wait is r8, not
+							 * DEC/PIC. bne: r8=-1;
+							 * beq: r8=0. Do not mill. */
+							if (nw_dec_leave_50326_wait(rom_off) &&
+							    opw == 0x2c08ffffu) {
+								const uint32 nxt =
+									vm_read_memory_4(pc() + 4);
+								const uint32 was = gpr(8);
+								if ((nxt & 0xfffe0000u) ==
+								    0x40820000u)
+									gpr(8) = 0xffffffffu;
+								else if ((nxt & 0xfffe0000u) ==
+									 0x41820000u)
+									gpr(8) = 0;
+								else
+									gpr(8) = 0xffffffffu;
+#if NW_BOOT_LOG
+								{
+									static int nr8;
+									if (!nr8) {
+										nr8 = 1;
+										char buf[128];
+										snprintf(buf, sizeof(buf),
+											 "G3: DEC leave r8 wait was=%08x use=%08x nxt=%08x",
+											 (unsigned)was,
+											 (unsigned)gpr(8),
+											 (unsigned)nxt);
+										nw_boot_log(buf);
+									}
+								}
+#endif
+							}
 #if NW_BOOT_LOG
 							if (nw_dec_leave_50326_wait(rom_off)) {
 								static int n26;
