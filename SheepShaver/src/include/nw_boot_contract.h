@@ -134,6 +134,7 @@ const char *nw_boot_line_g3_native_op(void);
 const char *nw_boot_line_g3_dec_arm(void);
 const char *nw_boot_line_g3_walk_dec_ee(void);
 const char *nw_boot_line_g3_dec_take(void);	/* host took 0x900; not G3 */
+const char *nw_boot_line_g3_dec_left(void);	/* handler rfi'd; not G3 */
 const char *nw_boot_line_g3_fb_guest(void);
 const char *nw_boot_line_g3_fb_none(void);	/* named reason: EE=0, not host n=1 */
 
@@ -169,6 +170,9 @@ int nw_video_fb_in_ram(uint32_t fb_ea, uint32_t ram_base, uint32_t ram_size,
  * in NK even if XLM_RUN_MODE is still MODE_68K (New World patch skip).
  */
 int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base);
+/* Live 46577d78: VecTbl 0x900 = ROM+0x326420. Heartbeats 503264xx.
+ * Not a skip-list. Host must not picspin-skip or re-take 0x900 here. */
+int nw_ppc_pc_in_dec_handler(uint32_t pc, uint32_t rom_base);
 int nw_handle_interrupt_use_native(int first_dsi, uint32_t pc,
 				     uint32_t rom_base);
 int nw_handle_interrupt_skip_nested(int use_native, uint32_t r1,

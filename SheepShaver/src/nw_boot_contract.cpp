@@ -400,6 +400,11 @@ const char *nw_boot_line_g3_dec_take(void)
 	return "G3: DEC 0x900";
 }
 
+const char *nw_boot_line_g3_dec_left(void)
+{
+	return "G3: DEC handler left";
+}
+
 const char *nw_boot_line_g3_fb_guest(void)
 {
 	return "G3: FB guest dirty";
@@ -493,6 +498,22 @@ int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base)
 	if (off >= (uint32_t)NW_NK_MILL_68K)
 		return 0;
 	if (off >= (uint32_t)NW_NK_68K_EMUL)
+		return 0;
+	return 1;
+}
+
+int nw_ppc_pc_in_dec_handler(uint32_t pc, uint32_t rom_base)
+{
+	uint32_t off;
+
+	if (pc < rom_base)
+		return 0;
+	off = pc - rom_base;
+	/* Live 46577d78: 0x900 VecTbl = ROM+0x326420 (CLOUD_LO_4).
+	 * Heartbeats 503264xx. Not a skip-list change. */
+	if (off < (uint32_t)NW_NK_CLOUD_LO_4)
+		return 0;
+	if (off >= (uint32_t)NW_NK_CLOUD_LO_4 + 0x400u)
 		return 0;
 	return 1;
 }

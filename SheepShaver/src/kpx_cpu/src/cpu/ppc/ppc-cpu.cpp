@@ -67,6 +67,11 @@ static uint32 g3_pc0(uint32 pc)
 		return pc - ROMBase;
 	return pc;
 }
+/* Live 46577d78: 0x900 lands at 50326420. Do not re-take or picspin
+ * until rfi. Do not mill the walk. */
+static int nw_dec_in_handler;
+static uint32 nw_dec_handler_srr0;
+static uint32 nw_dec_handler_from;
 static int g3_ea_data(uint32 a)
 {
 	a = g3_rom0(a);
@@ -2476,6 +2481,13 @@ void powerpc_cpu::take_dec()
 	pc() = hotints_vector(0x900);
 	dec_pending_ = false;
 #ifdef SHEEPSHAVER
+	/* 0xffffffff is not < 0x1000. Leave MSB-set DEC and the EE=0
+	 * path re-takes 0x900 before rfi. Reload any tiny or negative. */
+	if (dec_ < nw_dec_arm_value() || (dec_ & 0x80000000u))
+		dec_ = 0x00100000u;
+	nw_dec_in_handler = 1;
+	nw_dec_handler_from = pc();
+	nw_dec_handler_srr0 = srr0_;
 #if NW_BOOT_LOG
 	{
 		static int n;
@@ -3135,6 +3147,30 @@ void powerpc_cpu::execute(uint32 entry)
 				const int first_dsi =
 					nw_guest_first_data_dsi_seen() ? 1 : 0;
 				nw_arm_dec_after_g2();
+				if (nw_dec_in_handler &&
+				    pc() == nw_dec_handler_srr0) {
+#if NW_BOOT_LOG
+					static int left;
+					if (!left) {
+						left = 1;
+						char buf[128];
+						snprintf(buf, sizeof(buf),
+							 "%s from=%08x to=%08x srr0=%08x",
+							 nw_boot_line_g3_dec_left(),
+							 (unsigned)nw_dec_handler_from,
+							 (unsigned)pc(),
+							 (unsigned)nw_dec_handler_srr0);
+						nw_boot_log(buf);
+					}
+#endif
+					nw_dec_in_handler = 0;
+					/* Handler may have mtdec 0. Do not
+					 * re-take 0x900 on this timeslice. */
+					dec_pending_ = false;
+					if (dec_ < nw_dec_arm_value() ||
+					    (dec_ & 0x80000000u))
+						dec_ = 0x00100000u;
+				}
 #if NW_BOOT_LOG
 				if ((msr_now & ppc32_mmu::MSR_IR) &&
 				    (msr_now & ppc32_mmu::MSR_DR)) {
@@ -3172,6 +3208,7 @@ void powerpc_cpu::execute(uint32 entry)
 				}
 #endif
 				if (dec_pending_ &&
+				    !nw_dec_in_handler &&
 				    nw_dec_host_take(first_dsi, msr_now)) {
 					if (nw_dec_take_after_g2(first_dsi)) {
 						/* After G2: live walk has
@@ -22487,8 +22524,9 @@ void powerpc_cpu::execute(uint32 entry)
 					 pc() < ROMBase + 0x500000u)
 						? pc() - ROMBase
 						: 0xffffffffu;
-				if (nw_nk_picspin_rom_off(rom_off) ||
-				    nw_nk_picspin_cycle_off(rom_off)) {
+				if (!nw_dec_in_handler &&
+				    (nw_nk_picspin_rom_off(rom_off) ||
+				     nw_nk_picspin_cycle_off(rom_off))) {
 					const uint32 pic = gpr(28);
 					const uint32 opw = vm_read_memory_4(pc());
 #if NW_BOOT_LOG

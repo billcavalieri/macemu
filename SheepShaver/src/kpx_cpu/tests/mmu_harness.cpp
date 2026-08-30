@@ -249,6 +249,8 @@ int main()
 			"G3: 171-PC walk DEC blocked MSR[EE]=0") == 0);
 		CHECK(strcmp(nw_boot_line_g3_dec_take(),
 			"G3: DEC 0x900") == 0);
+		CHECK(strcmp(nw_boot_line_g3_dec_left(),
+			"G3: DEC handler left") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_guest(),
 			"G3: FB guest dirty") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_none(),
@@ -1276,6 +1278,16 @@ int main()
 		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_A, 0x60000000u));
 		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_MILL_68K,
 						     0x4e800020u));
+		/* Live 46577d78 0x900 = 50326420. Runtime does not skip
+		 * while in the handler; skip-list itself is unchanged. */
+		CHECK(NW_NK_CLOUD_LO_4 == 0x326420u);
+		CHECK(nw_ppc_pc_in_dec_handler(rom + (uint32_t)NW_NK_CLOUD_LO_4,
+						 rom));
+		CHECK(nw_ppc_pc_in_dec_handler(rom + 0x3264f0u, rom));
+		CHECK(!nw_ppc_pc_in_dec_handler(walk, rom));
+		CHECK(!nw_ppc_pc_in_dec_handler(rom + (uint32_t)NW_NK_WALK_EE,
+						 rom));
+		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_A, 0x60000000u));
 		CHECK(NW_MSR_LIVE_EE_OFF == 0x00002000u);
 		CHECK(NW_DEC_VECTOR_EA == 0x900u);
 		CHECK(!nw_dec_can_yield((uint32_t)NW_MSR_LIVE_EE_OFF));
