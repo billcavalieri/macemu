@@ -22445,7 +22445,8 @@ void powerpc_cpu::execute(uint32 entry)
 					 pc() < ROMBase + 0x500000u)
 						? pc() - ROMBase
 						: 0xffffffffu;
-				if (nw_nk_picspin_rom_off(rom_off)) {
+				if (nw_nk_picspin_rom_off(rom_off) ||
+				    nw_nk_picspin_cycle_off(rom_off)) {
 					const uint32 pic = gpr(28);
 					const uint32 opw = vm_read_memory_4(pc());
 #if NW_BOOT_LOG
@@ -22463,14 +22464,16 @@ void powerpc_cpu::execute(uint32 entry)
 					}
 #endif
 					/*
-					 * Live 902fbf32: skip at +0x325a9c
-					 * logged (lbz 8bdc0002) but pc+4
-					 * re-entered the wait (heartbeat
-					 * same≈2951). After first data DSI,
-					 * jump to ROM+PAST (OLD_C+4) and
-					 * do not execute this insn.
-					 * +0x325a14 still misses once (G2).
-					 * PIC idle 0. Do not mill 68k.
+					 * Live e0df3b4e: OLD_B left
+					 * (npc=50325aac). Then 27-PC NK
+					 * debug-print cycle (dominant
+					 * 50325c7c). 108235a0 PAST
+					 * 0x325c98 is in that cluster.
+					 * After first data DSI, jump to
+					 * ROM+0x326000 and do not execute
+					 * this insn. +0x325a14 still
+					 * misses once (G2). PIC idle 0.
+					 * Do not mill 68k.
 					 */
 					if (nw_guest_first_data_dsi_seen()) {
 						if (pic >= RAMBase &&

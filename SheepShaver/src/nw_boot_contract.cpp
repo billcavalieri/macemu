@@ -577,6 +577,27 @@ int nw_nk_picspin_rom_off(uint32_t off)
 	}
 }
 
+int nw_nk_picspin_cycle_off(uint32_t off)
+{
+	switch (off) {
+	case NW_NK_CYCLE_A:
+	case NW_NK_CYCLE_B:
+	case NW_NK_CYCLE_C:
+	case NW_NK_CYCLE_D:
+	case NW_NK_CYCLE_E:
+	case NW_NK_CYCLE_F:
+	case NW_NK_CYCLE_G:
+	case NW_NK_CYCLE_H:
+	case NW_NK_PRINT_A:
+	case NW_NK_PRINT_B:
+	case NW_NK_PRINT_C:
+	case NW_NK_CYCLE_OLD_PAST:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 int nw_nk_picspin_is_g2_dsi_off(uint32_t off)
 {
 	return off == (uint32_t)NW_NK_PICSPIN_LBZ;
@@ -586,11 +607,10 @@ int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op)
 {
 	(void)op;
 	/*
-	 * Live 902fbf32: skip at OLD_B logged but pc+4 re-entered the
-	 * lbz loop. Caller must jump to leave_npc, not PC+4, and must
-	 * not invoke this until nw_guest_note_first_data_dsi().
+	 * After G2, skip listed picspin offs and the e0df3b4e 27-PC
+	 * NK debug-print cycle. Caller jumps to past_npc, not PC+4.
 	 */
-	return nw_nk_picspin_rom_off(off);
+	return nw_nk_picspin_rom_off(off) || nw_nk_picspin_cycle_off(off);
 }
 
 int nw_nk_picspin_npc_stays(uint32_t npc, uint32_t from_pc, uint32_t rom_base)
@@ -603,14 +623,9 @@ int nw_nk_picspin_npc_stays(uint32_t npc, uint32_t from_pc, uint32_t rom_base)
 		off = npc - rom_base;
 	else
 		off = npc;
-	switch (off) {
-	case NW_NK_PICSPIN_LBZ:
-	case NW_NK_PICSPIN_BEQ:
-	case NW_NK_PICSPIN_OLD_B:
+	if (nw_nk_picspin_rom_off(off) || nw_nk_picspin_cycle_off(off))
 		return 1;
-	default:
-		return 0;
-	}
+	return 0;
 }
 
 uint32_t nw_nk_picspin_leave_npc(uint32_t pc, uint32_t rom_base,
@@ -641,9 +656,9 @@ uint32_t nw_nk_picspin_past_npc(uint32_t pc, uint32_t rom_base)
 	uint32_t npc;
 
 	/*
-	 * Live 902fbf32: pc+4 at OLD_B re-entered the lbz wait
-	 * (heartbeat same≈2951). Execute-loop skip jumps here, past
-	 * mill-era OLD_A/B/C, not mill 68k +0x366084.
+	 * Live e0df3b4e: OLD_B left; then 27-PC cycle at 0x325c7c
+	 * (NK debug print). 108235a0 PAST 0x325c98 is in that cluster.
+	 * Jump to ROM+0x326000, past the cycle, not mill +0x366084.
 	 */
 	if (rom_base != 0)
 		npc = rom_base + (uint32_t)NW_NK_PICSPIN_PAST;

@@ -833,17 +833,34 @@ int main()
 			CHECK(!nw_nk_picspin_npc_stays(
 				rom + 0x366084u, old_b, rom));
 
-			CHECK(NW_NK_PICSPIN_PAST ==
+			CHECK(NW_NK_PICSPIN_PAST == 0x326000u);
+			CHECK(NW_NK_PICSPIN_PAST !=
 			      (uint32_t)NW_NK_PICSPIN_OLD_C + 4u);
+			CHECK(nw_nk_picspin_cycle_off(NW_NK_CYCLE_A));
+			CHECK(nw_nk_picspin_cycle_off(NW_NK_CYCLE_F));
+			CHECK(nw_nk_picspin_cycle_off(NW_NK_CYCLE_OLD_PAST));
+			CHECK(!nw_nk_picspin_cycle_off(0x366084u));
+			CHECK(!nw_nk_picspin_rom_off(NW_NK_CYCLE_A));
+			CHECK(nw_nk_picspin_skip_after_g2(NW_NK_CYCLE_A,
+							  0x60000000u));
+			CHECK(!nw_nk_picspin_skip_after_g2(0x366084u,
+							   0x60000000u));
 			npc = nw_nk_picspin_past_npc(old_b, rom);
 			CHECK(npc == rom + (uint32_t)NW_NK_PICSPIN_PAST);
 			CHECK(npc != old_b);
 			CHECK(npc != old_b + 4u);
 			CHECK(npc != lbz_pc);
 			CHECK(npc != beq_pc);
+			CHECK(npc != rom + (uint32_t)NW_NK_CYCLE_A);
+			CHECK(npc != rom + (uint32_t)NW_NK_CYCLE_OLD_PAST);
 			CHECK(npc != rom + 0x366084u);
 			CHECK(!nw_nk_picspin_npc_stays(npc, old_b, rom));
+			CHECK(nw_nk_picspin_npc_stays(
+				rom + (uint32_t)NW_NK_CYCLE_A, old_b, rom));
 			npc = nw_nk_picspin_past_npc(beq_pc, rom);
+			CHECK(npc == rom + (uint32_t)NW_NK_PICSPIN_PAST);
+			npc = nw_nk_picspin_past_npc(
+				rom + (uint32_t)NW_NK_CYCLE_A, rom);
 			CHECK(npc == rom + (uint32_t)NW_NK_PICSPIN_PAST);
 
 			{

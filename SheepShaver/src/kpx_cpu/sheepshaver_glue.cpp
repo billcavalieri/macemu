@@ -1137,9 +1137,8 @@ void nw_guest_plant_nk_irq(uint32_t kdp)
 	/*
 	 * NK 1:1-BATs this pointer (live DBAT3 10000003/1000003a) then
 	 * lbz r30,2(r28). Live first DSI was that load (ea=10010002).
-	 * Idle stays 0. After G2, jump picspin PCs to ROM+PAST
-	 * (OLD_C+4). Live 902fbf32 skip at +0x325a9c logged but
-	 * pc+4 re-entered the lbz wait.
+	 * Idle stays 0. After G2, jump picspin and 27-PC NK print
+	 * cycle PCs to ROM+0x326000 (past 0x325c98 cluster).
 	 */
 	const uint32_t pic = nw_nk_irq_pic_ea(RAMBase);
 	if (pic < RAMBase ||

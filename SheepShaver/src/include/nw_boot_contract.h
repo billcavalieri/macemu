@@ -152,11 +152,14 @@ void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
 void nw_guest_seed_rom_htab(uint32_t sdr1);
 /*
  * NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one.
- * Live 902fbf32: skip at OLD_B logged (op=8bdc0002) but pc+4
- * re-entered the lbz wait (heartbeat same≈2951 at 50325a9c).
- * After first data DSI, the execute loop jumps to
- * ROM+NW_NK_PICSPIN_PAST (OLD_C+4), not PC+4. Do not skip
- * +0x325a14 before that DSI. PIC idle 0.
+ * Live e0df3b4e: OLD_B left (skip pc=50325a9c npc=50325aac;
+ * heartbeats 0/2604 at 50325a9c). Then a 27-PC NK cycle
+ * (dominant 50325c7c; also 50325c44/5032570c/50325690/50325670/
+ * 50325520/50312728/50312708). 50325520 is NK debug print
+ * (rom_patches blr). 108235a0 PAST 0x325c98 sits in that
+ * cluster. After first data DSI, jump to ROM+0x326000 (past
+ * the cycle, not mill). Do not skip +0x325a14 before that DSI.
+ * PIC idle 0.
  */
 enum {
 	NW_NK_IRQ_KDP_OFF = 2272,
@@ -170,8 +173,20 @@ enum {
 	NW_NK_PICSPIN_OLD_A = 0x325998,
 	NW_NK_PICSPIN_OLD_B = 0x325a9c,
 	NW_NK_PICSPIN_OLD_C = 0x325c94,
-	NW_NK_PICSPIN_PAST = 0x325c98,	/* OLD_C+4: past mill-era waits */
-	NW_NK_PICSPIN_LEAVE_INSNS = 16
+	NW_NK_PICSPIN_PAST = 0x326000,	/* past 27-PC cycle; not mill */
+	NW_NK_PICSPIN_LEAVE_INSNS = 16,
+	NW_NK_CYCLE_A = 0x325c7c,	/* live e0df3b4e dominant */
+	NW_NK_CYCLE_B = 0x325c44,
+	NW_NK_CYCLE_C = 0x32570c,
+	NW_NK_CYCLE_D = 0x325690,
+	NW_NK_CYCLE_E = 0x325670,
+	NW_NK_CYCLE_F = 0x325520,	/* NK debug print */
+	NW_NK_CYCLE_G = 0x312728,
+	NW_NK_CYCLE_H = 0x312708,
+	NW_NK_PRINT_A = 0x32572c,
+	NW_NK_PRINT_B = 0x325850,
+	NW_NK_PRINT_C = 0x325874,
+	NW_NK_CYCLE_OLD_PAST = 0x325c98	/* 108235a0 PAST, in cluster */
 };
 uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
 uint8_t nw_nk_irq_status_idle(void);
@@ -179,6 +194,7 @@ int nw_nk_irq_status_spins(uint8_t v);
 int nw_ppc_is_branch(uint32_t op);
 int nw_ppc_rel_branch_target(uint32_t pc, uint32_t op, uint32_t *target);
 int nw_nk_picspin_rom_off(uint32_t off);
+int nw_nk_picspin_cycle_off(uint32_t off);
 int nw_nk_picspin_is_g2_dsi_off(uint32_t off);
 int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op);
 int nw_nk_picspin_npc_stays(uint32_t npc, uint32_t from_pc, uint32_t rom_base);
