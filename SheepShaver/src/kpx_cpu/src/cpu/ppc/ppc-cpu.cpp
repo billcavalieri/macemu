@@ -22464,12 +22464,11 @@ void powerpc_cpu::execute(uint32 entry)
 					}
 #endif
 					/*
-					 * Live 92beda4a: skip 50312728
-					 * npc=503127cc then ~50-PC NK
-					 * wait (50325584 / 50326438 /
-					 * 503128bc). Not mill, not G3,
-					 * not WINDOW. leave_npc must
-					 * not land on that cloud.
+					 * Live 93eb1588: cloud left,
+					 * then heartbeat 5032582c ×2208
+					 * (not mill, not G3, not WINDOW).
+					 * leave_npc must not land on
+					 * 0x32582c or prior waits.
 					 * OLD_B npc stays 50325aac.
 					 * +0x325a14 still misses once.
 					 * PIC idle 0. Do not mill 68k.

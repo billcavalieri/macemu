@@ -937,6 +937,9 @@ int main()
 			CHECK(nw_nk_picspin_cycle_off(NW_NK_CLOUD_B));
 			CHECK(nw_nk_picspin_cycle_off(NW_NK_CLOUD_C));
 			CHECK(nw_nk_picspin_cycle_off(NW_NK_CLOUD_MID));
+			CHECK(nw_nk_picspin_cycle_off(NW_NK_STICK));
+			CHECK(nw_nk_picspin_skip_after_g2(NW_NK_STICK,
+							  0x60000000u));
 			CHECK(nw_nk_picspin_skip_after_g2(NW_NK_CLOUD_A,
 							  0x60000000u));
 			CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_MILL_68K,
@@ -960,6 +963,7 @@ int main()
 				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_A);
 				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_B);
 				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_C);
+				CHECK(npc != rom + (uint32_t)NW_NK_STICK);
 				CHECK(npc > rom + (uint32_t)NW_NK_CLOUD_TAIL);
 				CHECK(!nw_nk_picspin_cycle_off(npc - rom));
 				nops[0] = (uint32_t)NW_NK_PICSPIN_LBZ_OP;
@@ -1015,6 +1019,7 @@ int main()
 					CHECK(npc != rom + live_cloud[ci]);
 				CHECK(npc != rom + (uint32_t)NW_NK_PICSPIN_PAST);
 				CHECK(npc != rom + (uint32_t)NW_NK_MILL_68K);
+				CHECK(npc != rom + (uint32_t)NW_NK_STICK);
 				nops[0] = (uint32_t)NW_NK_PICSPIN_LBZ_OP;
 				npc = nw_nk_picspin_leave_npc(
 					rom + (uint32_t)NW_NK_CLOUD_A, rom,
@@ -1038,6 +1043,67 @@ int main()
 				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_A);
 				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_B);
 				CHECK(!nw_nk_picspin_cycle_off(npc - rom));
+			}
+
+			/* Live 93eb1588: cloud left, stuck on 5032582c. */
+			{
+				const uint32_t stick =
+					rom + (uint32_t)NW_NK_STICK;
+				uint32_t nops[NW_NK_PICSPIN_LEAVE_INSNS];
+				uint32_t spin[1];
+				unsigned k;
+				CHECK(NW_NK_STICK == 0x32582cu);
+				CHECK(!nw_nk_picspin_rom_off(NW_NK_STICK));
+				CHECK(nw_nk_picspin_cycle_off(NW_NK_STICK));
+				CHECK(nw_nk_picspin_skip_after_g2(
+					NW_NK_STICK, 0x60000000u));
+				CHECK(!nw_nk_picspin_skip_after_g2(
+					NW_NK_MILL_68K, 0x60000000u));
+				spin[0] = 0x48000000u; /* b .+0 → self */
+				npc = nw_nk_picspin_leave_npc(stick, rom,
+							      spin, 1);
+				CHECK(npc == stick + 4u);
+				CHECK(npc != stick);
+				CHECK(npc != lbz_pc);
+				CHECK(npc != beq_pc);
+				CHECK(npc != old_b);
+				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_A);
+				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_B);
+				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_C);
+				CHECK(npc != rom + (uint32_t)NW_NK_TAIL_A);
+				CHECK(npc != rom + (uint32_t)NW_NK_PICSPIN_PAST);
+				CHECK(npc != rom + (uint32_t)NW_NK_MILL_68K);
+				for (k = 0; k < (unsigned)NW_NK_PICSPIN_LEAVE_INSNS; k++)
+					nops[k] = 0x60000000u;
+				npc = nw_nk_picspin_leave_npc(
+					stick, rom, nops,
+					(unsigned)NW_NK_PICSPIN_LEAVE_INSNS);
+				CHECK(npc != stick);
+				CHECK(npc != lbz_pc);
+				CHECK(npc != beq_pc);
+				CHECK(npc != old_b);
+				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_A);
+				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_B);
+				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_C);
+				CHECK(npc != rom + (uint32_t)NW_NK_CLOUD_TAIL);
+				CHECK(npc != rom + (uint32_t)NW_NK_TAIL_A);
+				CHECK(npc != rom + (uint32_t)NW_NK_PICSPIN_PAST);
+				CHECK(npc != rom + (uint32_t)NW_NK_MILL_68K);
+				CHECK(!nw_nk_picspin_cycle_off(npc - rom));
+				/* Live skips that left the cloud. */
+				nops[0] = (uint32_t)NW_NK_PICSPIN_LBZ_OP;
+				npc = nw_nk_picspin_leave_npc(
+					rom + 0x325660u, rom, nops,
+					(unsigned)NW_NK_PICSPIN_LEAVE_INSNS);
+				CHECK(npc != stick);
+				npc = nw_nk_picspin_leave_npc(
+					rom + 0x3256ecu, rom, nops,
+					(unsigned)NW_NK_PICSPIN_LEAVE_INSNS);
+				CHECK(npc != stick);
+				npc = nw_nk_picspin_leave_npc(
+					rom + 0x325c84u, rom, nops,
+					(unsigned)NW_NK_PICSPIN_LEAVE_INSNS);
+				CHECK(npc != stick);
 			}
 
 			{

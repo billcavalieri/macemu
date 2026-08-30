@@ -1138,9 +1138,9 @@ void nw_guest_plant_nk_irq(uint32_t kdp)
 	 * NK 1:1-BATs this pointer (live DBAT3 10000003/1000003a) then
 	 * lbz r30,2(r28). Live first DSI was that load (ea=10010002).
 	 * Idle stays 0. After G2, leave_npc local fallthrough.
-	 * Live 92beda4a ~50-PC cloud after 503127cc: skip it; do
-	 * not land on 50325584 / 50326438 / 503128bc. Do not jump
-	 * PAST 0x326000 (mill flood). Mill is not G3.
+	 * Live 93eb1588 stick 5032582c after the 50-PC cloud: skip
+	 * it; do not land on 0x32582c. Do not jump PAST 0x326000
+	 * (mill flood). Mill is not G3.
 	 */
 	const uint32_t pic = nw_nk_irq_pic_ea(RAMBase);
 	if (pic < RAMBase ||

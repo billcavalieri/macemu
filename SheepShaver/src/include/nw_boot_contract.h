@@ -152,12 +152,11 @@ void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
 void nw_guest_seed_rom_htab(uint32_t sdr1);
 /*
  * NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one.
- * Live 92beda4a: skip 50312728 npc=503127cc walked past a8/b8/c8
- * then a ~50-PC NK wait (dominant 50325584 / 50326438 / 503128bc;
- * 2036 heartbeats). Not mill. After first data DSI, leave_npc
- * must not land on that cloud or 503127cc. OLD_B npc=50325aac.
- * Do not jump to PAST 0x326000 or mill +0x366084. Do not skip
- * +0x325a14 before that DSI. PIC idle 0.
+ * Live 93eb1588: 50-PC cloud left, then single-PC stick
+ * heartbeat 5032582c ×2208 (ROM+0x32582c). Not mill. After first
+ * data DSI, leave_npc must not land on 0x32582c or prior waits.
+ * OLD_B npc=50325aac. Do not skip +0x325a14 before that DSI.
+ * Do not jump PAST 0x326000 or mill +0x366084. PIC idle 0.
  */
 enum {
 	NW_NK_IRQ_KDP_OFF = 2272,
@@ -206,7 +205,8 @@ enum {
 	NW_NK_CLOUD_LO_3 = 0x3256ec,
 	NW_NK_CLOUD_HI_3 = 0x32570c,	/* through CYCLE_C */
 	NW_NK_CLOUD_LO_4 = 0x326420,
-	NW_NK_CLOUD_HI_4 = 0x326448
+	NW_NK_CLOUD_HI_4 = 0x326448,
+	NW_NK_STICK = 0x32582c	/* live 93eb1588 heartbeat ×2208 */
 };
 uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
 uint8_t nw_nk_irq_status_idle(void);

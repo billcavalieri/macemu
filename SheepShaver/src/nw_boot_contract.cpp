@@ -605,6 +605,7 @@ int nw_nk_picspin_cycle_off(uint32_t off)
 	case NW_NK_CLOUD_C:
 	case NW_NK_CLOUD_TAIL:
 	case NW_NK_CLOUD_MID:
+	case NW_NK_STICK:
 		return 1;
 	default:
 		break;
@@ -658,9 +659,10 @@ int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op)
 	(void)op;
 	/*
 	 * After G2, skip listed picspin offs, the 27-PC cycle, the
-	 * 503127a8/b8/c8 loop, and the live 92beda4a ~50-PC cloud.
-	 * leave_npc must not land on 50325584 / 50326438 / 503128bc
-	 * or 503127cc. OLD_B npc=50325aac. Never PAST/mill.
+	 * 503127a8/b8/c8 loop, the live 92beda4a ~50-PC cloud, and
+	 * live 93eb1588 stick 5032582c. leave_npc must not land on
+	 * 5032582c / 50325584 / 50326438 / 503128bc / 503127cc.
+	 * OLD_B npc=50325aac. Never PAST/mill.
 	 */
 	return nw_nk_picspin_rom_off(off) || nw_nk_picspin_cycle_off(off);
 }
