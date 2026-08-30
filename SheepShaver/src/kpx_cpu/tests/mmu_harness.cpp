@@ -243,6 +243,10 @@ int main()
 			"G3: HandleInterrupt NK native") == 0);
 		CHECK(strcmp(nw_boot_line_g3_native_op(),
 			"G3: native_op") == 0);
+		CHECK(strcmp(nw_boot_line_g3_dec_arm(),
+			"G3: DEC arm after G2") == 0);
+		CHECK(strcmp(nw_boot_line_g3_walk_dec_ee(),
+			"G3: 171-PC walk DEC blocked MSR[EE]=0") == 0);
 	}
 
 	const uint32_t ram_size = 4u * 1024u * 1024u;
@@ -1252,6 +1256,17 @@ int main()
 		CHECK(nw_handle_interrupt_skip_nested(0, kdp, kdp));
 		CHECK(!nw_handle_interrupt_skip_nested(1, kdp, kdp));
 		CHECK(!nw_handle_interrupt_skip_nested(1, 0x10010000u, kdp));
+
+		CHECK(NW_NK_WALK_B == 0x327b50u);
+		CHECK(NW_NK_WALK_C == 0x327b60u);
+		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_B, 0x60000000u));
+		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_C, 0x60000000u));
+		CHECK(nw_dec_arm_value() == 0x1000u);
+		CHECK(!nw_dec_take_after_g2(0));
+		CHECK(nw_dec_take_after_g2(1));
+		CHECK(nw_dec_ee_on(0x00008000u));
+		CHECK(!nw_dec_ee_on(0));
+		CHECK(!nw_dec_ee_on(0x00000030u)); /* IR+DR, EE off */
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);

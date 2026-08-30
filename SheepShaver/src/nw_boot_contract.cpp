@@ -385,6 +385,31 @@ const char *nw_boot_line_g3_native_op(void)
 	return "G3: native_op";
 }
 
+const char *nw_boot_line_g3_dec_arm(void)
+{
+	return "G3: DEC arm after G2";
+}
+
+const char *nw_boot_line_g3_walk_dec_ee(void)
+{
+	return "G3: 171-PC walk DEC blocked MSR[EE]=0";
+}
+
+uint32_t nw_dec_arm_value(void)
+{
+	return (uint32_t)NW_DEC_ARM_AFTER_G2;
+}
+
+int nw_dec_take_after_g2(int first_dsi)
+{
+	return first_dsi ? 1 : 0;
+}
+
+int nw_dec_ee_on(uint32_t msr)
+{
+	return (msr & (uint32_t)NW_MSR_EE) != 0;
+}
+
 int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base)
 {
 	uint32_t off;

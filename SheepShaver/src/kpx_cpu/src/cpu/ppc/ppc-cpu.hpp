@@ -278,6 +278,13 @@ public:
 #endif
 	~powerpc_cpu();
 
+#ifdef SHEEPSHAVER
+	/* After live G2: short DEC so 0x900 can fire. Not a skip-list. */
+	void nw_arm_dec_after_g2();
+	uint32 guest_dec() const { return dec_; }
+	bool guest_dec_pending() const { return dec_pending_; }
+#endif
+
 	// Specialised memory allocation (needs to be 16-byte aligned)
 	void *operator new(size_t size);
 	void operator delete(void *p);

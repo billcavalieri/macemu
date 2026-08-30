@@ -1335,12 +1335,16 @@ void HandleInterrupt(powerpc_registers *r)
 	if (use_native && run_mode == MODE_68K)
 		run_mode = MODE_NATIVE;
 
+	if (ppc_cpu && nw_guest_first_data_dsi_seen())
+		ppc_cpu->nw_arm_dec_after_g2();
+
 #if NW_BOOT_LOG
 	if (nw_guest_first_data_dsi_seen()) {
 		static int logged;
 		if (logged < 8) {
-			char buf[192];
+			char buf[220];
 			const char *mode = "other";
+			const uint32 msr = ppc32_guest_mmu().msr();
 			if (run_mode == MODE_EMUL_OP)
 				mode = "EMUL_OP";
 			else if (run_mode == MODE_68K)
@@ -1348,11 +1352,14 @@ void HandleInterrupt(powerpc_registers *r)
 			else if (run_mode == MODE_NATIVE)
 				mode = use_native ? "NK native" : "MODE_NATIVE";
 			snprintf(buf, sizeof(buf),
-				 "G3: HandleInterrupt %s pc=%08x r1=%08x kdp=%08x xlm=%d kdp65c=%08x kdp658=%08x",
+				 "G3: HandleInterrupt %s pc=%08x r1=%08x kdp=%08x xlm=%d kdp65c=%08x kdp658=%08x ee=%d dec=%08x pend=%d",
 				 mode, (unsigned)r->pc, (unsigned)r->gpr[1],
 				 KernelDataAddr, ReadMacInt32(XLM_RUN_MODE),
 				 (unsigned)ReadMacInt32(KERNEL_DATA_BASE + 0x65c),
-				 (unsigned)ReadMacInt32(KERNEL_DATA_BASE + 0x658));
+				 (unsigned)ReadMacInt32(KERNEL_DATA_BASE + 0x658),
+				 nw_dec_ee_on(msr),
+				 ppc_cpu ? (unsigned)ppc_cpu->guest_dec() : 0,
+				 ppc_cpu && ppc_cpu->guest_dec_pending() ? 1 : 0);
 			nw_boot_log(buf);
 			logged++;
 		}

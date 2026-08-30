@@ -2494,6 +2494,31 @@ void powerpc_cpu::take_dec()
 #endif
 }
 
+#ifdef SHEEPSHAVER
+void powerpc_cpu::nw_arm_dec_after_g2()
+{
+	if (!nw_guest_first_data_dsi_seen())
+		return;
+	static int armed;
+	if (armed)
+		return;
+	armed = 1;
+	dec_ = nw_dec_arm_value();
+	dec_pending_ = false;
+#if NW_BOOT_LOG
+	{
+		char buf[128];
+		const uint32 msr = ppc32_guest_mmu().msr();
+		snprintf(buf, sizeof(buf),
+			 "G3: DEC arm after G2 pc=%08x msr=%08x ee=%d dec=%08x",
+			 (unsigned)pc(), (unsigned)msr,
+			 nw_dec_ee_on(msr), (unsigned)dec_);
+		nw_boot_log(buf);
+	}
+#endif
+}
+#endif
+
 bool powerpc_cpu::guest_fetch(uint32 *opcode)
 {
 	if (!ppc32_guest_mmu_enabled()) {
@@ -3101,6 +3126,7 @@ void powerpc_cpu::execute(uint32 entry)
 			 * until IR is on so NK has finished probe. */
 			{
 				const uint32 msr_now = ppc32_guest_mmu().msr();
+				nw_arm_dec_after_g2();
 #if NW_BOOT_LOG
 				if ((msr_now & ppc32_mmu::MSR_IR) &&
 				    (msr_now & ppc32_mmu::MSR_DR)) {
@@ -3141,6 +3167,16 @@ void powerpc_cpu::execute(uint32 entry)
 				    (msr_now & (ppc32_mmu::MSR_EE |
 						ppc32_mmu::MSR_IR)) ==
 				    (ppc32_mmu::MSR_EE | ppc32_mmu::MSR_IR)) {
+					if (nw_dec_take_after_g2(
+						    nw_guest_first_data_dsi_seen()
+							    ? 1 : 0)) {
+						/* After G2 do not swallow into
+						 * 0x7fffffff (never ticks). */
+						take_dec();
+						if (dec_ < nw_dec_arm_value())
+							dec_ = 0x00100000u;
+						continue;
+					}
 					/* Boot spent so long with DEC=0 that
 					 * the first IR+EE is an underflow,
 					 * not a programmed tick. Swallow it. */
@@ -3162,6 +3198,22 @@ void powerpc_cpu::execute(uint32 entry)
 							dec_ = 0x00100000u;
 						continue;
 					}
+				} else if (dec_pending_ &&
+					   nw_guest_first_data_dsi_seen() &&
+					   !nw_dec_ee_on(msr_now)) {
+#if NW_BOOT_LOG
+					static int ee_blocked;
+					if (!ee_blocked) {
+						ee_blocked = 1;
+						char buf[128];
+						snprintf(buf, sizeof(buf),
+							 "G3: 171-PC walk DEC blocked MSR[EE]=0 pc=%08x msr=%08x dec=%08x",
+							 (unsigned)pc(),
+							 (unsigned)msr_now,
+							 (unsigned)dec_);
+						nw_boot_log(buf);
+					}
+#endif
 				}
 			}
 			nw_log_pc(pc(), ppc32_guest_mmu().msr());

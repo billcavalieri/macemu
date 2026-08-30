@@ -131,6 +131,8 @@ const char *nw_boot_line_g2_translator_off(void);
 const char *nw_boot_line_g3_sdl2_window(void);
 const char *nw_boot_line_g3_irq_nk(void);	/* NK native IRQ after G2; not mill */
 const char *nw_boot_line_g3_native_op(void);
+const char *nw_boot_line_g3_dec_arm(void);
+const char *nw_boot_line_g3_walk_dec_ee(void);
 
 /*
  * Clip a dirty rect to the screen. Returns 1 if the result is non-empty.
@@ -149,6 +151,19 @@ int nw_handle_interrupt_use_native(int first_dsi, uint32_t pc,
 				     uint32_t rom_base);
 int nw_handle_interrupt_skip_nested(int use_native, uint32_t r1,
 				      uint32_t kdp);
+
+/*
+ * After G2, arm a short DEC so the 171-PC walk can take 0x900.
+ * Reset DEC is 0x7fffffff and ticks 1/256 insns — that never underflows
+ * in a live hang. Do not skip_after_g2 0x327b5x. mill 68k is not G3.
+ */
+enum {
+	NW_MSR_EE = 0x00008000,
+	NW_DEC_ARM_AFTER_G2 = 0x1000
+};
+uint32_t nw_dec_arm_value(void);
+int nw_dec_take_after_g2(int first_dsi);
+int nw_dec_ee_on(uint32_t msr);
 
 void nw_boot_log(const char *line);
 void nw_log_g0_decode(const uint8_t *rom, size_t size);
@@ -235,7 +250,9 @@ enum {
 	 * Dominant 50327b54 (ROM+0x327b54)×33. Walk, not a stick.
 	 * Do not skip_after_g2 this off. mill +0x366084 is not a skip.
 	 */
-	NW_NK_WALK_A = 0x327b54
+	NW_NK_WALK_A = 0x327b54,
+	NW_NK_WALK_B = 0x327b50,	/* live dee26adb ×38; not skip */
+	NW_NK_WALK_C = 0x327b60	/* live dee26adb ×37; not skip */
 };
 uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
 uint8_t nw_nk_irq_status_idle(void);
