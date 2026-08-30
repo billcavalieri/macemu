@@ -577,6 +577,11 @@ int nw_nk_picspin_rom_off(uint32_t off)
 	}
 }
 
+static int nw_nk_off_span(uint32_t off, uint32_t lo, uint32_t hi)
+{
+	return (off & 3u) == 0 && off >= lo && off <= hi;
+}
+
 int nw_nk_picspin_cycle_off(uint32_t off)
 {
 	switch (off) {
@@ -595,15 +600,39 @@ int nw_nk_picspin_cycle_off(uint32_t off)
 	case NW_NK_TAIL_A:
 	case NW_NK_TAIL_B:
 	case NW_NK_TAIL_C:
+	case NW_NK_CLOUD_A:
+	case NW_NK_CLOUD_B:
+	case NW_NK_CLOUD_C:
+	case NW_NK_CLOUD_TAIL:
+	case NW_NK_CLOUD_MID:
 		return 1;
 	default:
 		break;
 	}
-	/* Live b19886d6: 503127a8/b8/c8 are 16 bytes apart; stay the
-	 * whole aligned range so leave_npc cannot land in the body. */
-	if (off >= (uint32_t)NW_NK_TAIL_LO &&
-	    off <= (uint32_t)NW_NK_TAIL_HI &&
-	    (off & 3u) == 0)
+	/* Live b19886d6: 503127a8/b8/c8. Live 92beda4a landed on
+	 * 503127cc (TAIL_HI+4); stay through that insn. */
+	if (nw_nk_off_span(off, (uint32_t)NW_NK_TAIL_LO,
+			   (uint32_t)NW_NK_CLOUD_TAIL))
+		return 1;
+	/* Live 92beda4a ~50-PC NK wait. Aligned spans so leave_npc
+	 * cannot land in a wait body. Mill and PAST stay out. */
+	if (nw_nk_off_span(off, (uint32_t)NW_NK_CLOUD_LO_0,
+			   (uint32_t)NW_NK_CLOUD_HI_0))
+		return 1;
+	if (nw_nk_off_span(off, (uint32_t)NW_NK_CLOUD_LO_1,
+			   (uint32_t)NW_NK_CLOUD_HI_1))
+		return 1;
+	if (nw_nk_off_span(off, (uint32_t)NW_NK_CLOUD_LO_2,
+			   (uint32_t)NW_NK_CLOUD_HI_2))
+		return 1;
+	if (nw_nk_off_span(off, (uint32_t)NW_NK_CLOUD_LO_3,
+			   (uint32_t)NW_NK_CLOUD_HI_3))
+		return 1;
+	if (nw_nk_off_span(off, (uint32_t)NW_NK_CLOUD_LO_4,
+			   (uint32_t)NW_NK_CLOUD_HI_4))
+		return 1;
+	if (nw_nk_off_span(off, (uint32_t)NW_NK_CYCLE_A,
+			   (uint32_t)NW_NK_CYCLE_OLD_PAST))
 		return 1;
 	return 0;
 }
@@ -628,9 +657,10 @@ int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op)
 {
 	(void)op;
 	/*
-	 * After G2, skip listed picspin offs, the 27-PC cycle, and the
-	 * live 503127a8/b8/c8 loop. Caller uses leave_npc (OLD_B
-	 * npc=50325aac). Do not land on the tail trio.
+	 * After G2, skip listed picspin offs, the 27-PC cycle, the
+	 * 503127a8/b8/c8 loop, and the live 92beda4a ~50-PC cloud.
+	 * leave_npc must not land on 50325584 / 50326438 / 503128bc
+	 * or 503127cc. OLD_B npc=50325aac. Never PAST/mill.
 	 */
 	return nw_nk_picspin_rom_off(off) || nw_nk_picspin_cycle_off(off);
 }

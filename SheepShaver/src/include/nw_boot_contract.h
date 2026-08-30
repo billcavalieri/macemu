@@ -152,12 +152,12 @@ void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
 void nw_guest_seed_rom_htab(uint32_t sdr1);
 /*
  * NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one.
- * Live b62e7717: skip pc=50325a20 npc=50326000 (PAST) left the
- * 27-set then dominant 50366084 mill 68k flood — mill is not G3
- * and is not WINDOW. Do not jump picspin to 0x326000 or mill
- * +0x366084. After first data DSI, leave_npc local fallthrough
- * (OLD_B npc=50325aac). Do not skip +0x325a14 before that DSI.
- * PIC idle 0.
+ * Live 92beda4a: skip 50312728 npc=503127cc walked past a8/b8/c8
+ * then a ~50-PC NK wait (dominant 50325584 / 50326438 / 503128bc;
+ * 2036 heartbeats). Not mill. After first data DSI, leave_npc
+ * must not land on that cloud or 503127cc. OLD_B npc=50325aac.
+ * Do not jump to PAST 0x326000 or mill +0x366084. Do not skip
+ * +0x325a14 before that DSI. PIC idle 0.
  */
 enum {
 	NW_NK_IRQ_KDP_OFF = 2272,
@@ -190,7 +190,23 @@ enum {
 	NW_NK_TAIL_B = 0x3127b8,
 	NW_NK_TAIL_C = 0x3127c8,
 	NW_NK_TAIL_LO = 0x3127a8,
-	NW_NK_TAIL_HI = 0x3127c8
+	NW_NK_TAIL_HI = 0x3127c8,
+	/* Live 92beda4a ~50-PC cloud after npc=503127cc. */
+	NW_NK_CLOUD_A = 0x325584,	/* dominant */
+	NW_NK_CLOUD_B = 0x326438,
+	NW_NK_CLOUD_C = 0x3128bc,
+	NW_NK_CLOUD_TAIL = 0x3127cc,	/* skip from 0x312728 landed here */
+	NW_NK_CLOUD_MID = 0x325660,
+	NW_NK_CLOUD_LO_0 = 0x312700,
+	NW_NK_CLOUD_HI_0 = 0x312728,
+	NW_NK_CLOUD_LO_1 = 0x31289c,
+	NW_NK_CLOUD_HI_1 = 0x3128c0,
+	NW_NK_CLOUD_LO_2 = 0x325554,
+	NW_NK_CLOUD_HI_2 = 0x32558c,
+	NW_NK_CLOUD_LO_3 = 0x3256ec,
+	NW_NK_CLOUD_HI_3 = 0x32570c,	/* through CYCLE_C */
+	NW_NK_CLOUD_LO_4 = 0x326420,
+	NW_NK_CLOUD_HI_4 = 0x326448
 };
 uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
 uint8_t nw_nk_irq_status_idle(void);

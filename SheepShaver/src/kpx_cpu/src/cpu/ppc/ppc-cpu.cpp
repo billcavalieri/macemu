@@ -22464,10 +22464,12 @@ void powerpc_cpu::execute(uint32 entry)
 					}
 #endif
 					/*
-					 * Live b62e7717: npc=50326000 then
-					 * mill 50366084 flood (not G3,
-					 * not WINDOW). leave_npc local
-					 * fallthrough; never PAST/mill.
+					 * Live 92beda4a: skip 50312728
+					 * npc=503127cc then ~50-PC NK
+					 * wait (50325584 / 50326438 /
+					 * 503128bc). Not mill, not G3,
+					 * not WINDOW. leave_npc must
+					 * not land on that cloud.
 					 * OLD_B npc stays 50325aac.
 					 * +0x325a14 still misses once.
 					 * PIC idle 0. Do not mill 68k.
