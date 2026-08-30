@@ -1198,6 +1198,7 @@ void powerpc_cpu::execute_mtmsr(uint32 opcode)
 		ppc32_guest_mmu().set_msr(msr);
 #ifdef SHEEPSHAVER
 		nw_log_msr_dr(msr);
+		nw_log_msr_write("mtmsr", pc(), msr);
 #endif
 	}
 	increment_pc(4);
@@ -1248,6 +1249,7 @@ void powerpc_cpu::execute_rfi(uint32 opcode)
 		ppc32_guest_mmu().set_msr(srr1_);
 #ifdef SHEEPSHAVER
 		nw_log_msr_dr(srr1_);
+		nw_log_msr_write("rfi", srr0_, srr1_);
 #endif
 		pc() = srr0_;
 		return;

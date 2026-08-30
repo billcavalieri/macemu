@@ -247,6 +247,8 @@ int main()
 			"G3: DEC arm after G2") == 0);
 		CHECK(strcmp(nw_boot_line_g3_walk_dec_ee(),
 			"G3: 171-PC walk DEC blocked MSR[EE]=0") == 0);
+		CHECK(strcmp(nw_boot_line_g3_dec_take(),
+			"G3: DEC 0x900") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_guest(),
 			"G3: FB guest dirty") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_none(),
@@ -1275,11 +1277,18 @@ int main()
 		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_MILL_68K,
 						     0x4e800020u));
 		CHECK(NW_MSR_LIVE_EE_OFF == 0x00002000u);
+		CHECK(NW_DEC_VECTOR_EA == 0x900u);
 		CHECK(!nw_dec_can_yield((uint32_t)NW_MSR_LIVE_EE_OFF));
 		CHECK(!nw_dec_can_yield((uint32_t)NW_MSR_EE)); /* EE, IR off */
 		CHECK(nw_dec_can_yield((uint32_t)NW_MSR_EE |
 					 (uint32_t)NW_MSR_IR));
-		CHECK(nw_video_guest_paint_blocked(
+		/* After G2 host takes 0x900 even if guest EE is off. */
+		CHECK(nw_dec_host_take(1, (uint32_t)NW_MSR_LIVE_EE_OFF));
+		CHECK(!nw_dec_ee_on((uint32_t)NW_MSR_LIVE_EE_OFF));
+		CHECK(!nw_dec_host_take(0, (uint32_t)NW_MSR_LIVE_EE_OFF));
+		CHECK(nw_dec_host_take(0, (uint32_t)NW_MSR_EE |
+					  (uint32_t)NW_MSR_IR));
+		CHECK(!nw_video_guest_paint_blocked(
 			1, (uint32_t)NW_MSR_LIVE_EE_OFF, 0, 0));
 		CHECK(!nw_video_guest_paint_blocked(
 			1, (uint32_t)NW_MSR_EE | (uint32_t)NW_MSR_IR, 0, 0));

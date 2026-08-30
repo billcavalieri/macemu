@@ -2481,13 +2481,18 @@ void powerpc_cpu::take_dec()
 		static int n;
 		if (!n) {
 			n = 1;
-			char buf[80];
+			const uint32 op0 = vm_read_memory_4(pc());
+			char buf[160];
 			snprintf(buf, sizeof(buf),
-				 "G3: DEC to=%08x SPRG3=%08x srr0=%08x srr1=%08x dec=%08x",
+				 "G3: DEC 0x900 to=%08x SPRG3=%08x srr0=%08x srr1=%08x ee=%d op=%08x dec=%08x",
 				 (unsigned)pc(), (unsigned)sprg_[3],
 				 (unsigned)srr0_, (unsigned)srr1_,
-				 (unsigned)dec_);
+				 nw_dec_ee_on(srr1_),
+				 (unsigned)op0, (unsigned)dec_);
 			nw_boot_log(buf);
+			if (op0 == 0) {
+				nw_boot_log("G3: DEC 0x900 vector empty");
+			}
 		}
 	}
 #endif
@@ -3122,10 +3127,13 @@ void powerpc_cpu::execute(uint32 entry)
 			}
 			/* Per-insn DEC underflows the instant EE is set
 			 * (reset DEC is 0). Real DecrementerIntSys rfi's
-			 * after mtdec ClockRateHz; 0 rate storms. Wait
-			 * until IR is on so NK has finished probe. */
+			 * after mtdec ClockRateHz; 0 rate storms. Pre-G2
+			 * wait for EE+IR so NK has finished probe. After
+			 * G2, live 00002000 has neither; take anyway. */
 			{
 				const uint32 msr_now = ppc32_guest_mmu().msr();
+				const int first_dsi =
+					nw_guest_first_data_dsi_seen() ? 1 : 0;
 				nw_arm_dec_after_g2();
 #if NW_BOOT_LOG
 				if ((msr_now & ppc32_mmu::MSR_IR) &&
@@ -3143,7 +3151,7 @@ void powerpc_cpu::execute(uint32 entry)
 							 (unsigned)msr_now,
 							 (int)ppc32_guest_mmu().ram_bats_delayed(),
 							 (unsigned)du, (unsigned)dl,
-							 nw_guest_first_data_dsi_seen());
+							 first_dsi);
 						nw_boot_log(buf);
 						/* Do not identity-map RAM here.
 						 * A 128 MiB DBAT at RAMBase
@@ -3164,14 +3172,12 @@ void powerpc_cpu::execute(uint32 entry)
 				}
 #endif
 				if (dec_pending_ &&
-				    (msr_now & (ppc32_mmu::MSR_EE |
-						ppc32_mmu::MSR_IR)) ==
-				    (ppc32_mmu::MSR_EE | ppc32_mmu::MSR_IR)) {
-					if (nw_dec_take_after_g2(
-						    nw_guest_first_data_dsi_seen()
-							    ? 1 : 0)) {
-						/* After G2 do not swallow into
-						 * 0x7fffffff (never ticks). */
+				    nw_dec_host_take(first_dsi, msr_now)) {
+					if (nw_dec_take_after_g2(first_dsi)) {
+						/* After G2: live walk has
+						 * EE=0 IR=0. Do not wait for
+						 * mtmsr EE (guest never wrote
+						 * it). Do not or-in EE. */
 						take_dec();
 						if (dec_ < nw_dec_arm_value())
 							dec_ = 0x00100000u;
@@ -3198,22 +3204,6 @@ void powerpc_cpu::execute(uint32 entry)
 							dec_ = 0x00100000u;
 						continue;
 					}
-				} else if (dec_pending_ &&
-					   nw_guest_first_data_dsi_seen() &&
-					   !nw_dec_ee_on(msr_now)) {
-#if NW_BOOT_LOG
-					static int ee_blocked;
-					if (!ee_blocked) {
-						ee_blocked = 1;
-						char buf[128];
-						snprintf(buf, sizeof(buf),
-							 "G3: 171-PC walk DEC blocked MSR[EE]=0 pc=%08x msr=%08x dec=%08x",
-							 (unsigned)pc(),
-							 (unsigned)msr_now,
-							 (unsigned)dec_);
-						nw_boot_log(buf);
-					}
-#endif
 				}
 			}
 			nw_log_pc(pc(), ppc32_guest_mmu().msr());

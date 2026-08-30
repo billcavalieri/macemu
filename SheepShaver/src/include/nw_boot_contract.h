@@ -133,6 +133,7 @@ const char *nw_boot_line_g3_irq_nk(void);	/* NK native IRQ after G2; not mill */
 const char *nw_boot_line_g3_native_op(void);
 const char *nw_boot_line_g3_dec_arm(void);
 const char *nw_boot_line_g3_walk_dec_ee(void);
+const char *nw_boot_line_g3_dec_take(void);	/* host took 0x900; not G3 */
 const char *nw_boot_line_g3_fb_guest(void);
 const char *nw_boot_line_g3_fb_none(void);	/* named reason: EE=0, not host n=1 */
 
@@ -182,17 +183,26 @@ enum {
 	NW_MSR_EE = 0x00008000,
 	NW_MSR_IR = 0x00000020,
 	NW_DEC_ARM_AFTER_G2 = 0x1000,
-	NW_MSR_LIVE_EE_OFF = 0x00002000	/* live c81f88bd at 50325600 */
+	NW_DEC_VECTOR_EA = 0x900,
+	NW_MSR_LIVE_EE_OFF = 0x00002000	/* live 7b349dc2 at 50325600 */
 };
 uint32_t nw_dec_arm_value(void);
 int nw_dec_take_after_g2(int first_dsi);
 int nw_dec_ee_on(uint32_t msr);
-/* take_dec after G2 requires EE+IR. Live 00002000 has neither.
- * Do not mill-skip the walk. Do not flip EE. */
+/* Guest MSR has EE+IR. Architectural; live 00002000 is 0. */
 int nw_dec_can_yield(uint32_t msr);
 /*
- * After G2, EE/IR off so DEC never yields: guest never reaches
- * VideoDoDriverIO / NQD / FB writes. 1 = the_buffer==copy for that reason.
+ * Host take_dec gate. After G2, pending DEC yields even when live
+ * msr=00002000 has neither EE nor IR. Guest never wrote EE (no
+ * mtmsrd on PPC32; mtmsr/rfi did not set it). Do not or-in EE.
+ * Do not mill-skip the 171-PC walk. Pre-G2 still needs EE+IR so
+ * DEC=0 at reset does not storm the probe.
+ */
+int nw_dec_host_take(int first_dsi, uint32_t msr);
+/*
+ * After G2, host takes pending DEC even if guest EE is off, so this
+ * is no longer 1 for live 00002000. 1 only if the host still will not
+ * take 0x900. NQD / dirty still win.
  */
 int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
 				   int nqd, int dirty);
@@ -205,6 +215,7 @@ void nw_log_g1_hwinit(void);
 void nw_log_g1_patch_skip(int is_newworld);
 void nw_note_mtsdr1(void);
 void nw_log_msr_dr(uint32_t msr);
+void nw_log_msr_write(const char *how, uint32_t pc, uint32_t msr);
 void nw_log_first_dsi(uint32_t srr0, uint32_t dar, int dr_on_hit);
 void nw_log_translator_off(void);
 void nw_log_pc(uint32_t pc, uint32_t msr);

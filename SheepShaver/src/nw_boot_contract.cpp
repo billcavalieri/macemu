@@ -395,6 +395,11 @@ const char *nw_boot_line_g3_walk_dec_ee(void)
 	return "G3: 171-PC walk DEC blocked MSR[EE]=0";
 }
 
+const char *nw_boot_line_g3_dec_take(void)
+{
+	return "G3: DEC 0x900";
+}
+
 const char *nw_boot_line_g3_fb_guest(void)
 {
 	return "G3: FB guest dirty";
@@ -455,6 +460,15 @@ int nw_dec_can_yield(uint32_t msr)
 	return ((msr & need) == need) ? 1 : 0;
 }
 
+int nw_dec_host_take(int first_dsi, uint32_t msr)
+{
+	/* After G2, live 00002000 never wrote EE. Take pending DEC
+	 * anyway. Do not or-in MSR[EE]. Pre-G2 still needs EE+IR. */
+	if (first_dsi)
+		return 1;
+	return nw_dec_can_yield(msr);
+}
+
 int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
 				   int nqd, int dirty)
 {
@@ -462,9 +476,8 @@ int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
 		return 0;
 	if (nqd || dirty)
 		return 0;
-	/* Live c81f88bd msr=00002000: DEC/0x900 cannot fire. Guest
-	 * never reaches VideoDoDriverIO / NQD. Do not mill-skip. */
-	return nw_dec_can_yield(msr) ? 0 : 1;
+	/* Host takes 0x900 after G2 even if guest EE is off. */
+	return nw_dec_host_take(first_dsi, msr) ? 0 : 1;
 }
 
 int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base)
@@ -581,6 +594,37 @@ void nw_log_msr_dr(uint32_t msr)
 		return;
 	logged = 1;
 	nw_boot_log("G2: MSR[DR] on");
+}
+
+void nw_log_msr_write(const char *how, uint32_t pc, uint32_t msr)
+{
+#if NW_BOOT_LOG
+	static unsigned n;
+	static int ee_on;
+	char buf[96];
+
+	if (how == NULL)
+		how = "msr";
+	if (nw_dec_ee_on(msr) && !ee_on) {
+		ee_on = 1;
+		snprintf(buf, sizeof(buf),
+			 "G3: %s EE on pc=%08x msr=%08x",
+			 how, (unsigned)pc, (unsigned)msr);
+		nw_boot_log(buf);
+	}
+	if (n < 8) {
+		n++;
+		snprintf(buf, sizeof(buf),
+			 "G3: %s n=%u pc=%08x msr=%08x ee=%d",
+			 how, n, (unsigned)pc, (unsigned)msr,
+			 nw_dec_ee_on(msr));
+		nw_boot_log(buf);
+	}
+#else
+	(void)how;
+	(void)pc;
+	(void)msr;
+#endif
 }
 
 void nw_log_g1_hwinit(void)
