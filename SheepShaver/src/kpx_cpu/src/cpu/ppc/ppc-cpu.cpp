@@ -105,6 +105,20 @@ static int nw_dec_hotints_spin(uint32 pc, uint32 op)
 		return 1;
 	return 0;
 }
+/* Live c3b5d982: srr1=17efbb80 is a KDP pointer, not MSR.
+ * Upper 16 bits must be 0. Do not treat it as EE. */
+static int nw_dec_srr1_ok(uint32 srr1)
+{
+	if (srr1 & 0xffff0000u)
+		return 0;
+	return 1;
+}
+static uint32 nw_dec_srr1_use(uint32 srr1)
+{
+	if (nw_dec_srr1_ok(srr1))
+		return srr1;
+	return (uint32)NW_MSR_LIVE_EE_OFF;
+}
 static int g3_ea_data(uint32 a)
 {
 	a = g3_rom0(a);
@@ -2472,12 +2486,12 @@ uint32 powerpc_cpu::hotints_vector(uint32 vec) const
 	xer().set(nw_dec_handler_xer); \
 	sprg_[1] = nw_dec_handler_gpr[1]; \
 	sprg_[2] = nw_dec_handler_lr; \
-	ppc32_guest_mmu().set_msr(nw_dec_handler_srr1); \
-	nw_log_msr_dr(nw_dec_handler_srr1); \
+	ppc32_guest_mmu().set_msr(nw_dec_srr1_use(nw_dec_handler_srr1)); \
+	nw_log_msr_dr(nw_dec_srr1_use(nw_dec_handler_srr1)); \
 	nw_log_msr_write("rfi", nw_dec_handler_srr0, \
-			 nw_dec_handler_srr1); \
+			 nw_dec_srr1_use(nw_dec_handler_srr1)); \
 	srr0_ = nw_dec_handler_srr0; \
-	srr1_ = nw_dec_handler_srr1; \
+	srr1_ = nw_dec_srr1_use(nw_dec_handler_srr1); \
 	pc() = nw_dec_handler_srr0; \
 } while (0)
 #endif
@@ -2552,7 +2566,28 @@ void powerpc_cpu::take_dec()
 {
 	ppc32_mmu &mmu = ppc32_guest_mmu();
 	srr0_ = pc();
+#ifdef SHEEPSHAVER
+	{
+		const uint32 msr_raw = mmu.msr();
+		srr1_ = nw_dec_srr1_use(msr_raw);
+#if NW_BOOT_LOG
+		if (!nw_dec_srr1_ok(msr_raw)) {
+			static int nclob;
+			if (!nclob) {
+				nclob = 1;
+				char buf[96];
+				snprintf(buf, sizeof(buf),
+					 "G3: DEC srr1 clobber was=%08x use=%08x",
+					 (unsigned)msr_raw,
+					 (unsigned)srr1_);
+				nw_boot_log(buf);
+			}
+		}
+#endif
+	}
+#else
 	srr1_ = mmu.msr();
+#endif
 	mmu.set_msr(srr1_ & ~ppc32_mmu::MSR_EXC_CLEAR);
 	sprg_[1] = gpr(1);
 	sprg_[2] = lr();
@@ -3258,21 +3293,30 @@ void powerpc_cpu::execute(uint32 entry)
 				nw_arm_dec_after_g2();
 				if (nw_dec_in_handler &&
 				    pc() == nw_dec_handler_srr0) {
+					const uint32 s1 =
+						nw_dec_srr1_use(
+							nw_dec_handler_srr1);
 #if NW_BOOT_LOG
 					static int left;
 					if (!left) {
 						left = 1;
-						char buf[128];
+						char buf[144];
 						snprintf(buf, sizeof(buf),
-							 "%s from=%08x to=%08x srr0=%08x",
+							 "%s from=%08x to=%08x srr0=%08x srr1=%08x",
 							 nw_boot_line_g3_dec_left(),
 							 (unsigned)nw_dec_handler_from,
 							 (unsigned)pc(),
-							 (unsigned)nw_dec_handler_srr0);
+							 (unsigned)nw_dec_handler_srr0,
+							 (unsigned)s1);
 						nw_boot_log(buf);
 					}
 #endif
 					nw_dec_in_handler = 0;
+					/* NK may have mtspr'd SRR1 to a
+					 * pointer (live 17efbb80). Restore
+					 * take_dec MSR. Do not or-in EE. */
+					ppc32_guest_mmu().set_msr(s1);
+					srr1_ = s1;
 					/* Handler may have mtdec 0. Do not
 					 * re-take 0x900 on this timeslice. */
 					dec_pending_ = false;
