@@ -29,6 +29,12 @@ enum {
 	/* Exception vector page copied to EA 0 (SPRG3 = VecTbl). */
 	NW_NK_VEC_TEMPLATE = 0x300000,
 	NW_NK_VEC_TEMPLATE_SIZE = 0x1000,
+	NW_DSI_VECTOR_EA = 0x300,
+	NW_DSI_VECTOR_SLOT = 0x100,		/* 0x300..0x3ff */
+	NW_DSI_VEC_MTSPRG1 = 0x7c3143a6,	/* mtsprg 1,r1 */
+	NW_DSI_VEC_MTSPRG2 = 0x7c3243a6,	/* mtsprg 2,lr */
+	NW_DSI_VEC_MTLR = 0x7c2803a6,		/* mtlr r1 */
+	NW_DSI_VEC_BLR = 0x4e800020,
 	NW_KDP_PAGE_SIZE = 0x1000,
 
 	/* NKProcessorState trampoline (elliotnunn/NanoKernel). DO NOT reorder. */
@@ -149,6 +155,10 @@ void nw_guest_plant_nk_irq(uint32_t kdp);
 /* After first DSI: 1:1 BAT RAM+ROM so HotInts MemRetry can HIT under DR. */
 void nw_guest_map_ram_rom_identity(void);
 void nw_guest_map_kernel_data(void);
+/* Write the DSI slot at EA 0x300 (host RAM image, no guest ROM). */
+void nw_fill_dsi_vector_be(uint8_t *mem, size_t mem_size, uint32_t handler);
+/* Guest: copy NK VecTbl DSI slot to PA 0x300; synthesize if template is empty. */
+void nw_guest_plant_dsi_vector(void);
 /* 68k inner loop at ROM+0x366084: table is ROM+0x380000 + opcode*8. */
 int nw_guest_68k_dispatch(uint32_t *pc, uint32_t *r24, uint32_t *r27,
 			  uint32_t *r29);

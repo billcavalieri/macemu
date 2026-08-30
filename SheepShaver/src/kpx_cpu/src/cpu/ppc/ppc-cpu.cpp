@@ -2203,10 +2203,11 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 	if (ppc32_guest_mmu_enabled()) {
 		extern uint32 ROMBase;
 		/*
-		 * Hardware 0x300 is gZeroPage (zeros); ba cannot reach ROM.
-		 * The 0x300 stub would mtsprg 1,r1 / mtsprg 2,lr then enter
-		 * HotInts DataStorageInt (IR/DR already off).
+		 * Hardware 0x300 is the IVT DSI slot. NK's copy is often
+		 * still zeros; plant a trampoline to HotInts DataStorageInt
+		 * so the guest does not execute opcode 0 at 0x300.
 		 */
+		nw_guest_plant_dsi_vector();
 		sprg_[1] = gpr(1);
 		sprg_[2] = lr();
 		if (sprg_[0] == 0) {
@@ -2281,7 +2282,6 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 				pc() = srr0_;
 #if NW_BOOT_LOG
 				nw_guest_seed_rom_htab(mmu.sdr1());
-				nw_log_first_dsi(dsi.srr0, dsi.dar, 1);
 				static unsigned n_dsi_retry;
 				n_dsi_retry++;
 				if (n_dsi_retry <= 8) {
@@ -2309,7 +2309,9 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 			const ppc32_xlate_result hit =
 				dsi.lwz_faulting_insn(mmu);
 			mmu.set_msr(saved_msr);
-			nw_log_first_dsi(dsi.srr0, dsi.dar, hit.ok ? 1 : 0);
+			const int vec_ok = vm_read_memory_4(NW_DSI_VECTOR_EA) != 0;
+			nw_log_first_dsi(dsi.srr0, dsi.dar,
+					 (hit.ok && vec_ok) ? 1 : 0);
 			static unsigned n_dsi;
 			n_dsi++;
 			if (n_dsi <= 8) {
@@ -2530,6 +2532,17 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 	}
 #endif
 	*opcode = vm_read_memory_4(r.pa);
+#ifdef SHEEPSHAVER
+	/*
+	 * After a data DSI the CPU fetches 0x300 with IR off (identity PA).
+	 * NK's VecTbl copy is often still zeros there; plant the DSI slot
+	 * so HotInts runs instead of opcode 0.
+	 */
+	if ((pc() & ~0xffu) == (uint32)NW_DSI_VECTOR_EA && *opcode == 0) {
+		nw_guest_plant_dsi_vector();
+		*opcode = vm_read_memory_4(r.pa);
+	}
+#endif
 	return true;
 }
 
@@ -3082,7 +3095,6 @@ void powerpc_cpu::execute(uint32 entry)
 							 (unsigned)msr_now);
 						nw_boot_log(buf);
 						nw_guest_map_ram_rom_identity();
-						nw_log_first_dsi(pc(), 0x68f36991u, 1);
 					}
 					if (ir_trace < 40) {
 						ir_trace++;

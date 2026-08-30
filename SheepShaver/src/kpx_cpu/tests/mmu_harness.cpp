@@ -502,6 +502,93 @@ int main()
 		CHECK(lwz.pa == (rpn << 12));
 	}
 
+	/*
+	 * G2: data DSI, then DR-on lwz at SRR0 HITs; executing 0x300 is
+	 * not zeros once NK has installed the DSI slot. IR/DR-off fetch
+	 * of the vector is identity into that planted page.
+	 */
+	{
+		mmu.reset();
+		mmu.set_physical_memory(&ram[0], ram_size);
+		memset(&ram[0], 0, ram_size);
+
+		const uint32_t fault_pc = 0x00004000u;
+		const uint32_t store_ea = 0x12345000u;
+		const uint32_t handler = 0x00005000u;
+		nw_fill_dsi_vector_be(&ram[0], ram_size, handler);
+		be32_store(&ram[0], fault_pc, 0x90840000u);
+
+		CHECK(nw_be32_load(&ram[0], NW_DSI_VECTOR_EA) != 0);
+		CHECK(nw_be32_load(&ram[0], NW_DSI_VECTOR_EA) ==
+		      (uint32_t)NW_DSI_VEC_MTSPRG1);
+
+		mmu.set_dbat(0, 0x00000002u, 0x00000000u);
+		mmu.set_ibat(0, 0x00000002u, 0x00000000u);
+		mmu.set_msr(ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR);
+
+		CHECK(!mmu.translate(store_ea, PPC32_XLATE_DR, 4).ok);
+
+		ppc32_hotints_dsi dsi;
+		dsi.take_data_dsi(mmu, fault_pc, store_ea, true);
+		CHECK(dsi.srr0 == fault_pc);
+		CHECK(dsi.dar == store_ea);
+		CHECK(dsi.vector == (uint32_t)NW_DSI_VECTOR_EA);
+		CHECK((mmu.msr() & (ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR)) == 0);
+		CHECK(mmu.ivt_mapped());
+
+		const ppc32_xlate_result vec =
+			mmu.translate(NW_DSI_VECTOR_EA, PPC32_XLATE_IR, 4);
+		CHECK(vec.ok);
+		CHECK(vec.pa == (uint32_t)NW_DSI_VECTOR_EA);
+		CHECK(nw_be32_load(&ram[0], vec.pa) != 0);
+		CHECK(nw_be32_load(&ram[0], vec.pa) ==
+		      (uint32_t)NW_DSI_VEC_MTSPRG1);
+
+		const ppc32_xlate_result lwz = dsi.lwz_faulting_insn(mmu);
+		CHECK(lwz.ok);
+		CHECK(lwz.pa == fault_pc);
+		CHECK(!mmu.translate(store_ea, PPC32_XLATE_DR, 4).ok);
+
+		mmu.set_msr(ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR);
+		const ppc32_xlate_result ir_vec =
+			mmu.translate(NW_DSI_VECTOR_EA, PPC32_XLATE_IR, 4);
+		CHECK(ir_vec.ok);
+		CHECK(nw_be32_load(&ram[0], ir_vec.pa) != 0);
+	}
+
+	/* G2: 0x300 HITs via IVT with no BAT and no HTAB (IR/DR on). */
+	{
+		mmu.reset();
+		mmu.set_physical_memory(&ram[0], ram_size);
+		memset(&ram[0], 0, ram_size);
+		nw_fill_dsi_vector_be(&ram[0], ram_size, 0x00004000u);
+		mmu.set_ivt_mapped(true);
+		mmu.set_msr(ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR);
+		const ppc32_xlate_result hit =
+			mmu.translate(NW_DSI_VECTOR_EA, PPC32_XLATE_IR, 4);
+		CHECK(hit.ok);
+		CHECK(hit.pa == (uint32_t)NW_DSI_VECTOR_EA);
+		CHECK(nw_be32_load(&ram[0], hit.pa) != 0);
+		const ppc32_xlate_result miss =
+			mmu.translate(0x12345000u, PPC32_XLATE_DR, 4);
+		CHECK(!miss.ok);
+	}
+
+	/* 9.0.4: IVT off, IR/DR off, 0x300 is identity (zeros allowed). */
+	{
+		mmu.reset();
+		mmu.set_physical_memory(&ram[0], ram_size);
+		memset(&ram[0], 0, ram_size);
+		CHECK(!mmu.ivt_mapped());
+		mmu.set_msr(0);
+		const ppc32_xlate_result id =
+			mmu.translate(NW_DSI_VECTOR_EA, PPC32_XLATE_IR, 4);
+		CHECK(id.ok);
+		CHECK(id.pa == (uint32_t)NW_DSI_VECTOR_EA);
+		CHECK(nw_be32_load(&ram[0], id.pa) == 0);
+		CHECK(!ppc32_guest_mmu_enabled());
+	}
+
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

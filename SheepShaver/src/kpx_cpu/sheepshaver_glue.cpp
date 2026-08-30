@@ -926,13 +926,17 @@ void nw_guest_map_ram_rom_identity(void)
 	const uint32_t lowu = 3u; /* BEPI 0, BL 0 = 128KiB, Vs+Vp */
 	const uint32_t lowl = low_pa | 0x02u;
 	mmu.set_dbat(3, lowu, lowl);
-	if (ReadMacInt32(ROMBase + NW_NK_VEC_TEMPLATE) == 0x7c3143a6u) {
+	if (ReadMacInt32(ROMBase + NW_NK_VEC_TEMPLATE + NW_DSI_VECTOR_EA) != 0) {
 		for (uint32 i = 0; i < NW_NK_VEC_TEMPLATE_SIZE; i += 4) {
 			const uint32 w = ReadMacInt32(ROMBase + NW_NK_VEC_TEMPLATE + i);
 			WriteMacInt32(i, w);
 			WriteMacInt32(low_pa + i, w);
 		}
 	}
+	nw_guest_plant_dsi_vector();
+	for (uint32 i = 0; i < 0x18u; i += 4)
+		WriteMacInt32(low_pa + NW_DSI_VECTOR_EA + i,
+			      ReadMacInt32(NW_DSI_VECTOR_EA + i));
 	/* 0x2804 = kernel data (must be in RAM BAT). 0x2818 = IRQ nest. */
 	WriteMacInt32(low_pa + XLM_KERNEL_DATA, KERNEL_DATA_BASE);
 	WriteMacInt32(low_pa + XLM_IRQ_NEST, 0);
@@ -1071,6 +1075,34 @@ int nw_guest_68k_dispatch(uint32_t *pc, uint32_t *r24, uint32_t *r27,
 	return 1;
 }
 
+void nw_guest_plant_dsi_vector(void)
+{
+	extern uint32 ROMBase;
+	ppc32_guest_mmu().set_ivt_mapped(true);
+
+	const uint32 handler = ROMBase + NW_NK_DATA_STORAGE_INT;
+	uint8 slot[0x400];
+	memset(slot, 0, sizeof(slot));
+	nw_fill_dsi_vector_be(slot, sizeof(slot), handler);
+	for (uint32 i = 0; i < 0x18u; i += 4)
+		WriteMacInt32(NW_DSI_VECTOR_EA + i,
+			      nw_be32_load(slot, NW_DSI_VECTOR_EA + i));
+#if NW_BOOT_LOG
+	{
+		static int logged;
+		if (!logged) {
+			logged = 1;
+			char buf[96];
+			snprintf(buf, sizeof(buf),
+				 "G2: plant DSI vector 0x300 op=%08x to=%08x",
+				 (unsigned)ReadMacInt32(NW_DSI_VECTOR_EA),
+				 (unsigned)handler);
+			nw_boot_log(buf);
+		}
+	}
+#endif
+}
+
 void nw_guest_plant_nk_irq(uint32_t kdp)
 {
 	/* 0x3259c0: lwz r28, -2272(r1); r28==0 returns -1 forever. */
@@ -1125,6 +1157,7 @@ void init_emul_ppc(void)
 		ppc_cpu->set_register(powerpc_registers::GPR(5), any_register(sysinfo));
 		ppc32_guest_mmu().set_sdr1(NW_DEFAULT_SDR1);
 		nw_guest_seed_rom_htab(NW_DEFAULT_SDR1);
+		nw_guest_plant_dsi_vector();
 		nw_log_g1_hwinit();
 	} else {
 		nw_log_translator_off();

@@ -44,6 +44,13 @@ void ppc32_mmu::reset()
 		dbatu_[i] = 0;
 		dbatl_[i] = 0;
 	}
+	ivt_mapped_ = false;
+	tlbia();
+}
+
+void ppc32_mmu::set_ivt_mapped(bool on)
+{
+	ivt_mapped_ = on;
 	tlbia();
 }
 
@@ -175,6 +182,15 @@ bool ppc32_mmu::bat_hit(uint32_t ea, bool insn, uint32_t *pa) const
 	return false;
 }
 
+bool ppc32_mmu::ivt_hit(uint32_t ea, uint32_t *pa) const
+{
+	/* Exception page only. Matches the 4 KiB NK VecTbl copy to EA 0. */
+	if (!ivt_mapped_ || ea >= 0x1000u)
+		return false;
+	*pa = ea;
+	return true;
+}
+
 bool ppc32_mmu::htab_hit(uint32_t ea, uint32_t *pa)
 {
 	const uint32_t sr_val = sr_[(ea >> 28) & 0xfu];
@@ -267,6 +283,11 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 		r.pa = pa;
 	} else if (htab_hit(ea, &pa)) {
 		how = "htab";
+		tlb_insert(ea, pa, insn);
+		r.ok = true;
+		r.pa = pa;
+	} else if (ivt_hit(ea, &pa)) {
+		how = "ivt";
 		tlb_insert(ea, pa, insn);
 		r.ok = true;
 		r.pa = pa;
