@@ -83,7 +83,6 @@ static uint32 nw_dec_handler_xer;
  * so leave does not invent EE or collapse to 0. */
 static uint32 nw_dec_last_real_msr;
 static int nw_dec_did_leave;
-static int nw_dec_second_take;
 static void nw_dec_note_msr(uint32 msr)
 {
 	const uint32 ir_dr =
@@ -235,6 +234,23 @@ static int nw_dec_leave_50326_wait(uint32 rom_off)
 	    rom_off <= (uint32)NW_NK_CLOUD_HI_4)
 		return 0;
 	return 1;
+}
+/* Live fbc1967c: extra 0x900 after leave returned to
+ * 50325a9c (OLD_B) msr=00002010. Hold missed because
+ * nested take_dec stuck in_handler. Complete the PIC
+ * poll (known EA + r30 occupancy). Live e0df3b4e
+ * body through npc=50325aac. Do not skip-list OLD_B.
+ * Do not or-in EE. */
+static int nw_dec_leave_50325a9c_wait(uint32 rom_off)
+{
+	if (!nw_dec_did_leave)
+		return 0;
+	if (rom_off == (uint32)NW_NK_PICSPIN_OLD_B)
+		return 1;
+	if (rom_off > (uint32)NW_NK_PICSPIN_OLD_B &&
+	    rom_off < (uint32)NW_NK_PICSPIN_OLD_B + 0x10u)
+		return 1;
+	return 0;
 }
 static int nw_dec_leave_no_skip(uint32 rom_off)
 {
@@ -3650,37 +3666,15 @@ void powerpc_cpu::execute(uint32 entry)
 						 * Do not nest. Do not or-in EE. */
 						if (nw_dec_did_leave &&
 						    !nw_dec_ee_on(msr_now)) {
-							/* Live cf12cf07: hold at
-							 * 503265bc op=60002000
-							 * (ori r0,r0,0x2000)
-							 * after r8 sentinel path.
-							 * One extra 0x900 so NK
-							 * can tick; take_dec
-							 * re-pins. Then hold.
+							/* Live fbc1967c: extra
+							 * 0x900 after leave
+							 * stuck in_handler
+							 * (pc=5032659c) and
+							 * returned to 50325a9c
+							 * msr=00002010. Hold
+							 * that second 0x900 so
+							 * DEC does not re-enter.
 							 * Do not or-in EE. */
-							if (!nw_dec_second_take) {
-								nw_dec_second_take = 1;
-#if NW_BOOT_LOG
-								{
-									static int n2;
-									if (!n2) {
-										n2 = 1;
-										char buf[144];
-										snprintf(buf, sizeof(buf),
-											 "G3: DEC second take after leave pc=%08x msr=%08x dec=%08x op=%08x",
-											 (unsigned)pc(),
-											 (unsigned)msr_now,
-											 (unsigned)dec_,
-											 (unsigned)vm_read_memory_4(pc()));
-										nw_boot_log(buf);
-									}
-								}
-#endif
-								take_dec();
-								if (dec_ < nw_dec_arm_value())
-									dec_ = 0x00100000u;
-								continue;
-							}
 							dec_pending_ = false;
 							if (dec_ & 0x80000000u)
 								dec_ = 0;
@@ -23086,6 +23080,52 @@ void powerpc_cpu::execute(uint32 entry)
 							 * to 503265bc ori r0,r0,
 							 * 0x2000. Do not smash a
 							 * live r8. Do not mill. */
+							if (nw_dec_leave_50325a9c_wait(rom_off)) {
+								const uint32 prim =
+									opw >> 26;
+								const uint32 rt =
+									(opw >> 21) & 31u;
+								/* Completing
+								 * 50325a9c is
+								 * PIC/r30, not
+								 * a skip-list.
+								 * Known PIC EA
+								 * only. r30
+								 * occupancy if
+								 * r28 is that
+								 * PIC, or this
+								 * insn is the
+								 * lbz/cmpwi
+								 * occupancy
+								 * test. Do not
+								 * smash r8. */
+								nw_dec_plant_pic_idle(pic_ea);
+								if (pic == pic_ea)
+									gpr(30) = nw_nk_irq_status_idle();
+								if (opw == (uint32)NW_NK_PICSPIN_LBZ_OP ||
+								    opw == 0x2c1e0000u ||
+								    ((prim == 32u ||
+								      prim == 34u) &&
+								     rt == 30u))
+									gpr(30) = nw_nk_irq_status_idle();
+#if NW_BOOT_LOG
+								{
+									static int n25;
+									if (!n25) {
+										n25 = 1;
+										char buf[144];
+										snprintf(buf, sizeof(buf),
+											 "G3: DEC leave 50325a9c wait pc=%08x msr=%08x r28=%08x r30=%08x op=%08x",
+											 (unsigned)pc(),
+											 (unsigned)ppc32_guest_mmu().msr(),
+											 (unsigned)pic,
+											 (unsigned)gpr(30),
+											 (unsigned)opw);
+										nw_boot_log(buf);
+									}
+								}
+#endif
+							}
 							if (nw_dec_leave_50326_wait(rom_off) &&
 							    opw == 0x2c08ffffu) {
 								const uint32 nxt =
