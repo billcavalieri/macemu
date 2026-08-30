@@ -67,10 +67,11 @@ static uint32 g3_pc0(uint32 pc)
 		return pc - ROMBase;
 	return pc;
 }
-/* Live 58b12272: 0x900 to=50313200 srr0=50325600. Stay in-handler
- * until rfi. Do not mill the walk. Do not picspin-skip here. */
+/* Live 0ad66900: 0x900 to=50313200. Panic sc 0x2e overwrote live
+ * srr0_/srr1_. rfi to these take_dec captures. Do not mill the walk. */
 static int nw_dec_in_handler;
 static uint32 nw_dec_handler_srr0;
+static uint32 nw_dec_handler_srr1;
 static uint32 nw_dec_handler_from;
 /* D-form twi: OPCD=3, TO=31. Live illegal 0fff0005 at 50324140. */
 static int nw_ppc_twi_uncond(uint32 opcode)
@@ -2439,25 +2440,28 @@ void powerpc_cpu::take_sc()
 	/* NK debug/panic path: sc r0=0x2e after a NULL callback. */
 	if (gpr(0) == 0x2eu) {
 		if (nw_dec_in_handler) {
-			/* Live 58b12272: after DEC 0x900, sc 0x2e then
-			 * twi 0fff0005 aborts. rfi to srr0 so the
-			 * handler can leave. Do not or-in EE. Do not
-			 * mill the walk. Next interpret loop logs
-			 * G3: DEC handler left. */
-			mmu.set_msr(srr1_);
-			nw_log_msr_dr(srr1_);
-			nw_log_msr_write("rfi", srr0_, srr1_);
-			pc() = srr0_;
+			/* Live 0ad66900: NK panic wrote srr0=50324058
+			 * srr1=00009002 before take_sc. rfi to the
+			 * take_dec captures (50325604 / 00002000), not
+			 * live SPRs. Do not or-in EE. Do not mill the
+			 * walk. Next loop logs G3: DEC handler left. */
+			mmu.set_msr(nw_dec_handler_srr1);
+			nw_log_msr_dr(nw_dec_handler_srr1);
+			nw_log_msr_write("rfi", nw_dec_handler_srr0,
+					 nw_dec_handler_srr1);
+			srr0_ = nw_dec_handler_srr0;
+			srr1_ = nw_dec_handler_srr1;
+			pc() = nw_dec_handler_srr0;
 #if NW_BOOT_LOG
 			{
 				static int n;
 				if (!n) {
 					n = 1;
-					char buf[96];
+					char buf[112];
 					snprintf(buf, sizeof(buf),
 						 "G3: DEC sc 0x2e rfi srr0=%08x srr1=%08x",
-						 (unsigned)srr0_,
-						 (unsigned)srr1_);
+						 (unsigned)nw_dec_handler_srr0,
+						 (unsigned)nw_dec_handler_srr1);
 					nw_boot_log(buf);
 				}
 			}
@@ -2520,6 +2524,7 @@ void powerpc_cpu::take_dec()
 	nw_dec_in_handler = 1;
 	nw_dec_handler_from = pc();
 	nw_dec_handler_srr0 = srr0_;
+	nw_dec_handler_srr1 = srr1_;
 #if NW_BOOT_LOG
 	{
 		static int n;
@@ -22647,14 +22652,17 @@ void powerpc_cpu::execute(uint32 entry)
 			continue;
 		}
 #ifdef SHEEPSHAVER
-		/* Live 58b12272: twi pad after DEC 0x900 is not in
-		 * ppc-decode; execute_illegal aborts. rfi to srr0.
-		 * Do not mill the walk. Do not or-in EE. */
+		/* Live 0ad66900: twi pad after DEC 0x900 is not in
+		 * ppc-decode. rfi to take_dec srr0/srr1, not live
+		 * SPRs the panic path overwrote. Do not or-in EE. */
 		if (nw_dec_in_handler && nw_ppc_twi_uncond(opcode)) {
-			ppc32_guest_mmu().set_msr(srr1_);
-			nw_log_msr_dr(srr1_);
-			nw_log_msr_write("rfi", srr0_, srr1_);
-			pc() = srr0_;
+			ppc32_guest_mmu().set_msr(nw_dec_handler_srr1);
+			nw_log_msr_dr(nw_dec_handler_srr1);
+			nw_log_msr_write("rfi", nw_dec_handler_srr0,
+					 nw_dec_handler_srr1);
+			srr0_ = nw_dec_handler_srr0;
+			srr1_ = nw_dec_handler_srr1;
+			pc() = nw_dec_handler_srr0;
 #if NW_BOOT_LOG
 			{
 				static int n;
@@ -22664,7 +22672,7 @@ void powerpc_cpu::execute(uint32 entry)
 					snprintf(buf, sizeof(buf),
 						 "G3: DEC twi pad rfi opcode=%08x srr0=%08x",
 						 (unsigned)opcode,
-						 (unsigned)srr0_);
+						 (unsigned)nw_dec_handler_srr0);
 					nw_boot_log(buf);
 				}
 			}
