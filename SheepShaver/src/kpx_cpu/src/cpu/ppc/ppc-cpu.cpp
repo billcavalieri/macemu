@@ -3367,13 +3367,27 @@ void powerpc_cpu::execute(uint32 entry)
 							 (unsigned)gpr(1));
 						nw_boot_log(buf);
 					}
+					/* Live 5d8f7852: XL rfi never ran.
+					 * HotInts left via pc==saved SRR0.
+					 * Log the same restore line. */
+					{
+						static int nrfi;
+						if (!nrfi) {
+							nrfi = 1;
+							char buf[112];
+							snprintf(buf, sizeof(buf),
+								 "G3: DEC rfi restore srr0=%08x srr1=%08x r1=%08x",
+								 (unsigned)nw_dec_handler_srr0,
+								 (unsigned)s1,
+								 (unsigned)gpr(1));
+							nw_boot_log(buf);
+						}
+					}
 #endif
 					nw_dec_in_handler = 0;
 					nw_dec_did_leave = 1;
-					/* Live b83a3bfe: leave logged
-					 * 00002000 then heartbeats
-					 * 17efbb80 then 00000000. Use
-					 * the last real EE-off MSR. */
+					/* Live d7dc8625: last-real 00000010.
+					 * Do not or-in EE. */
 					ppc32_guest_mmu().set_msr(s1);
 					srr1_ = s1;
 					/* Handler may have mtdec 0. Do not
@@ -3397,9 +3411,18 @@ void powerpc_cpu::execute(uint32 entry)
 						ppc32_guest_mmu().msr();
 					const uint32 want =
 						nw_dec_resume_srr1(m);
+					const uint32 ir_dr =
+						ppc32_mmu::MSR_IR |
+						ppc32_mmu::MSR_DR;
+					/* Live d7dc8625: pin once logged
+					 * 17efbb80→00000010 then heartbeats
+					 * collapsed to 0. Keep last-real
+					 * EE-off (DR) pinned. Do not or-in EE. */
 					if (m != want &&
 					    (!nw_ppc_srr1_is_msr(m) ||
-					     m == 0)) {
+					     m == 0 ||
+					     ((nw_dec_last_real_msr & ir_dr) != 0 &&
+					      (m & ir_dr) == 0))) {
 						ppc32_guest_mmu().set_msr(want);
 						srr1_ = want;
 #if NW_BOOT_LOG
@@ -3456,15 +3479,37 @@ void powerpc_cpu::execute(uint32 entry)
 				    !nw_dec_in_handler &&
 				    nw_dec_host_take(first_dsi, msr_now)) {
 					if (nw_dec_take_after_g2(first_dsi)) {
-						/* After G2: live walk has
-						 * EE=0 IR=0. Do not wait for
-						 * mtmsr EE (guest never wrote
-						 * it). Do not or-in EE. */
-						take_dec();
-						if (dec_ < nw_dec_arm_value())
-							dec_ = 0x00100000u;
-						continue;
-					}
+						/* Live d7dc8625: first 0x900
+						 * left with srr1=00000010,
+						 * then host re-took (EE still
+						 * off) and take_dec cleared
+						 * MSR to 0. First take only.
+						 * Do not nest. Do not or-in EE. */
+						if (nw_dec_did_leave &&
+						    !nw_dec_ee_on(msr_now)) {
+							dec_pending_ = false;
+							if (dec_ < nw_dec_arm_value() ||
+							    (dec_ & 0x80000000u))
+								dec_ = 0x00100000u;
+#if NW_BOOT_LOG
+							static int nhold;
+							if (!nhold) {
+								nhold = 1;
+								char buf[96];
+								snprintf(buf, sizeof(buf),
+									 "G3: DEC hold after leave pc=%08x msr=%08x",
+									 (unsigned)pc(),
+									 (unsigned)msr_now);
+								nw_boot_log(buf);
+							}
+#endif
+						} else {
+							take_dec();
+							if (dec_ < nw_dec_arm_value())
+								dec_ = 0x00100000u;
+							continue;
+						}
+					} else {
 					/* Boot spent so long with DEC=0 that
 					 * the first IR+EE is an underflow,
 					 * not a programmed tick. Swallow it. */
@@ -3485,6 +3530,7 @@ void powerpc_cpu::execute(uint32 entry)
 						if (dec_ < 0x1000u)
 							dec_ = 0x00100000u;
 						continue;
+					}
 					}
 				}
 			}
