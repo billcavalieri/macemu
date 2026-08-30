@@ -23346,36 +23346,41 @@ void powerpc_cpu::execute(uint32 entry)
 								}
 #endif
 							} else if (nw_dec_leave_50326480_wait(rom_off)) {
-								const uint32 nxt =
-									vm_read_memory_4(pc() + 4);
+								uint32 win[8];
+								unsigned wi;
+								int idx;
 								uint32 arm = 0;
-								uint32 log_nxt = nxt;
-								/* Like 50326674: match, arm the
-								 * following bc, CR-fallthrough.
-								 * Do not smash r8. cmp+li is
-								 * not a wait. */
-								if (nw_ppc_is_cmp(opw) &&
-								    !nw_ppc_is_li(nxt) &&
-								    nw_ppc_bc_fallthrough_cr_set(nxt) >= 0)
-									arm = pc() + 4;
-								else if (nw_ppc_is_cmp(opw)) {
-									const uint32 n2 =
-										vm_read_memory_4(pc() + 8);
-									if (!nw_ppc_is_li(n2) &&
-									    nw_ppc_bc_fallthrough_cr_set(n2) >= 0) {
-										arm = pc() + 8;
-										log_nxt = n2;
-									}
-								} else if (nw_ppc_bc_fallthrough_cr_set(opw) >= 0 &&
-									   rom_off != 0x3264fcu)
-									arm = pc();
+								uint32 log_nxt;
+								/* Live 5dd8d481: completing
+								 * 503264f8 cmpw r0,r3 +
+								 * 503264fc bne -16 did not
+								 * unstick 50326480. Plant
+								 * PIC idle (known EA). Scan
+								 * following forward bc like
+								 * 50326674. Do not smash r0
+								 * or r8. Do not arm 503264fc. */
+								nw_dec_plant_pic_idle(pic_ea);
+								if (pic == pic_ea)
+									gpr(30) = nw_nk_irq_status_idle();
+								for (wi = 0; wi < 8u; wi++)
+									win[wi] = vm_read_memory_4(
+										pc() + 4u * wi);
+								log_nxt = win[1];
+								idx = nw_dec_leave_50326480_arm_idx(
+									rom_off, win, 8u);
+								if (idx >= 0) {
+									arm = pc() + 4u * (uint32)idx;
+									log_nxt = win[idx];
+								}
 								if (arm &&
-								    (arm - ROMBase) != 0x3264fcu)
+								    (arm - ROMBase) != 0x3264fcu &&
+								    (arm - ROMBase) != 0x3264f8u)
 									nw_dec_leave_skip_bc_pc = arm;
 #if NW_BOOT_LOG
-								if (arm && nw_ppc_is_cmp(opw)) {
+								{
 									static int n480;
-									if (!n480) {
+									if (!n480 &&
+									    rom_off == 0x326480u) {
 										n480 = 1;
 										char buf[144];
 										snprintf(buf, sizeof(buf),
@@ -23403,6 +23408,8 @@ void powerpc_cpu::execute(uint32 entry)
 								 * cmp+beq/bne. */
 								if (!nw_dec_leave_503256f4_false(
 									    rom_off, opw, nxt) &&
+								    !nw_dec_leave_503264f8_false(
+									    rom_off, opw, nxt) &&
 								    nw_dec_leave_cmp_wait(nxt)) {
 									uint32 rb;
 									uint32 use;
@@ -23415,7 +23422,8 @@ void powerpc_cpu::execute(uint32 entry)
 										rb = gpr((opw >> 11) & 31u);
 									use = nw_dec_leave_50326_cmp_use(
 										ra, was, rb, nxt);
-									if (ra != 8u && use != was)
+									if (ra != 8u && ra != 0u &&
+									    use != was)
 										gpr(ra) = use;
 									nw_dec_leave_skip_bc_pc =
 										pc() + 4;

@@ -590,6 +590,37 @@ int nw_dec_leave_503256f4_false(uint32_t off, uint32_t op, uint32_t nxt)
 	return 0;
 }
 
+int nw_dec_leave_503264f8_false(uint32_t off, uint32_t op, uint32_t nxt)
+{
+	if (off == 0x3264f8u)
+		return 1;
+	if (off == 0x3264fcu)
+		return 1;
+	if (op == 0x7c001800u && nxt == 0x4082fff0u)
+		return 1;
+	return 0;
+}
+
+int nw_dec_leave_50326480_arm_idx(uint32_t base_off, const uint32_t *insns,
+				 unsigned n)
+{
+	unsigned i;
+
+	if (insns == NULL || n == 0)
+		return -1;
+	for (i = 0; i < n; i++) {
+		const uint32_t off = base_off + 4u * i;
+		if (off == 0x3264f8u || off == 0x3264fcu)
+			break;
+		if (nw_dec_leave_cmp_wait(insns[i]))
+			return (int)i;
+		if (i == 0u &&
+		    nw_ppc_bc_fallthrough_cr_set(insns[0]) >= 0)
+			return 0;
+	}
+	return -1;
+}
+
 int nw_dec_leave_50326480_off(uint32_t off)
 {
 	if (off == 0x326480u)
@@ -623,12 +654,16 @@ uint32_t nw_dec_leave_50326_cmp_use(uint32_t ra, uint32_t was,
 
 	if ((nxt >> 26) != 16u)
 		return was;
-	/* r8: beq-only when already -1. Do not smash on bne. */
+	/* r8: beq-only when already -1. Do not smash on bne.
+	 * Live 5dd8d481: 503264f8 cmpw r0,r3 r0=00000c28 — do
+	 * not smash r0. */
 	if (ra == 8u) {
 		if (bo == 12u && crb == 2u && was == 0xffffffffu)
 			return 0;
 		return was;
 	}
+	if (ra == 0u)
+		return was;
 	if (bo == 4u) {
 		if (crb == 2u)
 			return rb;

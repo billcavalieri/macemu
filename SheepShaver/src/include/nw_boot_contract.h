@@ -229,6 +229,11 @@ int nw_nk_postleave_walk_off(uint32_t off);
 int nw_ppc_is_li(uint32_t op);
 int nw_dec_leave_cmp_wait(uint32_t nxt); /* following insn is forward beq/bne */
 int nw_dec_leave_503256f4_false(uint32_t off, uint32_t op, uint32_t nxt);
+/* Live 5dd8d481: 503264f8 cmpw r0,r3 nxt=4082fff0 did not unstick 50326480. */
+int nw_dec_leave_503264f8_false(uint32_t off, uint32_t op, uint32_t nxt);
+/* First forward wait-bc index from 50326480; -1 none. Stops at 503264f8. */
+int nw_dec_leave_50326480_arm_idx(uint32_t base_off, const uint32_t *insns,
+				 unsigned n);
 /* Live 2d295270 hang pc=50326480. Not a skip-list. */
 int nw_dec_leave_50326480_off(uint32_t off);
 /* Heartbeat wait sites after 50326678. Not a skip-list. */
