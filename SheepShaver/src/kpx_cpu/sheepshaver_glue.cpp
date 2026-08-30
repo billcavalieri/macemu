@@ -1137,8 +1137,8 @@ void nw_guest_plant_nk_irq(uint32_t kdp)
 	/*
 	 * NK 1:1-BATs this pointer (live DBAT3 10000003/1000003a) then
 	 * lbz r30,2(r28). Live first DSI was that load (ea=10010002).
-	 * 0xFFFFFFFF made byte+2=0xFF (bit 2 set) and they picspun with
-	 * DSI n=1 — MemRetry HIT, so 0xFF is the spin value, not idle.
+	 * Idle stays 0. Skip the live spin at ROM+0x325a14 / +0x325a20
+	 * after G2; mill-era +0x325a9c did not run on fa989e08.
 	 */
 	const uint32_t pic = nw_nk_irq_pic_ea(RAMBase);
 	if (pic < RAMBase ||

@@ -537,6 +537,35 @@ int nw_ppc_is_branch(uint32_t op)
 	return 0;
 }
 
+int nw_nk_picspin_rom_off(uint32_t off)
+{
+	switch (off) {
+	case NW_NK_PICSPIN_LBZ:
+	case NW_NK_PICSPIN_BEQ:
+	case NW_NK_PICSPIN_OLD_A:
+	case NW_NK_PICSPIN_OLD_B:
+	case NW_NK_PICSPIN_OLD_C:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+int nw_nk_picspin_is_g2_dsi_off(uint32_t off)
+{
+	return off == (uint32_t)NW_NK_PICSPIN_LBZ;
+}
+
+int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op)
+{
+	if (!nw_nk_picspin_rom_off(off))
+		return 0;
+	if (off == (uint32_t)NW_NK_PICSPIN_LBZ ||
+	    off == (uint32_t)NW_NK_PICSPIN_BEQ)
+		return 1;
+	return nw_ppc_is_branch(op);
+}
+
 void nw_nk_irq_fill_pic_be(uint8_t *mem, size_t mem_size, uint32_t pic_ea)
 {
 	if (mem == NULL)

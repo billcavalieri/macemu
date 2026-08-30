@@ -750,7 +750,26 @@ int main()
 		CHECK(!nw_nk_irq_status_spins(nw_nk_irq_status_idle()));
 		CHECK(nw_ppc_is_branch(0x4182fffcu)); /* beq *-4 */
 		CHECK(nw_ppc_is_branch(0x4e800020u)); /* blr */
-		CHECK(!nw_ppc_is_branch(0x8bdc0002u)); /* lbz r30,2(r28) */
+		CHECK(nw_ppc_is_branch((uint32_t)NW_NK_PICSPIN_BEQ_OP));
+		CHECK(!nw_ppc_is_branch((uint32_t)NW_NK_PICSPIN_LBZ_OP));
+		CHECK(NW_NK_PICSPIN_LBZ_OP == 0x8bdc0002u);
+		CHECK(NW_NK_PICSPIN_BEQ_OP == 0x4182fc40u);
+		CHECK(nw_nk_picspin_rom_off(NW_NK_PICSPIN_LBZ));
+		CHECK(nw_nk_picspin_rom_off(NW_NK_PICSPIN_BEQ));
+		CHECK(nw_nk_picspin_rom_off(NW_NK_PICSPIN_OLD_B));
+		CHECK(!nw_nk_picspin_rom_off(0x366084u));
+		CHECK(nw_nk_picspin_is_g2_dsi_off(NW_NK_PICSPIN_LBZ));
+		CHECK(!nw_nk_picspin_is_g2_dsi_off(NW_NK_PICSPIN_BEQ));
+		CHECK(nw_nk_picspin_skip_after_g2(NW_NK_PICSPIN_LBZ,
+						  NW_NK_PICSPIN_LBZ_OP));
+		CHECK(nw_nk_picspin_skip_after_g2(NW_NK_PICSPIN_BEQ,
+						  NW_NK_PICSPIN_BEQ_OP));
+		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_PICSPIN_OLD_B,
+						   0x60000000u));
+		CHECK(nw_nk_picspin_skip_after_g2(NW_NK_PICSPIN_OLD_B,
+						  NW_NK_PICSPIN_BEQ_OP));
+		CHECK(!nw_nk_picspin_skip_after_g2(0x366084u,
+						   NW_NK_PICSPIN_BEQ_OP));
 
 		CHECK(ppc32_mmu::bat_overlaps(pic_batu, pic_batl, ram_base,
 					      ram_base + ram_size));

@@ -152,21 +152,32 @@ void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
 void nw_guest_seed_rom_htab(uint32_t sdr1);
 /*
  * NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one.
- * Live 87f42f4d: r28=RAMBase+0x10000, first DSI is lbz r30,2(r28), then
- * picspin at ROM+0x325a9c. Host 0xFFFFFFFF at that PIC (byte+2=0xFF,
- * bit 2 set) is the spin value — DSI n=1 so MemRetry HIT; they stayed
- * in picspin ~1m17s. Idle is bit 2 clear (0), not 0xFF.
+ * Live fa989e08: G2 HIT at ROM+0x325a14 (lbz r30,2(r28), ea=10010002),
+ * then beq 0x4182fc40 at +0x325a20. Mill-era PCs +0x325a9c/0x325998/
+ * +0x325c94 hit 0 times — hook the live lbz/beq, not only those.
+ * 0x325a14 is the G2 DSI PC: do not skip it until
+ * nw_guest_note_first_data_dsi(). PIC idle stays 0.
  */
 enum {
 	NW_NK_IRQ_KDP_OFF = 2272,
 	NW_NK_IRQ_PIC_RAM_OFF = 0x10000,
 	NW_NK_IRQ_STATUS_OFF = 2,
-	NW_NK_IRQ_SPIN_BIT = 2
+	NW_NK_IRQ_SPIN_BIT = 2,
+	NW_NK_PICSPIN_LBZ = 0x325a14,
+	NW_NK_PICSPIN_BEQ = 0x325a20,
+	NW_NK_PICSPIN_LBZ_OP = 0x8bdc0002,	/* lbz r30,2(r28) */
+	NW_NK_PICSPIN_BEQ_OP = 0x4182fc40,	/* beq */
+	NW_NK_PICSPIN_OLD_A = 0x325998,
+	NW_NK_PICSPIN_OLD_B = 0x325a9c,
+	NW_NK_PICSPIN_OLD_C = 0x325c94
 };
 uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
 uint8_t nw_nk_irq_status_idle(void);
 int nw_nk_irq_status_spins(uint8_t v);
 int nw_ppc_is_branch(uint32_t op);
+int nw_nk_picspin_rom_off(uint32_t off);
+int nw_nk_picspin_is_g2_dsi_off(uint32_t off);
+int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op);
 void nw_nk_irq_fill_pic_be(uint8_t *mem, size_t mem_size, uint32_t pic_ea);
 void nw_guest_plant_nk_irq(uint32_t kdp);
 /* After first DSI: 1:1 BAT RAM+ROM so HotInts MemRetry can HIT under DR.
