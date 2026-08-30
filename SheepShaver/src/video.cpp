@@ -35,6 +35,7 @@
 #include "user_strings.h"
 #include "version.h"
 #include "thunks.h"
+#include "nw_boot_contract.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -52,6 +53,12 @@ uint8 MacCursor[68] = {16, 1};	// Mac cursor image
 
 
 bool keyfile_valid;		// Flag: Keyfile is valid, enable full-screen modes
+
+#if !defined(USE_SDL_VIDEO)
+void VideoPresent(void)
+{
+}
+#endif
 
 
 /*
@@ -1029,6 +1036,19 @@ static int16 VideoClose(uint32 pb, VidLocals *csSave)
 
 int16 VideoDoDriverIO(uint32 spaceID, uint32 commandID, uint32 commandContents, uint32 commandCode, uint32 commandKind)
 {
+#if NW_BOOT_LOG
+	{
+		static int logged;
+		if (!logged) {
+			logged = 1;
+			char buf[96];
+			snprintf(buf, sizeof(buf),
+				 "G3: VideoDoDriverIO code=%d kind=%d",
+				 (int)commandCode, (int)commandKind);
+			nw_boot_log(buf);
+		}
+	}
+#endif
 //	D(bug("VideoDoDriverIO space %08x, command %08x, contents %08x, code %d, kind %d\n", spaceID, commandID, commandContents, commandCode, commandKind));
 	int16 err = noErr;
 

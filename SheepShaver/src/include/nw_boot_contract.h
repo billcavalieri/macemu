@@ -128,6 +128,13 @@ const char *nw_boot_line_g1_hwinit(void);
 const char *nw_boot_line_g1_patch_skip(void);
 const char *nw_boot_line_g2_first_dsi(void);
 const char *nw_boot_line_g2_translator_off(void);
+const char *nw_boot_line_g3_sdl2_window(void);
+
+/*
+ * Clip a dirty rect to the screen. Returns 1 if the result is non-empty.
+ * Host-testable helper for SDL2 update_display_static_bbox / video_set_dirty_area.
+ */
+int nw_video_clip_dirty(int *x, int *y, int *w, int *h, int sw, int sh);
 
 void nw_boot_log(const char *line);
 void nw_log_g0_decode(const uint8_t *rom, size_t size);
@@ -206,7 +213,13 @@ enum {
 	NW_NK_CLOUD_HI_3 = 0x32570c,	/* through CYCLE_C */
 	NW_NK_CLOUD_LO_4 = 0x326420,
 	NW_NK_CLOUD_HI_4 = 0x326448,
-	NW_NK_STICK = 0x32582c	/* live 93eb1588 heartbeat ×2208 */
+	NW_NK_STICK = 0x32582c,	/* live 93eb1588 heartbeat ×2208 */
+	/*
+	 * Live bedd28a3: 171 unique NK PCs after leaving 5032582c.
+	 * Dominant 50327b54 (ROM+0x327b54)×33. Walk, not a stick.
+	 * Do not skip_after_g2 this off. mill +0x366084 is not a skip.
+	 */
+	NW_NK_WALK_A = 0x327b54
 };
 uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
 uint8_t nw_nk_irq_status_idle(void);

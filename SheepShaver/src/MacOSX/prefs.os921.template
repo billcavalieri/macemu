@@ -24,6 +24,12 @@ cdrom /ABSOLUTE/PATH/TO/MacOS921.toast
 ramsize 134217728
 jit true
 
+# SDL2 window. VideoInit reads "screen"; without it the default is 640x480
+# at host desktop depth. frameskip 1 so the static bbox refresh is 60Hz.
+# gfxaccel (default true) feeds video_set_dirty_area; VOSF stays off.
+screen win/640/480
+frameskip 1
+
 # bootdrive 0 = first volume. bootdriver -62 = CD-ROM (cdrom.h CDROMRefNum).
 # G0 is DecodeROM; G3+ boots the 9.2.1 installer from cdrom onto disk.
 # After a successful install (G4), set bootdriver 0 to boot the HFS target.

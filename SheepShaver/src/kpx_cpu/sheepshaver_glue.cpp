@@ -1305,7 +1305,8 @@ void TriggerInterrupt(void)
 void HandleInterrupt(powerpc_registers *r)
 {
 #ifdef USE_SDL_VIDEO
-	// We must fill in the events queue in the same thread that did call SDL_SetVideoMode()
+	// Same thread as SetVideoMode. Present stays in SDL2 VideoVBL /
+	// the redraw thread (video_sdl2.cpp). Do not mill 68k as G3.
 	SDL_PumpEvents();
 #endif
 
@@ -1321,6 +1322,15 @@ void HandleInterrupt(powerpc_registers *r)
 	// Interrupt action depends on current run mode
 	switch (ReadMacInt32(XLM_RUN_MODE)) {
 	case MODE_68K:
+#if NW_BOOT_LOG
+		if (nw_guest_first_data_dsi_seen()) {
+			static int logged;
+			if (!logged) {
+				logged = 1;
+				nw_boot_log("G3: HandleInterrupt MODE_68K");
+			}
+		}
+#endif
 		// 68k emulator active, trigger 68k interrupt level 1
 		WriteMacInt16(ReadMacInt32(KERNEL_DATA_BASE + 0x67c), 1);
 		r->cr.set(r->cr.get() | ReadMacInt32(KERNEL_DATA_BASE + 0x674));
@@ -1330,6 +1340,15 @@ void HandleInterrupt(powerpc_registers *r)
 	case MODE_NATIVE:
 		// 68k emulator inactive, in nanokernel?
 		if (r->gpr[1] != KernelDataAddr) {
+#if NW_BOOT_LOG
+			if (nw_guest_first_data_dsi_seen()) {
+				static int logged;
+				if (!logged) {
+					logged = 1;
+					nw_boot_log("G3: HandleInterrupt MODE_NATIVE");
+				}
+			}
+#endif
 
 			// Prepare for 68k interrupt level 1
 			WriteMacInt16(ReadMacInt32(KERNEL_DATA_BASE + 0x67c), 1);
@@ -1343,6 +1362,16 @@ void HandleInterrupt(powerpc_registers *r)
 				ppc_cpu->interrupt(ROMBase + 0x312b1c);
 			else
 				ppc_cpu->interrupt(ROMBase + 0x312a3c);
+		} else {
+#if NW_BOOT_LOG
+			if (nw_guest_first_data_dsi_seen()) {
+				static int logged;
+				if (!logged) {
+					logged = 1;
+					nw_boot_log("G3: HandleInterrupt skip in-NK");
+				}
+			}
+#endif
 		}
 		break;
 #endif

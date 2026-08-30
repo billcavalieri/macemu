@@ -138,6 +138,7 @@ extern VidLocals *private_data;	// Pointer to driver local variables (there is o
 extern bool VideoInit(void);
 extern void VideoExit(void);
 extern void VideoVBL(void);
+extern void VideoPresent(void);	/* CPU-thread SDL2 present (not VOSF) */
 extern void VideoInstallAccel(void);
 extern void VideoQuitFullScreen(void);
 

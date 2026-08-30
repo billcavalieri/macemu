@@ -370,6 +370,36 @@ const char *nw_boot_line_g2_translator_off(void)
 	return "G2: translator off (Old World)";
 }
 
+const char *nw_boot_line_g3_sdl2_window(void)
+{
+	return "G3: SDL2 bbox dirty VOSF off";
+}
+
+int nw_video_clip_dirty(int *x, int *y, int *w, int *h, int sw, int sh)
+{
+	if (x == NULL || y == NULL || w == NULL || h == NULL)
+		return 0;
+	if (sw <= 0 || sh <= 0 || *w <= 0 || *h <= 0)
+		return 0;
+	if (*x < 0) {
+		*w += *x;
+		*x = 0;
+	}
+	if (*y < 0) {
+		*h += *y;
+		*y = 0;
+	}
+	if (*w <= 0 || *h <= 0)
+		return 0;
+	if (*x >= sw || *y >= sh)
+		return 0;
+	if (*x + *w > sw)
+		*w = sw - *x;
+	if (*y + *h > sh)
+		*h = sh - *y;
+	return (*w > 0 && *h > 0) ? 1 : 0;
+}
+
 void nw_boot_log(const char *line)
 {
 #if NW_BOOT_LOG
