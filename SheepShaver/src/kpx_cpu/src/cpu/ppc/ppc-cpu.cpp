@@ -129,6 +129,10 @@ static int nw_dec_leave_needs_pin(uint32 m, uint32 want)
 		ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR;
 	if (m == want)
 		return 0;
+	/* Live 54bc576f: guest WALK_EE mtmsr with EE must not be
+	 * stripped back to 00000010. Do not or-in EE. */
+	if (nw_ppc_srr1_is_msr(m) && m != 0 && nw_dec_ee_on(m))
+		return 0;
 	if (!nw_ppc_srr1_is_msr(m) || m == 0)
 		return 1;
 	if ((nw_dec_last_real_msr & ir_dr) != 0 &&
@@ -194,14 +198,38 @@ static int nw_ppc_rfi(uint32 opcode)
 	       ((opcode & 1u) == 0);
 }
 /* Live walk after DEC left. 0x325580 is inside CLOUD_LO_2 so
- * skip_after_g2 is 1; runtime must not skip it. */
+ * skip_after_g2 is 1; runtime must not skip it. 0x325c84 is the
+ * live DEC SRR0 (in the cycle span). After leave, 50325xxx is
+ * that walk — not a picspin skip. */
+static int nw_dec_leave_50325(uint32 rom_off)
+{
+	if (!nw_dec_did_leave)
+		return 0;
+	if (rom_off >= 0x325000u && rom_off < 0x326000u)
+		return 1;
+	return 0;
+}
 static int nw_dec_is_walk_off(uint32 rom_off)
 {
 	if (rom_off == 0x325580u ||
 	    rom_off == 0x325600u ||
-	    rom_off == 0x325604u)
+	    rom_off == 0x325604u ||
+	    rom_off == 0x325c84u)
+		return 1;
+	if (nw_dec_leave_50325(rom_off))
 		return 1;
 	return 0;
+}
+static void nw_dec_plant_pic_idle(uint32 pic)
+{
+	if (pic < RAMBase ||
+	    (uint64_t)pic + 8u >
+		    (uint64_t)RAMBase + RAMSize)
+		return;
+	vm_write_memory_4(pic, 0);
+	vm_write_memory_4(pic + 4, 0);
+	vm_write_memory_1(pic + (uint32)NW_NK_IRQ_STATUS_OFF,
+			  nw_nk_irq_status_idle());
 }
 /* Live 5e3539ca: VecTbl 0x900 = creqv 6,6,6 at CLOUD_LO_4.
  * Not a skip-list. rfi to saved SRR0. */
@@ -22876,10 +22904,11 @@ void powerpc_cpu::execute(uint32 entry)
 					 pc() < ROMBase + 0x500000u)
 						? pc() - ROMBase
 						: 0xffffffffu;
+				const int listed =
+					nw_nk_picspin_rom_off(rom_off) ||
+					nw_nk_picspin_cycle_off(rom_off);
 				if (!nw_dec_in_handler &&
-				    !nw_dec_is_walk_off(rom_off) &&
-				    (nw_nk_picspin_rom_off(rom_off) ||
-				     nw_nk_picspin_cycle_off(rom_off))) {
+				    (listed || nw_dec_leave_50325(rom_off))) {
 					const uint32 pic = gpr(28);
 					const uint32 opw = vm_read_memory_4(pc());
 #if NW_BOOT_LOG
@@ -22897,27 +22926,35 @@ void powerpc_cpu::execute(uint32 entry)
 					}
 #endif
 					/*
-					 * Live 93eb1588: cloud left,
-					 * then heartbeat 5032582c ×2208
-					 * (not mill, not G3, not WINDOW).
-					 * leave_npc must not land on
-					 * 0x32582c or prior waits.
-					 * OLD_B npc stays 50325aac.
-					 * +0x325a14 still misses once.
-					 * PIC idle 0. Do not mill 68k.
+					 * Live 54bc576f: skip of 0x325c84
+					 * (DEC SRR0) left an EE-off spin
+					 * 50325cac / 50325604 / 50325584.
+					 * After leave do not skip-list
+					 * 50325xxx. PIC idle (0) is the
+					 * poll fallthrough. Do not or-in
+					 * EE. Do not mill.
 					 */
 					if (nw_guest_first_data_dsi_seen()) {
-						if (pic >= RAMBase &&
-						    (uint64_t)pic + 8 <=
-							    (uint64_t)RAMBase + RAMSize) {
-							vm_write_memory_4(pic, 0);
-							vm_write_memory_4(pic + 4, 0);
-							vm_write_memory_1(
-								pic + (uint32)NW_NK_IRQ_STATUS_OFF,
-								nw_nk_irq_status_idle());
-						}
+						nw_dec_plant_pic_idle(pic);
+						nw_dec_plant_pic_idle(
+							nw_nk_irq_pic_ea(RAMBase));
 						gpr(30) = nw_nk_irq_status_idle();
-						if (nw_nk_picspin_skip_after_g2(rom_off,
+						if (nw_dec_leave_50325(rom_off) ||
+						    nw_dec_is_walk_off(rom_off)) {
+#if NW_BOOT_LOG
+							static int nwalk;
+							if (!nwalk) {
+								nwalk = 1;
+								char buf[96];
+								snprintf(buf, sizeof(buf),
+									 "G3: DEC leave no-skip pc=%08x msr=%08x off=%08x",
+									 (unsigned)pc(),
+									 (unsigned)ppc32_guest_mmu().msr(),
+									 (unsigned)rom_off);
+								nw_boot_log(buf);
+							}
+#endif
+						} else if (nw_nk_picspin_skip_after_g2(rom_off,
 										opw)) {
 							uint32 win[NW_NK_PICSPIN_LEAVE_INSNS];
 							unsigned wi;
