@@ -728,6 +728,85 @@ int main()
 		CHECK(after.pa == kdp_m1048);
 	}
 
+	/*
+	 * Live 87f42f4d: first miss ea=10010002 (lbz r30,2(r28), r28=PIC
+	 * at RAMBase+0x10000), dbat3=10000003/1000003a (128 KiB at
+	 * 0x10000000). Delay skips that RAM BAT so G2 can miss; after
+	 * first DSI, MemRetry HITs. 0xFF at PIC+2 is the spin value.
+	 */
+	{
+		const uint32_t ram_base = 0x10000000u;
+		const uint32_t ram_size = 0x08000000u;
+		const uint32_t pic_batu = 0x10000003u;
+		const uint32_t pic_batl = 0x1000003au;
+		const uint32_t pic = nw_nk_irq_pic_ea(ram_base);
+		const uint32_t pic_status = pic + (uint32_t)NW_NK_IRQ_STATUS_OFF;
+		const uint32_t fault_pc = 0x00004000u;
+
+		CHECK(pic == 0x10010000u);
+		CHECK(pic_status == 0x10010002u);
+		CHECK(nw_nk_irq_status_idle() == 0);
+		CHECK(nw_nk_irq_status_spins(0xff));
+		CHECK(!nw_nk_irq_status_spins(nw_nk_irq_status_idle()));
+		CHECK(nw_ppc_is_branch(0x4182fffcu)); /* beq *-4 */
+		CHECK(nw_ppc_is_branch(0x4e800020u)); /* blr */
+		CHECK(!nw_ppc_is_branch(0x8bdc0002u)); /* lbz r30,2(r28) */
+
+		CHECK(ppc32_mmu::bat_overlaps(pic_batu, pic_batl, ram_base,
+					      ram_base + ram_size));
+
+		mmu.reset();
+		mmu.set_physical_memory(&ram[0], (uint32_t)ram.size());
+		memset(&ram[0], 0, ram.size());
+		nw_fill_dsi_vector_be(&ram[0], (uint32_t)ram.size(), 0x00005000u);
+		be32_store(&ram[0], fault_pc, 0x8bdc0002u);
+		/* Host RAM image is 4 MiB; plant the PIC page at the same
+		 * offset the guest uses (RAMBase+0x10000 → 0x10000). */
+		nw_nk_irq_fill_pic_be(&ram[0], (uint32_t)ram.size(),
+				      (uint32_t)NW_NK_IRQ_PIC_RAM_OFF);
+		CHECK(!nw_nk_irq_status_spins(
+			ram[NW_NK_IRQ_PIC_RAM_OFF + NW_NK_IRQ_STATUS_OFF]));
+		ram[NW_NK_IRQ_PIC_RAM_OFF + NW_NK_IRQ_STATUS_OFF] = 0xff;
+		CHECK(nw_nk_irq_status_spins(
+			ram[NW_NK_IRQ_PIC_RAM_OFF + NW_NK_IRQ_STATUS_OFF]));
+		nw_nk_irq_fill_pic_be(&ram[0], (uint32_t)ram.size(),
+				      (uint32_t)NW_NK_IRQ_PIC_RAM_OFF);
+		CHECK(!nw_nk_irq_status_spins(
+			ram[NW_NK_IRQ_PIC_RAM_OFF + NW_NK_IRQ_STATUS_OFF]));
+
+		mmu.delay_ram_bats(true, ram_base, ram_size);
+		mmu.set_dbat(3, pic_batu, pic_batl);
+		mmu.set_dbat(1, 0x00000002u, 0x00000000u);
+		mmu.set_ibat(1, 0x00000002u, 0x00000000u);
+		mmu.set_msr(ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR);
+		mmu.set_ivt_mapped(true);
+		mmu.set_sdr1(0x17f0000fu);
+
+		CHECK(mmu.ram_bats_delayed());
+		const ppc32_xlate_result delayed =
+			mmu.translate(pic_status, PPC32_XLATE_DR, 1);
+		CHECK(!delayed.ok);
+		CHECK(delayed.how != NULL && strcmp(delayed.how, "miss") == 0);
+
+		ppc32_hotints_dsi dsi;
+		dsi.take_data_dsi(mmu, fault_pc, pic_status, false);
+		CHECK(dsi.srr0 == fault_pc);
+		CHECK(dsi.dar == pic_status);
+		CHECK(dsi.vector == (uint32_t)NW_DSI_VECTOR_EA);
+		CHECK(nw_be32_load(&ram[0], NW_DSI_VECTOR_EA) != 0);
+
+		const ppc32_xlate_result lwz = dsi.lwz_faulting_insn(mmu);
+		CHECK(lwz.ok);
+		CHECK(lwz.pa == fault_pc);
+		CHECK(!mmu.translate(pic_status, PPC32_XLATE_DR, 1).ok);
+
+		mmu.delay_ram_bats(false, ram_base, ram_size);
+		const ppc32_xlate_result memretry =
+			mmu.translate(pic_status, PPC32_XLATE_DR, 1);
+		CHECK(memretry.ok);
+		CHECK(memretry.pa == pic_status);
+	}
+
 	/* 9.0.4 IR/DR-off still identity; RAM-BAT delay is off. */
 	{
 		mmu.reset();

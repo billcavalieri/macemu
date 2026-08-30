@@ -1127,7 +1127,7 @@ void nw_guest_plant_dsi_vector(void)
 void nw_guest_plant_nk_irq(uint32_t kdp)
 {
 	/* 0x3259c0: lwz r28, -2272(r1); r28==0 returns -1 forever. */
-	const uint32_t slot = kdp - 2272u;
+	const uint32_t slot = kdp - (uint32_t)NW_NK_IRQ_KDP_OFF;
 	if (kdp < 0x2000u)
 		return;
 	if (slot < RAMBase || slot + 4 > RAMBase + RAMSize)
@@ -1135,12 +1135,19 @@ void nw_guest_plant_nk_irq(uint32_t kdp)
 	if (kdp >= 4 && kdp - 4 >= RAMBase && ReadMacInt32(kdp - 4) == 0)
 		WriteMacInt32(kdp - 4, kdp);
 	/*
-	 * NK 1:1-BATs this pointer (DBAT3) then spins on lbz 2(r28) bit 2.
-	 * Refresh 0xFF every plant: NK zeros low RAM after the first mtsdr1.
+	 * NK 1:1-BATs this pointer (live DBAT3 10000003/1000003a) then
+	 * lbz r30,2(r28). Live first DSI was that load (ea=10010002).
+	 * 0xFFFFFFFF made byte+2=0xFF (bit 2 set) and they picspun with
+	 * DSI n=1 — MemRetry HIT, so 0xFF is the spin value, not idle.
 	 */
-	const uint32_t pic = RAMBase + 0x10000u;
-	WriteMacInt32(pic, 0xffffffffu);
-	WriteMacInt32(pic + 4, 0xffffffffu);
+	const uint32_t pic = nw_nk_irq_pic_ea(RAMBase);
+	if (pic < RAMBase ||
+	    (uint64_t)pic + 8 > (uint64_t)RAMBase + RAMSize)
+		return;
+	WriteMacInt32(pic, 0);
+	WriteMacInt32(pic + 4, 0);
+	WriteMacInt8(pic + (uint32_t)NW_NK_IRQ_STATUS_OFF,
+		     nw_nk_irq_status_idle());
 	if (ReadMacInt32(slot) == 0)
 		WriteMacInt32(slot, pic);
 #if NW_BOOT_LOG
@@ -1148,7 +1155,12 @@ void nw_guest_plant_nk_irq(uint32_t kdp)
 		static int logged;
 		if (!logged) {
 			logged = 1;
-			nw_boot_log("G2: plant NK IRQ ptr KDP-2272");
+			char buf[96];
+			snprintf(buf, sizeof(buf),
+				 "G2: plant NK IRQ ptr KDP-2272 pic=%08x idle=%02x",
+				 (unsigned)pic,
+				 (unsigned)nw_nk_irq_status_idle());
+			nw_boot_log(buf);
 		}
 	}
 #endif

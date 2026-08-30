@@ -22443,20 +22443,53 @@ void powerpc_cpu::execute(uint32 entry)
 			    pc() == ROMBase + 0x325a9c ||
 			    pc() == ROMBase + 0x325998u) {
 				const uint32 pic = gpr(28);
+				const uint32 opw = vm_read_memory_4(pc());
 #if NW_BOOT_LOG
 				static int spun;
 				if (!spun) {
 					spun = 1;
-					char buf[80];
-					snprintf(buf, sizeof(buf), "G2: picspin r28=%08x pc=%08x",
-						 (unsigned)pic, (unsigned)pc());
+					char buf[112];
+					snprintf(buf, sizeof(buf),
+						 "G2: picspin r28=%08x pc=%08x op=%08x mill=%d",
+						 (unsigned)pic, (unsigned)pc(),
+						 (unsigned)opw,
+						 nw_guest_first_data_dsi_seen());
 					nw_boot_log(buf);
 				}
 #endif
-				if (pic >= RAMBase &&
+				/*
+				 * After G2 only. Live wrote 0xFFFFFFFF here every
+				 * iteration (byte+2=0xFF, bit 2 set) and stayed in
+				 * picspin with DSI n=1. That value is the spin
+				 * condition. Idle is 0. If this PC is a branch
+				 * on r30, skip it once the idle byte is visible.
+				 * Do not mill 68k. Do not run before first DSI.
+				 */
+				if (nw_guest_first_data_dsi_seen() &&
+				    pic >= RAMBase &&
 				    (uint64_t)pic + 8 <= (uint64_t)RAMBase + RAMSize) {
-					vm_write_memory_4(pic, 0xffffffffu);
-					vm_write_memory_4(pic + 4, 0xffffffffu);
+					vm_write_memory_4(pic, 0);
+					vm_write_memory_4(pic + 4, 0);
+					vm_write_memory_1(pic + (uint32)NW_NK_IRQ_STATUS_OFF,
+							  nw_nk_irq_status_idle());
+					gpr(30) = nw_nk_irq_status_idle();
+					if (nw_ppc_is_branch(opw)) {
+#if NW_BOOT_LOG
+						static int left;
+						if (!left) {
+							left = 1;
+							char buf[96];
+							snprintf(buf, sizeof(buf),
+								 "G2: picspin idle r28=%08x r30=%08x skipbr op=%08x",
+								 (unsigned)pic,
+								 (unsigned)gpr(30),
+								 (unsigned)opw);
+							nw_boot_log(buf);
+						}
+#endif
+						pc() += 4;
+						continue;
+					}
 				}
 			}
 		}

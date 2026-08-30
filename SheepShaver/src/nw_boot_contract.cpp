@@ -511,6 +511,42 @@ void nw_log_pc(uint32_t pc, uint32_t msr)
 #endif
 }
 
+uint32_t nw_nk_irq_pic_ea(uint32_t ram_base)
+{
+	return ram_base + (uint32_t)NW_NK_IRQ_PIC_RAM_OFF;
+}
+
+uint8_t nw_nk_irq_status_idle(void)
+{
+	/* Live wrote 0xFF (bit 2 set) and spun; that is the spin value. */
+	return 0;
+}
+
+int nw_nk_irq_status_spins(uint8_t v)
+{
+	return (v & (uint8_t)(1u << NW_NK_IRQ_SPIN_BIT)) != 0;
+}
+
+int nw_ppc_is_branch(uint32_t op)
+{
+	const uint32_t prim = op >> 26;
+	if (prim == 16u || prim == 18u)
+		return 1;
+	if ((op & 0xfc0007feu) == 0x4c000020u)
+		return 1;
+	return 0;
+}
+
+void nw_nk_irq_fill_pic_be(uint8_t *mem, size_t mem_size, uint32_t pic_ea)
+{
+	if (mem == NULL)
+		return;
+	if ((uint64_t)pic_ea + 8u > mem_size)
+		return;
+	nw_be32_store(mem, pic_ea, 0);
+	nw_be32_store(mem, pic_ea + 4u, 0);
+}
+
 void nw_log_xlatehow(const char *how, uint32_t ea, uint32_t msr, uint32_t sdr1,
 		     uint32_t sr, uint32_t dbat3u, uint32_t dbat3l)
 {
