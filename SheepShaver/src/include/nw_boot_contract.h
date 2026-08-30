@@ -152,11 +152,12 @@ void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
 void nw_guest_seed_rom_htab(uint32_t sdr1);
 /*
  * NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one.
- * Live b19886d6: 27-set left; skip pc=50312728 npc=503127a8
- * (32-insn window end). Then 3-PC loop 503127a8 / 503127b8 /
- * 503127c8. After first data DSI, leave those via leave_npc;
- * do not land on that trio or the 27-set. Do not skip +0x325a14
- * before that DSI. PIC idle 0. OLD_B npc stays 50325aac.
+ * Live b62e7717: skip pc=50325a20 npc=50326000 (PAST) left the
+ * 27-set then dominant 50366084 mill 68k flood — mill is not G3
+ * and is not WINDOW. Do not jump picspin to 0x326000 or mill
+ * +0x366084. After first data DSI, leave_npc local fallthrough
+ * (OLD_B npc=50325aac). Do not skip +0x325a14 before that DSI.
+ * PIC idle 0.
  */
 enum {
 	NW_NK_IRQ_KDP_OFF = 2272,
@@ -170,8 +171,9 @@ enum {
 	NW_NK_PICSPIN_OLD_A = 0x325998,
 	NW_NK_PICSPIN_OLD_B = 0x325a9c,
 	NW_NK_PICSPIN_OLD_C = 0x325c94,
-	NW_NK_PICSPIN_PAST = 0x326000,	/* last-resort if fallthrough stays */
+	NW_NK_PICSPIN_PAST = 0x326000,	/* live b62e7717: went to mill; stay */
 	NW_NK_PICSPIN_LEAVE_INSNS = 32,
+	NW_NK_MILL_68K = 0x366084,	/* mill inner loop; not G3 / not WINDOW */
 	NW_NK_CYCLE_A = 0x325c7c,	/* live e0df3b4e dominant */
 	NW_NK_CYCLE_B = 0x325c44,
 	NW_NK_CYCLE_C = 0x32570c,
@@ -197,6 +199,7 @@ int nw_ppc_is_branch(uint32_t op);
 int nw_ppc_rel_branch_target(uint32_t pc, uint32_t op, uint32_t *target);
 int nw_nk_picspin_rom_off(uint32_t off);
 int nw_nk_picspin_cycle_off(uint32_t off);
+int nw_nk_picspin_mill_off(uint32_t off);
 int nw_nk_picspin_is_g2_dsi_off(uint32_t off);
 int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op);
 int nw_nk_picspin_npc_stays(uint32_t npc, uint32_t from_pc, uint32_t rom_base);

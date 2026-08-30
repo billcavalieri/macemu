@@ -22464,12 +22464,10 @@ void powerpc_cpu::execute(uint32 entry)
 					}
 #endif
 					/*
-					 * Live b19886d6: 27-set left;
-					 * skip 50312728 landed on
-					 * 503127a8 (32-insn window).
-					 * Then 503127a8/b8/c8. After
-					 * first data DSI, leave_npc
-					 * must not land on that trio.
+					 * Live b62e7717: npc=50326000 then
+					 * mill 50366084 flood (not G3,
+					 * not WINDOW). leave_npc local
+					 * fallthrough; never PAST/mill.
 					 * OLD_B npc stays 50325aac.
 					 * +0x325a14 still misses once.
 					 * PIC idle 0. Do not mill 68k.

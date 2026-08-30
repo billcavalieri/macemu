@@ -608,6 +608,17 @@ int nw_nk_picspin_cycle_off(uint32_t off)
 	return 0;
 }
 
+int nw_nk_picspin_mill_off(uint32_t off)
+{
+	switch (off) {
+	case NW_NK_MILL_68K:
+	case 0x466084u: /* ROM+4MiB mirror */
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 int nw_nk_picspin_is_g2_dsi_off(uint32_t off)
 {
 	return off == (uint32_t)NW_NK_PICSPIN_LBZ;
@@ -634,7 +645,9 @@ int nw_nk_picspin_npc_stays(uint32_t npc, uint32_t from_pc, uint32_t rom_base)
 		off = npc - rom_base;
 	else
 		off = npc;
-	if (nw_nk_picspin_rom_off(off) || nw_nk_picspin_cycle_off(off))
+	if (nw_nk_picspin_rom_off(off) || nw_nk_picspin_cycle_off(off) ||
+	    nw_nk_picspin_mill_off(off) ||
+	    off == (uint32_t)NW_NK_PICSPIN_PAST)
 		return 1;
 	return 0;
 }
@@ -668,18 +681,20 @@ uint32_t nw_nk_picspin_leave_npc(uint32_t pc, uint32_t rom_base,
 uint32_t nw_nk_picspin_past_npc(uint32_t pc, uint32_t rom_base)
 {
 	uint32_t npc;
+	unsigned i;
 
 	/*
-	 * Last resort only: leave_npc could not find a non-stay
-	 * fallthrough. Do not use 0x325c98 (in the 27-PC cluster).
+	 * Live b62e7717: ROM+0x326000 then mill +0x366084 flood.
+	 * Walk forward from pc. Never PAST, never mill.
 	 */
-	if (rom_base != 0)
-		npc = rom_base + (uint32_t)NW_NK_PICSPIN_PAST;
-	else
-		npc = (uint32_t)NW_NK_PICSPIN_PAST;
-	if (npc <= pc || nw_nk_picspin_npc_stays(npc, pc, rom_base))
-		npc = pc + 4u * (uint32_t)NW_NK_PICSPIN_LEAVE_INSNS;
-	return npc;
+	npc = pc + 4u;
+	for (i = 0; i < 256u; i++) {
+		if (!nw_nk_picspin_npc_stays(npc, pc, rom_base) &&
+		    npc > pc)
+			return npc;
+		npc += 4u;
+	}
+	return pc + 4u;
 }
 
 void nw_nk_irq_fill_pic_be(uint8_t *mem, size_t mem_size, uint32_t pic_ea)
