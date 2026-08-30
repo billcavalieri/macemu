@@ -22464,14 +22464,13 @@ void powerpc_cpu::execute(uint32 entry)
 					}
 #endif
 					/*
-					 * Live e0df3b4e: OLD_B left via
-					 * leave_npc (npc=50325aac). Then
-					 * 27-PC NK cycle (dominant
-					 * 50325c7c). Do not jump picspin
-					 * to 0x325c98 (108235a0, in the
-					 * cluster). After first data DSI,
-					 * leave_npc on picspin and cycle
-					 * PCs; do not execute the insn.
+					 * Live b19886d6: 27-set left;
+					 * skip 50312728 landed on
+					 * 503127a8 (32-insn window).
+					 * Then 503127a8/b8/c8. After
+					 * first data DSI, leave_npc
+					 * must not land on that trio.
+					 * OLD_B npc stays 50325aac.
 					 * +0x325a14 still misses once.
 					 * PIC idle 0. Do not mill 68k.
 					 */

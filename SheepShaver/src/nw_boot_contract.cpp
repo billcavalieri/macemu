@@ -592,10 +592,20 @@ int nw_nk_picspin_cycle_off(uint32_t off)
 	case NW_NK_PRINT_B:
 	case NW_NK_PRINT_C:
 	case NW_NK_CYCLE_OLD_PAST:
+	case NW_NK_TAIL_A:
+	case NW_NK_TAIL_B:
+	case NW_NK_TAIL_C:
 		return 1;
 	default:
-		return 0;
+		break;
 	}
+	/* Live b19886d6: 503127a8/b8/c8 are 16 bytes apart; stay the
+	 * whole aligned range so leave_npc cannot land in the body. */
+	if (off >= (uint32_t)NW_NK_TAIL_LO &&
+	    off <= (uint32_t)NW_NK_TAIL_HI &&
+	    (off & 3u) == 0)
+		return 1;
+	return 0;
 }
 
 int nw_nk_picspin_is_g2_dsi_off(uint32_t off)
@@ -607,9 +617,9 @@ int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op)
 {
 	(void)op;
 	/*
-	 * After G2, skip listed picspin offs and the e0df3b4e 27-PC
-	 * cycle. Caller uses leave_npc (OLD_B npc=50325aac), not
-	 * 108235a0 PAST 0x325c98.
+	 * After G2, skip listed picspin offs, the 27-PC cycle, and the
+	 * live 503127a8/b8/c8 loop. Caller uses leave_npc (OLD_B
+	 * npc=50325aac). Do not land on the tail trio.
 	 */
 	return nw_nk_picspin_rom_off(off) || nw_nk_picspin_cycle_off(off);
 }

@@ -905,6 +905,38 @@ int main()
 				CHECK(npc > cyc_pc);
 			}
 
+			CHECK(nw_nk_picspin_cycle_off(NW_NK_TAIL_A));
+			CHECK(nw_nk_picspin_cycle_off(NW_NK_TAIL_B));
+			CHECK(nw_nk_picspin_cycle_off(NW_NK_TAIL_C));
+			CHECK(nw_nk_picspin_cycle_off(NW_NK_TAIL_A + 4u));
+			CHECK(nw_nk_picspin_skip_after_g2(NW_NK_TAIL_A,
+							  0x60000000u));
+			CHECK(!nw_nk_picspin_cycle_off(NW_NK_TAIL_HI + 4u));
+			{
+				const uint32_t g = rom + (uint32_t)NW_NK_CYCLE_G;
+				const uint32_t tail_a =
+					rom + (uint32_t)NW_NK_TAIL_A;
+				uint32_t nops[NW_NK_PICSPIN_LEAVE_INSNS];
+				unsigned k;
+				for (k = 0; k < (unsigned)NW_NK_PICSPIN_LEAVE_INSNS; k++)
+					nops[k] = 0x60000000u;
+				npc = nw_nk_picspin_leave_npc(
+					g, rom, nops,
+					(unsigned)NW_NK_PICSPIN_LEAVE_INSNS);
+				CHECK(npc != rom + (uint32_t)NW_NK_TAIL_A);
+				CHECK(npc != rom + (uint32_t)NW_NK_TAIL_B);
+				CHECK(npc != rom + (uint32_t)NW_NK_TAIL_C);
+				CHECK(npc > rom + (uint32_t)NW_NK_TAIL_HI);
+				nops[0] = (uint32_t)NW_NK_PICSPIN_LBZ_OP;
+				npc = nw_nk_picspin_leave_npc(
+					tail_a, rom, nops,
+					(unsigned)NW_NK_PICSPIN_LEAVE_INSNS);
+				CHECK(npc != tail_a);
+				CHECK(npc > rom + (uint32_t)NW_NK_TAIL_HI);
+				CHECK(!nw_nk_picspin_npc_stays(npc, tail_a,
+							       rom));
+			}
+
 			{
 				uint32_t nops[NW_NK_PICSPIN_LEAVE_INSNS];
 				unsigned k;

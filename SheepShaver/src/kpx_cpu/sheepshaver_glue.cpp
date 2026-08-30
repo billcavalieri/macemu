@@ -1137,9 +1137,9 @@ void nw_guest_plant_nk_irq(uint32_t kdp)
 	/*
 	 * NK 1:1-BATs this pointer (live DBAT3 10000003/1000003a) then
 	 * lbz r30,2(r28). Live first DSI was that load (ea=10010002).
-	 * Idle stays 0. After G2, leave picspin (OLD_B npc=50325aac)
-	 * and the 27-PC cycle via backward-branch fallthrough. Do not
-	 * jump OLD_B to 0x325c98.
+	 * Idle stays 0. After G2, leave picspin (OLD_B npc=50325aac),
+	 * the 27-PC cycle, and the 503127a8/b8/c8 loop via
+	 * leave_npc. Do not land on that trio.
 	 */
 	const uint32_t pic = nw_nk_irq_pic_ea(RAMBase);
 	if (pic < RAMBase ||

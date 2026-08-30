@@ -152,13 +152,11 @@ void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
 void nw_guest_seed_rom_htab(uint32_t sdr1);
 /*
  * NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one.
- * Live e0df3b4e: OLD_B left (skip pc=50325a9c npc=50325aac).
- * Then a 27-PC NK cycle (dominant 50325c7c; also 50325c44/
- * 5032570c/50325690/50325670/50325520/50312728/50312708).
- * 108235a0 PAST 0x325c98 is in that cluster — do not use it as
- * OLD_B npc. After first data DSI, leave picspin and cycle PCs
- * via the first backward-branch fallthrough (same as OLD_B).
- * Do not skip +0x325a14 before that DSI. PIC idle 0.
+ * Live b19886d6: 27-set left; skip pc=50312728 npc=503127a8
+ * (32-insn window end). Then 3-PC loop 503127a8 / 503127b8 /
+ * 503127c8. After first data DSI, leave those via leave_npc;
+ * do not land on that trio or the 27-set. Do not skip +0x325a14
+ * before that DSI. PIC idle 0. OLD_B npc stays 50325aac.
  */
 enum {
 	NW_NK_IRQ_KDP_OFF = 2272,
@@ -185,7 +183,12 @@ enum {
 	NW_NK_PRINT_A = 0x32572c,
 	NW_NK_PRINT_B = 0x325850,
 	NW_NK_PRINT_C = 0x325874,
-	NW_NK_CYCLE_OLD_PAST = 0x325c98	/* 108235a0 PAST, in cluster */
+	NW_NK_CYCLE_OLD_PAST = 0x325c98,	/* 108235a0 PAST, in cluster */
+	NW_NK_TAIL_A = 0x3127a8,	/* live b19886d6 3-PC loop */
+	NW_NK_TAIL_B = 0x3127b8,
+	NW_NK_TAIL_C = 0x3127c8,
+	NW_NK_TAIL_LO = 0x3127a8,
+	NW_NK_TAIL_HI = 0x3127c8
 };
 uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
 uint8_t nw_nk_irq_status_idle(void);
