@@ -219,6 +219,11 @@ int nw_dec_leave_50326674_cmp(uint32_t rom_off, uint32_t op);
  */
 int nw_ppc_bc_fallthrough_cr_set(uint32_t op);
 /*
+ * 50325xxx / 50326xxx after leave. Not a skip-list. CLOUD_LO_4
+ * (0x900 body) stays out.
+ */
+int nw_nk_postleave_walk_off(uint32_t off);
+/*
  * GPR that makes the following bc fall through. r8: beq-only
  * when already -1. Do not smash r8 on bne.
  */

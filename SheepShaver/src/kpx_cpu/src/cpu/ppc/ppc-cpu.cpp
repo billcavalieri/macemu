@@ -89,8 +89,10 @@ static int nw_dec_did_leave;
  * take_dec so hold cannot swallow the first 0x900. */
 static int nw_dec_took_900;
 /* Live 3081e072: 50326674 cmpwi r8,-1 then bne +8. Complete
- * that bc via CR fall-through; do not smash r8. */
-static int nw_dec_leave_skip_bc;
+ * that bc via CR fall-through; do not smash r8.
+ * Live 6b413a91: after that, neighboring 50325/50326
+ * cmp+bc / PIC poll. Arm the following bc pc. */
+static uint32 nw_dec_leave_skip_bc_pc;
 static void nw_dec_note_msr(uint32 msr)
 {
 	const uint32 ir_dr =
@@ -138,6 +140,10 @@ static int nw_dec_leave_needs_pin(uint32 m, uint32 want)
 	/* Live 54bc576f: guest WALK_EE mtmsr with EE must not be
 	 * stripped back to 00000010. Do not or-in EE. */
 	if (nw_ppc_srr1_is_msr(m) && m != 0 && nw_dec_ee_on(m))
+		return 0;
+	/* Live 6b413a91: walk msr=00003010. Do not re-pin
+	 * to 00007672. */
+	if (m == 0x00003010u)
 		return 0;
 	/* Live a4f0c6ce: pin was=00001040 use=00007672. ME+IP
 	 * real-mode after leave is a real guest MSR — do not
@@ -23220,6 +23226,14 @@ void powerpc_cpu::execute(uint32 entry)
 									}
 								}
 #endif
+								{
+									const uint32 nxt =
+										vm_read_memory_4(pc() + 4);
+									if (nw_ppc_is_bc(nxt) &&
+									    nw_ppc_bc_fallthrough_cr_set(nxt) >= 0)
+										nw_dec_leave_skip_bc_pc =
+											pc() + 4;
+								}
 							}
 							if (nw_dec_leave_50325a9c_wait(rom_off)) {
 								const uint32 prim =
@@ -23266,6 +23280,14 @@ void powerpc_cpu::execute(uint32 entry)
 									}
 								}
 #endif
+								{
+									const uint32 nxt =
+										vm_read_memory_4(pc() + 4);
+									if (nw_ppc_is_bc(nxt) &&
+									    nw_ppc_bc_fallthrough_cr_set(nxt) >= 0)
+										nw_dec_leave_skip_bc_pc =
+											pc() + 4;
+								}
 							}
 							if (nw_dec_leave_50326674_cmp(rom_off,
 										       opw)) {
@@ -23277,8 +23299,10 @@ void powerpc_cpu::execute(uint32 entry)
 										8, was, 0xffffffffu,
 										nxt);
 								gpr(8) = use;
-								if (nw_ppc_is_bc(nxt))
-									nw_dec_leave_skip_bc = 1;
+								if (nw_ppc_is_bc(nxt) &&
+								    nw_ppc_bc_fallthrough_cr_set(nxt) >= 0)
+									nw_dec_leave_skip_bc_pc =
+										pc() + 4;
 #if NW_BOOT_LOG
 								{
 									static int nr8;
@@ -23308,7 +23332,7 @@ void powerpc_cpu::execute(uint32 entry)
 									}
 								}
 #endif
-							} else if (nw_dec_leave_50326_wait(rom_off) &&
+							} else if (nw_nk_postleave_walk_off(rom_off) &&
 								   nw_ppc_is_cmp(opw)) {
 								const uint32 nxt =
 									vm_read_memory_4(pc() + 4);
@@ -23329,23 +23353,30 @@ void powerpc_cpu::execute(uint32 entry)
 									rb = gpr((opw >> 11) & 31u);
 								use = nw_dec_leave_50326_cmp_use(
 									ra, was, rb, nxt);
-								if (use != was) {
+								/* Do not smash r8 on bne. */
+								if (ra != 8u && use != was)
 									gpr(ra) = use;
+								if (nw_ppc_is_bc(nxt) &&
+								    nw_ppc_bc_fallthrough_cr_set(nxt) >= 0)
+									nw_dec_leave_skip_bc_pc =
+										pc() + 4;
 #if NW_BOOT_LOG
-									static int n26c;
-									if (!n26c) {
-										n26c = 1;
+								{
+									static int n26n;
+									if (!n26n) {
+										n26n = 1;
 										char buf[144];
 										snprintf(buf, sizeof(buf),
-											 "G3: DEC leave 50326 cmp r%u was=%08x use=%08x nxt=%08x",
+											 "G3: DEC leave 50326 cmp pc=%08x op=%08x nxt=%08x r%u=%08x",
+											 (unsigned)pc(),
+											 (unsigned)opw,
+											 (unsigned)nxt,
 											 (unsigned)ra,
-											 (unsigned)was,
-											 (unsigned)use,
-											 (unsigned)nxt);
+											 (unsigned)gpr(ra));
 										nw_boot_log(buf);
 									}
-#endif
 								}
+#endif
 							}
 #if NW_BOOT_LOG
 							if (nw_dec_leave_50326_wait(rom_off)) {
@@ -23465,46 +23496,58 @@ void powerpc_cpu::execute(uint32 entry)
 			continue;
 		}
 #ifdef SHEEPSHAVER
-		/* Live 3081e072: after matching 50326674 cmpwi r8,-1,
-		 * make bne at 50326678 fall through. Do not smash r8.
-		 * Do not skip-list 50326xxx. Do not or-in EE. */
-		if (nw_dec_did_leave && nw_dec_leave_skip_bc) {
+		/* Live 6b413a91: after 50326674/678, complete the
+		 * next 50325/50326 cmp+bc the same way (match then
+		 * CR fallthrough at the armed pc). Do not smash r8.
+		 * Do not skip-list. Do not or-in EE. */
+		if (nw_dec_did_leave && nw_dec_leave_skip_bc_pc &&
+		    pc() == nw_dec_leave_skip_bc_pc &&
+		    nw_ppc_is_bc(opcode)) {
+			const int cr_set =
+				nw_ppc_bc_fallthrough_cr_set(opcode);
+			const uint32 bi = (opcode >> 16) & 0x1fu;
+			uint32 crv = cr().get();
+			const uint32 bit = 1u << (31u - bi);
 			const uint32 off =
 				(pc() >= ROMBase &&
 				 pc() < ROMBase + 0x500000u)
 					? pc() - ROMBase
 					: 0xffffffffu;
-			if (off == 0x326678u && nw_ppc_is_bc(opcode)) {
-				const int cr_set =
-					nw_ppc_bc_fallthrough_cr_set(opcode);
-				const uint32 bi = (opcode >> 16) & 0x1fu;
-				uint32 crv = cr().get();
-				const uint32 bit = 1u << (31u - bi);
-				nw_dec_leave_skip_bc = 0;
-				if (cr_set == 1)
-					crv |= bit;
-				else if (cr_set == 0)
-					crv &= ~bit;
-				if (cr_set >= 0)
-					cr().set(crv);
+			nw_dec_leave_skip_bc_pc = 0;
+			if (cr_set == 1)
+				crv |= bit;
+			else if (cr_set == 0)
+				crv &= ~bit;
+			if (cr_set >= 0)
+				cr().set(crv);
 #if NW_BOOT_LOG
-				{
-					static int nsk;
-					if (!nsk) {
-						nsk = 1;
+			{
+				static int nsk;
+				if (!nsk) {
+					nsk = 1;
+					char buf[112];
+					snprintf(buf, sizeof(buf),
+						 "G3: DEC leave 50326 bc fallthrough pc=%08x op=%08x cr=%08x",
+						 (unsigned)pc(),
+						 (unsigned)opcode,
+						 (unsigned)cr().get());
+					nw_boot_log(buf);
+				}
+				if (off != 0x326678u) {
+					static int nskn;
+					if (!nskn) {
+						nskn = 1;
 						char buf[112];
 						snprintf(buf, sizeof(buf),
-							 "G3: DEC leave 50326 bc fallthrough pc=%08x op=%08x cr=%08x",
+							 "G3: DEC leave 50326 bc pc=%08x op=%08x cr=%08x",
 							 (unsigned)pc(),
 							 (unsigned)opcode,
 							 (unsigned)cr().get());
 						nw_boot_log(buf);
 					}
 				}
-#endif
-			} else if (off != 0x326674u) {
-				nw_dec_leave_skip_bc = 0;
 			}
+#endif
 		}
 		/* Live 0ad66900: twi pad after DEC 0x900 is not in
 		 * ppc-decode. Restore take_dec GPRs too. */

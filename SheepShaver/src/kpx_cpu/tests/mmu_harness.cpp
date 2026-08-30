@@ -1374,6 +1374,14 @@ int main()
 		CHECK(nw_dec_leave_pin_real(0, 0x00007672u));
 		CHECK(nw_dec_leave_pin_real(0x17efbb80u, 0x00007672u));
 		CHECK(!nw_dec_leave_pin_real(0x00007672u, 0x00007672u));
+		CHECK(!nw_dec_leave_pin_real(0x00003010u, 0x00007672u));
+		CHECK(nw_nk_postleave_walk_off(0x326674u));
+		CHECK(nw_nk_postleave_walk_off(0x3259e0u));
+		CHECK(nw_nk_postleave_walk_off(0x325a9cu));
+		CHECK(!nw_nk_postleave_walk_off(0x326420u));
+		CHECK(!nw_nk_postleave_walk_off(0x366084u));
+		CHECK(!nw_nk_picspin_mill_off(0x326674u));
+		CHECK(!nw_nk_picspin_mill_off(0x325a9cu));
 		CHECK(nw_ppc_is_cmp(0x2c08ffffu));
 		CHECK(nw_ppc_is_cmp(0x2c1e0000u));
 		CHECK(nw_ppc_is_cmp(0x7c032040u)); /* cmplw cr0,r3,r4 */

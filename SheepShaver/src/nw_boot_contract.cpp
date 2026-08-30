@@ -489,6 +489,10 @@ int nw_dec_leave_pin_real(uint32_t live, uint32_t last_real)
 
 	if (!nw_ppc_srr1_is_msr(live) || live == 0)
 		return 1;
+	/* Live 6b413a91: walk msr=00003010 (ME+DR). Do not
+	 * re-pin to 00007672. */
+	if (live == 0x00003010u)
+		return 0;
 	/* Live a4f0c6ce pin was=00001040 use=00007672. Guest
 	 * ME+IP real-mode after leave is a real MSR. Do not
 	 * force IR+DR back. RI-only leftover (no ME) still
@@ -537,6 +541,21 @@ int nw_ppc_bc_fallthrough_cr_set(uint32_t op)
 	if (bo == 12u)
 		return 0;
 	return -1;
+}
+
+int nw_nk_postleave_walk_off(uint32_t off)
+{
+	if ((off & 3u) != 0)
+		return 0;
+	if (off >= 0x325000u && off < 0x326000u)
+		return 1;
+	if (off >= 0x326000u && off < 0x327000u) {
+		if (off >= (uint32_t)NW_NK_CLOUD_LO_4 &&
+		    off <= (uint32_t)NW_NK_CLOUD_HI_4)
+			return 0;
+		return 1;
+	}
+	return 0;
 }
 
 uint32_t nw_dec_leave_50326_cmp_use(uint32_t ra, uint32_t was,
