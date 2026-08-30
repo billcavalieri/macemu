@@ -22463,13 +22463,15 @@ void powerpc_cpu::execute(uint32 entry)
 					}
 #endif
 					/*
-					 * Live 855f81f6: beq skip at +0x325a20
-					 * fired; then heartbeats stuck on
-					 * mill-era +0x325a9c (not a branch).
-					 * After first data DSI, skip every
-					 * picspin off, including OLD_B.
-					 * +0x325a14 still misses once (G2).
-					 * PIC idle 0. Do not mill 68k.
+					 * Live 902fbf32: skip at +0x325a9c
+					 * logged (lbz 8bdc0002) but pc+4
+					 * re-entered the same loop
+					 * (heartbeats ×2952). After first
+					 * data DSI, leave to the
+					 * fallthrough of the first
+					 * backward branch. +0x325a14 still
+					 * misses once (G2). PIC idle 0.
+					 * Do not mill 68k.
 					 */
 					if (nw_guest_first_data_dsi_seen()) {
 						if (pic >= RAMBase &&
@@ -22484,23 +22486,36 @@ void powerpc_cpu::execute(uint32 entry)
 						gpr(30) = nw_nk_irq_status_idle();
 						if (nw_nk_picspin_skip_after_g2(rom_off,
 										opw)) {
+							uint32 win[NW_NK_PICSPIN_LEAVE_INSNS];
+							unsigned wi;
+							uint32 npc;
+							win[0] = opw;
+							for (wi = 1;
+							     wi < (unsigned)NW_NK_PICSPIN_LEAVE_INSNS;
+							     wi++)
+								win[wi] = vm_read_memory_4(
+									pc() + 4u * wi);
+							npc = nw_nk_picspin_leave_npc(
+								pc(), ROMBase, win,
+								(unsigned)NW_NK_PICSPIN_LEAVE_INSNS);
 #if NW_BOOT_LOG
 							static unsigned nleft;
 							if (nleft < 8) {
 								nleft++;
-								char buf[128];
+								char buf[160];
 								snprintf(buf, sizeof(buf),
-									 "G2: picspin idle n=%u r28=%08x r30=%08x skip pc=%08x off=%08x op=%08x",
+									 "G2: picspin idle n=%u r28=%08x r30=%08x skip pc=%08x npc=%08x off=%08x op=%08x",
 									 nleft,
 									 (unsigned)pic,
 									 (unsigned)gpr(30),
 									 (unsigned)pc(),
+									 (unsigned)npc,
 									 (unsigned)rom_off,
 									 (unsigned)opw);
 								nw_boot_log(buf);
 							}
 #endif
-							pc() += 4;
+							pc() = npc;
 							continue;
 						}
 					}

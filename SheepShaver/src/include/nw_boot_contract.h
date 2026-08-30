@@ -152,11 +152,12 @@ void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
 void nw_guest_seed_rom_htab(uint32_t sdr1);
 /*
  * NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one.
- * Live 855f81f6: G2 HIT at ROM+0x325a14 (lbz still misses before skip).
- * Skip of beq +0x325a20 fired; heartbeats then stuck on mill-era
- * +0x325a9c (OLD_B) because skip_after_g2 only skipped branches.
- * After first data DSI, skip every picspin ROM off (including OLD_B
- * non-branches). Do not skip +0x325a14 before that DSI. PIC idle 0.
+ * Live 902fbf32: G2 HIT at ROM+0x325a14 (lbz still misses before skip).
+ * Skip of OLD_B +0x325a9c logged (op=8bdc0002) but pc+4 re-entered the
+ * lbz loop (heartbeats 50325a9c ×2952). After first data DSI, leave
+ * every picspin ROM off to the fallthrough of the first backward
+ * branch — not PC+0 and not +0x325a14 / +0x325a20 / +0x325a9c.
+ * Do not skip +0x325a14 before that DSI. PIC idle 0.
  */
 enum {
 	NW_NK_IRQ_KDP_OFF = 2272,
@@ -169,15 +170,20 @@ enum {
 	NW_NK_PICSPIN_BEQ_OP = 0x4182fc40,	/* beq */
 	NW_NK_PICSPIN_OLD_A = 0x325998,
 	NW_NK_PICSPIN_OLD_B = 0x325a9c,
-	NW_NK_PICSPIN_OLD_C = 0x325c94
+	NW_NK_PICSPIN_OLD_C = 0x325c94,
+	NW_NK_PICSPIN_LEAVE_INSNS = 16
 };
 uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
 uint8_t nw_nk_irq_status_idle(void);
 int nw_nk_irq_status_spins(uint8_t v);
 int nw_ppc_is_branch(uint32_t op);
+int nw_ppc_rel_branch_target(uint32_t pc, uint32_t op, uint32_t *target);
 int nw_nk_picspin_rom_off(uint32_t off);
 int nw_nk_picspin_is_g2_dsi_off(uint32_t off);
 int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op);
+int nw_nk_picspin_npc_stays(uint32_t npc, uint32_t from_pc, uint32_t rom_base);
+uint32_t nw_nk_picspin_leave_npc(uint32_t pc, uint32_t rom_base,
+				 const uint32_t *insns, unsigned n);
 void nw_nk_irq_fill_pic_be(uint8_t *mem, size_t mem_size, uint32_t pic_ea);
 void nw_guest_plant_nk_irq(uint32_t kdp);
 /* After first DSI: 1:1 BAT RAM+ROM so HotInts MemRetry can HIT under DR.

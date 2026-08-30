@@ -537,6 +537,32 @@ int nw_ppc_is_branch(uint32_t op)
 	return 0;
 }
 
+int nw_ppc_rel_branch_target(uint32_t pc, uint32_t op, uint32_t *target)
+{
+	const uint32_t prim = op >> 26;
+	uint32_t t;
+
+	if (target == NULL)
+		return 0;
+	if (prim == 18u) {
+		t = op & 0x03fffffcu;
+		if (t & 0x02000000u)
+			t |= 0xfc000000u;
+		if ((op & 2u) == 0)
+			t += pc;
+		*target = t;
+		return 1;
+	}
+	if (prim == 16u) {
+		t = (uint32_t)(int32_t)(int16_t)(op & 0xfffcu);
+		if ((op & 2u) == 0)
+			t += pc;
+		*target = t;
+		return 1;
+	}
+	return 0;
+}
+
 int nw_nk_picspin_rom_off(uint32_t off)
 {
 	switch (off) {
@@ -560,12 +586,54 @@ int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op)
 {
 	(void)op;
 	/*
-	 * Live 855f81f6: OLD_B +0x325a9c ran ×2634 after the beq skip.
-	 * That insn is not a branch, so a branch-only skip never fired.
-	 * After G2, skip every listed picspin off. Caller must not invoke
-	 * this until nw_guest_note_first_data_dsi() (0x325a14 is G2).
+	 * Live 902fbf32: skip at OLD_B logged but pc+4 re-entered the
+	 * lbz loop. Caller must jump to leave_npc, not PC+4, and must
+	 * not invoke this until nw_guest_note_first_data_dsi().
 	 */
 	return nw_nk_picspin_rom_off(off);
+}
+
+int nw_nk_picspin_npc_stays(uint32_t npc, uint32_t from_pc, uint32_t rom_base)
+{
+	uint32_t off;
+
+	if (npc == from_pc)
+		return 1;
+	if (rom_base != 0 && npc >= rom_base)
+		off = npc - rom_base;
+	else
+		off = npc;
+	switch (off) {
+	case NW_NK_PICSPIN_LBZ:
+	case NW_NK_PICSPIN_BEQ:
+	case NW_NK_PICSPIN_OLD_B:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+uint32_t nw_nk_picspin_leave_npc(uint32_t pc, uint32_t rom_base,
+				 const uint32_t *insns, unsigned n)
+{
+	unsigned i;
+	uint32_t past;
+
+	if (insns == NULL || n == 0)
+		return pc + 4u;
+	for (i = 0; i < n; i++) {
+		uint32_t cur = pc + 4u * i;
+		uint32_t tgt = 0;
+		if (nw_ppc_rel_branch_target(cur, insns[i], &tgt) &&
+		    tgt <= cur) {
+			uint32_t ft = cur + 4u;
+			if (!nw_nk_picspin_npc_stays(ft, pc, rom_base))
+				return ft;
+		}
+	}
+	/* No backward branch in the window: jump past it, not PC+4. */
+	past = pc + 4u * (uint32_t)n;
+	return past;
 }
 
 void nw_nk_irq_fill_pic_be(uint8_t *mem, size_t mem_size, uint32_t pic_ea)
