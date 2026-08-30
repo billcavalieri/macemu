@@ -80,6 +80,14 @@ public:
 	void tlbia();
 
 	/*
+	 * 4 KiB exception page at EA 0 (DSI at 0x300). Early NK copies this
+	 * from ROM+0x300000; until that BAT/PTE exists, identity-map it so
+	 * a fetch of 0x300 can HIT. Off for Old World 9.0.4 (IR/DR off).
+	 */
+	void set_ivt_mapped(bool on);
+	bool ivt_mapped() const { return ivt_mapped_; }
+
+	/*
 	 * space selects instruction vs data translation (MSR[IR] vs MSR[DR]).
 	 * width is the access size in bytes (1/2/4/8); first cut uses it only
 	 * as a non-zero access marker.
@@ -102,6 +110,7 @@ private:
 	bool relocation_on(ppc32_xlate_space space) const;
 	bool bat_hit(uint32_t ea, bool insn, uint32_t *pa) const;
 	bool htab_hit(uint32_t ea, uint32_t *pa);
+	bool ivt_hit(uint32_t ea, uint32_t *pa) const;
 	bool phys_read32(uint32_t pa, uint32_t *value) const;
 	void tlb_insert(uint32_t ea, uint32_t pa, bool insn);
 	bool tlb_lookup(uint32_t ea, bool insn, uint32_t *pa) const;
@@ -119,6 +128,7 @@ private:
 	uint32_t dbatl_[NBAT];
 	tlb_entry tlb_[NTLB];
 	unsigned tlb_next_;
+	bool ivt_mapped_;
 };
 
 /*
@@ -148,6 +158,8 @@ struct ppc32_hotints_dsi {
 		dsisr = 0x40000000u | (is_store ? 0x02000000u : 0);
 		vector = (srr1 & ppc32_mmu::MSR_IP) ? 0xfff00300u : 0x300u;
 		mmu.set_msr(mmu.msr() & ~ppc32_mmu::MSR_EXC_CLEAR);
+		/* DSI vector page must HIT after the fault (IR/DR now off). */
+		mmu.set_ivt_mapped(true);
 	}
 
 	/* Handler: MSR[DR] ON, lwz at SRR0. Must HIT — no second DSI. */

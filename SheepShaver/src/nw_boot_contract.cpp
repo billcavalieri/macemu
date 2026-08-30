@@ -568,3 +568,16 @@ void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
 	for (uint32_t ea = rom_base; ea + 0x1000u <= last && ea >= rom_base; ea += 0x1000u)
 		nw_htab_insert_pte(htab, htab_size, sdr1, vsid, ea, ea >> 12);
 }
+
+void nw_fill_dsi_vector_be(uint8_t *mem, size_t mem_size, uint32_t handler)
+{
+	if (mem == NULL || mem_size < (size_t)NW_DSI_VECTOR_EA + 0x18u)
+		return;
+	/* mtsprg 1,r1; mtsprg 2,lr; lis/ori r1,handler; mtlr r1; blr */
+	nw_be32_store(mem, NW_DSI_VECTOR_EA + 0x00, (uint32_t)NW_DSI_VEC_MTSPRG1);
+	nw_be32_store(mem, NW_DSI_VECTOR_EA + 0x04, (uint32_t)NW_DSI_VEC_MTSPRG2);
+	nw_be32_store(mem, NW_DSI_VECTOR_EA + 0x08, 0x3c200000u | (handler >> 16));
+	nw_be32_store(mem, NW_DSI_VECTOR_EA + 0x0c, 0x60210000u | (handler & 0xffffu));
+	nw_be32_store(mem, NW_DSI_VECTOR_EA + 0x10, (uint32_t)NW_DSI_VEC_MTLR);
+	nw_be32_store(mem, NW_DSI_VECTOR_EA + 0x14, (uint32_t)NW_DSI_VEC_BLR);
+}
