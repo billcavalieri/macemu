@@ -288,6 +288,16 @@ static int nw_dec_leave_50326480_wait(uint32 rom_off)
 		return 0;
 	return nw_dec_leave_50326480_off(rom_off);
 }
+/* Live 042a7f54: 50326480 hang gone; bc 50326484
+ * 4082000c (bne +12); then silent hang pc=50326564
+ * msr=00003010. Complete that wait like 50326674.
+ * Forward beq/bne only. Do not fall through 503264fc. */
+static int nw_dec_leave_50326564_wait(uint32 rom_off)
+{
+	if (!nw_dec_did_leave || !nw_dec_took_900)
+		return 0;
+	return nw_dec_leave_50326564_off(rom_off);
+}
 static int nw_dec_leave_no_skip(uint32 rom_off)
 {
 	if (nw_dec_leave_50325(rom_off) ||
@@ -23392,6 +23402,49 @@ void powerpc_cpu::execute(uint32 entry)
 									}
 								}
 #endif
+							} else if (nw_dec_leave_50326564_wait(rom_off)) {
+								uint32 win[8];
+								unsigned wi;
+								int idx;
+								uint32 arm = 0;
+								uint32 log_nxt;
+								/* Live 042a7f54: hang pc=50326564
+								 * after 50326484 bne +12.
+								 * Match, arm following forward
+								 * beq/bne, CR-fallthrough.
+								 * Do not smash r8/r0. Do not
+								 * complete 503264fc. */
+								for (wi = 0; wi < 8u; wi++)
+									win[wi] = vm_read_memory_4(
+										pc() + 4u * wi);
+								log_nxt = win[1];
+								idx = nw_dec_leave_50326480_arm_idx(
+									rom_off, win, 8u);
+								if (idx >= 0 &&
+								    nw_dec_leave_cmp_wait(win[idx])) {
+									arm = pc() + 4u * (uint32)idx;
+									log_nxt = win[idx];
+								}
+								if (arm &&
+								    (arm - ROMBase) != 0x3264fcu &&
+								    (arm - ROMBase) != 0x3264f8u)
+									nw_dec_leave_skip_bc_pc = arm;
+#if NW_BOOT_LOG
+								{
+									static int n564;
+									if (!n564 &&
+									    rom_off == 0x326564u) {
+										n564 = 1;
+										char buf[144];
+										snprintf(buf, sizeof(buf),
+											 "G3: DEC leave 50326 cmp pc=%08x op=%08x nxt=%08x",
+											 (unsigned)pc(),
+											 (unsigned)opw,
+											 (unsigned)log_nxt);
+										nw_boot_log(buf);
+									}
+								}
+#endif
 							} else if (nw_nk_postleave_walk_off(rom_off) &&
 								   nw_ppc_is_cmp(opw)) {
 								const uint32 nxt =
@@ -23454,7 +23507,8 @@ void powerpc_cpu::execute(uint32 entry)
 							if (nw_dec_leave_hb_wait_off(rom_off) &&
 							    rom_off != 0x326674u &&
 							    rom_off != 0x3256f4u &&
-							    !nw_dec_leave_50326480_off(rom_off)) {
+							    !nw_dec_leave_50326480_off(rom_off) &&
+							    !nw_dec_leave_50326564_off(rom_off)) {
 								const uint32 nxt =
 									vm_read_memory_4(pc() + 4);
 								uint32 arm = 0;

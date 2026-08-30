@@ -631,17 +631,30 @@ int nw_dec_leave_50326480_off(uint32_t off)
 	return 0;
 }
 
+int nw_dec_leave_50326564_off(uint32_t off)
+{
+	if (off == 0x326564u)
+		return 1;
+	/* Around 50326564: ±4 insns. Not a skip-list. */
+	if ((off & 3u) == 0 && off >= 0x32655cu && off <= 0x326574u)
+		return 1;
+	return 0;
+}
+
 int nw_dec_leave_hb_wait_off(uint32_t off)
 {
 	switch (off) {
 	case 0x326480u:
 	case 0x326484u:
 	case 0x326478u:
+	case 0x326564u:
+	case 0x326568u:
 	case 0x32663cu:
 	case 0x3259dcu:
 		return 1;
 	default:
-		return nw_dec_leave_50326480_off(off);
+		return nw_dec_leave_50326480_off(off) ||
+		       nw_dec_leave_50326564_off(off);
 	}
 }
 

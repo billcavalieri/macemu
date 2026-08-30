@@ -1489,6 +1489,35 @@ int main()
 		CHECK(!nw_nk_picspin_skip_after_g2(0x3264f8u, 0x7c001800u));
 		CHECK(!nw_nk_picspin_mill_off(0x3264f8u));
 
+		/* Live 042a7f54: 50326480 hang gone; bc 50326484
+		 * 4082000c (bne +12); hang pc=50326564. */
+		CHECK(nw_ppc_bc_disp(0x4082000cu) == 12);
+		CHECK(nw_dec_leave_cmp_wait(0x4082000cu));
+		CHECK(nw_dec_leave_50326564_off(0x326564u));
+		CHECK(nw_dec_leave_50326564_off(0x326568u));
+		CHECK(nw_dec_leave_50326564_off(0x32655cu));
+		CHECK(!nw_dec_leave_50326564_off(0x326480u));
+		CHECK(!nw_dec_leave_50326564_off(0x3264fcu));
+		CHECK(!nw_dec_leave_50326564_off(0x326674u));
+		CHECK(nw_dec_leave_hb_wait_off(0x326564u));
+		CHECK(nw_nk_postleave_walk_off(0x326564u));
+		CHECK(!nw_nk_picspin_skip_after_g2(0x326564u, 0x4082000cu));
+		CHECK(!nw_nk_picspin_mill_off(0x326564u));
+		CHECK(!nw_dec_leave_cmp_wait(0x4082fff0u));
+		{
+			uint32_t w[4];
+			w[0] = 0x2c080000u;
+			w[1] = 0x4082000cu;
+			w[2] = 0;
+			w[3] = 0;
+			CHECK(nw_dec_leave_50326480_arm_idx(0x326564u, w, 4u) == 1);
+			w[0] = 0x4082000cu;
+			CHECK(nw_dec_leave_50326480_arm_idx(0x326564u, w, 4u) == 0);
+			w[0] = 0x2c080000u;
+			w[1] = 0x4082fff0u;
+			CHECK(nw_dec_leave_50326480_arm_idx(0x326564u, w, 4u) == -1);
+		}
+
 		{
 			uint8_t a[16], b[16];
 			memset(a, 0, sizeof(a));

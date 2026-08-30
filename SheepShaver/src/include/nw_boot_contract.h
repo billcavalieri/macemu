@@ -236,6 +236,8 @@ int nw_dec_leave_50326480_arm_idx(uint32_t base_off, const uint32_t *insns,
 				 unsigned n);
 /* Live 2d295270 hang pc=50326480. Not a skip-list. */
 int nw_dec_leave_50326480_off(uint32_t off);
+/* Live 042a7f54 hang pc=50326564 after 50326484 bne +12. */
+int nw_dec_leave_50326564_off(uint32_t off);
 /* Heartbeat wait sites after 50326678. Not a skip-list. */
 int nw_dec_leave_hb_wait_off(uint32_t off);
 /*
