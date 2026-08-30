@@ -247,6 +247,8 @@ int main()
 			"G3: DEC arm after G2") == 0);
 		CHECK(strcmp(nw_boot_line_g3_walk_dec_ee(),
 			"G3: 171-PC walk DEC blocked MSR[EE]=0") == 0);
+		CHECK(strcmp(nw_boot_line_g3_fb_guest(),
+			"G3: FB guest dirty") == 0);
 	}
 
 	const uint32_t ram_size = 4u * 1024u * 1024u;
@@ -1267,6 +1269,17 @@ int main()
 		CHECK(nw_dec_ee_on(0x00008000u));
 		CHECK(!nw_dec_ee_on(0));
 		CHECK(!nw_dec_ee_on(0x00000030u)); /* IR+DR, EE off */
+
+		{
+			uint8_t a[16], b[16];
+			memset(a, 0, sizeof(a));
+			memset(b, 0, sizeof(b));
+			CHECK(!nw_video_fb_guest_dirty(a, b, sizeof(a)));
+			a[7] = 0x5a;
+			CHECK(nw_video_fb_guest_dirty(a, b, sizeof(a)));
+			CHECK(!nw_video_fb_guest_dirty(NULL, b, sizeof(a)));
+			CHECK(!nw_video_fb_guest_dirty(a, b, 0));
+		}
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);

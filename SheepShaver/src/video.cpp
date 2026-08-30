@@ -58,6 +58,11 @@ bool keyfile_valid;		// Flag: Keyfile is valid, enable full-screen modes
 void VideoPresent(void)
 {
 }
+
+int VideoGuestPresent(void)
+{
+	return 0;
+}
 #endif
 
 

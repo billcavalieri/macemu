@@ -133,12 +133,20 @@ const char *nw_boot_line_g3_irq_nk(void);	/* NK native IRQ after G2; not mill */
 const char *nw_boot_line_g3_native_op(void);
 const char *nw_boot_line_g3_dec_arm(void);
 const char *nw_boot_line_g3_walk_dec_ee(void);
+const char *nw_boot_line_g3_fb_guest(void);
 
 /*
  * Clip a dirty rect to the screen. Returns 1 if the result is non-empty.
  * Host-testable helper for SDL2 update_display_static_bbox / video_set_dirty_area.
  */
 int nw_video_clip_dirty(int *x, int *y, int *w, int *h, int sw, int sh);
+
+/*
+ * Guest framebuffer vs copy. 1 if any byte differs. Host present of an
+ * empty union is not this. Do not mill 68k.
+ */
+int nw_video_fb_guest_dirty(const uint8_t *fb, const uint8_t *copy,
+			    size_t nbytes);
 
 /*
  * NK v2 is ROM+0x310000 .. ROM+0x360000. Mill 68k (ROM+0x366084) is not

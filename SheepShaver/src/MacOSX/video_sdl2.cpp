@@ -671,6 +671,11 @@ public:
 static void update_display_window_vosf(driver_base *drv);
 #endif
 static void update_display_static(driver_base *drv);
+#ifdef SHEEPSHAVER
+static unsigned update_display_static_bbox(driver_base *drv);
+#else
+static void update_display_static_bbox(driver_base *drv);
+#endif
 
 static driver_base *drv = NULL;	// Pointer to currently used driver object
 
@@ -1402,6 +1407,9 @@ bool SDL_monitor_desc::video_open(void)
 	 */
 	if (drv && drv->s) {
 		const VIDEO_MODE &mode = drv->mode;
+		if (the_buffer && the_buffer_copy)
+			memcpy(the_buffer_copy, the_buffer,
+			       (size_t)VIDEO_MODE_ROW_BYTES * (size_t)VIDEO_MODE_Y);
 		update_sdl_video(drv->s, 0, 0, (Sint32)VIDEO_MODE_X,
 				 (Sint32)VIDEO_MODE_Y);
 		VideoPresent();
@@ -1409,7 +1417,7 @@ bool SDL_monitor_desc::video_open(void)
 		{
 			char buf[96];
 			snprintf(buf, sizeof(buf),
-				 "G3: SDL2 window %ux%u VOSF=0 bbox",
+				 "G3: SDL2 window %ux%u VOSF=0 bbox host",
 				 (unsigned)VIDEO_MODE_X,
 				 (unsigned)VIDEO_MODE_Y);
 			nw_boot_log(buf);
@@ -1811,6 +1819,46 @@ static bool is_fullscreen(SDL_Window * window)
 }
 
 #ifdef SHEEPSHAVER
+int VideoGuestPresent(void)
+{
+	unsigned boxes = 0;
+
+	if (!drv || !drv->s || !the_buffer || !the_buffer_copy)
+		return 0;
+	{
+		const VIDEO_MODE &mode = drv->mode;
+		if ((int)VIDEO_MODE_DEPTH >= VIDEO_DEPTH_8BIT)
+			boxes = update_display_static_bbox(drv);
+	}
+	if (boxes) {
+#if NW_BOOT_LOG
+		{
+			static unsigned n;
+			if (n < 8) {
+				n++;
+				char buf[80];
+				snprintf(buf, sizeof(buf),
+					 "G3: FB guest dirty boxes=%u n=%u",
+					 boxes, n);
+				nw_boot_log(buf);
+			}
+		}
+#endif
+		VideoPresent();
+		return 1;
+	}
+#if NW_BOOT_LOG
+	if (nw_guest_first_data_dsi_seen()) {
+		static int logged;
+		if (logged < 4) {
+			logged++;
+			nw_boot_log("G3: FB guest dirty none");
+		}
+	}
+#endif
+	return 0;
+}
+
 void VideoPresent(void)
 {
 	int rc = present_sdl_video();
@@ -2690,7 +2738,11 @@ static void update_display_static(driver_base *drv)
 
 // Static display update (fixed frame rate, bounding boxes based).
 // NQD video_set_dirty_area clips the scan; VOSF stays off.
+#ifdef SHEEPSHAVER
+static unsigned update_display_static_bbox(driver_base *drv)
+#else
 static void update_display_static_bbox(driver_base *drv)
+#endif
 {
 	const VIDEO_MODE &mode = drv->mode;
 	bool blit = (int)VIDEO_MODE_DEPTH == VIDEO_DEPTH_16BIT;
@@ -2766,6 +2818,9 @@ static void update_display_static_bbox(driver_base *drv)
 	// Refresh display
 	if (nr_boxes)
 		update_sdl_video(drv->s, nr_boxes, boxes);
+#ifdef SHEEPSHAVER
+	return nr_boxes;
+#endif
 }
 
 

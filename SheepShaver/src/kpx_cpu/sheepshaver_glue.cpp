@@ -1308,6 +1308,8 @@ void HandleInterrupt(powerpc_registers *r)
 	// Same thread as SetVideoMode. Present stays in SDL2 VideoVBL /
 	// the redraw thread (video_sdl2.cpp). Do not mill 68k as G3.
 	SDL_PumpEvents();
+	if (nw_guest_first_data_dsi_seen())
+		VideoGuestPresent();
 #endif
 
 	// Do nothing if interrupts are disabled

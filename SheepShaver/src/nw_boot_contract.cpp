@@ -395,6 +395,19 @@ const char *nw_boot_line_g3_walk_dec_ee(void)
 	return "G3: 171-PC walk DEC blocked MSR[EE]=0";
 }
 
+const char *nw_boot_line_g3_fb_guest(void)
+{
+	return "G3: FB guest dirty";
+}
+
+int nw_video_fb_guest_dirty(const uint8_t *fb, const uint8_t *copy,
+			    size_t nbytes)
+{
+	if (fb == NULL || copy == NULL || nbytes == 0)
+		return 0;
+	return memcmp(fb, copy, nbytes) != 0 ? 1 : 0;
+}
+
 uint32_t nw_dec_arm_value(void)
 {
 	return (uint32_t)NW_DEC_ARM_AFTER_G2;

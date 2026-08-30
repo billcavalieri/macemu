@@ -139,6 +139,7 @@ extern bool VideoInit(void);
 extern void VideoExit(void);
 extern void VideoVBL(void);
 extern void VideoPresent(void);	/* CPU-thread SDL2 present (not VOSF) */
+extern int VideoGuestPresent(void);	/* CPU-thread present of guest FB dirty */
 extern void VideoInstallAccel(void);
 extern void VideoQuitFullScreen(void);
 
