@@ -118,6 +118,65 @@ static uint32 nw_dec_resume_srr1(uint32 live)
 			(uint32)NW_MSR_LIVE_EE_OFF;
 	return u;
 }
+/* Live 183d5833: after hold, 8192 heartbeats at 00000010
+ * (pc=50325cac) then pc=503128a0 msr=00000000 with no
+ * logged mtmsr/rfi/take_dec. Exception entry does
+ * set_msr(srr1 & ~EXC_CLEAR) and DR is in that mask.
+ * Re-pin last-real EE-off. Do not or-in EE. */
+static int nw_dec_leave_needs_pin(uint32 m, uint32 want)
+{
+	const uint32 ir_dr =
+		ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR;
+	if (m == want)
+		return 0;
+	if (!nw_ppc_srr1_is_msr(m) || m == 0)
+		return 1;
+	if ((nw_dec_last_real_msr & ir_dr) != 0 &&
+	    (m & ir_dr) == 0)
+		return 1;
+	return 0;
+}
+static int nw_dec_repin_if_left(void)
+{
+	uint32 m, want;
+	if (!nw_dec_did_leave)
+		return 0;
+	m = ppc32_guest_mmu().msr();
+	want = nw_dec_resume_srr1(m);
+	if (!nw_dec_leave_needs_pin(m, want))
+		return 0;
+	ppc32_guest_mmu().set_msr(want);
+#if NW_BOOT_LOG
+	{
+		static int npin;
+		if (!npin) {
+			npin = 1;
+			char buf[80];
+			snprintf(buf, sizeof(buf),
+				 "G3: DEC leave msr pin was=%08x use=%08x",
+				 (unsigned)m, (unsigned)want);
+			nw_boot_log(buf);
+		}
+	}
+	if (m == 0) {
+		static int ncol;
+		if (!ncol) {
+			ncol = 1;
+			char buf[80];
+			snprintf(buf, sizeof(buf),
+				 "G3: MSR collapse was=%08x use=%08x",
+				 (unsigned)m, (unsigned)want);
+			nw_boot_log(buf);
+		}
+	}
+#endif
+	return 1;
+}
+static int nw_ppc_mtmsr(uint32 opcode)
+{
+	return ((opcode >> 26) == 31) &&
+	       (((opcode >> 1) & 0x3ffu) == 146u);
+}
 /* D-form twi: OPCD=3, TO=31. Live illegal 0fff0005 at 50324140. */
 static int nw_ppc_twi_uncond(uint32 opcode)
 {
@@ -2288,6 +2347,10 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 	dsisr_ = dsi.dsisr;
 	pc() = dsi.vector;
 #ifdef SHEEPSHAVER
+	/* take_data_dsi already did set_msr(~EXC_CLEAR) → 0.
+	 * Live 183d5833 then heartbeats 00000000 at 503128a0.
+	 * Keep last-real DR. Do not rewrite exception SRR1. */
+	nw_dec_repin_if_left();
 	/* Fault MSR is still a real word here. take_dec later sees
 	 * 17efbb80. Do not or-in EE. */
 	nw_dec_note_msr(dsi.srr1);
@@ -2479,6 +2542,10 @@ void powerpc_cpu::take_isi()
 	}
 #endif
 	ppc32_guest_mmu().set_msr(srr1_ & ~ppc32_mmu::MSR_EXC_CLEAR);
+#ifdef SHEEPSHAVER
+	if (nw_dec_repin_if_left())
+		srr1_ = nw_dec_resume_srr1(srr1_);
+#endif
 	sprg_[1] = gpr(1);
 	sprg_[2] = lr();
 	pc() = hotints_vector(0x400);
@@ -2580,6 +2647,10 @@ void powerpc_cpu::take_sc()
 	srr0_ = pc() + 4;
 	srr1_ = mmu.msr();
 	mmu.set_msr(srr1_ & ~ppc32_mmu::MSR_EXC_CLEAR);
+#ifdef SHEEPSHAVER
+	if (nw_dec_repin_if_left())
+		srr1_ = nw_dec_resume_srr1(srr1_);
+#endif
 	sprg_[1] = gpr(1);
 	sprg_[2] = lr();
 	pc() = hotints_vector(0xc00);
@@ -2633,6 +2704,9 @@ void powerpc_cpu::take_dec()
 	srr1_ = msr_snap;
 #endif
 	mmu.set_msr(srr1_ & ~ppc32_mmu::MSR_EXC_CLEAR);
+#ifdef SHEEPSHAVER
+	nw_dec_repin_if_left();
+#endif
 	sprg_[1] = gpr(1);
 	sprg_[2] = lr();
 	pc() = hotints_vector(0x900);
@@ -3406,38 +3480,15 @@ void powerpc_cpu::execute(uint32 entry)
 					NW_DEC_RESTORE_SAVED();
 					continue;
 				}
-				if (nw_dec_did_leave && !nw_dec_in_handler) {
-					const uint32 m =
-						ppc32_guest_mmu().msr();
-					const uint32 want =
-						nw_dec_resume_srr1(m);
-					const uint32 ir_dr =
-						ppc32_mmu::MSR_IR |
-						ppc32_mmu::MSR_DR;
-					/* Live d7dc8625: pin once logged
-					 * 17efbb80→00000010 then heartbeats
-					 * collapsed to 0. Keep last-real
-					 * EE-off (DR) pinned. Do not or-in EE. */
-					if (m != want &&
-					    (!nw_ppc_srr1_is_msr(m) ||
-					     m == 0 ||
-					     ((nw_dec_last_real_msr & ir_dr) != 0 &&
-					      (m & ir_dr) == 0))) {
-						ppc32_guest_mmu().set_msr(want);
-						srr1_ = want;
-#if NW_BOOT_LOG
-						static int npin;
-						if (!npin) {
-							npin = 1;
-							char buf[112];
-							snprintf(buf, sizeof(buf),
-								 "G3: DEC leave msr pin was=%08x use=%08x",
-								 (unsigned)m,
-								 (unsigned)want);
-							nw_boot_log(buf);
-						}
-#endif
-					}
+				if (nw_dec_did_leave) {
+					/* Live 183d5833: pin required
+					 * !in_handler, so a later DSI/ISI/sc
+					 * EXC_CLEAR to 0 at 503128a0 was
+					 * not restored before heartbeats.
+					 * Do not or-in EE. */
+					if (nw_dec_repin_if_left())
+						srr1_ = nw_dec_resume_srr1(
+							ppc32_guest_mmu().msr());
 				}
 #if NW_BOOT_LOG
 				if ((msr_now & ppc32_mmu::MSR_IR) &&
@@ -3534,6 +3585,7 @@ void powerpc_cpu::execute(uint32 entry)
 					}
 				}
 			}
+			nw_dec_repin_if_left();
 			nw_log_pc(pc(), ppc32_guest_mmu().msr());
 			extern uint32 ROMBase;
 			extern uint32 RAMBase;
@@ -22983,6 +23035,30 @@ void powerpc_cpu::execute(uint32 entry)
 			}
 #endif
 			continue;
+		}
+		/* Live 183d5833: silent mtmsr/rfi after the first 8
+		 * nw_log_msr_write lines can install 0. After leave,
+		 * keep last-real EE-off. */
+		if (nw_dec_did_leave && nw_ppc_rfi(opcode) &&
+		    !nw_dec_in_handler) {
+			const uint32 raw = srr1_;
+			const uint32 use = nw_dec_resume_srr1(raw);
+			if (nw_dec_leave_needs_pin(raw, use)) {
+				ppc32_guest_mmu().set_msr(use);
+				srr1_ = use;
+				pc() = srr0_;
+				continue;
+			}
+		}
+		if (nw_dec_did_leave && nw_ppc_mtmsr(opcode)) {
+			const uint32 rs = gpr((opcode >> 21) & 31);
+			const uint32 use = nw_dec_resume_srr1(rs);
+			if (nw_dec_leave_needs_pin(rs, use)) {
+				ppc32_guest_mmu().set_msr(use);
+				srr1_ = use;
+				increment_pc(4);
+				continue;
+			}
 		}
 #endif
 		const instr_info_t *ii = decode(opcode);
