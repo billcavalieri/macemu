@@ -238,6 +238,11 @@ int nw_dec_leave_50326480_arm_idx(uint32_t base_off, const uint32_t *insns,
 int nw_dec_leave_50326480_off(uint32_t off);
 /* Live 042a7f54 hang pc=50326564 after 50326484 bne +12. */
 int nw_dec_leave_50326564_off(uint32_t off);
+/* Live 183fe016: 50326480 is rlwinm. r0,r0,0,0,14 Rc=1. */
+int nw_ppc_is_rlwinm_rc(uint32_t op);
+int nw_dec_leave_50326480_rlwinm(uint32_t off, uint32_t op, uint32_t nxt);
+/* cmp or rlwinm. then forward beq/bne. */
+int nw_dec_leave_cr_then_fwd_bc(uint32_t op, uint32_t nxt);
 /* Heartbeat wait sites after 50326678. Not a skip-list. */
 int nw_dec_leave_hb_wait_off(uint32_t off);
 /*

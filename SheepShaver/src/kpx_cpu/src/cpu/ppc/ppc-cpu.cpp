@@ -288,10 +288,11 @@ static int nw_dec_leave_50326480_wait(uint32 rom_off)
 		return 0;
 	return nw_dec_leave_50326480_off(rom_off);
 }
-/* Live 042a7f54: 50326480 hang gone; bc 50326484
- * 4082000c (bne +12); then silent hang pc=50326564
- * msr=00003010. Complete that wait like 50326674.
- * Forward beq/bne only. Do not fall through 503264fc. */
+/* Live 183fe016: 50326480 hang gone via rlwinm.
+ * 5400001d nxt=4082000c (bne +12 at 50326484). Then
+ * hang pc=50326564 msr=00003010. Complete that wait
+ * like 50326674. Forward beq/bne only. Do not fall
+ * through 503264fc. */
 static int nw_dec_leave_50326564_wait(uint32 rom_off)
 {
 	if (!nw_dec_did_leave || !nw_dec_took_900)
@@ -23408,22 +23409,29 @@ void powerpc_cpu::execute(uint32 entry)
 								int idx;
 								uint32 arm = 0;
 								uint32 log_nxt;
-								/* Live 042a7f54: hang pc=50326564
-								 * after 50326484 bne +12.
-								 * Match, arm following forward
-								 * beq/bne, CR-fallthrough.
-								 * Do not smash r8/r0. Do not
-								 * complete 503264fc. */
+								/* Live 183fe016: hang pc=50326564
+								 * after 50326480 rlwinm. +
+								 * 50326484 bne +12. Same shape:
+								 * CR-setting insn then forward
+								 * beq/bne. Do not smash r0/r8.
+								 * Do not complete 503264fc. */
 								for (wi = 0; wi < 8u; wi++)
 									win[wi] = vm_read_memory_4(
 										pc() + 4u * wi);
 								log_nxt = win[1];
-								idx = nw_dec_leave_50326480_arm_idx(
-									rom_off, win, 8u);
-								if (idx >= 0 &&
-								    nw_dec_leave_cmp_wait(win[idx])) {
-									arm = pc() + 4u * (uint32)idx;
-									log_nxt = win[idx];
+								if (nw_dec_leave_cr_then_fwd_bc(
+									    opw, win[1])) {
+									arm = pc() + 4;
+									log_nxt = win[1];
+								} else {
+									idx = nw_dec_leave_50326480_arm_idx(
+										rom_off, win, 8u);
+									if (idx >= 0 &&
+									    nw_dec_leave_cmp_wait(win[idx])) {
+										arm = pc() + 4u *
+											(uint32)idx;
+										log_nxt = win[idx];
+									}
 								}
 								if (arm &&
 								    (arm - ROMBase) != 0x3264fcu &&

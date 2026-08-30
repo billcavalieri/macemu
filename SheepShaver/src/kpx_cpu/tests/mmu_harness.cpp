@@ -1489,8 +1489,28 @@ int main()
 		CHECK(!nw_nk_picspin_skip_after_g2(0x3264f8u, 0x7c001800u));
 		CHECK(!nw_nk_picspin_mill_off(0x3264f8u));
 
-		/* Live 042a7f54: 50326480 hang gone; bc 50326484
-		 * 4082000c (bne +12); hang pc=50326564. */
+		/* Live 183fe016: 50326480 is rlwinm. 5400001d
+		 * nxt=4082000c. Hang advanced to 50326564. */
+		CHECK(nw_ppc_is_rlwinm_rc(0x5400001du));
+		CHECK(!nw_ppc_is_rlwinm_rc(0x5400001cu)); /* Rc=0 */
+		CHECK(!nw_ppc_is_cmp(0x5400001du));
+		CHECK(nw_dec_leave_50326480_rlwinm(0x326480u, 0x5400001du,
+						    0x4082000cu));
+		CHECK(!nw_dec_leave_50326480_rlwinm(0x326564u, 0x5400001du,
+						     0x4082000cu));
+		CHECK(nw_dec_leave_cr_then_fwd_bc(0x5400001du, 0x4082000cu));
+		CHECK(nw_dec_leave_cr_then_fwd_bc(0x2c08ffffu, 0x40820008u));
+		CHECK(!nw_dec_leave_cr_then_fwd_bc(0x5400001du, 0x4082fff0u));
+		CHECK(!nw_dec_leave_cr_then_fwd_bc(0x5400001du, 0x3bc00000u));
+		{
+			uint32_t w[4];
+			w[0] = 0x5400001du;
+			w[1] = 0x4082000cu;
+			w[2] = 0;
+			w[3] = 0;
+			CHECK(nw_dec_leave_50326480_arm_idx(0x326564u, w, 4u) == 1);
+			CHECK(nw_dec_leave_50326480_arm_idx(0x326480u, w, 4u) == 1);
+		}
 		CHECK(nw_ppc_bc_disp(0x4082000cu) == 12);
 		CHECK(nw_dec_leave_cmp_wait(0x4082000cu));
 		CHECK(nw_dec_leave_50326564_off(0x326564u));

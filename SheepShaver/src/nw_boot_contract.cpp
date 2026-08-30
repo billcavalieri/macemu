@@ -570,6 +570,28 @@ int nw_ppc_is_li(uint32_t op)
 	return ((op >> 26) == 14u) && (((op >> 16) & 31u) == 0);
 }
 
+int nw_ppc_is_rlwinm_rc(uint32_t op)
+{
+	return ((op >> 26) == 21u) && ((op & 1u) != 0);
+}
+
+int nw_dec_leave_50326480_rlwinm(uint32_t off, uint32_t op, uint32_t nxt)
+{
+	return (off == 0x326480u && op == 0x5400001du &&
+		nxt == 0x4082000cu) ? 1 : 0;
+}
+
+int nw_dec_leave_cr_then_fwd_bc(uint32_t op, uint32_t nxt)
+{
+	if (nw_ppc_is_li(nxt))
+		return 0;
+	if (!nw_dec_leave_cmp_wait(nxt))
+		return 0;
+	if (nw_ppc_is_cmp(op) || nw_ppc_is_rlwinm_rc(op))
+		return 1;
+	return 0;
+}
+
 int nw_dec_leave_cmp_wait(uint32_t nxt)
 {
 	/* 50326678 is bne +8. Live 2d295270: completing
