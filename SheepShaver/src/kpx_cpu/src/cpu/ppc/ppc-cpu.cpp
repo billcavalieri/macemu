@@ -130,20 +130,17 @@ static uint32 nw_dec_resume_srr1(uint32 live)
  * Re-pin last-real EE-off. Do not or-in EE. */
 static int nw_dec_leave_needs_pin(uint32 m, uint32 want)
 {
-	const uint32 ir_dr =
-		ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR;
 	if (m == want)
 		return 0;
 	/* Live 54bc576f: guest WALK_EE mtmsr with EE must not be
 	 * stripped back to 00000010. Do not or-in EE. */
 	if (nw_ppc_srr1_is_msr(m) && m != 0 && nw_dec_ee_on(m))
 		return 0;
-	if (!nw_ppc_srr1_is_msr(m) || m == 0)
-		return 1;
-	if ((nw_dec_last_real_msr & ir_dr) != 0 &&
-	    (m & ir_dr) == 0)
-		return 1;
-	return 0;
+	/* Live a4f0c6ce: pin was=00001040 use=00007672. ME+IP
+	 * real-mode after leave is a real guest MSR — do not
+	 * force IR+DR back. Collapse-to-0 / !is_msr / no-ME
+	 * leftover (RI-only) still pin. */
+	return nw_dec_leave_pin_real(m, nw_dec_last_real_msr);
 }
 static int nw_dec_repin_if_left(void)
 {
@@ -23272,17 +23269,11 @@ void powerpc_cpu::execute(uint32 entry)
 								const uint32 nxt =
 									vm_read_memory_4(pc() + 4);
 								const uint32 was = gpr(8);
-								if ((nxt & 0xfffe0000u) ==
-								    0x41820000u &&
-								    was == 0xffffffffu)
-									gpr(8) = 0;
-								else if (was == 0)
-									/* Live 3530b06f: r8 wait
-									 * was=0 (not a live pointer
-									 * like 503266a7). Empty
-									 * list → terminator -1.
-									 * Do not smash a live r8. */
-									gpr(8) = 0xffffffffu;
+								const uint32 use =
+									nw_dec_leave_50326_cmp_use(
+										8, was, 0xffffffffu,
+										nxt);
+								gpr(8) = use;
 #if NW_BOOT_LOG
 								{
 									static int nr8;
@@ -23298,6 +23289,44 @@ void powerpc_cpu::execute(uint32 entry)
 									}
 								}
 #endif
+							} else if (nw_dec_leave_50326_wait(rom_off) &&
+								   nw_ppc_is_cmp(opw)) {
+								const uint32 nxt =
+									vm_read_memory_4(pc() + 4);
+								const uint32 ra =
+									(opw >> 16) & 31u;
+								const uint32 prim =
+									opw >> 26;
+								const uint32 was =
+									gpr(ra);
+								uint32 rb;
+								uint32 use;
+								if (prim == 11u)
+									rb = (uint32)(int32)(int16)
+										(opw & 0xffffu);
+								else if (prim == 10u)
+									rb = opw & 0xffffu;
+								else
+									rb = gpr((opw >> 11) & 31u);
+								use = nw_dec_leave_50326_cmp_use(
+									ra, was, rb, nxt);
+								if (use != was) {
+									gpr(ra) = use;
+#if NW_BOOT_LOG
+									static int n26c;
+									if (!n26c) {
+										n26c = 1;
+										char buf[144];
+										snprintf(buf, sizeof(buf),
+											 "G3: DEC leave 50326 cmp r%u was=%08x use=%08x nxt=%08x",
+											 (unsigned)ra,
+											 (unsigned)was,
+											 (unsigned)use,
+											 (unsigned)nxt);
+										nw_boot_log(buf);
+									}
+#endif
+								}
 							}
 #if NW_BOOT_LOG
 							if (nw_dec_leave_50326_wait(rom_off)) {

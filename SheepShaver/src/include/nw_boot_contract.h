@@ -135,6 +135,7 @@ const char *nw_boot_line_g3_dec_arm(void);
 const char *nw_boot_line_g3_walk_dec_ee(void);
 const char *nw_boot_line_g3_dec_take(void);	/* host took 0x900; not G3 */
 const char *nw_boot_line_g3_dec_left(void);	/* handler rfi'd; not G3 */
+const char *nw_boot_line_g3_dec_leave_50326(void); /* post-leave wait; not G3 */
 const char *nw_boot_line_g3_fb_guest(void);
 const char *nw_boot_line_g3_fb_none(void);	/* named reason: EE=0, not host n=1 */
 
@@ -186,6 +187,9 @@ int nw_handle_interrupt_skip_nested(int use_native, uint32_t r1,
 enum {
 	NW_MSR_EE = 0x00008000,
 	NW_MSR_IR = 0x00000020,
+	NW_MSR_DR = 0x00000010,
+	NW_MSR_ME = 0x00001000,
+	NW_MSR_IP = 0x00000040,
 	NW_DEC_ARM_AFTER_G2 = 0x1000,
 	NW_DEC_VECTOR_EA = 0x900,
 	NW_MSR_LIVE_EE_OFF = 0x00002000	/* live 7b349dc2 at 50325600 */
@@ -196,6 +200,21 @@ int nw_dec_ee_on(uint32_t msr);
 /* Live c3b5d982: 17efbb80 is r1/KDP, not MSR. Upper 16 bits 0. */
 int nw_ppc_srr1_is_msr(uint32_t srr1);
 uint32_t nw_ppc_srr1_use(uint32_t srr1);	/* 00002000 if not; EE stays off */
+/*
+ * Live a4f0c6ce: after leave/hold, guest mtmsr 00001040 (ME+IP,
+ * real). Pinning IR+DR back to 00007672 kept the 50326 walk.
+ * Collapse-to-0 and !is_msr still pin. RI-only leftover
+ * (no ME, no IR/DR) still pins. Do not or-in EE.
+ */
+int nw_dec_leave_pin_real(uint32_t live, uint32_t last_real);
+/* cmpi/cmpli/cmp/cmpl. Used to complete a 50326 wait, not skip it. */
+int nw_ppc_is_cmp(uint32_t op);
+/*
+ * GPR that makes the following bc fall through. r8: beq-only
+ * when already -1. Do not smash r8 on bne.
+ */
+uint32_t nw_dec_leave_50326_cmp_use(uint32_t ra, uint32_t was,
+				    uint32_t rb, uint32_t nxt);
 /* Guest MSR has EE+IR. Architectural; live 00002000 is 0. */
 int nw_dec_can_yield(uint32_t msr);
 /*

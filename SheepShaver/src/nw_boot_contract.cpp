@@ -405,6 +405,11 @@ const char *nw_boot_line_g3_dec_left(void)
 	return "G3: DEC handler left";
 }
 
+const char *nw_boot_line_g3_dec_leave_50326(void)
+{
+	return "G3: DEC leave 50326";
+}
+
 const char *nw_boot_line_g3_fb_guest(void)
 {
 	return "G3: FB guest dirty";
@@ -470,6 +475,72 @@ uint32_t nw_ppc_srr1_use(uint32_t srr1)
 	if (nw_ppc_srr1_is_msr(srr1))
 		return srr1;
 	return (uint32_t)NW_MSR_LIVE_EE_OFF;
+}
+
+int nw_dec_leave_pin_real(uint32_t live, uint32_t last_real)
+{
+	const uint32_t ir_dr =
+		(uint32_t)NW_MSR_IR | (uint32_t)NW_MSR_DR;
+
+	if (!nw_ppc_srr1_is_msr(live) || live == 0)
+		return 1;
+	/* Live a4f0c6ce pin was=00001040 use=00007672. Guest
+	 * ME+IP real-mode after leave is a real MSR. Do not
+	 * force IR+DR back. RI-only leftover (no ME) still
+	 * pins. Collapse-to-0 and !is_msr still pin. */
+	if ((last_real & ir_dr) != 0 && (live & ir_dr) == 0) {
+		if (live & (uint32_t)NW_MSR_ME)
+			return 0;
+		return 1;
+	}
+	return 0;
+}
+
+int nw_ppc_is_cmp(uint32_t op)
+{
+	const uint32_t prim = op >> 26;
+
+	if (prim == 10u || prim == 11u)
+		return 1;
+	if ((op & 0xfc0007feu) == 0x7c000000u)
+		return 1;
+	if ((op & 0xfc0007feu) == 0x7c000040u)
+		return 1;
+	return 0;
+}
+
+uint32_t nw_dec_leave_50326_cmp_use(uint32_t ra, uint32_t was,
+				    uint32_t rb, uint32_t nxt)
+{
+	const uint32_t bo = (nxt >> 21) & 0x1fu;
+	const uint32_t bi = (nxt >> 16) & 0x1fu;
+	const uint32_t crb = bi & 3u;
+
+	if ((nxt >> 26) != 16u)
+		return was;
+	/* r8: beq-only when already -1. Do not smash on bne. */
+	if (ra == 8u) {
+		if (bo == 12u && crb == 2u && was == 0xffffffffu)
+			return 0;
+		return was;
+	}
+	if (bo == 4u) {
+		if (crb == 2u)
+			return rb;
+		if (crb == 0u)
+			return rb - 1u;
+		if (crb == 1u)
+			return rb + 1u;
+		return was;
+	}
+	if (bo == 12u) {
+		if (crb == 2u)
+			return rb ^ 1u;
+		if (crb == 0u || crb == 1u)
+			return rb;
+		return was;
+	}
+	return was;
 }
 
 int nw_dec_can_yield(uint32_t msr)

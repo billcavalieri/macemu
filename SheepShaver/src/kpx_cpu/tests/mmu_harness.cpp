@@ -251,6 +251,8 @@ int main()
 			"G3: DEC 0x900") == 0);
 		CHECK(strcmp(nw_boot_line_g3_dec_left(),
 			"G3: DEC handler left") == 0);
+		CHECK(strcmp(nw_boot_line_g3_dec_leave_50326(),
+			"G3: DEC leave 50326") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_guest(),
 			"G3: FB guest dirty") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_none(),
@@ -1341,6 +1343,49 @@ int main()
 		CHECK(nw_ppc_srr1_use(0x00002000u) == 0x00002000u);
 		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_EE,
 						     0x60000000u));
+
+		/* Live a4f0c6ce: 50326 still spun after r8 terminator.
+		 * Do not skip-list those PCs. Do not mill. Do not or-in
+		 * EE. 00001040 (ME+IP) after leave is a real MSR. */
+		CHECK(!nw_nk_picspin_skip_after_g2(0x326674u, 0x2c08ffffu));
+		CHECK(!nw_nk_picspin_skip_after_g2(0x3259e0u, 0x2f9c0000u));
+		CHECK(!nw_nk_picspin_skip_after_g2(0x3256ccu, 0x48000b61u));
+		CHECK(!nw_nk_picspin_mill_off(0x326674u));
+		CHECK(!nw_nk_picspin_mill_off(0x3259e0u));
+		CHECK(nw_nk_picspin_mill_off(NW_NK_MILL_68K));
+		CHECK(NW_MSR_ME == 0x00001000u);
+		CHECK(NW_MSR_IP == 0x00000040u);
+		CHECK(NW_MSR_DR == 0x00000010u);
+		CHECK(nw_ppc_srr1_is_msr(0x00001040u));
+		CHECK((0x00001040u & (uint32_t)NW_MSR_ME) != 0);
+		CHECK((0x00001040u &
+		       ((uint32_t)NW_MSR_IR | (uint32_t)NW_MSR_DR)) == 0);
+		CHECK(!nw_dec_ee_on(0x00001040u));
+		CHECK(!nw_dec_leave_pin_real(0x00001040u, 0x00007672u));
+		/* 00000010 is DR, not a missing-IR+DR collapse. */
+		CHECK(!nw_dec_leave_pin_real(0x00000010u, 0x00007672u));
+		/* RI-only leftover still pins; collapse-to-0 still pins. */
+		CHECK(nw_dec_leave_pin_real(0x00000002u, 0x00007672u));
+		CHECK(nw_dec_leave_pin_real(0, 0x00007672u));
+		CHECK(nw_dec_leave_pin_real(0x17efbb80u, 0x00007672u));
+		CHECK(!nw_dec_leave_pin_real(0x00007672u, 0x00007672u));
+		CHECK(nw_ppc_is_cmp(0x2c08ffffu));
+		CHECK(nw_ppc_is_cmp(0x2c1e0000u));
+		CHECK(nw_ppc_is_cmp(0x7c032040u)); /* cmplw cr0,r3,r4 */
+		CHECK(!nw_ppc_is_cmp(0x48000b61u));
+		/* r8 bne +8: do not smash (a4f0c6ce terminator). */
+		CHECK(nw_dec_leave_50326_cmp_use(8, 0, 0xffffffffu,
+						  0x40820008u) == 0);
+		CHECK(nw_dec_leave_50326_cmp_use(8, 0x503266a7u, 0xffffffffu,
+						  0x40820008u) == 0x503266a7u);
+		/* r8 beq when already -1 → 0. */
+		CHECK(nw_dec_leave_50326_cmp_use(8, 0xffffffffu, 0xffffffffu,
+						  0x41820008u) == 0);
+		/* Other GPR: make bne fall through (EQ). */
+		CHECK(nw_dec_leave_50326_cmp_use(9, 1, 0, 0x40820008u) == 0);
+		/* cmplw + blt +8: fall through with RA>=RB. */
+		CHECK(nw_dec_leave_50326_cmp_use(3, 0, 100u,
+						  0x41800008u) == 100u);
 
 		{
 			uint8_t a[16], b[16];
