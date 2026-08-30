@@ -251,6 +251,8 @@ int main()
 			"G3: FB guest dirty") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_none(),
 			"G3: FB guest dirty none reason=EE=0 DEC never yielded walk") == 0);
+		CHECK(strcmp(nw_boot_line_g3_fb_host(),
+			"G3: FB skip host full-upload nqd=0 VideoDoDriverIO=0") == 0);
 	}
 
 	const uint32_t ram_size = 4u * 1024u * 1024u;
@@ -1319,7 +1321,7 @@ int main()
 		}
 
 		CHECK(!nw_video_full_scan(0));
-		CHECK(nw_video_full_scan(1));
+		CHECK(!nw_video_full_scan(1)); /* live 3c3d1f6c: not host 80-box */
 		CHECK(!nw_video_present_pending(0, 0, 1));
 		CHECK(!nw_video_present_pending(0, 0, 0));
 		CHECK(nw_video_present_pending(0, 3, 1));
@@ -1327,12 +1329,17 @@ int main()
 		CHECK(!nw_video_present_pending(1, 0, 1));
 		CHECK(nw_video_present_pending(1, 2, 1));
 		CHECK(!nw_video_guest_frame(0, 0));
-		CHECK(nw_video_guest_frame(1, 0));
-		CHECK(nw_video_guest_frame(0, 1));
+		CHECK(!nw_video_guest_frame(80, 0)); /* live 3c3d1f6c host */
+		CHECK(!nw_video_guest_frame(0, 1));
+		CHECK(nw_video_guest_frame(1, 1));
+		CHECK(nw_video_guest_frame(80, 1));
 		CHECK(!nw_video_full_frame(0, 4, 1));
-		CHECK(nw_video_full_frame(1, 1, 0));
-		CHECK(nw_video_full_frame(1, 0, 1));
+		CHECK(!nw_video_full_frame(1, 80, 0));
+		CHECK(!nw_video_full_frame(1, 1, 1));
 		CHECK(!nw_video_full_frame(1, 0, 0));
+		CHECK(!nw_video_installer_frame(0, 0));
+		CHECK(nw_video_installer_frame(1, 0));
+		CHECK(nw_video_installer_frame(0, 1));
 		{
 			uint8_t z[8];
 			memset(z, 0, sizeof(z));

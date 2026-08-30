@@ -135,6 +135,7 @@ const char *nw_boot_line_g3_dec_arm(void);
 const char *nw_boot_line_g3_walk_dec_ee(void);
 const char *nw_boot_line_g3_fb_guest(void);
 const char *nw_boot_line_g3_fb_none(void);	/* named reason: EE=0, not host n=1 */
+const char *nw_boot_line_g3_fb_host(void);	/* live 3c3d1f6c boxes=80, not installer */
 
 /*
  * Clip a dirty rect to the screen. Returns 1 if the result is non-empty.
@@ -197,8 +198,8 @@ int nw_dec_can_yield(uint32_t msr);
 int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
 				   int nqd, int dirty);
 /*
- * After G2, NQD bbox is a hint not a clip. QD stores that skip NQD
- * still HIT the_buffer. Do not require EE. Do not mill.
+ * After G2, NQD bbox is the installer clip. Full-scan of RAM FB
+ * is host (live 3c3d1f6c boxes=80). Do not mill. Do not flip EE.
  */
 int nw_video_full_scan(int first_dsi);
 /* Blit when the SDL surface is not the guest FB (16-bit). 8/32-bit
@@ -214,6 +215,12 @@ int nw_video_present_pending(int first_dsi, unsigned boxes,
 int nw_video_guest_frame(unsigned boxes, int nqd);
 int nw_video_fb_has_paint(const uint8_t *fb, size_t nbytes);
 int nw_video_full_frame(int first_dsi, unsigned boxes, int nqd);
+/*
+ * Live 3c3d1f6c boxes=80 nqd=0 is host full-upload of RAM FB, not
+ * the 9.2.1 installer. Guest installer frame needs NQD (and/or
+ * VideoDoDriverIO). Do not mill 50327bxx / 503256xx. Do not flip EE.
+ */
+int nw_video_installer_frame(int nqd, int vddio);
 
 void nw_boot_log(const char *line);
 void nw_log_g0_decode(const uint8_t *rom, size_t size);

@@ -405,6 +405,11 @@ const char *nw_boot_line_g3_fb_none(void)
 	return "G3: FB guest dirty none reason=EE=0 DEC never yielded walk";
 }
 
+const char *nw_boot_line_g3_fb_host(void)
+{
+	return "G3: FB skip host full-upload nqd=0 VideoDoDriverIO=0";
+}
+
 int nw_video_fb_in_ram(uint32_t fb_ea, uint32_t ram_base, uint32_t ram_size,
 			uint32_t fb_bytes)
 {
@@ -469,9 +474,10 @@ int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
 
 int nw_video_full_scan(int first_dsi)
 {
-	/* Live 7b349dc2 nqd=0 already full-scans. After G2 keep that
-	 * even if NQD later plants a small bbox. Do not flip EE. */
-	return first_dsi ? 1 : 0;
+	/* Live 3c3d1f6c boxes=80 nqd=0: full-scan of RAM FB is host.
+	 * Clip to NQD. Do not full-upload as WINDOW. Do not flip EE. */
+	(void)first_dsi;
+	return 0;
 }
 
 int nw_video_need_blit(const void *pixels, const void *fb)
@@ -492,9 +498,8 @@ int nw_video_present_pending(int first_dsi, unsigned boxes,
 
 int nw_video_guest_frame(unsigned boxes, int nqd)
 {
-	if (nqd)
-		return 1;
-	return boxes ? 1 : 0;
+	/* Live 3c3d1f6c boxes=80 nqd=0 is host, not installer. */
+	return (nqd && boxes) ? 1 : 0;
 }
 
 int nw_video_fb_has_paint(const uint8_t *fb, size_t nbytes)
@@ -511,9 +516,16 @@ int nw_video_fb_has_paint(const uint8_t *fb, size_t nbytes)
 
 int nw_video_full_frame(int first_dsi, unsigned boxes, int nqd)
 {
-	if (!first_dsi)
+	(void)boxes;
+	/* Live 3c3d1f6c full 640x480 upload is not installer. */
+	if (!first_dsi || !nqd)
 		return 0;
-	return (boxes || nqd) ? 1 : 0;
+	return 0;
+}
+
+int nw_video_installer_frame(int nqd, int vddio)
+{
+	return (nqd || vddio) ? 1 : 0;
 }
 
 int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base)

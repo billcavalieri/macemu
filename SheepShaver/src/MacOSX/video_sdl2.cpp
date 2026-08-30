@@ -1861,38 +1861,10 @@ static bool is_fullscreen(SDL_Window * window)
 #ifdef SHEEPSHAVER
 static uint32 video_guest_msr;
 
-/* Full 640x480 (or current mode) of guest FB. One tile is not WINDOW. */
-static void video_guest_full_frame(driver_base *drv)
-{
-	const VIDEO_MODE &mode = drv->mode;
-	const uint32 bytes_per_row = VIDEO_MODE_ROW_BYTES;
-	const uint32 bytes_per_pixel = bytes_per_row / VIDEO_MODE_X;
-	const uint32 dst_bytes_per_row = drv->s->pitch;
-	const int blit = nw_video_need_blit(drv->s->pixels, the_buffer);
-	uint32 y;
-
-	if (SDL_MUSTLOCK(drv->s))
-		SDL_LockSurface(drv->s);
-	if (blit) {
-		for (y = 0; y < VIDEO_MODE_Y; y++)
-			Screen_blit((uint8 *)drv->s->pixels + y * dst_bytes_per_row,
-				    the_buffer + y * bytes_per_row,
-				    VIDEO_MODE_X * bytes_per_pixel);
-	}
-	if (the_buffer_copy)
-		memcpy(the_buffer_copy, the_buffer,
-		       (size_t)bytes_per_row * (size_t)VIDEO_MODE_Y);
-	if (SDL_MUSTLOCK(drv->s))
-		SDL_UnlockSurface(drv->s);
-	update_sdl_video(drv->s, 0, 0, (Sint32)VIDEO_MODE_X,
-			 (Sint32)VIDEO_MODE_Y);
-}
-
 int VideoGuestPresent(uint32 msr)
 {
 	unsigned boxes = 0;
 	int nqd_this = 0;
-	int paint = 0;
 	int guest;
 
 	if (msr)
@@ -1902,27 +1874,16 @@ int VideoGuestPresent(uint32 msr)
 	{
 		const VIDEO_MODE &mode = drv->mode;
 		nqd_this = nqd_have_dirty ? 1 : 0;
-		if ((int)VIDEO_MODE_DEPTH >= VIDEO_DEPTH_8BIT)
+		/*
+		 * After G2, only scan NQD. Live 3c3d1f6c boxes=80
+		 * nqd=0 is host full-upload of RAM FB, not installer.
+		 * Do not mill 50327bxx / 503256xx. Do not flip EE.
+		 */
+		if (nqd_this && (int)VIDEO_MODE_DEPTH >= VIDEO_DEPTH_8BIT)
 			boxes = update_display_static_bbox(drv);
-		else if (nw_guest_first_data_dsi_seen())
-			update_display_static(drv);
-		paint = nw_video_fb_has_paint(
-			the_buffer,
-			(size_t)VIDEO_MODE_ROW_BYTES * (size_t)VIDEO_MODE_Y);
 	}
 	guest = nw_video_guest_frame(boxes, nqd_this);
-	if (!guest && nw_guest_first_data_dsi_seen() && paint) {
-		static int paint_frame;
-		if (!paint_frame) {
-			paint_frame = 1;
-			guest = 1;
-		}
-	}
 	if (guest) {
-		if (nw_video_full_frame(
-			    nw_guest_first_data_dsi_seen() ? 1 : 0,
-			    boxes ? boxes : 1u, nqd_this || paint))
-			video_guest_full_frame(drv);
 #if NW_BOOT_LOG
 		{
 			static unsigned n;
@@ -1948,9 +1909,19 @@ int VideoGuestPresent(uint32 msr)
 			logged++;
 			const int blocked = nw_video_guest_paint_blocked(
 				1, video_guest_msr ? video_guest_msr : msr,
-				nqd_ever_dirty, paint);
+				nqd_ever_dirty, 0);
 			char buf[176];
-			if (blocked)
+			if (!nqd_this)
+				snprintf(buf, sizeof(buf),
+					 "%s msr=%08x inRAM=%d nqd=%d",
+					 nw_boot_line_g3_fb_host(),
+					 (unsigned)(video_guest_msr
+						    ? video_guest_msr : msr),
+					 nw_video_fb_in_ram(screen_base,
+							     RAMBase, RAMSize,
+							     the_buffer_size),
+					 nqd_ever_dirty);
+			else if (blocked)
 				snprintf(buf, sizeof(buf),
 					 "%s msr=%08x inRAM=%d nqd=%d",
 					 nw_boot_line_g3_fb_none(),
