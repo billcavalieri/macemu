@@ -134,6 +134,7 @@ const char *nw_boot_line_g3_native_op(void);
 const char *nw_boot_line_g3_dec_arm(void);
 const char *nw_boot_line_g3_walk_dec_ee(void);
 const char *nw_boot_line_g3_fb_guest(void);
+const char *nw_boot_line_g3_fb_none(void);	/* named reason, not host n=1 */
 
 /*
  * Clip a dirty rect to the screen. Returns 1 if the result is non-empty.
@@ -147,6 +148,18 @@ int nw_video_clip_dirty(int *x, int *y, int *w, int *h, int sw, int sh);
  */
 int nw_video_fb_guest_dirty(const uint8_t *fb, const uint8_t *copy,
 			    size_t nbytes);
+
+/*
+ * Guest FB must live in RAM so after G2 the RAM BAT lets NQD /
+ * VideoDoDriverIO / QD stores HIT the_buffer. vm_acquire_reserved is
+ * outside that BAT. Offset is past HTAB and mill's NuBus 4MiB alias.
+ * Live c81f88bd 50325600 is not a skip.
+ */
+enum {
+	NW_GUEST_FB_RAM_OFF = 0x800000
+};
+int nw_video_fb_in_ram(uint32_t fb_ea, uint32_t ram_base, uint32_t ram_size,
+			uint32_t fb_bytes);
 
 /*
  * NK v2 is ROM+0x310000 .. ROM+0x360000. Mill 68k (ROM+0x366084) is not
@@ -260,7 +273,8 @@ enum {
 	 */
 	NW_NK_WALK_A = 0x327b54,
 	NW_NK_WALK_B = 0x327b50,	/* live dee26adb ×38; not skip */
-	NW_NK_WALK_C = 0x327b60	/* live dee26adb ×37; not skip */
+	NW_NK_WALK_C = 0x327b60,	/* live dee26adb ×37; not skip */
+	NW_NK_WALK_EE = 0x325600	/* live c81f88bd; do not skip */
 };
 uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
 uint8_t nw_nk_irq_status_idle(void);

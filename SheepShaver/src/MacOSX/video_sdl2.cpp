@@ -174,6 +174,9 @@ static bool mouse_grabbed = false;
 /* Non-VOSF dirty bbox fed by NQD video_set_dirty_area. */
 static SDL_Rect nqd_dirty_bbox = {0, 0, 0, 0};
 static bool nqd_have_dirty = false;
+static int nqd_ever_dirty = 0;
+/* Guest FB in RAM (not vm_acquire_reserved) so NQD/QD stores HIT. */
+static int fb_in_guest_ram = 0;
 #endif
 
 // Mutex to protect SDL events
@@ -1103,8 +1106,27 @@ void driver_base::init()
 		// Allocate memory for frame buffer
 		the_buffer_size = (aligned_height + 2) * pitch;
 		the_buffer_copy = (uint8 *)calloc(1, the_buffer_size);
-		the_buffer = (uint8 *)vm_acquire_framebuffer(the_buffer_size);
-		memset(the_buffer, 0, the_buffer_size);
+#ifdef SHEEPSHAVER
+		/*
+		 * After G2 the RAM BAT covers RAM only. A reserved
+		 * vm_acquire framebuffer is outside that BAT, so
+		 * NQD / VideoDoDriverIO / QD stores miss the_buffer.
+		 * Plant in RAM. Not mill. mill's NuBus alias is 4MiB.
+		 */
+		fb_in_guest_ram = 0;
+		the_buffer = NULL;
+		if (RAMBaseHost != NULL &&
+		    nw_video_fb_in_ram(RAMBase + (uint32)NW_GUEST_FB_RAM_OFF,
+				       RAMBase, RAMSize, the_buffer_size)) {
+			the_buffer = RAMBaseHost + NW_GUEST_FB_RAM_OFF;
+			memset(the_buffer, 0, the_buffer_size);
+			fb_in_guest_ram = 1;
+		} else
+#endif
+		{
+			the_buffer = (uint8 *)vm_acquire_framebuffer(the_buffer_size);
+			memset(the_buffer, 0, the_buffer_size);
+		}
 		D(bug("the_buffer = %p, the_buffer_copy = %p\n", the_buffer, the_buffer_copy));
 	}
 
@@ -1186,11 +1208,19 @@ driver_base::~driver_base()
 	//shutdown_sdl_video();			// This deletes SDL_Window, SDL_Renderer, in addition to
 									// instances of SDL_Surface and SDL_Texture.
 
-	// the_buffer shall always be mapped through vm_acquire_framebuffer()
-	if (the_buffer != VM_MAP_FAILED) {
-		D(bug(" releasing the_buffer at %p (%d bytes)\n", the_buffer, the_buffer_size));
-		vm_release_framebuffer(the_buffer, the_buffer_size);
+	// Guest RAM FB is not vm_acquire; do not release it.
+	if (the_buffer != VM_MAP_FAILED && the_buffer != NULL) {
+#ifdef SHEEPSHAVER
+		if (!fb_in_guest_ram)
+#endif
+		{
+			D(bug(" releasing the_buffer at %p (%d bytes)\n", the_buffer, the_buffer_size));
+			vm_release_framebuffer(the_buffer, the_buffer_size);
+		}
 		the_buffer = NULL;
+#ifdef SHEEPSHAVER
+		fb_in_guest_ram = 0;
+#endif
 	}
 
 	// Free frame buffer(s)
@@ -1415,11 +1445,17 @@ bool SDL_monitor_desc::video_open(void)
 		VideoPresent();
 #if NW_BOOT_LOG
 		{
-			char buf[96];
+			char buf[128];
 			snprintf(buf, sizeof(buf),
 				 "G3: SDL2 window %ux%u VOSF=0 bbox host",
 				 (unsigned)VIDEO_MODE_X,
 				 (unsigned)VIDEO_MODE_Y);
+			nw_boot_log(buf);
+			snprintf(buf, sizeof(buf),
+				 "G3: SDL2 guest FB base=%08x inRAM=%d",
+				 (unsigned)screen_base,
+				 nw_video_fb_in_ram(screen_base, RAMBase,
+						     RAMSize, the_buffer_size));
 			nw_boot_log(buf);
 		}
 #endif
@@ -1852,7 +1888,15 @@ int VideoGuestPresent(void)
 		static int logged;
 		if (logged < 4) {
 			logged++;
-			nw_boot_log("G3: FB guest dirty none");
+			char buf[160];
+			snprintf(buf, sizeof(buf),
+				 "%s base=%08x inRAM=%d nqd=%d",
+				 nw_boot_line_g3_fb_none(),
+				 (unsigned)screen_base,
+				 nw_video_fb_in_ram(screen_base, RAMBase,
+						     RAMSize, the_buffer_size),
+				 nqd_ever_dirty);
+			nw_boot_log(buf);
 		}
 	}
 #endif
@@ -3051,6 +3095,7 @@ void video_set_dirty_area(int x, int y, int w, int h)
 	else
 		SDL_UnionRect(&nqd_dirty_bbox, &r, &nqd_dirty_bbox);
 	nqd_have_dirty = true;
+	nqd_ever_dirty = 1;
 #if NW_BOOT_LOG
 	{
 		static int logged;

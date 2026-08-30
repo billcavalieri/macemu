@@ -400,6 +400,31 @@ const char *nw_boot_line_g3_fb_guest(void)
 	return "G3: FB guest dirty";
 }
 
+const char *nw_boot_line_g3_fb_none(void)
+{
+	return "G3: FB guest dirty none reason=no NQD the_buffer==copy";
+}
+
+int nw_video_fb_in_ram(uint32_t fb_ea, uint32_t ram_base, uint32_t ram_size,
+			uint32_t fb_bytes)
+{
+	uint32_t ram_end, fb_end;
+
+	if (fb_bytes == 0 || ram_size < fb_bytes)
+		return 0;
+	if (fb_ea < ram_base)
+		return 0;
+	ram_end = ram_base + ram_size;
+	if (ram_end < ram_base)
+		return 0;
+	fb_end = fb_ea + fb_bytes;
+	if (fb_end < fb_ea)
+		return 0;
+	if (fb_end > ram_end)
+		return 0;
+	return 1;
+}
+
 int nw_video_fb_guest_dirty(const uint8_t *fb, const uint8_t *copy,
 			    size_t nbytes)
 {

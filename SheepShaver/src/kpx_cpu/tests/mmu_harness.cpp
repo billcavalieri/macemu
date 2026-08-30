@@ -249,6 +249,8 @@ int main()
 			"G3: 171-PC walk DEC blocked MSR[EE]=0") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_guest(),
 			"G3: FB guest dirty") == 0);
+		CHECK(strcmp(nw_boot_line_g3_fb_none(),
+			"G3: FB guest dirty none reason=no NQD the_buffer==copy") == 0);
 	}
 
 	const uint32_t ram_size = 4u * 1024u * 1024u;
@@ -1261,8 +1263,20 @@ int main()
 
 		CHECK(NW_NK_WALK_B == 0x327b50u);
 		CHECK(NW_NK_WALK_C == 0x327b60u);
+		CHECK(NW_NK_WALK_EE == 0x325600u);
 		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_B, 0x60000000u));
 		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_C, 0x60000000u));
+		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_EE, 0x60000000u));
+		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_EE, 0x4e800020u));
+		CHECK(NW_GUEST_FB_RAM_OFF == 0x800000u);
+		CHECK(nw_video_fb_in_ram(0x10000000u + (uint32_t)NW_GUEST_FB_RAM_OFF,
+					 0x10000000u, 0x08000000u,
+					 640u * 480u * 4u));
+		CHECK(!nw_video_fb_in_ram(0x68fff000u, 0x10000000u,
+					    0x08000000u, 0x1000u));
+		CHECK(!nw_video_fb_in_ram(0x10000000u + 0x400000u,
+					    0x10000000u, 0x08000000u,
+					    0x08000000u)); /* size past RAM end */
 		CHECK(nw_dec_arm_value() == 0x1000u);
 		CHECK(!nw_dec_take_after_g2(0));
 		CHECK(nw_dec_take_after_g2(1));
