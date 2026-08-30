@@ -239,6 +239,10 @@ int main()
 			"G2: translator off (Old World)") == 0);
 		CHECK(strcmp(nw_boot_line_g3_sdl2_window(),
 			"G3: SDL2 bbox dirty VOSF off") == 0);
+		CHECK(strcmp(nw_boot_line_g3_irq_nk(),
+			"G3: HandleInterrupt NK native") == 0);
+		CHECK(strcmp(nw_boot_line_g3_native_op(),
+			"G3: native_op") == 0);
 	}
 
 	const uint32_t ram_size = 4u * 1024u * 1024u;
@@ -1217,7 +1221,14 @@ int main()
 
 	/* Live bedd28a3 171-PC walk. Dominant 50327b54. Not a skip. */
 	{
+		const uint32_t rom = 0x50000000u;
+		const uint32_t walk = rom + (uint32_t)NW_NK_WALK_A;
+		const uint32_t mill = rom + (uint32_t)NW_NK_MILL_68K;
+		const uint32_t emul = rom + (uint32_t)NW_NK_68K_EMUL;
+		const uint32_t kdp = 0x68ffe000u;
+
 		CHECK(NW_NK_WALK_A == 0x327b54u);
+		CHECK(NW_NK_IRQ_NATIVE == 0x312b1cu);
 		CHECK(!nw_nk_picspin_rom_off(NW_NK_WALK_A));
 		CHECK(!nw_nk_picspin_cycle_off(NW_NK_WALK_A));
 		CHECK(!nw_nk_picspin_mill_off(NW_NK_WALK_A));
@@ -1226,6 +1237,21 @@ int main()
 		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_MILL_68K,
 						     0x4e800020u));
 		CHECK(nw_nk_picspin_mill_off(NW_NK_MILL_68K));
+
+		CHECK(nw_ppc_pc_in_nk(walk, rom));
+		CHECK(!nw_ppc_pc_in_nk(mill, rom));
+		CHECK(!nw_ppc_pc_in_nk(emul, rom));
+		CHECK(!nw_ppc_pc_in_nk(rom + (uint32_t)NW_NK_V2_OFFSET - 4u, rom));
+		CHECK(nw_ppc_pc_in_nk(rom + (uint32_t)NW_NK_V2_OFFSET, rom));
+
+		CHECK(!nw_handle_interrupt_use_native(0, walk, rom));
+		CHECK(nw_handle_interrupt_use_native(1, walk, rom));
+		CHECK(!nw_handle_interrupt_use_native(1, mill, rom));
+		CHECK(!nw_handle_interrupt_use_native(1, emul, rom));
+
+		CHECK(nw_handle_interrupt_skip_nested(0, kdp, kdp));
+		CHECK(!nw_handle_interrupt_skip_nested(1, kdp, kdp));
+		CHECK(!nw_handle_interrupt_skip_nested(1, 0x10010000u, kdp));
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);

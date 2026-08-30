@@ -1319,50 +1319,58 @@ void HandleInterrupt(powerpc_registers *r)
 	interrupt_count++;
 #endif
 
-	// Interrupt action depends on current run mode
-	switch (ReadMacInt32(XLM_RUN_MODE)) {
-	case MODE_68K:
+	/*
+	 * H1: New World patch_nanokernel() returns immediately, so it never
+	 * writes XLM_RUN_MODE = MODE_NATIVE. init_emul_ppc leaves MODE_68K.
+	 * After G2 the guest PC is still in NK v2 (live 50327b54). The 68k
+	 * IRQ poke is ignored there; VideoDoDriverIO is a later native_op.
+	 * Take native 0x312b1c. Do not mill the 171-PC walk. mill 68k is not G3.
+	 */
+	int run_mode = ReadMacInt32(XLM_RUN_MODE);
+	const int use_native =
+		(ROMType == ROMTYPE_NEWWORLD) &&
+		nw_handle_interrupt_use_native(
+			nw_guest_first_data_dsi_seen() ? 1 : 0,
+			(uint32)r->pc, ROMBase);
+	if (use_native && run_mode == MODE_68K)
+		run_mode = MODE_NATIVE;
+
 #if NW_BOOT_LOG
-		if (nw_guest_first_data_dsi_seen()) {
-			static int logged;
-			if (!logged) {
-				logged = 1;
-				nw_boot_log("G3: HandleInterrupt MODE_68K");
-			}
+	if (nw_guest_first_data_dsi_seen()) {
+		static int logged;
+		if (logged < 8) {
+			char buf[192];
+			const char *mode = "other";
+			if (run_mode == MODE_EMUL_OP)
+				mode = "EMUL_OP";
+			else if (run_mode == MODE_68K)
+				mode = "MODE_68K";
+			else if (run_mode == MODE_NATIVE)
+				mode = use_native ? "NK native" : "MODE_NATIVE";
+			snprintf(buf, sizeof(buf),
+				 "G3: HandleInterrupt %s pc=%08x r1=%08x kdp=%08x xlm=%d kdp65c=%08x kdp658=%08x",
+				 mode, (unsigned)r->pc, (unsigned)r->gpr[1],
+				 KernelDataAddr, ReadMacInt32(XLM_RUN_MODE),
+				 (unsigned)ReadMacInt32(KERNEL_DATA_BASE + 0x65c),
+				 (unsigned)ReadMacInt32(KERNEL_DATA_BASE + 0x658));
+			nw_boot_log(buf);
+			logged++;
 		}
+	}
 #endif
+
+	switch (run_mode) {
+	case MODE_68K:
 		// 68k emulator active, trigger 68k interrupt level 1
 		WriteMacInt16(ReadMacInt32(KERNEL_DATA_BASE + 0x67c), 1);
 		r->cr.set(r->cr.get() | ReadMacInt32(KERNEL_DATA_BASE + 0x674));
 		break;
-    
+
 #if INTERRUPTS_IN_NATIVE_MODE
 	case MODE_NATIVE:
-		// 68k emulator inactive, in nanokernel?
-		if (r->gpr[1] != KernelDataAddr) {
-#if NW_BOOT_LOG
-			if (nw_guest_first_data_dsi_seen()) {
-				static int logged;
-				if (!logged) {
-					logged = 1;
-					nw_boot_log("G3: HandleInterrupt MODE_NATIVE");
-				}
-			}
-#endif
-
-			// Prepare for 68k interrupt level 1
-			WriteMacInt16(ReadMacInt32(KERNEL_DATA_BASE + 0x67c), 1);
-			WriteMacInt32(ReadMacInt32(KERNEL_DATA_BASE + 0x658) + 0xdc,
-						  ReadMacInt32(ReadMacInt32(KERNEL_DATA_BASE + 0x658) + 0xdc)
-						  | ReadMacInt32(KERNEL_DATA_BASE + 0x674));
-      
-			// Execute nanokernel interrupt routine (this will activate the 68k emulator)
-			DisableInterrupt();
-			if (ROMType == ROMTYPE_NEWWORLD)
-				ppc_cpu->interrupt(ROMBase + 0x312b1c);
-			else
-				ppc_cpu->interrupt(ROMBase + 0x312a3c);
-		} else {
+		if (nw_handle_interrupt_skip_nested(use_native,
+						      (uint32)r->gpr[1],
+						      KernelDataAddr)) {
 #if NW_BOOT_LOG
 			if (nw_guest_first_data_dsi_seen()) {
 				static int logged;
@@ -1372,7 +1380,41 @@ void HandleInterrupt(powerpc_registers *r)
 				}
 			}
 #endif
+			break;
 		}
+
+		if (ReadMacInt32(KERNEL_DATA_BASE + 0x65c) == 0) {
+			WriteMacInt32(KERNEL_DATA_BASE + 0x65c,
+				      KERNEL_DATA_BASE + 0x1000u);
+#if NW_BOOT_LOG
+			nw_boot_log("G3: HandleInterrupt plant kdp+0x65c");
+#endif
+		}
+
+#if NW_BOOT_LOG
+		if (use_native) {
+			static int native_logged;
+			if (!native_logged) {
+				native_logged = 1;
+				nw_boot_log(nw_boot_line_g3_irq_nk());
+			}
+		}
+#endif
+
+		WriteMacInt16(ReadMacInt32(KERNEL_DATA_BASE + 0x67c), 1);
+		{
+			const uint32 cpu = ReadMacInt32(KERNEL_DATA_BASE + 0x658);
+			if (cpu != 0)
+				WriteMacInt32(cpu + 0xdc,
+					      ReadMacInt32(cpu + 0xdc)
+					      | ReadMacInt32(KERNEL_DATA_BASE + 0x674));
+		}
+
+		DisableInterrupt();
+		if (ROMType == ROMTYPE_NEWWORLD)
+			ppc_cpu->interrupt(ROMBase + NW_NK_IRQ_NATIVE);
+		else
+			ppc_cpu->interrupt(ROMBase + 0x312a3c);
 		break;
 #endif
     
@@ -1428,6 +1470,18 @@ void sheepshaver_cpu::execute_native_op(uint32 selector)
 #if EMUL_TIME_STATS
 	native_exec_count++;
 	const clock_t native_exec_start = clock();
+#endif
+#if NW_BOOT_LOG
+	if (nw_guest_first_data_dsi_seen()) {
+		static int logged;
+		if (logged < 8) {
+			char buf[80];
+			snprintf(buf, sizeof(buf),
+				 "G3: native_op sel=%u", (unsigned)selector);
+			nw_boot_log(buf);
+			logged++;
+		}
+	}
 #endif
 
 	switch (selector) {

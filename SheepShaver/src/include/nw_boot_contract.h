@@ -129,12 +129,26 @@ const char *nw_boot_line_g1_patch_skip(void);
 const char *nw_boot_line_g2_first_dsi(void);
 const char *nw_boot_line_g2_translator_off(void);
 const char *nw_boot_line_g3_sdl2_window(void);
+const char *nw_boot_line_g3_irq_nk(void);	/* NK native IRQ after G2; not mill */
+const char *nw_boot_line_g3_native_op(void);
 
 /*
  * Clip a dirty rect to the screen. Returns 1 if the result is non-empty.
  * Host-testable helper for SDL2 update_display_static_bbox / video_set_dirty_area.
  */
 int nw_video_clip_dirty(int *x, int *y, int *w, int *h, int sw, int sh);
+
+/*
+ * NK v2 is ROM+0x310000 .. ROM+0x360000. Mill 68k (ROM+0x366084) is not
+ * in NK and is not G3. Live 50327b54 (ROM+0x327b54) is in NK. Do not mill
+ * that walk. After G2, HandleInterrupt uses native 0x312b1c while PC is
+ * in NK even if XLM_RUN_MODE is still MODE_68K (New World patch skip).
+ */
+int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base);
+int nw_handle_interrupt_use_native(int first_dsi, uint32_t pc,
+				     uint32_t rom_base);
+int nw_handle_interrupt_skip_nested(int use_native, uint32_t r1,
+				      uint32_t kdp);
 
 void nw_boot_log(const char *line);
 void nw_log_g0_decode(const uint8_t *rom, size_t size);
@@ -179,6 +193,8 @@ enum {
 	NW_NK_PICSPIN_OLD_C = 0x325c94,
 	NW_NK_PICSPIN_PAST = 0x326000,	/* live b62e7717: went to mill; stay */
 	NW_NK_PICSPIN_LEAVE_INSNS = 32,
+	NW_NK_68K_EMUL = 0x360000,	/* Old World 68k mill; mill 68k is not G3 */
+	NW_NK_IRQ_NATIVE = 0x312b1c,	/* New World NK interrupt entry */
 	NW_NK_MILL_68K = 0x366084,	/* mill inner loop; not G3 / not WINDOW */
 	NW_NK_CYCLE_A = 0x325c7c,	/* live e0df3b4e dominant */
 	NW_NK_CYCLE_B = 0x325c44,

@@ -376,6 +376,9 @@ void DoPatchNameRegistry(void)
 {
 	SheepVar32 u32;
 	D(bug("Patching Name Registry..."));
+#if NW_BOOT_LOG
+	nw_boot_log("G3: DoPatchNameRegistry");
+#endif
 
 	// Create "device-tree"
 	SheepRegEntryID device_tree;

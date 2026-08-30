@@ -375,6 +375,51 @@ const char *nw_boot_line_g3_sdl2_window(void)
 	return "G3: SDL2 bbox dirty VOSF off";
 }
 
+const char *nw_boot_line_g3_irq_nk(void)
+{
+	return "G3: HandleInterrupt NK native";
+}
+
+const char *nw_boot_line_g3_native_op(void)
+{
+	return "G3: native_op";
+}
+
+int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base)
+{
+	uint32_t off;
+
+	if (pc < rom_base)
+		return 0;
+	off = pc - rom_base;
+	if (off < (uint32_t)NW_NK_V2_OFFSET)
+		return 0;
+	/* mill 68k is not G3 */
+	if (off >= (uint32_t)NW_NK_MILL_68K)
+		return 0;
+	if (off >= (uint32_t)NW_NK_68K_EMUL)
+		return 0;
+	return 1;
+}
+
+int nw_handle_interrupt_use_native(int first_dsi, uint32_t pc,
+				    uint32_t rom_base)
+{
+	if (!first_dsi)
+		return 0;
+	return nw_ppc_pc_in_nk(pc, rom_base);
+}
+
+int nw_handle_interrupt_skip_nested(int use_native, uint32_t r1,
+				     uint32_t kdp)
+{
+	/* After G2, PC in NK: do not skip r1==KDP. That skip is for later
+	 * MODE_NATIVE nested in NK. Boot walk uses KDP as r1. */
+	if (use_native)
+		return 0;
+	return r1 == kdp;
+}
+
 int nw_video_clip_dirty(int *x, int *y, int *w, int *h, int sw, int sh)
 {
 	if (x == NULL || y == NULL || w == NULL || h == NULL)
