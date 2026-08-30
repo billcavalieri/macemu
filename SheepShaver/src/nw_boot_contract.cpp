@@ -484,11 +484,36 @@ int nw_video_need_blit(const void *pixels, const void *fb)
 int nw_video_present_pending(int first_dsi, unsigned boxes,
 			     int union_empty)
 {
-	if (boxes)
+	(void)first_dsi;
+	(void)union_empty;
+	/* Live 76e5106f leftover union present n=2 is not installer. */
+	return boxes ? 1 : 0;
+}
+
+int nw_video_guest_frame(unsigned boxes, int nqd)
+{
+	if (nqd)
 		return 1;
+	return boxes ? 1 : 0;
+}
+
+int nw_video_fb_has_paint(const uint8_t *fb, size_t nbytes)
+{
+	size_t i;
+
+	if (fb == NULL || nbytes == 0)
+		return 0;
+	for (i = 0; i < nbytes; i++)
+		if (fb[i] != 0)
+			return 1;
+	return 0;
+}
+
+int nw_video_full_frame(int first_dsi, unsigned boxes, int nqd)
+{
 	if (!first_dsi)
 		return 0;
-	return union_empty ? 0 : 1;
+	return (boxes || nqd) ? 1 : 0;
 }
 
 int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base)

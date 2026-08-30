@@ -205,12 +205,15 @@ int nw_video_full_scan(int first_dsi);
  * CreateRGBSurfaceFrom shares pixels — blit would be a no-op. */
 int nw_video_need_blit(const void *pixels, const void *fb);
 /*
- * After G2, present leftover SDL union even if this scan found 0
- * new boxes (redraw thread queued, VideoVBL never ran, EE=0).
- * Host n=1 of an empty union is not this.
+ * Live 76e5106f leftover SDL union present n=2 is not the installer.
+ * Guest frame = NQD or memcmp boxes. Leftover pending is host.
+ * Do not flip EE. Do not mill 50327bxx / 503256xx.
  */
 int nw_video_present_pending(int first_dsi, unsigned boxes,
 			      int union_empty);
+int nw_video_guest_frame(unsigned boxes, int nqd);
+int nw_video_fb_has_paint(const uint8_t *fb, size_t nbytes);
+int nw_video_full_frame(int first_dsi, unsigned boxes, int nqd);
 
 void nw_boot_log(const char *line);
 void nw_log_g0_decode(const uint8_t *rom, size_t size);

@@ -1137,8 +1137,12 @@ void driver_base::init()
 
 	adapt_to_video_mode();
 	
-	// set default B/W palette
+	// Gray ramp so 8-bit guest/NQD pixels are visible before CLUT.
+	// Index 1 stays black (classic B/W). Do not wait for VideoDoDriverIO.
 	sdl_palette = SDL_AllocPalette(256);
+	for (int i = 0; i < 256; i++)
+		sdl_palette->colors[i] = (SDL_Color){
+			.r = (Uint8)i, .g = (Uint8)i, .b = (Uint8)i, .a = 255 };
 	sdl_palette->colors[1] = (SDL_Color){ .r = 0, .g = 0, .b = 0, .a = 255 };
 	SDL_SetSurfacePalette(s, sdl_palette);
 
@@ -1857,10 +1861,39 @@ static bool is_fullscreen(SDL_Window * window)
 #ifdef SHEEPSHAVER
 static uint32 video_guest_msr;
 
+/* Full 640x480 (or current mode) of guest FB. One tile is not WINDOW. */
+static void video_guest_full_frame(driver_base *drv)
+{
+	const VIDEO_MODE &mode = drv->mode;
+	const uint32 bytes_per_row = VIDEO_MODE_ROW_BYTES;
+	const uint32 bytes_per_pixel = bytes_per_row / VIDEO_MODE_X;
+	const uint32 dst_bytes_per_row = drv->s->pitch;
+	const int blit = nw_video_need_blit(drv->s->pixels, the_buffer);
+	uint32 y;
+
+	if (SDL_MUSTLOCK(drv->s))
+		SDL_LockSurface(drv->s);
+	if (blit) {
+		for (y = 0; y < VIDEO_MODE_Y; y++)
+			Screen_blit((uint8 *)drv->s->pixels + y * dst_bytes_per_row,
+				    the_buffer + y * bytes_per_row,
+				    VIDEO_MODE_X * bytes_per_pixel);
+	}
+	if (the_buffer_copy)
+		memcpy(the_buffer_copy, the_buffer,
+		       (size_t)bytes_per_row * (size_t)VIDEO_MODE_Y);
+	if (SDL_MUSTLOCK(drv->s))
+		SDL_UnlockSurface(drv->s);
+	update_sdl_video(drv->s, 0, 0, (Sint32)VIDEO_MODE_X,
+			 (Sint32)VIDEO_MODE_Y);
+}
+
 int VideoGuestPresent(uint32 msr)
 {
 	unsigned boxes = 0;
-	int pending;
+	int nqd_this = 0;
+	int paint = 0;
+	int guest;
 
 	if (msr)
 		video_guest_msr = msr;
@@ -1868,31 +1901,39 @@ int VideoGuestPresent(uint32 msr)
 		return 0;
 	{
 		const VIDEO_MODE &mode = drv->mode;
+		nqd_this = nqd_have_dirty ? 1 : 0;
 		if ((int)VIDEO_MODE_DEPTH >= VIDEO_DEPTH_8BIT)
 			boxes = update_display_static_bbox(drv);
 		else if (nw_guest_first_data_dsi_seen())
 			update_display_static(drv);
+		paint = nw_video_fb_has_paint(
+			the_buffer,
+			(size_t)VIDEO_MODE_ROW_BYTES * (size_t)VIDEO_MODE_Y);
 	}
-	{
-		pending = 0;
-		if (sdl_update_video_mutex) {
-			SDL_LockMutex(sdl_update_video_mutex);
-			pending = SDL_RectEmpty(&sdl_update_video_rect) ? 0 : 1;
-			SDL_UnlockMutex(sdl_update_video_mutex);
+	guest = nw_video_guest_frame(boxes, nqd_this);
+	if (!guest && nw_guest_first_data_dsi_seen() && paint) {
+		static int paint_frame;
+		if (!paint_frame) {
+			paint_frame = 1;
+			guest = 1;
 		}
 	}
-	if (nw_video_present_pending(
-		    nw_guest_first_data_dsi_seen() ? 1 : 0, boxes,
-		    pending ? 0 : 1)) {
+	if (guest) {
+		if (nw_video_full_frame(
+			    nw_guest_first_data_dsi_seen() ? 1 : 0,
+			    boxes ? boxes : 1u, nqd_this || paint))
+			video_guest_full_frame(drv);
 #if NW_BOOT_LOG
 		{
 			static unsigned n;
 			if (n < 8) {
+				const VIDEO_MODE &mode = drv->mode;
 				n++;
-				char buf[80];
+				char buf[96];
 				snprintf(buf, sizeof(buf),
-					 "G3: FB guest dirty boxes=%u n=%u",
-					 boxes ? boxes : 1u, n);
+					 "G3: FB guest dirty boxes=%u frame=%ux%u nqd=%d n=%u",
+					 boxes, (unsigned)VIDEO_MODE_X,
+					 (unsigned)VIDEO_MODE_Y, nqd_this, n);
 				nw_boot_log(buf);
 			}
 		}
@@ -1907,7 +1948,7 @@ int VideoGuestPresent(uint32 msr)
 			logged++;
 			const int blocked = nw_video_guest_paint_blocked(
 				1, video_guest_msr ? video_guest_msr : msr,
-				nqd_ever_dirty, 0);
+				nqd_ever_dirty, paint);
 			char buf[176];
 			if (blocked)
 				snprintf(buf, sizeof(buf),
@@ -1964,8 +2005,9 @@ void VideoVBL(void)
 		do_toggle_fullscreen();
 
 	/*
-	 * After G2, present guest FB dirty. Do not wait for NQD /
-	 * VideoDoDriverIO. Do not flip EE. Host n=1 is not this.
+	 * After G2, present a real guest frame (NQD / memcmp boxes /
+	 * nonzero FB). Leftover host union is not installer. Do not
+	 * flip EE. mill 68k is not G3.
 	 */
 	if (nw_guest_first_data_dsi_seen())
 		VideoGuestPresent(video_guest_msr);
@@ -3008,19 +3050,13 @@ static void video_refresh_window_static(void)
 	static uint32 tick_counter = 0;
 #ifdef SHEEPSHAVER
 	/*
-	 * After G2, scan guest FB every refresh. Do not clip to NQD.
-	 * Do not present here (SDL renderer thread is the CPU thread).
-	 * VideoGuestPresent / VideoVBL present the leftover union.
-	 * Do not flip EE. mill 68k is not G3.
+	 * After G2, do not consume dirty on the redraw thread. Live
+	 * 76e5106f leftover union present n=2 is not installer.
+	 * CPU-thread VideoGuestPresent owns scan + full-frame present.
+	 * Do not flip EE. Do not mill 50327bxx / 503256xx.
 	 */
-	if (nw_guest_first_data_dsi_seen()) {
-		const VIDEO_MODE &mode = drv->mode;
-		if ((int)VIDEO_MODE_DEPTH >= VIDEO_DEPTH_8BIT)
-			update_display_static_bbox(drv);
-		else
-			update_display_static(drv);
+	if (nw_guest_first_data_dsi_seen())
 		return;
-	}
 #endif
 	if (++tick_counter >= frame_skip) {
 		tick_counter = 0;
@@ -3168,6 +3204,10 @@ void video_set_dirty_area(int x, int y, int w, int h)
 		}
 	}
 #endif
+	/* After G2, present the installer frame now. Do not wait for
+	 * VideoVBL / EE. Do not mill. */
+	if (nw_guest_first_data_dsi_seen())
+		VideoGuestPresent(video_guest_msr);
 }
 #endif
 

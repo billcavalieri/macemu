@@ -1323,9 +1323,25 @@ int main()
 		CHECK(!nw_video_present_pending(0, 0, 1));
 		CHECK(!nw_video_present_pending(0, 0, 0));
 		CHECK(nw_video_present_pending(0, 3, 1));
-		CHECK(nw_video_present_pending(1, 0, 0));
+		CHECK(!nw_video_present_pending(1, 0, 0)); /* leftover != installer */
 		CHECK(!nw_video_present_pending(1, 0, 1));
 		CHECK(nw_video_present_pending(1, 2, 1));
+		CHECK(!nw_video_guest_frame(0, 0));
+		CHECK(nw_video_guest_frame(1, 0));
+		CHECK(nw_video_guest_frame(0, 1));
+		CHECK(!nw_video_full_frame(0, 4, 1));
+		CHECK(nw_video_full_frame(1, 1, 0));
+		CHECK(nw_video_full_frame(1, 0, 1));
+		CHECK(!nw_video_full_frame(1, 0, 0));
+		{
+			uint8_t z[8];
+			memset(z, 0, sizeof(z));
+			CHECK(!nw_video_fb_has_paint(z, sizeof(z)));
+			z[3] = 1;
+			CHECK(nw_video_fb_has_paint(z, sizeof(z)));
+			CHECK(!nw_video_fb_has_paint(NULL, sizeof(z)));
+			CHECK(!nw_video_fb_has_paint(z, 0));
+		}
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);
