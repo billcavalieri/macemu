@@ -78,6 +78,46 @@ static uint32 nw_dec_handler_lr;
 static uint32 nw_dec_handler_cr;
 static uint32 nw_dec_handler_ctr;
 static uint32 nw_dec_handler_xer;
+/* Live b83a3bfe: mmu.msr() at take_dec is already 17efbb80
+ * (r1/KDP). Keep the last real EE-off MSR from G2 / the walk
+ * so leave does not invent EE or collapse to 0. */
+static uint32 nw_dec_last_real_msr;
+static int nw_dec_did_leave;
+static void nw_dec_note_msr(uint32 msr)
+{
+	const uint32 ir_dr =
+		ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR;
+	if (!nw_ppc_srr1_is_msr(msr))
+		return;
+	if (msr == 0)
+		return;
+	msr &= ~ppc32_mmu::MSR_EE;
+	if ((nw_dec_last_real_msr & ir_dr) != 0 &&
+	    (msr & ir_dr) == 0)
+		return;
+	nw_dec_last_real_msr = msr;
+}
+static uint32 nw_dec_resume_srr1(uint32 live)
+{
+	const uint32 ir_dr =
+		ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR;
+	uint32 u;
+	if (nw_ppc_srr1_is_msr(live) && live != 0)
+		u = live;
+	else if (nw_dec_last_real_msr)
+		u = nw_dec_last_real_msr;
+	else
+		u = (uint32)NW_MSR_LIVE_EE_OFF;
+	u &= ~ppc32_mmu::MSR_EE;
+	if ((nw_dec_last_real_msr & ir_dr) != 0 &&
+	    (u & ir_dr) == 0)
+		u = nw_dec_last_real_msr;
+	if (u == 0)
+		u = nw_dec_last_real_msr ?
+			nw_dec_last_real_msr :
+			(uint32)NW_MSR_LIVE_EE_OFF;
+	return u;
+}
 /* D-form twi: OPCD=3, TO=31. Live illegal 0fff0005 at 50324140. */
 static int nw_ppc_twi_uncond(uint32 opcode)
 {
@@ -2248,6 +2288,9 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 	dsisr_ = dsi.dsisr;
 	pc() = dsi.vector;
 #ifdef SHEEPSHAVER
+	/* Fault MSR is still a real word here. take_dec later sees
+	 * 17efbb80. Do not or-in EE. */
+	nw_dec_note_msr(dsi.srr1);
 	if (ppc32_guest_mmu_enabled()) {
 		extern uint32 ROMBase;
 		/*
@@ -2482,12 +2525,12 @@ uint32 powerpc_cpu::hotints_vector(uint32 vec) const
 	xer().set(nw_dec_handler_xer); \
 	sprg_[1] = nw_dec_handler_gpr[1]; \
 	sprg_[2] = nw_dec_handler_lr; \
-	ppc32_guest_mmu().set_msr(nw_ppc_srr1_use(nw_dec_handler_srr1)); \
-	nw_log_msr_dr(nw_ppc_srr1_use(nw_dec_handler_srr1)); \
+	ppc32_guest_mmu().set_msr(nw_dec_resume_srr1(nw_dec_handler_srr1)); \
+	nw_log_msr_dr(nw_dec_resume_srr1(nw_dec_handler_srr1)); \
 	nw_log_msr_write("rfi", nw_dec_handler_srr0, \
-			 nw_ppc_srr1_use(nw_dec_handler_srr1)); \
+			 nw_dec_resume_srr1(nw_dec_handler_srr1)); \
 	srr0_ = nw_dec_handler_srr0; \
-	srr1_ = nw_ppc_srr1_use(nw_dec_handler_srr1); \
+	srr1_ = nw_dec_resume_srr1(nw_dec_handler_srr1); \
 	pc() = nw_dec_handler_srr0; \
 } while (0)
 #endif
@@ -2564,20 +2607,23 @@ void powerpc_cpu::take_dec()
 	const uint32 msr_snap = mmu.msr();
 	srr0_ = pc();
 #ifdef SHEEPSHAVER
-	/* Snapshot MSR before sprg/r1. Live c3b5d982 stored
-	 * 17efbb80 (r1) as srr1. Do not or-in EE. */
-	srr1_ = nw_ppc_srr1_use(msr_snap);
+	/* Live b83a3bfe: mmu.msr() is already 17efbb80 at take_dec.
+	 * Use the dedicated last-real snapshot. Do not or-in EE. */
+	nw_dec_note_msr(msr_snap);
+	srr1_ = nw_dec_resume_srr1(msr_snap);
 	nw_dec_handler_srr0 = srr0_;
 	nw_dec_handler_srr1 = srr1_;
 #if NW_BOOT_LOG
-	if (!nw_ppc_srr1_is_msr(msr_snap)) {
+	if (!nw_ppc_srr1_is_msr(msr_snap) ||
+	    srr1_ != nw_ppc_srr1_use(msr_snap)) {
 		static int nclob;
 		if (!nclob) {
 			nclob = 1;
-			char buf[112];
+			char buf[128];
 			snprintf(buf, sizeof(buf),
-				 "G3: DEC srr1 clobber was=%08x use=%08x r1=%08x SPRG3=%08x",
+				 "G3: DEC srr1 clobber was=%08x use=%08x last=%08x r1=%08x SPRG3=%08x",
 				 (unsigned)msr_snap, (unsigned)srr1_,
+				 (unsigned)nw_dec_last_real_msr,
 				 (unsigned)gpr(1), (unsigned)sprg_[3]);
 			nw_boot_log(buf);
 		}
@@ -2616,12 +2662,13 @@ void powerpc_cpu::take_dec()
 				n = 1;
 				char buf[192];
 				snprintf(buf, sizeof(buf),
-					 "G3: DEC 0x900 to=%08x SPRG3=%08x r1=%08x srr0=%08x srr1_raw=%08x srr1=%08x ee=%d op=%08x dec=%08x",
+					 "G3: DEC 0x900 to=%08x SPRG3=%08x r1=%08x srr0=%08x srr1_raw=%08x srr1=%08x last=%08x ee=%d op=%08x dec=%08x",
 					 (unsigned)pc(), (unsigned)sprg_[3],
 					 (unsigned)gpr(1),
 					 (unsigned)nw_dec_handler_srr0,
 					 (unsigned)msr_snap,
 					 (unsigned)nw_dec_handler_srr1,
+					 (unsigned)nw_dec_last_real_msr,
 					 nw_dec_ee_on(nw_dec_handler_srr1),
 					 (unsigned)op0, (unsigned)dec_);
 				nw_boot_log(buf);
@@ -3289,6 +3336,7 @@ void powerpc_cpu::execute(uint32 entry)
 				const uint32 msr_now = ppc32_guest_mmu().msr();
 				const int first_dsi =
 					nw_guest_first_data_dsi_seen() ? 1 : 0;
+				nw_dec_note_msr(msr_now);
 				nw_arm_dec_after_g2();
 				if (nw_dec_in_handler &&
 				    pc() == nw_dec_handler_srr0) {
@@ -3301,28 +3349,31 @@ void powerpc_cpu::execute(uint32 entry)
 					 * not or-in EE. */
 					NW_DEC_RESTORE_SAVED();
 					const uint32 s1 =
-						nw_ppc_srr1_use(
+						nw_dec_resume_srr1(
 							nw_dec_handler_srr1);
 #if NW_BOOT_LOG
 					static int left;
 					if (!left) {
 						left = 1;
-						char buf[160];
+						char buf[176];
 						snprintf(buf, sizeof(buf),
-							 "%s from=%08x to=%08x srr0=%08x srr1=%08x r1=%08x",
+							 "%s from=%08x to=%08x srr0=%08x srr1=%08x last=%08x r1=%08x",
 							 nw_boot_line_g3_dec_left(),
 							 (unsigned)nw_dec_handler_from,
 							 (unsigned)pc(),
 							 (unsigned)nw_dec_handler_srr0,
 							 (unsigned)s1,
+							 (unsigned)nw_dec_last_real_msr,
 							 (unsigned)gpr(1));
 						nw_boot_log(buf);
 					}
 #endif
 					nw_dec_in_handler = 0;
-					/* NK may have mtspr'd SRR1 to a
-					 * pointer (live 17efbb80). Restore
-					 * take_dec MSR. Do not or-in EE. */
+					nw_dec_did_leave = 1;
+					/* Live b83a3bfe: leave logged
+					 * 00002000 then heartbeats
+					 * 17efbb80 then 00000000. Use
+					 * the last real EE-off MSR. */
 					ppc32_guest_mmu().set_msr(s1);
 					srr1_ = s1;
 					/* Handler may have mtdec 0. Do not
@@ -3340,6 +3391,30 @@ void powerpc_cpu::execute(uint32 entry)
 					 * rfi saved SRR0. Not a skip. */
 					NW_DEC_RESTORE_SAVED();
 					continue;
+				}
+				if (nw_dec_did_leave && !nw_dec_in_handler) {
+					const uint32 m =
+						ppc32_guest_mmu().msr();
+					const uint32 want =
+						nw_dec_resume_srr1(m);
+					if (m != want &&
+					    (!nw_ppc_srr1_is_msr(m) ||
+					     m == 0)) {
+						ppc32_guest_mmu().set_msr(want);
+						srr1_ = want;
+#if NW_BOOT_LOG
+						static int npin;
+						if (!npin) {
+							npin = 1;
+							char buf[112];
+							snprintf(buf, sizeof(buf),
+								 "G3: DEC leave msr pin was=%08x use=%08x",
+								 (unsigned)m,
+								 (unsigned)want);
+							nw_boot_log(buf);
+						}
+#endif
+					}
 				}
 #if NW_BOOT_LOG
 				if ((msr_now & ppc32_mmu::MSR_IR) &&
@@ -22854,7 +22929,7 @@ void powerpc_cpu::execute(uint32 entry)
 					snprintf(buf, sizeof(buf),
 						 "G3: DEC rfi restore srr0=%08x srr1=%08x r1=%08x",
 						 (unsigned)nw_dec_handler_srr0,
-						 (unsigned)nw_ppc_srr1_use(
+						 (unsigned)nw_dec_resume_srr1(
 							 nw_dec_handler_srr1),
 						 (unsigned)gpr(1));
 					nw_boot_log(buf);
