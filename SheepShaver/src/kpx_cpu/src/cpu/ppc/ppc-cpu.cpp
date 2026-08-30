@@ -88,6 +88,9 @@ static int nw_dec_did_leave;
  * HandleInterrupt. took_900 is set only inside
  * take_dec so hold cannot swallow the first 0x900. */
 static int nw_dec_took_900;
+/* Live 3081e072: 50326674 cmpwi r8,-1 then bne +8. Complete
+ * that bc via CR fall-through; do not smash r8. */
+static int nw_dec_leave_skip_bc;
 static void nw_dec_note_msr(uint32 msr)
 {
 	const uint32 ir_dr =
@@ -23264,8 +23267,8 @@ void powerpc_cpu::execute(uint32 entry)
 								}
 #endif
 							}
-							if (nw_dec_leave_50326_wait(rom_off) &&
-							    opw == 0x2c08ffffu) {
+							if (nw_dec_leave_50326674_cmp(rom_off,
+										       opw)) {
 								const uint32 nxt =
 									vm_read_memory_4(pc() + 4);
 								const uint32 was = gpr(8);
@@ -23274,6 +23277,8 @@ void powerpc_cpu::execute(uint32 entry)
 										8, was, 0xffffffffu,
 										nxt);
 								gpr(8) = use;
+								if (nw_ppc_is_bc(nxt))
+									nw_dec_leave_skip_bc = 1;
 #if NW_BOOT_LOG
 								{
 									static int nr8;
@@ -23285,6 +23290,20 @@ void powerpc_cpu::execute(uint32 entry)
 											 (unsigned)was,
 											 (unsigned)gpr(8),
 											 (unsigned)nxt);
+										nw_boot_log(buf);
+									}
+								}
+								{
+									static int n26c;
+									if (!n26c) {
+										n26c = 1;
+										char buf[144];
+										snprintf(buf, sizeof(buf),
+											 "G3: DEC leave 50326 cmp pc=%08x op=%08x nxt=%08x r8=%08x",
+											 (unsigned)pc(),
+											 (unsigned)opw,
+											 (unsigned)nxt,
+											 (unsigned)gpr(8));
 										nw_boot_log(buf);
 									}
 								}
@@ -23446,6 +23465,47 @@ void powerpc_cpu::execute(uint32 entry)
 			continue;
 		}
 #ifdef SHEEPSHAVER
+		/* Live 3081e072: after matching 50326674 cmpwi r8,-1,
+		 * make bne at 50326678 fall through. Do not smash r8.
+		 * Do not skip-list 50326xxx. Do not or-in EE. */
+		if (nw_dec_did_leave && nw_dec_leave_skip_bc) {
+			const uint32 off =
+				(pc() >= ROMBase &&
+				 pc() < ROMBase + 0x500000u)
+					? pc() - ROMBase
+					: 0xffffffffu;
+			if (off == 0x326678u && nw_ppc_is_bc(opcode)) {
+				const int cr_set =
+					nw_ppc_bc_fallthrough_cr_set(opcode);
+				const uint32 bi = (opcode >> 16) & 0x1fu;
+				uint32 crv = cr().get();
+				const uint32 bit = 1u << (31u - bi);
+				nw_dec_leave_skip_bc = 0;
+				if (cr_set == 1)
+					crv |= bit;
+				else if (cr_set == 0)
+					crv &= ~bit;
+				if (cr_set >= 0)
+					cr().set(crv);
+#if NW_BOOT_LOG
+				{
+					static int nsk;
+					if (!nsk) {
+						nsk = 1;
+						char buf[112];
+						snprintf(buf, sizeof(buf),
+							 "G3: DEC leave 50326 bc fallthrough pc=%08x op=%08x cr=%08x",
+							 (unsigned)pc(),
+							 (unsigned)opcode,
+							 (unsigned)cr().get());
+						nw_boot_log(buf);
+					}
+				}
+#endif
+			} else if (off != 0x326674u) {
+				nw_dec_leave_skip_bc = 0;
+			}
+		}
 		/* Live 0ad66900: twi pad after DEC 0x900 is not in
 		 * ppc-decode. Restore take_dec GPRs too. */
 		if (nw_dec_in_handler && nw_ppc_twi_uncond(opcode)) {

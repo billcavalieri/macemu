@@ -136,6 +136,7 @@ const char *nw_boot_line_g3_walk_dec_ee(void);
 const char *nw_boot_line_g3_dec_take(void);	/* host took 0x900; not G3 */
 const char *nw_boot_line_g3_dec_left(void);	/* handler rfi'd; not G3 */
 const char *nw_boot_line_g3_dec_leave_50326(void); /* post-leave wait; not G3 */
+const char *nw_boot_line_g3_dec_leave_50326_cmp(void); /* live 50326674; not G3 */
 const char *nw_boot_line_g3_fb_guest(void);
 const char *nw_boot_line_g3_fb_none(void);	/* named reason: EE=0, not host n=1 */
 
@@ -209,6 +210,14 @@ uint32_t nw_ppc_srr1_use(uint32_t srr1);	/* 00002000 if not; EE stays off */
 int nw_dec_leave_pin_real(uint32_t live, uint32_t last_real);
 /* cmpi/cmpli/cmp/cmpl. Used to complete a 50326 wait, not skip it. */
 int nw_ppc_is_cmp(uint32_t op);
+int nw_ppc_is_bc(uint32_t op);
+/* Live 3081e072: wait is exactly ROM+0x326674 op=2c08ffff. */
+int nw_dec_leave_50326674_cmp(uint32_t rom_off, uint32_t op);
+/*
+ * CR bit to set (1) or clear (0) so bc falls through. Returns
+ * -1 if op is not a CR-using bc (BO 4 or 12).
+ */
+int nw_ppc_bc_fallthrough_cr_set(uint32_t op);
 /*
  * GPR that makes the following bc fall through. r8: beq-only
  * when already -1. Do not smash r8 on bne.

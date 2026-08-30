@@ -410,6 +410,11 @@ const char *nw_boot_line_g3_dec_leave_50326(void)
 	return "G3: DEC leave 50326";
 }
 
+const char *nw_boot_line_g3_dec_leave_50326_cmp(void)
+{
+	return "G3: DEC leave 50326 cmp";
+}
+
 const char *nw_boot_line_g3_fb_guest(void)
 {
 	return "G3: FB guest dirty";
@@ -507,6 +512,31 @@ int nw_ppc_is_cmp(uint32_t op)
 	if ((op & 0xfc0007feu) == 0x7c000040u)
 		return 1;
 	return 0;
+}
+
+int nw_ppc_is_bc(uint32_t op)
+{
+	return (op >> 26) == 16u;
+}
+
+int nw_dec_leave_50326674_cmp(uint32_t rom_off, uint32_t op)
+{
+	return (rom_off == 0x326674u && op == 0x2c08ffffu) ? 1 : 0;
+}
+
+int nw_ppc_bc_fallthrough_cr_set(uint32_t op)
+{
+	const uint32_t bo = (op >> 21) & 0x1fu;
+
+	if (!nw_ppc_is_bc(op))
+		return -1;
+	/* BO=4: branch if CR bit clear → fall through if bit set. */
+	if (bo == 4u)
+		return 1;
+	/* BO=12: branch if CR bit set → fall through if bit clear. */
+	if (bo == 12u)
+		return 0;
+	return -1;
 }
 
 uint32_t nw_dec_leave_50326_cmp_use(uint32_t ra, uint32_t was,

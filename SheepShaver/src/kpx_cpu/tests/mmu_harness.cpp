@@ -253,6 +253,8 @@ int main()
 			"G3: DEC handler left") == 0);
 		CHECK(strcmp(nw_boot_line_g3_dec_leave_50326(),
 			"G3: DEC leave 50326") == 0);
+		CHECK(strcmp(nw_boot_line_g3_dec_leave_50326_cmp(),
+			"G3: DEC leave 50326 cmp") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_guest(),
 			"G3: FB guest dirty") == 0);
 		CHECK(strcmp(nw_boot_line_g3_fb_none(),
@@ -1348,9 +1350,12 @@ int main()
 		 * Do not skip-list those PCs. Do not mill. Do not or-in
 		 * EE. 00001040 (ME+IP) after leave is a real MSR. */
 		CHECK(!nw_nk_picspin_skip_after_g2(0x326674u, 0x2c08ffffu));
+		CHECK(!nw_nk_picspin_skip_after_g2(0x326678u, 0x40820008u));
+		CHECK(!nw_nk_picspin_skip_after_g2(0x326670u, 0x4bfff351u));
 		CHECK(!nw_nk_picspin_skip_after_g2(0x3259e0u, 0x2f9c0000u));
 		CHECK(!nw_nk_picspin_skip_after_g2(0x3256ccu, 0x48000b61u));
 		CHECK(!nw_nk_picspin_mill_off(0x326674u));
+		CHECK(!nw_nk_picspin_mill_off(0x326678u));
 		CHECK(!nw_nk_picspin_mill_off(0x3259e0u));
 		CHECK(nw_nk_picspin_mill_off(NW_NK_MILL_68K));
 		CHECK(NW_MSR_ME == 0x00001000u);
@@ -1373,7 +1378,15 @@ int main()
 		CHECK(nw_ppc_is_cmp(0x2c1e0000u));
 		CHECK(nw_ppc_is_cmp(0x7c032040u)); /* cmplw cr0,r3,r4 */
 		CHECK(!nw_ppc_is_cmp(0x48000b61u));
-		/* r8 bne +8: do not smash (a4f0c6ce terminator). */
+		CHECK(nw_dec_leave_50326674_cmp(0x326674u, 0x2c08ffffu));
+		CHECK(!nw_dec_leave_50326674_cmp(0x326670u, 0x4bfff351u));
+		CHECK(!nw_dec_leave_50326674_cmp(0x326674u, 0x2c1e0000u));
+		CHECK(nw_ppc_is_bc(0x40820008u));
+		CHECK(!nw_ppc_is_bc(0x2c08ffffu));
+		CHECK(nw_ppc_bc_fallthrough_cr_set(0x40820008u) == 1);
+		CHECK(nw_ppc_bc_fallthrough_cr_set(0x41820008u) == 0);
+		CHECK(nw_ppc_bc_fallthrough_cr_set(0x2c08ffffu) == -1);
+		/* r8 bne +8: do not smash (live 3081e072 use=0). */
 		CHECK(nw_dec_leave_50326_cmp_use(8, 0, 0xffffffffu,
 						  0x40820008u) == 0);
 		CHECK(nw_dec_leave_50326_cmp_use(8, 0x503266a7u, 0xffffffffu,
