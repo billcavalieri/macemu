@@ -558,6 +558,40 @@ int nw_nk_postleave_walk_off(uint32_t off)
 	return 0;
 }
 
+int nw_ppc_is_li(uint32_t op)
+{
+	return ((op >> 26) == 14u) && (((op >> 16) & 31u) == 0);
+}
+
+int nw_dec_leave_cmp_wait(uint32_t nxt)
+{
+	return nw_ppc_bc_fallthrough_cr_set(nxt) >= 0;
+}
+
+int nw_dec_leave_503256f4_false(uint32_t off, uint32_t op, uint32_t nxt)
+{
+	if (off == 0x3256f4u && op == 0x2c9e0000u)
+		return 1;
+	if (nw_ppc_is_li(nxt))
+		return 1;
+	if (!nw_dec_leave_cmp_wait(nxt))
+		return 1;
+	return 0;
+}
+
+int nw_dec_leave_hb_wait_off(uint32_t off)
+{
+	switch (off) {
+	case 0x32663cu:
+	case 0x3259dcu:
+	case 0x3264c0u:
+	case 0x3264fcu:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 uint32_t nw_dec_leave_50326_cmp_use(uint32_t ra, uint32_t was,
 				    uint32_t rb, uint32_t nxt)
 {

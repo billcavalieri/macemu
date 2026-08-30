@@ -273,6 +273,9 @@ static int nw_dec_leave_503259e0_wait(uint32 rom_off)
 		return 0;
 	if (rom_off == 0x3259e0u)
 		return 1;
+	/* Live 2d295270: heartbeat 503259dc (PIC slot, -4). */
+	if (rom_off == 0x3259dcu)
+		return 1;
 	return 0;
 }
 static int nw_dec_leave_no_skip(uint32 rom_off)
@@ -23342,37 +23345,108 @@ void powerpc_cpu::execute(uint32 entry)
 									opw >> 26;
 								const uint32 was =
 									gpr(ra);
-								uint32 rb;
-								uint32 use;
-								if (prim == 11u)
-									rb = (uint32)(int32)(int16)
-										(opw & 0xffffu);
-								else if (prim == 10u)
-									rb = opw & 0xffffu;
-								else
-									rb = gpr((opw >> 11) & 31u);
-								use = nw_dec_leave_50326_cmp_use(
-									ra, was, rb, nxt);
-								/* Do not smash r8 on bne. */
-								if (ra != 8u && use != was)
-									gpr(ra) = use;
-								if (nw_ppc_is_bc(nxt) &&
-								    nw_ppc_bc_fallthrough_cr_set(nxt) >= 0)
+								/* Live 2d295270: 503256f4
+								 * cmpwi r30,0 nxt=li is not
+								 * a wait. Only complete
+								 * cmp+beq/bne. */
+								if (!nw_dec_leave_503256f4_false(
+									    rom_off, opw, nxt) &&
+								    nw_dec_leave_cmp_wait(nxt)) {
+									uint32 rb;
+									uint32 use;
+									if (prim == 11u)
+										rb = (uint32)(int32)(int16)
+											(opw & 0xffffu);
+									else if (prim == 10u)
+										rb = opw & 0xffffu;
+									else
+										rb = gpr((opw >> 11) & 31u);
+									use = nw_dec_leave_50326_cmp_use(
+										ra, was, rb, nxt);
+									if (ra != 8u && use != was)
+										gpr(ra) = use;
 									nw_dec_leave_skip_bc_pc =
 										pc() + 4;
 #if NW_BOOT_LOG
-								{
-									static int n26n;
-									if (!n26n) {
-										n26n = 1;
+									{
+										static int n26n;
+										if (!n26n) {
+											n26n = 1;
+											char buf[144];
+											snprintf(buf, sizeof(buf),
+												 "G3: DEC leave 50326 cmp pc=%08x op=%08x nxt=%08x r%u=%08x",
+												 (unsigned)pc(),
+												 (unsigned)opw,
+												 (unsigned)nxt,
+												 (unsigned)ra,
+												 (unsigned)gpr(ra));
+											nw_boot_log(buf);
+										}
+									}
+#endif
+								}
+							}
+							/* Live 2d295270 heartbeats:
+							 * 5032663c / 503259dc /
+							 * 503264c0; bc 503264fc.
+							 * cmp+li is not a wait.
+							 * Prefer nxt beq/bne like
+							 * 50326674; 503264c0 may
+							 * arm +0x3c. */
+							if (nw_dec_leave_hb_wait_off(rom_off) &&
+							    rom_off != 0x326674u &&
+							    rom_off != 0x3256f4u) {
+								const uint32 nxt =
+									vm_read_memory_4(pc() + 4);
+								uint32 arm = 0;
+								uint32 log_nxt = nxt;
+								if (nw_ppc_is_cmp(opw) &&
+								    !nw_dec_leave_503256f4_false(
+									    rom_off, opw, nxt) &&
+								    nw_dec_leave_cmp_wait(nxt))
+									arm = pc() + 4;
+								else if (rom_off == 0x3264c0u &&
+									 nw_ppc_is_cmp(opw)) {
+									const uint32 bcop =
+										vm_read_memory_4(
+											pc() + 0x3cu);
+									if (nw_ppc_bc_fallthrough_cr_set(bcop) >= 0) {
+										arm = pc() + 0x3cu;
+										log_nxt = bcop;
+									}
+								} else if (nw_ppc_bc_fallthrough_cr_set(opw) >= 0)
+									arm = pc();
+								else if (rom_off == 0x3259dcu) {
+									const uint32 n2 =
+										vm_read_memory_4(pc() + 8);
+									if (nw_dec_leave_cmp_wait(nxt))
+										arm = pc() + 4;
+									else if (nw_dec_leave_cmp_wait(n2)) {
+										arm = pc() + 8;
+										log_nxt = n2;
+									}
+								} else if (rom_off == 0x32663cu &&
+									   nw_ppc_is_cmp(opw)) {
+									const uint32 n2 =
+										vm_read_memory_4(pc() + 8);
+									if (nw_dec_leave_cmp_wait(n2)) {
+										arm = pc() + 8;
+										log_nxt = n2;
+									}
+								}
+								if (arm)
+									nw_dec_leave_skip_bc_pc = arm;
+#if NW_BOOT_LOG
+								if (arm && nw_ppc_is_cmp(opw)) {
+									static int nhb;
+									if (!nhb) {
+										nhb = 1;
 										char buf[144];
 										snprintf(buf, sizeof(buf),
-											 "G3: DEC leave 50326 cmp pc=%08x op=%08x nxt=%08x r%u=%08x",
+											 "G3: DEC leave 50326 cmp pc=%08x op=%08x nxt=%08x",
 											 (unsigned)pc(),
 											 (unsigned)opw,
-											 (unsigned)nxt,
-											 (unsigned)ra,
-											 (unsigned)gpr(ra));
+											 (unsigned)log_nxt);
 										nw_boot_log(buf);
 									}
 								}

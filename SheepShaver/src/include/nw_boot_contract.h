@@ -223,6 +223,12 @@ int nw_ppc_bc_fallthrough_cr_set(uint32_t op);
  * (0x900 body) stays out.
  */
 int nw_nk_postleave_walk_off(uint32_t off);
+/* Live 2d295270: 503256f4 cmpwi r30,0 nxt=li r30,0 is not a wait. */
+int nw_ppc_is_li(uint32_t op);
+int nw_dec_leave_cmp_wait(uint32_t nxt); /* following insn is beq/bne */
+int nw_dec_leave_503256f4_false(uint32_t off, uint32_t op, uint32_t nxt);
+/* Heartbeat wait sites after 50326678. Not a skip-list. */
+int nw_dec_leave_hb_wait_off(uint32_t off);
 /*
  * GPR that makes the following bc fall through. r8: beq-only
  * when already -1. Do not smash r8 on bne.
