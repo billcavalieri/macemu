@@ -828,6 +828,22 @@ int main()
 			CHECK(npc == old_b + 12u);
 			CHECK(!nw_nk_picspin_npc_stays(npc, old_b, rom));
 
+			/* Live e0df3b4e: skip pc=50325a9c npc=50325aac. */
+			{
+				uint32_t live[4];
+				live[0] = (uint32_t)NW_NK_PICSPIN_LBZ_OP;
+				live[1] = 0x60000000u;
+				live[2] = 0x2c1e0000u;
+				live[3] = 0x4182fff4u; /* beq *-12 → old_b */
+				CHECK(nw_ppc_rel_branch_target(old_b + 12u,
+							       live[3], &tgt));
+				CHECK(tgt == old_b);
+				npc = nw_nk_picspin_leave_npc(old_b, rom,
+							      live, 4);
+				CHECK(npc == old_b + 16u);
+				CHECK(npc == rom + 0x325aacu);
+			}
+
 			CHECK(!nw_nk_picspin_skip_after_g2(0x366084u,
 							   loop[0]));
 			CHECK(!nw_nk_picspin_npc_stays(
@@ -862,6 +878,32 @@ int main()
 			npc = nw_nk_picspin_past_npc(
 				rom + (uint32_t)NW_NK_CYCLE_A, rom);
 			CHECK(npc == rom + (uint32_t)NW_NK_PICSPIN_PAST);
+
+			/* Cycle wait: leave like OLD_B, not to 50325c98. */
+			{
+				const uint32_t cyc_pc =
+					rom + (uint32_t)NW_NK_CYCLE_A;
+				uint32_t cyc[2];
+				uint32_t oldc[7];
+				unsigned j;
+				cyc[0] = (uint32_t)NW_NK_PICSPIN_LBZ_OP;
+				cyc[1] = 0x4182fff8u; /* beq *-8 */
+				npc = nw_nk_picspin_leave_npc(cyc_pc, rom,
+							      cyc, 2);
+				CHECK(npc == cyc_pc + 8u);
+				CHECK(!nw_nk_picspin_cycle_off(npc - rom));
+				CHECK(npc != rom +
+				      (uint32_t)NW_NK_CYCLE_OLD_PAST);
+				for (j = 0; j < 6u; j++)
+					oldc[j] = 0x60000000u;
+				oldc[6] = (uint32_t)NW_NK_PICSPIN_BEQ_OP;
+				npc = nw_nk_picspin_leave_npc(cyc_pc, rom,
+							      oldc, 7);
+				CHECK(npc != rom +
+				      (uint32_t)NW_NK_CYCLE_OLD_PAST);
+				CHECK(!nw_nk_picspin_cycle_off(npc - rom));
+				CHECK(npc > cyc_pc);
+			}
 
 			{
 				uint32_t nops[NW_NK_PICSPIN_LEAVE_INSNS];

@@ -608,7 +608,8 @@ int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op)
 	(void)op;
 	/*
 	 * After G2, skip listed picspin offs and the e0df3b4e 27-PC
-	 * NK debug-print cycle. Caller jumps to past_npc, not PC+4.
+	 * cycle. Caller uses leave_npc (OLD_B npc=50325aac), not
+	 * 108235a0 PAST 0x325c98.
 	 */
 	return nw_nk_picspin_rom_off(off) || nw_nk_picspin_cycle_off(off);
 }
@@ -646,8 +647,11 @@ uint32_t nw_nk_picspin_leave_npc(uint32_t pc, uint32_t rom_base,
 				return ft;
 		}
 	}
-	/* No backward branch in the window: jump past it, not PC+4. */
+	/* No backward branch, or fallthrough was a stay PC: walk past
+	 * the window until the npc is not a listed wait. */
 	past = pc + 4u * (uint32_t)n;
+	while (nw_nk_picspin_npc_stays(past, pc, rom_base))
+		past += 4u;
 	return past;
 }
 
@@ -656,9 +660,8 @@ uint32_t nw_nk_picspin_past_npc(uint32_t pc, uint32_t rom_base)
 	uint32_t npc;
 
 	/*
-	 * Live e0df3b4e: OLD_B left; then 27-PC cycle at 0x325c7c
-	 * (NK debug print). 108235a0 PAST 0x325c98 is in that cluster.
-	 * Jump to ROM+0x326000, past the cycle, not mill +0x366084.
+	 * Last resort only: leave_npc could not find a non-stay
+	 * fallthrough. Do not use 0x325c98 (in the 27-PC cluster).
 	 */
 	if (rom_base != 0)
 		npc = rom_base + (uint32_t)NW_NK_PICSPIN_PAST;
