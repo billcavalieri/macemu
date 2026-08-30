@@ -67,9 +67,8 @@ static uint32 g3_pc0(uint32 pc)
 		return pc - ROMBase;
 	return pc;
 }
-/* Live 24ce21f6: 0x900 to=50313200. Panic sc 0x2e overwrote live
- * srr0_/srr1_ and the GPR file. rfi to these take_dec captures.
- * Do not mill 50325580/600/604. */
+/* Live 5e3539ca: 0x900 to=50326420 creqv, srr0=50315b94. Handler
+ * never rfi'd. Do not mill the walk. Do not skip-list picspin. */
 static int nw_dec_in_handler;
 static uint32 nw_dec_handler_srr0;
 static uint32 nw_dec_handler_srr1;
@@ -92,6 +91,17 @@ static int nw_dec_is_walk_off(uint32 rom_off)
 	if (rom_off == 0x325580u ||
 	    rom_off == 0x325600u ||
 	    rom_off == 0x325604u)
+		return 1;
+	return 0;
+}
+/* Live 5e3539ca: VecTbl 0x900 = creqv 6,6,6 at CLOUD_LO_4.
+ * Not a skip-list. rfi to saved SRR0. */
+static int nw_dec_hotints_spin(uint32 pc, uint32 op)
+{
+	if (op == 0x4cc63242u)
+		return 1;
+	if (pc >= ROMBase &&
+	    (pc - ROMBase) == (uint32)NW_NK_CLOUD_LO_4)
 		return 1;
 	return 0;
 }
@@ -2566,26 +2576,47 @@ void powerpc_cpu::take_dec()
 	nw_dec_handler_cr = cr().get();
 	nw_dec_handler_ctr = ctr();
 	nw_dec_handler_xer = xer().get();
-#if NW_BOOT_LOG
 	{
-		static int n;
-		if (!n) {
-			n = 1;
-			const uint32 op0 = vm_read_memory_4(pc());
-			char buf[160];
-			snprintf(buf, sizeof(buf),
-				 "G3: DEC 0x900 to=%08x SPRG3=%08x srr0=%08x srr1=%08x ee=%d op=%08x dec=%08x",
-				 (unsigned)pc(), (unsigned)sprg_[3],
-				 (unsigned)srr0_, (unsigned)srr1_,
-				 nw_dec_ee_on(srr1_),
-				 (unsigned)op0, (unsigned)dec_);
-			nw_boot_log(buf);
-			if (op0 == 0) {
-				nw_boot_log("G3: DEC 0x900 vector empty");
+		const uint32 op0 = vm_read_memory_4(pc());
+#if NW_BOOT_LOG
+		{
+			static int n;
+			if (!n) {
+				n = 1;
+				char buf[160];
+				snprintf(buf, sizeof(buf),
+					 "G3: DEC 0x900 to=%08x SPRG3=%08x srr0=%08x srr1=%08x ee=%d op=%08x dec=%08x",
+					 (unsigned)pc(), (unsigned)sprg_[3],
+					 (unsigned)srr0_, (unsigned)srr1_,
+					 nw_dec_ee_on(srr1_),
+					 (unsigned)op0, (unsigned)dec_);
+				nw_boot_log(buf);
+				if (op0 == 0) {
+					nw_boot_log("G3: DEC 0x900 vector empty");
+				}
 			}
 		}
-	}
 #endif
+		/* Live 5e3539ca: creqv at 50326420 never rfi'd.
+		 * Return to saved SRR0. Do not skip-list picspin. */
+		if (nw_dec_hotints_spin(pc(), op0)) {
+			NW_DEC_RESTORE_SAVED();
+#if NW_BOOT_LOG
+			{
+				static int n;
+				if (!n) {
+					n = 1;
+					char buf[96];
+					snprintf(buf, sizeof(buf),
+						 "G3: DEC HotInts rfi srr0=%08x srr1=%08x",
+						 (unsigned)nw_dec_handler_srr0,
+						 (unsigned)nw_dec_handler_srr1);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+		}
+	}
 #endif
 }
 
@@ -3248,6 +3279,15 @@ void powerpc_cpu::execute(uint32 entry)
 					if (dec_ < nw_dec_arm_value() ||
 					    (dec_ & 0x80000000u))
 						dec_ = 0x00100000u;
+				} else if (nw_dec_in_handler &&
+					   pc() != nw_dec_handler_srr0 &&
+					   nw_dec_hotints_spin(
+						   pc(),
+						   vm_read_memory_4(pc()))) {
+					/* Still on the creqv VecTbl.
+					 * rfi saved SRR0. Not a skip. */
+					NW_DEC_RESTORE_SAVED();
+					continue;
 				}
 #if NW_BOOT_LOG
 				if ((msr_now & ppc32_mmu::MSR_IR) &&
