@@ -3567,18 +3567,23 @@ void powerpc_cpu::execute(uint32 entry)
 						if (nw_dec_did_leave &&
 						    !nw_dec_ee_on(msr_now)) {
 							dec_pending_ = false;
-							if (dec_ < nw_dec_arm_value() ||
-							    (dec_ & 0x80000000u))
-								dec_ = 0x00100000u;
+							/* Live 0b9c914c: hold
+							 * reloaded DEC, so the
+							 * 00002010 walk at
+							 * 50326644 never saw
+							 * underflow. Block
+							 * 0x900 only. Do not
+							 * or-in EE. */
 #if NW_BOOT_LOG
 							static int nhold;
 							if (!nhold) {
 								nhold = 1;
-								char buf[96];
+								char buf[112];
 								snprintf(buf, sizeof(buf),
-									 "G3: DEC hold after leave pc=%08x msr=%08x",
+									 "G3: DEC hold after leave pc=%08x msr=%08x dec=%08x",
 									 (unsigned)pc(),
-									 (unsigned)msr_now);
+									 (unsigned)msr_now,
+									 (unsigned)dec_);
 								nw_boot_log(buf);
 							}
 #endif
