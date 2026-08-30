@@ -819,8 +819,21 @@ sigsegv_return_t sigsegv_handler(sigsegv_info_t *sip)
 			return SIGSEGV_RETURN_SKIP_INSTRUCTION;
 
 		// Ignore all other faults, if requested
-		if (PrefsFindBool("ignoresegv"))
+		if (PrefsFindBool("ignoresegv")) {
+#if NW_BOOT_LOG
+			if (nw_guest_first_data_dsi_seen()) {
+				static unsigned n;
+				if (n < 4) {
+					n++;
+					char buf[80];
+					snprintf(buf, sizeof(buf),
+						 "G3: skip SEGV n=%u", n);
+					nw_boot_log(buf);
+				}
+			}
+#endif
 			return SIGSEGV_RETURN_SKIP_INSTRUCTION;
+		}
 	}
 #else
 #error "FIXME: You don't have the capability to skip instruction within signal handlers"
@@ -829,6 +842,9 @@ sigsegv_return_t sigsegv_handler(sigsegv_info_t *sip)
 	fprintf(stderr, "SIGSEGV\n");
 	fprintf(stderr, "  pc %p\n", sigsegv_get_fault_instruction_address(sip));
 	fprintf(stderr, "  ea %p\n", sigsegv_get_fault_address(sip));
+#if NW_BOOT_LOG
+	nw_boot_log("G3: host SIGSEGV");
+#endif
 	dump_registers();
 	dump_log();
 	dump_disassembly(pc, 8, 8);
@@ -1305,8 +1321,11 @@ void TriggerInterrupt(void)
 void HandleInterrupt(powerpc_registers *r)
 {
 #ifdef USE_SDL_VIDEO
-	// We must fill in the events queue in the same thread that did call SDL_SetVideoMode()
+	// Same thread as SetVideoMode. VideoVBL is 68k-only; present here
+	// so the SDL2 window can paint after CYCLE_LEFT (bedd28a3). Do not
+	// mill 68k as G3.
 	SDL_PumpEvents();
+	VideoPresent();
 #endif
 
 	// Do nothing if interrupts are disabled
@@ -1321,6 +1340,15 @@ void HandleInterrupt(powerpc_registers *r)
 	// Interrupt action depends on current run mode
 	switch (ReadMacInt32(XLM_RUN_MODE)) {
 	case MODE_68K:
+#if NW_BOOT_LOG
+		if (nw_guest_first_data_dsi_seen()) {
+			static int logged;
+			if (!logged) {
+				logged = 1;
+				nw_boot_log("G3: HandleInterrupt MODE_68K");
+			}
+		}
+#endif
 		// 68k emulator active, trigger 68k interrupt level 1
 		WriteMacInt16(ReadMacInt32(KERNEL_DATA_BASE + 0x67c), 1);
 		r->cr.set(r->cr.get() | ReadMacInt32(KERNEL_DATA_BASE + 0x674));
@@ -1330,6 +1358,15 @@ void HandleInterrupt(powerpc_registers *r)
 	case MODE_NATIVE:
 		// 68k emulator inactive, in nanokernel?
 		if (r->gpr[1] != KernelDataAddr) {
+#if NW_BOOT_LOG
+			if (nw_guest_first_data_dsi_seen()) {
+				static int logged;
+				if (!logged) {
+					logged = 1;
+					nw_boot_log("G3: HandleInterrupt MODE_NATIVE");
+				}
+			}
+#endif
 
 			// Prepare for 68k interrupt level 1
 			WriteMacInt16(ReadMacInt32(KERNEL_DATA_BASE + 0x67c), 1);
@@ -1343,6 +1380,16 @@ void HandleInterrupt(powerpc_registers *r)
 				ppc_cpu->interrupt(ROMBase + 0x312b1c);
 			else
 				ppc_cpu->interrupt(ROMBase + 0x312a3c);
+		} else {
+#if NW_BOOT_LOG
+			if (nw_guest_first_data_dsi_seen()) {
+				static int logged;
+				if (!logged) {
+					logged = 1;
+					nw_boot_log("G3: HandleInterrupt skip in-NK");
+				}
+			}
+#endif
 		}
 		break;
 #endif

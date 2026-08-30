@@ -352,7 +352,7 @@
 		A10F9210BC10000000000011 /* nw_boot_contract.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_boot_contract.cpp; path = ../nw_boot_contract.cpp; sourceTree = SOURCE_ROOT; };
 		A7B1921218C35D4700791D8D /* DiskType.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DiskType.h; sourceTree = "<group>"; };
 		A7B1921318C35D4700791D8D /* DiskType.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = DiskType.m; sourceTree = "<group>"; };
-		E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = video_sdl2.cpp; path = ../../../BasiliskII/src/SDL/video_sdl2.cpp; sourceTree = "<group>"; };
+		E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = video_sdl2.cpp; path = video_sdl2.cpp; sourceTree = SOURCE_ROOT; };
 		E4150D1120D557820077C51A /* SDL2.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SDL2.framework; sourceTree = "<group>"; };
 		E41936C220CFE64D003A7654 /* SDLMain.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = SDLMain.h; path = ../../../BasiliskII/src/SDL/SDLMain.h; sourceTree = "<group>"; };
 		E41936C320CFE64D003A7654 /* SDLMain.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = SDLMain.m; path = ../../../BasiliskII/src/SDL/SDLMain.m; sourceTree = "<group>"; };
@@ -780,6 +780,7 @@
 				0873A80114AC515D004F12B7 /* utils_macosx.mm */,
 				5DDE94F82255C70C004D0E79 /* MacOSX_sound_if.h */,
 				5DDE94FA2255C712004D0E79 /* MacOSX_sound_if.cpp */,
+				E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */,
 			);
 			name = MacOSX;
 			sourceTree = "<group>";
@@ -792,7 +793,6 @@
 				E41936C220CFE64D003A7654 /* SDLMain.h */,
 				E41936C320CFE64D003A7654 /* SDLMain.m */,
 				E4CBF46020CFC451009F40CC /* video_sdl.cpp */,
-				E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */,
 			);
 			name = SDL;
 			path = ../SDL;

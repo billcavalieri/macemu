@@ -57,7 +57,13 @@ enum {
 	NW_HNFO_SIGNATURE = 0x486e666f,		/* 'Hnfo' */
 	NW_DEFAULT_HTABORG = 0x00100000,
 	NW_DEFAULT_PTEGMASK = 0x0000ffff,	/* 64 KiB HTAB */
-	NW_DEFAULT_SDR1 = 0x00100000
+	NW_DEFAULT_SDR1 = 0x00100000,
+	/*
+	 * After G2, do not leave DEC at 0x7fffffff (boot-underflow swallow).
+	 * Live bedd28a3: PICSPIN_LEFT and CYCLE_LEFT with G2 HIT. Arm a
+	 * programmed period after the first data DSI. Not mill 68k.
+	 */
+	NW_DEC_AFTER_G2 = 0x00100000
 };
 
 enum nw_decoded_rom_kind {
@@ -128,6 +134,13 @@ const char *nw_boot_line_g1_hwinit(void);
 const char *nw_boot_line_g1_patch_skip(void);
 const char *nw_boot_line_g2_first_dsi(void);
 const char *nw_boot_line_g2_translator_off(void);
+const char *nw_boot_line_g3_sdl2_window(void);
+
+/*
+ * Clip a dirty rect to the screen. Returns 1 if the result is non-empty.
+ * Host-testable helper for SDL2 update_display_static_bbox / video_set_dirty_area.
+ */
+int nw_video_clip_dirty(int *x, int *y, int *w, int *h, int sw, int sh);
 
 void nw_boot_log(const char *line);
 void nw_log_g0_decode(const uint8_t *rom, size_t size);

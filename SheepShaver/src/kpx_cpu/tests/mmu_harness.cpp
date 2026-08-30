@@ -237,6 +237,8 @@ int main()
 			"G2: first DSI SRR0=PC DR on HIT no second DSI") == 0);
 		CHECK(strcmp(nw_boot_line_g2_translator_off(),
 			"G2: translator off (Old World)") == 0);
+		CHECK(strcmp(nw_boot_line_g3_sdl2_window(),
+			"G3: SDL2 window (VOSF off bbox dirty)") == 0);
 	}
 
 	const uint32_t ram_size = 4u * 1024u * 1024u;
@@ -861,6 +863,19 @@ int main()
 			CHECK(!nw_nk_picspin_mill_off(NW_NK_PICSPIN_OLD_B));
 			CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_MILL_68K,
 							   0x60000000u));
+			/* Live bedd28a3: 171 unique PCs, dominant
+			 * 50327b54/58/50. Walk, not a stick. Skipping
+			 * 50327bxx mills. */
+			CHECK(!nw_nk_picspin_rom_off(0x327b50u));
+			CHECK(!nw_nk_picspin_rom_off(0x327b54u));
+			CHECK(!nw_nk_picspin_rom_off(0x327b58u));
+			CHECK(!nw_nk_picspin_cycle_off(0x327b54u));
+			CHECK(!nw_nk_picspin_skip_after_g2(0x327b50u,
+							   0x60000000u));
+			CHECK(!nw_nk_picspin_skip_after_g2(0x327b54u,
+							   0x60000000u));
+			CHECK(!nw_nk_picspin_skip_after_g2(0x327b58u,
+							   0x60000000u));
 			CHECK(nw_nk_picspin_npc_stays(
 				rom + (uint32_t)NW_NK_PICSPIN_PAST, old_b,
 				rom));
@@ -1189,6 +1204,36 @@ int main()
 		CHECK(id.pa == 0x17efdbe8u);
 		CHECK(id.how != NULL && strcmp(id.how, "ident") == 0);
 		CHECK(!ppc32_guest_mmu_enabled());
+	}
+
+	/* Non-VOSF dirty bbox clip (SDL2 update_display_static_bbox). */
+	{
+		int x = -8, y = -4, w = 32, h = 16;
+		CHECK(nw_video_clip_dirty(&x, &y, &w, &h, 640, 480));
+		CHECK(x == 0);
+		CHECK(y == 0);
+		CHECK(w == 24);
+		CHECK(h == 12);
+		x = 630; y = 470; w = 20; h = 20;
+		CHECK(nw_video_clip_dirty(&x, &y, &w, &h, 640, 480));
+		CHECK(x == 630);
+		CHECK(y == 470);
+		CHECK(w == 10);
+		CHECK(h == 10);
+		x = 640; y = 0; w = 8; h = 8;
+		CHECK(!nw_video_clip_dirty(&x, &y, &w, &h, 640, 480));
+		x = 0; y = 0; w = 0; h = 8;
+		CHECK(!nw_video_clip_dirty(&x, &y, &w, &h, 640, 480));
+	}
+
+	/* After G2, DEC is a programmed tick, not the boot swallow 0x7fffffff. */
+	{
+		CHECK(NW_DEC_AFTER_G2 != 0);
+		CHECK(NW_DEC_AFTER_G2 != 0x7fffffffu);
+		CHECK(NW_DEC_AFTER_G2 == 0x00100000u);
+		CHECK(nw_nk_irq_status_idle() == 0);
+		CHECK(nw_nk_irq_status_spins(0xff));
+		CHECK(!nw_nk_irq_status_spins(nw_nk_irq_status_idle()));
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);

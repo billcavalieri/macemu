@@ -3163,11 +3163,49 @@ void powerpc_cpu::execute(uint32 entry)
 						continue;
 					}
 				}
+				if (nw_guest_first_data_dsi_seen()) {
+					static int dec_armed;
+					if (!dec_armed) {
+						dec_armed = 1;
+						if (dec_ > (uint32)NW_DEC_AFTER_G2)
+							dec_ = (uint32)NW_DEC_AFTER_G2;
+						dec_pending_ = true;
+#if NW_BOOT_LOG
+						char buf[80];
+						snprintf(buf, sizeof(buf),
+							 "G3: DEC arm after G2 dec=%08x pc=%08x",
+							 (unsigned)dec_, (unsigned)pc());
+						nw_boot_log(buf);
+#endif
+					}
+				}
 			}
-			nw_log_pc(pc(), ppc32_guest_mmu().msr());
 			extern uint32 ROMBase;
 			extern uint32 RAMBase;
 			extern uint32 RAMSize;
+			nw_log_pc(pc(), ppc32_guest_mmu().msr());
+#if NW_BOOT_LOG
+			if (nw_guest_first_data_dsi_seen()) {
+				static unsigned hb;
+				if ((++hb & 0x0000ffffu) == 0) {
+					/* Live bedd28a3: CYCLE_LEFT YES. 171 unique NK PCs
+					 * (dominant 50327b54) is not mill; do not skip it. */
+					const char *where = "past-NK";
+					if (pc() >= ROMBase + 0x310000u &&
+					    pc() < ROMBase + 0x360000u)
+						where = "still-NK";
+					else if (pc() >= ROMBase + 0x360000u &&
+						 pc() < ROMBase + 0x500000u)
+						where = "mill";
+					char buf[96];
+					snprintf(buf, sizeof(buf),
+						 "G3: heartbeat %s pc=%08x msr=%08x",
+						 where, (unsigned)pc(),
+						 (unsigned)ppc32_guest_mmu().msr());
+					nw_boot_log(buf);
+				}
+			}
+#endif
 			if (g3_post && g3_post < 24) {
 				g3_post++;
 #if NW_BOOT_LOG
