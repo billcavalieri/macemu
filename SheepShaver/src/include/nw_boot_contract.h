@@ -196,6 +196,21 @@ int nw_dec_can_yield(uint32_t msr);
  */
 int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
 				   int nqd, int dirty);
+/*
+ * After G2, NQD bbox is a hint not a clip. QD stores that skip NQD
+ * still HIT the_buffer. Do not require EE. Do not mill.
+ */
+int nw_video_full_scan(int first_dsi);
+/* Blit when the SDL surface is not the guest FB (16-bit). 8/32-bit
+ * CreateRGBSurfaceFrom shares pixels — blit would be a no-op. */
+int nw_video_need_blit(const void *pixels, const void *fb);
+/*
+ * After G2, present leftover SDL union even if this scan found 0
+ * new boxes (redraw thread queued, VideoVBL never ran, EE=0).
+ * Host n=1 of an empty union is not this.
+ */
+int nw_video_present_pending(int first_dsi, unsigned boxes,
+			      int union_empty);
 
 void nw_boot_log(const char *line);
 void nw_log_g0_decode(const uint8_t *rom, size_t size);

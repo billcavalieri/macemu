@@ -1313,7 +1313,19 @@ int main()
 			CHECK(nw_video_fb_guest_dirty(a, b, sizeof(a)));
 			CHECK(!nw_video_fb_guest_dirty(NULL, b, sizeof(a)));
 			CHECK(!nw_video_fb_guest_dirty(a, b, 0));
+			CHECK(!nw_video_need_blit(NULL, a));
+			CHECK(!nw_video_need_blit(a, a));
+			CHECK(nw_video_need_blit(a, b));
 		}
+
+		CHECK(!nw_video_full_scan(0));
+		CHECK(nw_video_full_scan(1));
+		CHECK(!nw_video_present_pending(0, 0, 1));
+		CHECK(!nw_video_present_pending(0, 0, 0));
+		CHECK(nw_video_present_pending(0, 3, 1));
+		CHECK(nw_video_present_pending(1, 0, 0));
+		CHECK(!nw_video_present_pending(1, 0, 1));
+		CHECK(nw_video_present_pending(1, 2, 1));
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);

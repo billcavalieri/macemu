@@ -467,6 +467,30 @@ int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
 	return nw_dec_can_yield(msr) ? 0 : 1;
 }
 
+int nw_video_full_scan(int first_dsi)
+{
+	/* Live 7b349dc2 nqd=0 already full-scans. After G2 keep that
+	 * even if NQD later plants a small bbox. Do not flip EE. */
+	return first_dsi ? 1 : 0;
+}
+
+int nw_video_need_blit(const void *pixels, const void *fb)
+{
+	if (pixels == NULL || fb == NULL)
+		return 0;
+	return pixels != fb ? 1 : 0;
+}
+
+int nw_video_present_pending(int first_dsi, unsigned boxes,
+			     int union_empty)
+{
+	if (boxes)
+		return 1;
+	if (!first_dsi)
+		return 0;
+	return union_empty ? 0 : 1;
+}
+
 int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base)
 {
 	uint32_t off;
