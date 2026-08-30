@@ -284,17 +284,19 @@ static int nw_dec_pre_900_msr0_off(uint32 rom_off)
 		return 1;
 	return 0;
 }
-/* Live 4aefec8d: DEC armed after G2 (dec=00001000)
- * but take_dec never ran. Guest died at 503256cc
- * msr=00000010 during picspin; the 0x1000 countdown
- * never finished. First 0x900 is pending as soon as
- * PC is on the 50325/50326 walk (not the DSI
- * handler). Hold extra 0x900 only after leave. */
+/* Live 4aefec8d: DEC armed after G2 but take_dec never
+ * ran. Picspin idle n=1..8 then heartbeats at 50325790
+ * / 503256cc and silence. Do not pending the first
+ * 0x900 on listed picspin (let idle n=8 finish).
+ * Pending at the hang PCs so take_dec runs before
+ * that insn can freeze the loop. Hold extra 0x900
+ * only after leave. Do not skip-list these PCs. */
 static int nw_dec_first_900_walk(uint32 rom_off)
 {
 	if (nw_dec_took_900 || nw_dec_in_handler)
 		return 0;
-	if (rom_off >= 0x325000u && rom_off < 0x327000u)
+	if (rom_off == (uint32)NW_NK_PRE900_A ||
+	    rom_off == (uint32)NW_NK_PRE900_B)
 		return 1;
 	return 0;
 }
