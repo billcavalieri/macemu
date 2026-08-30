@@ -636,6 +636,24 @@ uint32_t nw_nk_picspin_leave_npc(uint32_t pc, uint32_t rom_base,
 	return past;
 }
 
+uint32_t nw_nk_picspin_past_npc(uint32_t pc, uint32_t rom_base)
+{
+	uint32_t npc;
+
+	/*
+	 * Live 902fbf32: pc+4 at OLD_B re-entered the lbz wait
+	 * (heartbeat same≈2951). Execute-loop skip jumps here, past
+	 * mill-era OLD_A/B/C, not mill 68k +0x366084.
+	 */
+	if (rom_base != 0)
+		npc = rom_base + (uint32_t)NW_NK_PICSPIN_PAST;
+	else
+		npc = (uint32_t)NW_NK_PICSPIN_PAST;
+	if (npc <= pc || nw_nk_picspin_npc_stays(npc, pc, rom_base))
+		npc = pc + 4u * (uint32_t)NW_NK_PICSPIN_LEAVE_INSNS;
+	return npc;
+}
+
 void nw_nk_irq_fill_pic_be(uint8_t *mem, size_t mem_size, uint32_t pic_ea)
 {
 	if (mem == NULL)

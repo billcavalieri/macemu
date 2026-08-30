@@ -22465,13 +22465,12 @@ void powerpc_cpu::execute(uint32 entry)
 					/*
 					 * Live 902fbf32: skip at +0x325a9c
 					 * logged (lbz 8bdc0002) but pc+4
-					 * re-entered the same loop
-					 * (heartbeats ×2952). After first
-					 * data DSI, leave to the
-					 * fallthrough of the first
-					 * backward branch. +0x325a14 still
-					 * misses once (G2). PIC idle 0.
-					 * Do not mill 68k.
+					 * re-entered the wait (heartbeat
+					 * same≈2951). After first data DSI,
+					 * jump to ROM+PAST (OLD_C+4) and
+					 * do not execute this insn.
+					 * +0x325a14 still misses once (G2).
+					 * PIC idle 0. Do not mill 68k.
 					 */
 					if (nw_guest_first_data_dsi_seen()) {
 						if (pic >= RAMBase &&
@@ -22486,18 +22485,9 @@ void powerpc_cpu::execute(uint32 entry)
 						gpr(30) = nw_nk_irq_status_idle();
 						if (nw_nk_picspin_skip_after_g2(rom_off,
 										opw)) {
-							uint32 win[NW_NK_PICSPIN_LEAVE_INSNS];
-							unsigned wi;
-							uint32 npc;
-							win[0] = opw;
-							for (wi = 1;
-							     wi < (unsigned)NW_NK_PICSPIN_LEAVE_INSNS;
-							     wi++)
-								win[wi] = vm_read_memory_4(
-									pc() + 4u * wi);
-							npc = nw_nk_picspin_leave_npc(
-								pc(), ROMBase, win,
-								(unsigned)NW_NK_PICSPIN_LEAVE_INSNS);
+							const uint32 npc =
+								nw_nk_picspin_past_npc(
+									pc(), ROMBase);
 #if NW_BOOT_LOG
 							static unsigned nleft;
 							if (nleft < 8) {
