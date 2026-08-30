@@ -458,6 +458,20 @@ int nw_dec_ee_on(uint32_t msr)
 	return (msr & (uint32_t)NW_MSR_EE) != 0;
 }
 
+int nw_ppc_srr1_is_msr(uint32_t srr1)
+{
+	if (srr1 & 0xffff0000u)
+		return 0;
+	return 1;
+}
+
+uint32_t nw_ppc_srr1_use(uint32_t srr1)
+{
+	if (nw_ppc_srr1_is_msr(srr1))
+		return srr1;
+	return (uint32_t)NW_MSR_LIVE_EE_OFF;
+}
+
 int nw_dec_can_yield(uint32_t msr)
 {
 	const uint32_t need =

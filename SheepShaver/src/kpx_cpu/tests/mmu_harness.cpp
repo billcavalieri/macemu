@@ -1330,6 +1330,17 @@ int main()
 		CHECK(nw_dec_ee_on(0x00008000u));
 		CHECK(!nw_dec_ee_on(0));
 		CHECK(!nw_dec_ee_on(0x00000030u)); /* IR+DR, EE off */
+		/* Live c3b5d982: 17efbb80 is r1, not SRR1. */
+		CHECK(!nw_ppc_srr1_is_msr(0x17efbb80u));
+		CHECK(!nw_ppc_srr1_is_msr(0x17efe360u)); /* SPRG3 */
+		CHECK(nw_ppc_srr1_is_msr(0x00002000u));
+		CHECK(nw_ppc_srr1_is_msr(0));
+		CHECK(nw_ppc_srr1_use(0x17efbb80u) ==
+		      (uint32_t)NW_MSR_LIVE_EE_OFF);
+		CHECK(!nw_dec_ee_on(nw_ppc_srr1_use(0x17efbb80u)));
+		CHECK(nw_ppc_srr1_use(0x00002000u) == 0x00002000u);
+		CHECK(!nw_nk_picspin_skip_after_g2(NW_NK_WALK_EE,
+						     0x60000000u));
 
 		{
 			uint8_t a[16], b[16];

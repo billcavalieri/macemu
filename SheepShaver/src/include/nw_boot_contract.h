@@ -193,6 +193,9 @@ enum {
 uint32_t nw_dec_arm_value(void);
 int nw_dec_take_after_g2(int first_dsi);
 int nw_dec_ee_on(uint32_t msr);
+/* Live c3b5d982: 17efbb80 is r1/KDP, not MSR. Upper 16 bits 0. */
+int nw_ppc_srr1_is_msr(uint32_t srr1);
+uint32_t nw_ppc_srr1_use(uint32_t srr1);	/* 00002000 if not; EE stays off */
 /* Guest MSR has EE+IR. Architectural; live 00002000 is 0. */
 int nw_dec_can_yield(uint32_t msr);
 /*
