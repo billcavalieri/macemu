@@ -84,6 +84,16 @@ static int nw_ppc_twi_uncond(uint32 opcode)
 	return ((opcode >> 26) == 3) &&
 	       (((opcode >> 21) & 0x1fu) == 31u);
 }
+/* XL-form rfi: OPCD=19 XO=50. Live 7543d747 HotInts 48000b61
+ * (bl, not creqv); HotInts rfi count=0 at the vector. The
+ * subroutine still rfis via execute_rfi, which uses live
+ * SRR0/SRR1 and does not restore the take_dec GPR file. */
+static int nw_ppc_rfi(uint32 opcode)
+{
+	return ((opcode >> 26) == 19) &&
+	       ((opcode & 0x7feu) == 100u) &&
+	       ((opcode & 1u) == 0);
+}
 /* Live walk after DEC left. 0x325580 is inside CLOUD_LO_2 so
  * skip_after_g2 is 1; runtime must not skip it. */
 static int nw_dec_is_walk_off(uint32 rom_off)
@@ -3282,6 +3292,14 @@ void powerpc_cpu::execute(uint32 entry)
 				nw_arm_dec_after_g2();
 				if (nw_dec_in_handler &&
 				    pc() == nw_dec_handler_srr0) {
+					/* Live 7543d747: handler rfi left
+					 * to 50325604 with the 0x900 GPR
+					 * file still live (r1 = handler
+					 * frame). Restore take_dec GPRs.
+					 * Idempotent if sc 0x2e / twi /
+					 * rfi intercept already did. Do
+					 * not or-in EE. */
+					NW_DEC_RESTORE_SAVED();
 					const uint32 s1 =
 						nw_ppc_srr1_use(
 							nw_dec_handler_srr1);
@@ -3289,14 +3307,15 @@ void powerpc_cpu::execute(uint32 entry)
 					static int left;
 					if (!left) {
 						left = 1;
-						char buf[144];
+						char buf[160];
 						snprintf(buf, sizeof(buf),
-							 "%s from=%08x to=%08x srr0=%08x srr1=%08x",
+							 "%s from=%08x to=%08x srr0=%08x srr1=%08x r1=%08x",
 							 nw_boot_line_g3_dec_left(),
 							 (unsigned)nw_dec_handler_from,
 							 (unsigned)pc(),
 							 (unsigned)nw_dec_handler_srr0,
-							 (unsigned)s1);
+							 (unsigned)s1,
+							 (unsigned)gpr(1));
 						nw_boot_log(buf);
 					}
 #endif
@@ -22813,6 +22832,31 @@ void powerpc_cpu::execute(uint32 entry)
 						 "G3: DEC twi pad rfi opcode=%08x srr0=%08x",
 						 (unsigned)opcode,
 						 (unsigned)nw_dec_handler_srr0);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+			continue;
+		}
+		/* Live 7543d747: VecTbl 0x900 = bl 48000b61, not
+		 * creqv, so HotInts rfi count stayed 0. The
+		 * subroutine's rfi went through execute_rfi (live
+		 * SRR1, no GPR restore). Walk at 50325604 then
+		 * ran on the handler frame. Do not mill. */
+		if (nw_dec_in_handler && nw_ppc_rfi(opcode)) {
+			NW_DEC_RESTORE_SAVED();
+#if NW_BOOT_LOG
+			{
+				static int n;
+				if (!n) {
+					n = 1;
+					char buf[112];
+					snprintf(buf, sizeof(buf),
+						 "G3: DEC rfi restore srr0=%08x srr1=%08x r1=%08x",
+						 (unsigned)nw_dec_handler_srr0,
+						 (unsigned)nw_ppc_srr1_use(
+							 nw_dec_handler_srr1),
+						 (unsigned)gpr(1));
 					nw_boot_log(buf);
 				}
 			}
