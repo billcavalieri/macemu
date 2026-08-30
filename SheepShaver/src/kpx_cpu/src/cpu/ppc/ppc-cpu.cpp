@@ -265,6 +265,25 @@ static int nw_dec_leave_no_skip(uint32 rom_off)
 		return 1;
 	return 0;
 }
+/* Live 8c21341f: picspin idle then heartbeats
+ * 50325790 / 503256cc msr=00000000 and silence
+ * before HandleInterrupt / first 0x900. Do not
+ * skip-list these PCs. Before first take, restore
+ * last-real EE-off if MSR collapsed to 0. Do not
+ * or-in EE. */
+enum {
+	NW_NK_PRE900_A = 0x325790,
+	NW_NK_PRE900_B = 0x3256cc
+};
+static int nw_dec_pre_900_msr0_off(uint32 rom_off)
+{
+	if (nw_dec_took_900 || nw_dec_did_leave)
+		return 0;
+	if (rom_off == (uint32)NW_NK_PRE900_A ||
+	    rom_off == (uint32)NW_NK_PRE900_B)
+		return 1;
+	return 0;
+}
 static void nw_dec_plant_pic_idle(uint32 pic)
 {
 	if (pic < RAMBase ||
@@ -3733,6 +3752,43 @@ void powerpc_cpu::execute(uint32 entry)
 							dec_ = 0x00100000u;
 						continue;
 					}
+					}
+				}
+			}
+			/* Live 8c21341f: died 503256cc msr=0 before
+			 * the first 0x900. Restore last-real EE-off
+			 * at that walk. Do not or-in EE. Do not skip. */
+			if (!nw_dec_took_900 && !nw_dec_did_leave) {
+				extern uint32 ROMBase;
+				const uint32 p = pc();
+				const uint32 off =
+					(p >= ROMBase &&
+					 p < ROMBase + 0x500000u)
+						? p - ROMBase
+						: 0xffffffffu;
+				if (nw_dec_pre_900_msr0_off(off)) {
+					const uint32 m =
+						ppc32_guest_mmu().msr();
+					if (m == 0) {
+						const uint32 want =
+							nw_dec_resume_srr1(m);
+						if (want != 0 &&
+						    !nw_dec_ee_on(want)) {
+							ppc32_guest_mmu().set_msr(want);
+							srr1_ = want;
+#if NW_BOOT_LOG
+							static int npre;
+							if (!npre) {
+								npre = 1;
+								char buf[96];
+								snprintf(buf, sizeof(buf),
+									 "G3: DEC pre-900 msr0 pc=%08x use=%08x",
+									 (unsigned)p,
+									 (unsigned)want);
+								nw_boot_log(buf);
+							}
+#endif
+						}
 					}
 				}
 			}
@@ -23179,7 +23235,9 @@ void powerpc_cpu::execute(uint32 entry)
 								}
 							}
 #endif
-						} else if (nw_nk_picspin_skip_after_g2(rom_off,
+						} else if (rom_off != (uint32)NW_NK_PRE900_A &&
+							   rom_off != (uint32)NW_NK_PRE900_B &&
+							   nw_nk_picspin_skip_after_g2(rom_off,
 										opw)) {
 							uint32 win[NW_NK_PICSPIN_LEAVE_INSNS];
 							unsigned wi;
