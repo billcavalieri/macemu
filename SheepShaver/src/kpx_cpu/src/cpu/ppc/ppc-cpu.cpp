@@ -67,17 +67,33 @@ static uint32 g3_pc0(uint32 pc)
 		return pc - ROMBase;
 	return pc;
 }
-/* Live 0ad66900: 0x900 to=50313200. Panic sc 0x2e overwrote live
- * srr0_/srr1_. rfi to these take_dec captures. Do not mill the walk. */
+/* Live 24ce21f6: 0x900 to=50313200. Panic sc 0x2e overwrote live
+ * srr0_/srr1_ and the GPR file. rfi to these take_dec captures.
+ * Do not mill 50325580/600/604. */
 static int nw_dec_in_handler;
 static uint32 nw_dec_handler_srr0;
 static uint32 nw_dec_handler_srr1;
 static uint32 nw_dec_handler_from;
+static uint32 nw_dec_handler_gpr[32];
+static uint32 nw_dec_handler_lr;
+static uint32 nw_dec_handler_cr;
+static uint32 nw_dec_handler_ctr;
+static uint32 nw_dec_handler_xer;
 /* D-form twi: OPCD=3, TO=31. Live illegal 0fff0005 at 50324140. */
 static int nw_ppc_twi_uncond(uint32 opcode)
 {
 	return ((opcode >> 26) == 3) &&
 	       (((opcode >> 21) & 0x1fu) == 31u);
+}
+/* Live walk after DEC left. 0x325580 is inside CLOUD_LO_2 so
+ * skip_after_g2 is 1; runtime must not skip it. */
+static int nw_dec_is_walk_off(uint32 rom_off)
+{
+	if (rom_off == 0x325580u ||
+	    rom_off == 0x325600u ||
+	    rom_off == 0x325604u)
+		return 1;
+	return 0;
 }
 static int g3_ea_data(uint32 a)
 {
@@ -2433,6 +2449,29 @@ uint32 powerpc_cpu::hotints_vector(uint32 vec) const
 	return handler;
 }
 
+#ifdef SHEEPSHAVER
+/* Panic sc 0x2e / twi / poolchk never rfi'd the GPR file. Live
+ * 24ce21f6 then SIGSEGV pc=baddcb00 r0=0x2e r1=0. */
+#define NW_DEC_RESTORE_SAVED() do { \
+	int nw_di; \
+	for (nw_di = 0; nw_di < 32; nw_di++) \
+		gpr(nw_di) = nw_dec_handler_gpr[nw_di]; \
+	lr() = nw_dec_handler_lr; \
+	cr().set(nw_dec_handler_cr); \
+	ctr() = nw_dec_handler_ctr; \
+	xer().set(nw_dec_handler_xer); \
+	sprg_[1] = nw_dec_handler_gpr[1]; \
+	sprg_[2] = nw_dec_handler_lr; \
+	ppc32_guest_mmu().set_msr(nw_dec_handler_srr1); \
+	nw_log_msr_dr(nw_dec_handler_srr1); \
+	nw_log_msr_write("rfi", nw_dec_handler_srr0, \
+			 nw_dec_handler_srr1); \
+	srr0_ = nw_dec_handler_srr0; \
+	srr1_ = nw_dec_handler_srr1; \
+	pc() = nw_dec_handler_srr0; \
+} while (0)
+#endif
+
 void powerpc_cpu::take_sc()
 {
 	ppc32_mmu &mmu = ppc32_guest_mmu();
@@ -2440,18 +2479,10 @@ void powerpc_cpu::take_sc()
 	/* NK debug/panic path: sc r0=0x2e after a NULL callback. */
 	if (gpr(0) == 0x2eu) {
 		if (nw_dec_in_handler) {
-			/* Live 0ad66900: NK panic wrote srr0=50324058
-			 * srr1=00009002 before take_sc. rfi to the
-			 * take_dec captures (50325604 / 00002000), not
-			 * live SPRs. Do not or-in EE. Do not mill the
-			 * walk. Next loop logs G3: DEC handler left. */
-			mmu.set_msr(nw_dec_handler_srr1);
-			nw_log_msr_dr(nw_dec_handler_srr1);
-			nw_log_msr_write("rfi", nw_dec_handler_srr0,
-					 nw_dec_handler_srr1);
-			srr0_ = nw_dec_handler_srr0;
-			srr1_ = nw_dec_handler_srr1;
-			pc() = nw_dec_handler_srr0;
+			/* Live 24ce21f6: restore take_dec PC/MSR and
+			 * the GPR file. Do not or-in EE. Do not mill
+			 * the walk. Next loop logs DEC handler left. */
+			NW_DEC_RESTORE_SAVED();
 #if NW_BOOT_LOG
 			{
 				static int n;
@@ -2459,9 +2490,10 @@ void powerpc_cpu::take_sc()
 					n = 1;
 					char buf[112];
 					snprintf(buf, sizeof(buf),
-						 "G3: DEC sc 0x2e rfi srr0=%08x srr1=%08x",
+						 "G3: DEC sc 0x2e rfi srr0=%08x srr1=%08x r1=%08x",
 						 (unsigned)nw_dec_handler_srr0,
-						 (unsigned)nw_dec_handler_srr1);
+						 (unsigned)nw_dec_handler_srr1,
+						 (unsigned)gpr(1));
 					nw_boot_log(buf);
 				}
 			}
@@ -2525,6 +2557,15 @@ void powerpc_cpu::take_dec()
 	nw_dec_handler_from = pc();
 	nw_dec_handler_srr0 = srr0_;
 	nw_dec_handler_srr1 = srr1_;
+	{
+		int i;
+		for (i = 0; i < 32; i++)
+			nw_dec_handler_gpr[i] = gpr(i);
+	}
+	nw_dec_handler_lr = lr();
+	nw_dec_handler_cr = cr().get();
+	nw_dec_handler_ctr = ctr();
+	nw_dec_handler_xer = xer().get();
 #if NW_BOOT_LOG
 	{
 		static int n;
@@ -22539,6 +22580,15 @@ void powerpc_cpu::execute(uint32 entry)
 					nw_boot_log(buf);
 				}
 #endif
+				/* Live 24ce21f6: pool debug during DEC
+				 * saw tag 876c6f63 vs want 'free', then
+				 * sc 0x2e. Do not execute a live block
+				 * as free. rfi saved state. */
+				if (nw_dec_in_handler &&
+				    gpr(19) != gpr(20)) {
+					NW_DEC_RESTORE_SAVED();
+					continue;
+				}
 			}
 			if (pc() == ROMBase + 0x326420u) {
 #if NW_BOOT_LOG
@@ -22562,6 +22612,7 @@ void powerpc_cpu::execute(uint32 entry)
 						? pc() - ROMBase
 						: 0xffffffffu;
 				if (!nw_dec_in_handler &&
+				    !nw_dec_is_walk_off(rom_off) &&
 				    (nw_nk_picspin_rom_off(rom_off) ||
 				     nw_nk_picspin_cycle_off(rom_off))) {
 					const uint32 pic = gpr(28);
@@ -22645,6 +22696,29 @@ void powerpc_cpu::execute(uint32 entry)
 			}
 		}
 #endif
+#ifdef SHEEPSHAVER
+		/* Live 24ce21f6: host SIGSEGV fetching pc=baddcb00
+		 * r0=0x2e r1=0. Do not mill the walk. */
+		if ((pc() & 0xffff0000u) == 0xbadd0000u) {
+#if NW_BOOT_LOG
+			static int npoi;
+			if (npoi < 4) {
+				npoi++;
+				char buf[96];
+				snprintf(buf, sizeof(buf),
+					 "G3: poison pc=%08x r0=%08x r1=%08x",
+					 (unsigned)pc(),
+					 (unsigned)gpr(0),
+					 (unsigned)gpr(1));
+				nw_boot_log(buf);
+			}
+#endif
+			if (nw_dec_handler_srr0) {
+				NW_DEC_RESTORE_SAVED();
+				continue;
+			}
+		}
+#endif
 		uint32 opcode;
 		if (!guest_fetch(&opcode)) {
 			if (!spcflags().empty() && !check_spcflags())
@@ -22653,16 +22727,9 @@ void powerpc_cpu::execute(uint32 entry)
 		}
 #ifdef SHEEPSHAVER
 		/* Live 0ad66900: twi pad after DEC 0x900 is not in
-		 * ppc-decode. rfi to take_dec srr0/srr1, not live
-		 * SPRs the panic path overwrote. Do not or-in EE. */
+		 * ppc-decode. Restore take_dec GPRs too. */
 		if (nw_dec_in_handler && nw_ppc_twi_uncond(opcode)) {
-			ppc32_guest_mmu().set_msr(nw_dec_handler_srr1);
-			nw_log_msr_dr(nw_dec_handler_srr1);
-			nw_log_msr_write("rfi", nw_dec_handler_srr0,
-					 nw_dec_handler_srr1);
-			srr0_ = nw_dec_handler_srr0;
-			srr1_ = nw_dec_handler_srr1;
-			pc() = nw_dec_handler_srr0;
+			NW_DEC_RESTORE_SAVED();
 #if NW_BOOT_LOG
 			{
 				static int n;
