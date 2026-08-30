@@ -19,6 +19,7 @@
  */
 
 #include "cpu/ppc/ppc-mmu.hpp"
+#include "nw_boot_contract.h"
 #include <stdio.h>
 
 ppc32_mmu::ppc32_mmu()
@@ -45,6 +46,9 @@ void ppc32_mmu::reset()
 		dbatl_[i] = 0;
 	}
 	ivt_mapped_ = false;
+	delay_ram_bats_ = false;
+	ram_base_ = 0;
+	ram_size_ = 0;
 	tlbia();
 }
 
@@ -52,6 +56,33 @@ void ppc32_mmu::set_ivt_mapped(bool on)
 {
 	ivt_mapped_ = on;
 	tlbia();
+}
+
+void ppc32_mmu::delay_ram_bats(bool on, uint32_t ram_base, uint32_t ram_size)
+{
+	delay_ram_bats_ = on;
+	ram_base_ = ram_base;
+	ram_size_ = ram_size;
+	tlbia();
+}
+
+bool ppc32_mmu::bat_overlaps(uint32_t batu, uint32_t batl, uint32_t lo, uint32_t hi)
+{
+	(void)batl;
+	if (hi <= lo)
+		return false;
+	if ((batu & 3u) == 0)
+		return false;
+	const uint32_t bl = (batu >> 2) & 0x1fffu;
+	const uint32_t block_mask = (bl << 17) | 0x1ffffu;
+	const uint32_t bepi = batu & 0xfffe0000u;
+	if (((lo ^ bepi) & ~block_mask) == 0)
+		return true;
+	if ((((hi - 1u) ^ bepi) & ~block_mask) == 0)
+		return true;
+	if (bepi >= lo && bepi < hi)
+		return true;
+	return false;
 }
 
 void ppc32_mmu::set_physical_memory(uint8_t *base, uint32_t size)
@@ -164,6 +195,9 @@ bool ppc32_mmu::bat_hit(uint32_t ea, bool insn, uint32_t *pa) const
 	for (unsigned i = 0; i < NBAT; i++) {
 		const uint32_t batu = upper[i];
 		const uint32_t batl = lower[i];
+		if (delay_ram_bats_ && ram_size_ != 0 &&
+		    bat_overlaps(batu, batl, ram_base_, ram_base_ + ram_size_))
+			continue;
 		const bool vs = (batu & 2) != 0;
 		const bool vp = (batu & 1) != 0;
 		if (priv ? !vp : !vs)
@@ -259,6 +293,7 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 	ppc32_xlate_result r;
 	r.ok = false;
 	r.pa = 0;
+	r.how = "miss";
 
 	if (width == 0)
 		return r;
@@ -266,6 +301,7 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 	if (!relocation_on(space)) {
 		r.ok = true;
 		r.pa = ea;
+		r.how = "ident";
 		return r;
 	}
 
@@ -293,17 +329,27 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 		r.ok = true;
 		r.pa = pa;
 	}
+	r.how = how;
 
-	if (space == PPC32_XLATE_DR && !r.ok) {
-		static unsigned n;
-		if (n < 4) {
-			n++;
+	if (space == PPC32_XLATE_DR) {
+		static unsigned n_miss;
+		static unsigned n_any;
+		if (!r.ok && n_miss < 8) {
+			n_miss++;
+			nw_log_xlatehow(how, ea, msr_, sdr1_,
+					 sr_[(ea >> 28) & 0xfu],
+					 dbatu_[3], dbatl_[3]);
 			fprintf(stderr,
 				"NW-BOOT G2: xlatehow=%s ea=%08x msr=%08x sdr1=%08x sr=%08x dbat3=%08x/%08x\n",
 				how, (unsigned)ea, (unsigned)msr_, (unsigned)sdr1_,
 				(unsigned)sr_[(ea >> 28) & 0xfu],
 				(unsigned)dbatu_[3], (unsigned)dbatl_[3]);
 			fflush(stderr);
+		} else if (r.ok && n_any < 8) {
+			n_any++;
+			nw_log_xlatehow(how, ea, msr_, sdr1_,
+					 sr_[(ea >> 28) & 0xfu],
+					 dbatu_[3], dbatl_[3]);
 		}
 	}
 

@@ -156,8 +156,11 @@ void nw_guest_plant_nk_irq(uint32_t kdp);
  * No-op until nw_guest_note_first_data_dsi() — planting at first IR+DR
  * covers KDP-1048 and swallows G2. */
 void nw_guest_note_first_data_dsi(void);
+int nw_guest_first_data_dsi_seen(void);
 void nw_guest_map_ram_rom_identity(void);
 void nw_guest_map_kernel_data(void);
+void nw_log_xlatehow(const char *how, uint32_t ea, uint32_t msr, uint32_t sdr1,
+		     uint32_t sr, uint32_t dbat3u, uint32_t dbat3l);
 /* Write the DSI slot at EA 0x300 (host RAM image, no guest ROM). */
 void nw_fill_dsi_vector_be(uint8_t *mem, size_t mem_size, uint32_t handler);
 /* Guest: copy NK VecTbl DSI slot to PA 0x300; synthesize if template is empty. */

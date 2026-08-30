@@ -39,6 +39,7 @@ enum ppc32_xlate_space {
 struct ppc32_xlate_result {
 	bool ok;
 	uint32_t pa;
+	const char *how;	/* ident / tlb / bat / htab / ivt / miss */
 };
 
 class ppc32_mmu
@@ -88,6 +89,17 @@ public:
 	bool ivt_mapped() const { return ivt_mapped_; }
 
 	/*
+	 * Until the first data DSI, skip DBATs/IBATs whose range overlaps
+	 * guest RAM. NK mtspr identity RAM (and the host 128 MiB identity
+	 * BAT) cover KDP-1048 (live ea=17efdbe8) and swallow G2.
+	 * ROM BATs and 0x68fe0000 kernel-data are not RAM and stay active.
+	 */
+	void delay_ram_bats(bool on, uint32_t ram_base, uint32_t ram_size);
+	bool ram_bats_delayed() const { return delay_ram_bats_; }
+	static bool bat_overlaps(uint32_t batu, uint32_t batl,
+				 uint32_t lo, uint32_t hi);
+
+	/*
 	 * space selects instruction vs data translation (MSR[IR] vs MSR[DR]).
 	 * width is the access size in bytes (1/2/4/8); first cut uses it only
 	 * as a non-zero access marker.
@@ -129,6 +141,9 @@ private:
 	tlb_entry tlb_[NTLB];
 	unsigned tlb_next_;
 	bool ivt_mapped_;
+	bool delay_ram_bats_;
+	uint32_t ram_base_;
+	uint32_t ram_size_;
 };
 
 /*

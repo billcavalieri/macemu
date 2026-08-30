@@ -511,6 +511,28 @@ void nw_log_pc(uint32_t pc, uint32_t msr)
 #endif
 }
 
+void nw_log_xlatehow(const char *how, uint32_t ea, uint32_t msr, uint32_t sdr1,
+		     uint32_t sr, uint32_t dbat3u, uint32_t dbat3l)
+{
+	char buf[160];
+	if (how == NULL)
+		how = "miss";
+	snprintf(buf, sizeof(buf),
+		 "G2: xlatehow=%s ea=%08x msr=%08x sdr1=%08x sr=%08x dbat3=%08x/%08x",
+		 how, (unsigned)ea, (unsigned)msr, (unsigned)sdr1,
+		 (unsigned)sr, (unsigned)dbat3u, (unsigned)dbat3l);
+	nw_boot_log(buf);
+#if !NW_BOOT_LOG
+	(void)how;
+	(void)ea;
+	(void)msr;
+	(void)sdr1;
+	(void)sr;
+	(void)dbat3u;
+	(void)dbat3l;
+#endif
+}
+
 static void nw_htab_store32(uint8_t *htab, uint32_t off, uint32_t value)
 {
 	htab[off + 0] = (uint8_t)(value >> 24);

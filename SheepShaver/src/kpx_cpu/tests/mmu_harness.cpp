@@ -669,6 +669,78 @@ int main()
 		CHECK(memretry.pa == store_ea);
 	}
 
+	/*
+	 * Without host identity BATs, KDP-1048 DR-misses. An NK/host RAM BAT
+	 * 10000fff/10000002 is delayed until after the first data DSI, then
+	 * DR-on lwz at SRR0 HITs, 0x300 is non-zero, original DAR still
+	 * misses until the post-DSI RAM BAT is allowed.
+	 */
+	{
+		const uint32_t kdp_m1048 = 0x17efdbe8u;
+		const uint32_t ram_batu = 0x10000fffu;
+		const uint32_t ram_batl = 0x10000002u;
+		const uint32_t ram_base = 0x10000000u;
+		const uint32_t ram_size = 0x08000000u;
+		const uint32_t fault_pc = 0x00004000u;
+
+		CHECK(ppc32_mmu::bat_overlaps(ram_batu, ram_batl, ram_base,
+					      ram_base + ram_size));
+		CHECK(!ppc32_mmu::bat_overlaps(0x68fe0003u, 0x68fe0002u,
+						 ram_base, ram_base + ram_size));
+
+		mmu.reset();
+		mmu.set_physical_memory(&ram[0], (uint32_t)ram.size());
+		memset(&ram[0], 0, ram.size());
+		nw_fill_dsi_vector_be(&ram[0], (uint32_t)ram.size(), 0x00005000u);
+		be32_store(&ram[0], fault_pc, 0x90840000u);
+
+		mmu.delay_ram_bats(true, ram_base, ram_size);
+		mmu.set_dbat(0, ram_batu, ram_batl);
+		mmu.set_dbat(1, 0x00000002u, 0x00000000u); /* insn page */
+		mmu.set_ibat(1, 0x00000002u, 0x00000000u);
+		mmu.set_msr(ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR);
+		mmu.set_ivt_mapped(true);
+		mmu.set_sdr1(0x17f00000u);
+
+		CHECK(mmu.ram_bats_delayed());
+		const ppc32_xlate_result delayed =
+			mmu.translate(kdp_m1048, PPC32_XLATE_DR, 4);
+		CHECK(!delayed.ok);
+		CHECK(delayed.how != NULL && strcmp(delayed.how, "miss") == 0);
+
+		ppc32_hotints_dsi dsi;
+		dsi.take_data_dsi(mmu, fault_pc, kdp_m1048, true);
+		CHECK(dsi.srr0 == fault_pc);
+		CHECK(dsi.dar == kdp_m1048);
+		CHECK(dsi.vector == (uint32_t)NW_DSI_VECTOR_EA);
+		CHECK(nw_be32_load(&ram[0], NW_DSI_VECTOR_EA) != 0);
+
+		const ppc32_xlate_result lwz = dsi.lwz_faulting_insn(mmu);
+		CHECK(lwz.ok);
+		CHECK(lwz.pa == fault_pc);
+
+		CHECK(!mmu.translate(kdp_m1048, PPC32_XLATE_DR, 4).ok);
+
+		mmu.delay_ram_bats(false, ram_base, ram_size);
+		const ppc32_xlate_result after =
+			mmu.translate(kdp_m1048, PPC32_XLATE_DR, 4);
+		CHECK(after.ok);
+		CHECK(after.pa == kdp_m1048);
+	}
+
+	/* 9.0.4 IR/DR-off still identity; RAM-BAT delay is off. */
+	{
+		mmu.reset();
+		CHECK(!mmu.ram_bats_delayed());
+		mmu.set_msr(0);
+		const ppc32_xlate_result id =
+			mmu.translate(0x17efdbe8u, PPC32_XLATE_DR, 4);
+		CHECK(id.ok);
+		CHECK(id.pa == 0x17efdbe8u);
+		CHECK(id.how != NULL && strcmp(id.how, "ident") == 0);
+		CHECK(!ppc32_guest_mmu_enabled());
+	}
+
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

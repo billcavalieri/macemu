@@ -2217,6 +2217,10 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 				sprg_[0] = htaborg - 0x2000u;
 		}
 		const uint32 handler = ROMBase + NW_NK_DATA_STORAGE_INT;
+		/* Mill 68k resume and r1/ea retry swallow the first data DSI
+		 * (pc stays off 0x300, HotInts never runs). After G2 they are
+		 * G3 and may run. */
+		if (nw_guest_first_data_dsi_seen()) {
 		if (ea >= 0xfffff000u || gpr(1) < 0x1000u) {
 			extern uint32 RAMBase, RAMSize;
 			const uint32 stk = RAMBase + RAMSize - 0x10000u;
@@ -2270,6 +2274,7 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 #endif
 				return;
 			}
+		}
 		}
 		/*
 		 * Identity RAM/ROM BATs are for HotInts MemRetry after this
@@ -2359,6 +2364,7 @@ void powerpc_cpu::take_isi()
 #endif
 			return;
 		}
+		if (nw_guest_first_data_dsi_seen()) {
 		extern uint32 ROMBase, RAMBase, RAMSize;
 		uint32 r24 = g3_fix_r24(gpr(24));
 		pc() = ROMBase + 0x366084u;
@@ -2377,6 +2383,7 @@ void powerpc_cpu::take_isi()
 		}
 #endif
 		return;
+		}
 		mmu.set_msr(saved);
 	}
 #endif
@@ -2535,10 +2542,10 @@ bool powerpc_cpu::guest_data_xlate(uint32 ea, unsigned width, bool is_store, uin
 	}
 	ppc32_xlate_result r = ppc32_guest_mmu().translate(ea, PPC32_XLATE_DR, width);
 #ifdef SHEEPSHAVER
-	if ((ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR) && !r.ok) {
+	if (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR) {
 		uint32 du = 0, dl = 0;
 		ppc32_guest_mmu().get_dbat(0, &du, &dl);
-		nw_log_dr_xlate(pc(), ea, 0, 0, du, dl);
+		nw_log_dr_xlate(pc(), ea, r.ok ? 1 : 0, r.pa, du, dl);
 	}
 #endif
 	if (r.ok) {
@@ -2622,6 +2629,22 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		else
 			u = value;
 		mmu.set_ibat(i, u, l);
+#ifdef SHEEPSHAVER
+#if NW_BOOT_LOG
+		{
+			static unsigned n;
+			if (n < 8) {
+				n++;
+				char buf[96];
+				snprintf(buf, sizeof(buf),
+					 "G2: mtspr IBAT%u %08x/%08x delayram=%d",
+					 i, (unsigned)u, (unsigned)l,
+					 (int)mmu.ram_bats_delayed());
+				nw_boot_log(buf);
+			}
+		}
+#endif
+#endif
 		return true;
 	}
 	if (spr >= powerpc_registers::SPR_DBAT0U && spr <= powerpc_registers::SPR_DBAT3L) {
@@ -2633,6 +2656,22 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		else
 			u = value;
 		mmu.set_dbat(i, u, l);
+#ifdef SHEEPSHAVER
+#if NW_BOOT_LOG
+		{
+			static unsigned n;
+			if (n < 8) {
+				n++;
+				char buf[96];
+				snprintf(buf, sizeof(buf),
+					 "G2: mtspr DBAT%u %08x/%08x delayram=%d",
+					 i, (unsigned)u, (unsigned)l,
+					 (int)mmu.ram_bats_delayed());
+				nw_boot_log(buf);
+			}
+		}
+#endif
+#endif
 		return true;
 	}
 	return false;
@@ -3069,11 +3108,16 @@ void powerpc_cpu::execute(uint32 entry)
 					static unsigned ir_trace;
 					if (!ir_on) {
 						ir_on = 1;
-						char buf[80];
+						uint32 du = 0, dl = 0;
+						ppc32_guest_mmu().get_dbat(0, &du, &dl);
+						char buf[128];
 						snprintf(buf, sizeof(buf),
-							 "G3: IR+DR on pc=%08x msr=%08x",
+							 "G3: IR+DR on pc=%08x msr=%08x delayram=%d dbat0=%08x/%08x mill=%d",
 							 (unsigned)pc(),
-							 (unsigned)msr_now);
+							 (unsigned)msr_now,
+							 (int)ppc32_guest_mmu().ram_bats_delayed(),
+							 (unsigned)du, (unsigned)dl,
+							 nw_guest_first_data_dsi_seen());
 						nw_boot_log(buf);
 						/* Do not identity-map RAM here.
 						 * A 128 MiB DBAT at RAMBase
@@ -3341,10 +3385,11 @@ void powerpc_cpu::execute(uint32 entry)
 				pc() = ROMBase + 0x312044u;
 				continue;
 			}
-			if (pc() == ROMBase + 0x36e8c0u ||
+			if (nw_guest_first_data_dsi_seen() &&
+			    (pc() == ROMBase + 0x36e8c0u ||
 			    pc() == ROMBase + 0x46e8c0u ||
 			    pc() == ROMBase + 0x36f900u ||
-			    pc() == ROMBase + 0x46f900u) {
+			    pc() == ROMBase + 0x46f900u)) {
 				nw_guest_map_kernel_data();
 				/* r24 is 68k PC; NK never seeded it. */
 				{
@@ -3373,8 +3418,11 @@ void powerpc_cpu::execute(uint32 entry)
 					gpr(31) = 0x68ffe000u + 0x1000u;
 				}
 			}
-			/* 68k opcode stub bclr/blr to unmapped LR → resume. */
-			if (pc() >= ROMBase + 0x360000u &&
+			/* 68k opcode stub bclr/blr to unmapped LR → resume.
+			 * After G2 only: before that, execute the real PPC so
+			 * the first DR load can miss through translate(). */
+			if (nw_guest_first_data_dsi_seen() &&
+			    pc() >= ROMBase + 0x360000u &&
 			    pc() < ROMBase + 0x500000u) {
 				const uint32 opw = vm_read_memory_4(pc());
 				if ((opw & 0xfc0007feu) == 0x4c000020u) {
@@ -3401,7 +3449,8 @@ void powerpc_cpu::execute(uint32 entry)
 					}
 				}
 			}
-			if ((pc() >= ROMBase + 0x361300u &&
+			if (nw_guest_first_data_dsi_seen() &&
+			    ((pc() >= ROMBase + 0x361300u &&
 			     pc() < ROMBase + 0x3616a0u) ||
 			    (pc() >= ROMBase + 0x461300u &&
 			     pc() < ROMBase + 0x4616a0u) ||
@@ -3448,8 +3497,9 @@ void powerpc_cpu::execute(uint32 entry)
 				pc() = ROMBase + 0x366084u;
 				continue;
 			}
-			if (pc() == ROMBase + 0x36ce20u ||
-			    pc() == ROMBase + 0x46ce20u) {
+			if (nw_guest_first_data_dsi_seen() &&
+			    (pc() == ROMBase + 0x36ce20u ||
+			    pc() == ROMBase + 0x46ce20u)) {
 #if NW_BOOT_LOG
 				static int decd;
 				if (!decd) {
@@ -3461,8 +3511,9 @@ void powerpc_cpu::execute(uint32 entry)
 				pc() = ROMBase + 0x366084u;
 				continue;
 			}
-			if (pc() == ROMBase + 0x36ca80u ||
-			    pc() == ROMBase + 0x46ca80u) {
+			if (nw_guest_first_data_dsi_seen() &&
+			    (pc() == ROMBase + 0x36ca80u ||
+			    pc() == ROMBase + 0x46ca80u)) {
 				/* mtctr r5 / bctrl / b 0x36ca80. r5 from
 				 * 0x80c(r31) is 0 or a blr, so this never
 				 * sets CR to exit. */
@@ -3480,9 +3531,10 @@ void powerpc_cpu::execute(uint32 entry)
 				pc() = ROMBase + 0x36ca94u;
 				continue;
 			}
-			if ((pc() >= ROMBase && pc() < ROMBase + 0x310000u) ||
-			    pc() < 0x1000u) {
-				/* 68k image or page 0 executed as PPC. */
+			if (nw_guest_first_data_dsi_seen() &&
+			    pc() >= ROMBase && pc() < ROMBase + 0x310000u) {
+				/* 68k image executed as PPC. Never mill EA 0..0xFFF:
+				 * that is the DSI vector (0x300) HotInts must run. */
 #if NW_BOOT_LOG
 				static unsigned nppc;
 				if (nppc < 8) {
@@ -3500,12 +3552,13 @@ void powerpc_cpu::execute(uint32 entry)
 				pc() = ROMBase + 0x366084u;
 				continue;
 			}
-			if (pc() == ROMBase + 0x366084u ||
+			if (nw_guest_first_data_dsi_seen() &&
+			    (pc() == ROMBase + 0x366084u ||
 			    pc() == ROMBase + 0x367c64u ||
 			    pc() == ROMBase + 0x367c6cu ||
 			    pc() == ROMBase + 0x466084u ||
 			    pc() == ROMBase + 0x467c64u ||
-			    pc() == ROMBase + 0x467c6cu) {
+			    pc() == ROMBase + 0x467c6cu)) {
 				{
 					uint32 sp = g3_rom0(gpr(1));
 					if (sp < RAMBase ||

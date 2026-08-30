@@ -892,6 +892,12 @@ static int nw_identity_after_dsi;
 void nw_guest_note_first_data_dsi(void)
 {
 	nw_identity_after_dsi = 1;
+	ppc32_guest_mmu().delay_ram_bats(false, 0, 0);
+}
+
+int nw_guest_first_data_dsi_seen(void)
+{
+	return nw_identity_after_dsi;
 }
 
 void nw_guest_map_ram_rom_identity(void)
@@ -970,6 +976,11 @@ void nw_guest_map_ram_rom_identity(void)
 
 void nw_guest_map_kernel_data(void)
 {
+	/* Same delay as identity RAM: planting before the first data DSI
+	 * is a host BAT. Kernel 0x68fe0000 does not cover KDP-1048, but
+	 * this still runs at mill 68k entry (first IR+DR) and is G3. */
+	if (!nw_identity_after_dsi)
+		return;
 	ppc32_mmu &mmu = ppc32_guest_mmu();
 	/* 128KiB identity at 0x68fe0000 covers KERNEL_DATA_BASE. */
 	const uint32_t bepi = 0x68fe0000u;
@@ -1157,6 +1168,8 @@ void init_emul_ppc(void)
 	if (ROMType == ROMTYPE_NEWWORLD) {
 		ppc32_guest_mmu().set_phys_read32(guest_phys_read32, NULL);
 		ppc_cpu->enable_guest_mmu(true);
+		extern uint32 RAMBase, RAMSize;
+		ppc32_guest_mmu().delay_ram_bats(true, RAMBase, RAMSize);
 		/* NK 0x3104a8 walks NKSystemInfo in r5 (bank size at +52). */
 		const uint32 sysinfo = SheepMem::Reserve(0x120);
 		Mac_memset(sysinfo, 0, 0x120);
