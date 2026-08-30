@@ -1408,15 +1408,18 @@ int main()
 		CHECK(nw_dec_leave_50326_cmp_use(3, 0, 100u,
 						  0x41800008u) == 100u);
 
-		/* Live 2d295270: 503256f4 cmpwi r30,0 nxt=li is
-		 * not a wait. Heartbeat waits are 5032663c /
-		 * 503259dc / 503264c0; bc 503264fc. Do not mill
-		 * or skip-list. Do not pin 00003010. */
+		/* Live 2d295270: 503256f4 cmp+li is not a wait.
+		 * Completing 503264fc bne -16 hung silent at
+		 * 50326480. Complete 50326480 like 50326674.
+		 * Do not mill or skip-list. Do not pin 00003010. */
 		CHECK(nw_ppc_is_li(0x3bc00000u)); /* li r30,0 */
 		CHECK(!nw_ppc_is_li(0x40820008u));
 		CHECK(!nw_ppc_is_li(0x2c9e0000u));
+		CHECK(nw_ppc_bc_disp(0x40820008u) == 8);
+		CHECK(nw_ppc_bc_disp(0x4082fff0u) == -16);
 		CHECK(!nw_dec_leave_cmp_wait(0x3bc00000u));
 		CHECK(!nw_dec_leave_cmp_wait(0x2c9e0000u));
+		CHECK(!nw_dec_leave_cmp_wait(0x4082fff0u)); /* backward */
 		CHECK(nw_dec_leave_cmp_wait(0x40820008u));
 		CHECK(nw_dec_leave_cmp_wait(0x41820008u));
 		CHECK(nw_dec_leave_503256f4_false(0x3256f4u, 0x2c9e0000u,
@@ -1425,27 +1428,30 @@ int main()
 						   0x3bc00000u));
 		CHECK(!nw_dec_leave_503256f4_false(0x32663cu, 0x2c08ffffu,
 						    0x40820008u));
-		CHECK(!nw_dec_leave_503256f4_false(0x3264c0u, 0x2c080000u,
-						    0x40820008u));
+		CHECK(nw_dec_leave_503256f4_false(0x3264f8u, 0x2c080000u,
+						    0x4082fff0u));
+		CHECK(nw_dec_leave_50326480_off(0x326480u));
+		CHECK(nw_dec_leave_50326480_off(0x326484u));
+		CHECK(nw_dec_leave_50326480_off(0x326478u));
+		CHECK(!nw_dec_leave_50326480_off(0x3264fcu));
+		CHECK(!nw_dec_leave_50326480_off(0x326674u));
+		CHECK(nw_dec_leave_hb_wait_off(0x326480u));
 		CHECK(nw_dec_leave_hb_wait_off(0x32663cu));
 		CHECK(nw_dec_leave_hb_wait_off(0x3259dcu));
-		CHECK(nw_dec_leave_hb_wait_off(0x3264c0u));
-		CHECK(nw_dec_leave_hb_wait_off(0x3264fcu));
+		CHECK(!nw_dec_leave_hb_wait_off(0x3264fcu));
 		CHECK(!nw_dec_leave_hb_wait_off(0x326674u));
 		CHECK(!nw_dec_leave_hb_wait_off(0x3256f4u));
-		CHECK(0x3264c0u + 0x3cu == 0x3264fcu);
+		CHECK(nw_nk_postleave_walk_off(0x326480u));
 		CHECK(nw_nk_postleave_walk_off(0x32663cu));
 		CHECK(nw_nk_postleave_walk_off(0x3259dcu));
-		CHECK(nw_nk_postleave_walk_off(0x3264c0u));
-		CHECK(nw_nk_postleave_walk_off(0x3264fcu));
 		CHECK(nw_nk_postleave_walk_off(0x3256f4u));
+		CHECK(!nw_nk_picspin_skip_after_g2(0x326480u, 0x2c08ffffu));
 		CHECK(!nw_nk_picspin_skip_after_g2(0x32663cu, 0x2c08ffffu));
 		CHECK(!nw_nk_picspin_skip_after_g2(0x3259dcu, 0x2f9c0000u));
-		CHECK(!nw_nk_picspin_skip_after_g2(0x3264c0u, 0x2c080000u));
-		CHECK(!nw_nk_picspin_skip_after_g2(0x3264fcu, 0x40820008u));
+		CHECK(!nw_nk_picspin_skip_after_g2(0x3264fcu, 0x4082fff0u));
+		CHECK(!nw_nk_picspin_mill_off(0x326480u));
 		CHECK(!nw_nk_picspin_mill_off(0x32663cu));
 		CHECK(!nw_nk_picspin_mill_off(0x3259dcu));
-		CHECK(!nw_nk_picspin_mill_off(0x3264c0u));
 		CHECK(!nw_nk_picspin_mill_off(0x3264fcu));
 		CHECK(!nw_nk_picspin_mill_off(0x3256f4u));
 		CHECK(!nw_dec_ee_on(0x00003010u));

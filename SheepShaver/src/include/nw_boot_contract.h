@@ -218,6 +218,8 @@ int nw_dec_leave_50326674_cmp(uint32_t rom_off, uint32_t op);
  * -1 if op is not a CR-using bc (BO 4 or 12).
  */
 int nw_ppc_bc_fallthrough_cr_set(uint32_t op);
+/* Signed BD bytes. 50326678 is +8; 503264fc 4082fff0 is -16. */
+int32_t nw_ppc_bc_disp(uint32_t op);
 /*
  * 50325xxx / 50326xxx after leave. Not a skip-list. CLOUD_LO_4
  * (0x900 body) stays out.
@@ -225,8 +227,10 @@ int nw_ppc_bc_fallthrough_cr_set(uint32_t op);
 int nw_nk_postleave_walk_off(uint32_t off);
 /* Live 2d295270: 503256f4 cmpwi r30,0 nxt=li r30,0 is not a wait. */
 int nw_ppc_is_li(uint32_t op);
-int nw_dec_leave_cmp_wait(uint32_t nxt); /* following insn is beq/bne */
+int nw_dec_leave_cmp_wait(uint32_t nxt); /* following insn is forward beq/bne */
 int nw_dec_leave_503256f4_false(uint32_t off, uint32_t op, uint32_t nxt);
+/* Live 2d295270 hang pc=50326480. Not a skip-list. */
+int nw_dec_leave_50326480_off(uint32_t off);
 /* Heartbeat wait sites after 50326678. Not a skip-list. */
 int nw_dec_leave_hb_wait_off(uint32_t off);
 /*

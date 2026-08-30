@@ -528,6 +528,13 @@ int nw_dec_leave_50326674_cmp(uint32_t rom_off, uint32_t op)
 	return (rom_off == 0x326674u && op == 0x2c08ffffu) ? 1 : 0;
 }
 
+int32_t nw_ppc_bc_disp(uint32_t op)
+{
+	if ((op >> 26) != 16u)
+		return 0;
+	return (int16_t)(op & 0xfffcu);
+}
+
 int nw_ppc_bc_fallthrough_cr_set(uint32_t op)
 {
 	const uint32_t bo = (op >> 21) & 0x1fu;
@@ -565,7 +572,11 @@ int nw_ppc_is_li(uint32_t op)
 
 int nw_dec_leave_cmp_wait(uint32_t nxt)
 {
-	return nw_ppc_bc_fallthrough_cr_set(nxt) >= 0;
+	/* 50326678 is bne +8. Live 2d295270: completing
+	 * 503264fc bne -16 then hung silent at 50326480. */
+	if (nw_ppc_bc_fallthrough_cr_set(nxt) < 0)
+		return 0;
+	return nw_ppc_bc_disp(nxt) > 0;
 }
 
 int nw_dec_leave_503256f4_false(uint32_t off, uint32_t op, uint32_t nxt)
@@ -579,16 +590,27 @@ int nw_dec_leave_503256f4_false(uint32_t off, uint32_t op, uint32_t nxt)
 	return 0;
 }
 
+int nw_dec_leave_50326480_off(uint32_t off)
+{
+	if (off == 0x326480u)
+		return 1;
+	/* Around the hang: ±4 insns. Not a skip-list. */
+	if ((off & 3u) == 0 && off >= 0x326478u && off <= 0x326490u)
+		return 1;
+	return 0;
+}
+
 int nw_dec_leave_hb_wait_off(uint32_t off)
 {
 	switch (off) {
+	case 0x326480u:
+	case 0x326484u:
+	case 0x326478u:
 	case 0x32663cu:
 	case 0x3259dcu:
-	case 0x3264c0u:
-	case 0x3264fcu:
 		return 1;
 	default:
-		return 0;
+		return nw_dec_leave_50326480_off(off);
 	}
 }
 

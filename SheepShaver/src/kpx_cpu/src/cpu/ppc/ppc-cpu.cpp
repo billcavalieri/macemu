@@ -278,6 +278,16 @@ static int nw_dec_leave_503259e0_wait(uint32 rom_off)
 		return 1;
 	return 0;
 }
+/* Live 2d295270: hung silent pc=50326480 msr=00003010
+ * after completing 503264fc bne -16. Complete the
+ * wait at/around 50326480 like 50326674. Do not
+ * skip-list. Do not fall through 503264fc. */
+static int nw_dec_leave_50326480_wait(uint32 rom_off)
+{
+	if (!nw_dec_did_leave || !nw_dec_took_900)
+		return 0;
+	return nw_dec_leave_50326480_off(rom_off);
+}
 static int nw_dec_leave_no_skip(uint32 rom_off)
 {
 	if (nw_dec_leave_50325(rom_off) ||
@@ -23335,6 +23345,48 @@ void powerpc_cpu::execute(uint32 entry)
 									}
 								}
 #endif
+							} else if (nw_dec_leave_50326480_wait(rom_off)) {
+								const uint32 nxt =
+									vm_read_memory_4(pc() + 4);
+								uint32 arm = 0;
+								uint32 log_nxt = nxt;
+								/* Like 50326674: match, arm the
+								 * following bc, CR-fallthrough.
+								 * Do not smash r8. cmp+li is
+								 * not a wait. */
+								if (nw_ppc_is_cmp(opw) &&
+								    !nw_ppc_is_li(nxt) &&
+								    nw_ppc_bc_fallthrough_cr_set(nxt) >= 0)
+									arm = pc() + 4;
+								else if (nw_ppc_is_cmp(opw)) {
+									const uint32 n2 =
+										vm_read_memory_4(pc() + 8);
+									if (!nw_ppc_is_li(n2) &&
+									    nw_ppc_bc_fallthrough_cr_set(n2) >= 0) {
+										arm = pc() + 8;
+										log_nxt = n2;
+									}
+								} else if (nw_ppc_bc_fallthrough_cr_set(opw) >= 0 &&
+									   rom_off != 0x3264fcu)
+									arm = pc();
+								if (arm &&
+								    (arm - ROMBase) != 0x3264fcu)
+									nw_dec_leave_skip_bc_pc = arm;
+#if NW_BOOT_LOG
+								if (arm && nw_ppc_is_cmp(opw)) {
+									static int n480;
+									if (!n480) {
+										n480 = 1;
+										char buf[144];
+										snprintf(buf, sizeof(buf),
+											 "G3: DEC leave 50326 cmp pc=%08x op=%08x nxt=%08x",
+											 (unsigned)pc(),
+											 (unsigned)opw,
+											 (unsigned)log_nxt);
+										nw_boot_log(buf);
+									}
+								}
+#endif
 							} else if (nw_nk_postleave_walk_off(rom_off) &&
 								   nw_ppc_is_cmp(opw)) {
 								const uint32 nxt =
@@ -23386,16 +23438,15 @@ void powerpc_cpu::execute(uint32 entry)
 #endif
 								}
 							}
-							/* Live 2d295270 heartbeats:
-							 * 5032663c / 503259dc /
-							 * 503264c0; bc 503264fc.
-							 * cmp+li is not a wait.
-							 * Prefer nxt beq/bne like
-							 * 50326674; 503264c0 may
-							 * arm +0x3c. */
+							/* Live 2d295270: do not complete
+							 * 503264fc bne -16 (hung silent
+							 * at 50326480). 50326480 is
+							 * handled above. Remaining hb
+							 * 5032663c / 503259dc. */
 							if (nw_dec_leave_hb_wait_off(rom_off) &&
 							    rom_off != 0x326674u &&
-							    rom_off != 0x3256f4u) {
+							    rom_off != 0x3256f4u &&
+							    !nw_dec_leave_50326480_off(rom_off)) {
 								const uint32 nxt =
 									vm_read_memory_4(pc() + 4);
 								uint32 arm = 0;
@@ -23405,16 +23456,8 @@ void powerpc_cpu::execute(uint32 entry)
 									    rom_off, opw, nxt) &&
 								    nw_dec_leave_cmp_wait(nxt))
 									arm = pc() + 4;
-								else if (rom_off == 0x3264c0u &&
-									 nw_ppc_is_cmp(opw)) {
-									const uint32 bcop =
-										vm_read_memory_4(
-											pc() + 0x3cu);
-									if (nw_ppc_bc_fallthrough_cr_set(bcop) >= 0) {
-										arm = pc() + 0x3cu;
-										log_nxt = bcop;
-									}
-								} else if (nw_ppc_bc_fallthrough_cr_set(opw) >= 0)
+								else if (nw_ppc_bc_fallthrough_cr_set(opw) >= 0 &&
+									 nw_ppc_bc_disp(opw) > 0)
 									arm = pc();
 								else if (rom_off == 0x3259dcu) {
 									const uint32 n2 =
@@ -23434,10 +23477,12 @@ void powerpc_cpu::execute(uint32 entry)
 										log_nxt = n2;
 									}
 								}
-								if (arm)
+								if (arm &&
+								    (arm - ROMBase) != 0x3264fcu)
 									nw_dec_leave_skip_bc_pc = arm;
 #if NW_BOOT_LOG
-								if (arm && nw_ppc_is_cmp(opw)) {
+								if (arm && nw_ppc_is_cmp(opw) &&
+								    (arm - ROMBase) != 0x3264fcu) {
 									static int nhb;
 									if (!nhb) {
 										nhb = 1;
@@ -23577,16 +23622,22 @@ void powerpc_cpu::execute(uint32 entry)
 		if (nw_dec_did_leave && nw_dec_leave_skip_bc_pc &&
 		    pc() == nw_dec_leave_skip_bc_pc &&
 		    nw_ppc_is_bc(opcode)) {
-			const int cr_set =
-				nw_ppc_bc_fallthrough_cr_set(opcode);
-			const uint32 bi = (opcode >> 16) & 0x1fu;
-			uint32 crv = cr().get();
-			const uint32 bit = 1u << (31u - bi);
 			const uint32 off =
 				(pc() >= ROMBase &&
 				 pc() < ROMBase + 0x500000u)
 					? pc() - ROMBase
 					: 0xffffffffu;
+			/* Live 2d295270: CR-fallthrough of
+			 * 503264fc 4082fff0 then silent hang
+			 * at 50326480. Do not complete it. */
+			if (off == 0x3264fcu) {
+				nw_dec_leave_skip_bc_pc = 0;
+			} else {
+			const int cr_set =
+				nw_ppc_bc_fallthrough_cr_set(opcode);
+			const uint32 bi = (opcode >> 16) & 0x1fu;
+			uint32 crv = cr().get();
+			const uint32 bit = 1u << (31u - bi);
 			nw_dec_leave_skip_bc_pc = 0;
 			if (cr_set == 1)
 				crv |= bit;
@@ -23622,6 +23673,7 @@ void powerpc_cpu::execute(uint32 entry)
 				}
 			}
 #endif
+			}
 		}
 		/* Live 0ad66900: twi pad after DEC 0x900 is not in
 		 * ppc-decode. Restore take_dec GPRs too. */
