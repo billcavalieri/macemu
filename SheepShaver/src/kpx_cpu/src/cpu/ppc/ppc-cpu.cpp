@@ -231,6 +231,49 @@ static void nw_dec_plant_pic_idle(uint32 pic)
 	vm_write_memory_1(pic + (uint32)NW_NK_IRQ_STATUS_OFF,
 			  nw_nk_irq_status_idle());
 }
+/*
+ * Live 0b9c914c: post-leave 00002010 walk. CoS named the other
+ * tree's hang 04cecd36 / DAR=68fff0dc (KERNEL_DATA+0x10dc).
+ * PIC idle 0 at a live r28 (not the PIC) zeros a callback; NK
+ * then bctr/blr to NULL or 04cecd36. Do not mill 50325/50326.
+ */
+enum {
+	NW_G3_HANG_04CECD36_PC = 0x04cecd36u,
+	NW_G3_HANG_68FFF0DC_EA = 0x68fff0dcu
+};
+static int nw_dec_pc_is_guest_code(uint32 p)
+{
+	if (p == 0 || p == (uint32)NW_G3_HANG_04CECD36_PC)
+		return 0;
+	if ((p & 0xffff0000u) == 0xbadd0000u)
+		return 0;
+	if (ROMBase &&
+	    p >= ROMBase && p < ROMBase + 0x500000u)
+		return 1;
+	if (RAMBase &&
+	    p >= RAMBase && p < RAMBase + RAMSize)
+		return 1;
+	if (p < 0x20000u)
+		return 1;
+	return 0;
+}
+static void nw_dec_log_hang_04cecd36(uint32 p, uint32 ea, uint32 r1)
+{
+#if NW_BOOT_LOG
+	static int n;
+	if (!n) {
+		n = 1;
+		char buf[96];
+		snprintf(buf, sizeof(buf),
+			 "G3: hang 04cecd36 pc=%08x ea=%08x r1=%08x",
+			 (unsigned)p, (unsigned)ea, (unsigned)r1);
+		nw_boot_log(buf);
+	}
+#endif
+	(void)p;
+	(void)ea;
+	(void)r1;
+}
 /* Live 5e3539ca: VecTbl 0x900 = creqv 6,6,6 at CLOUD_LO_4.
  * Not a skip-list. rfi to saved SRR0. */
 static int nw_dec_hotints_spin(uint32 pc, uint32 op)
@@ -2886,6 +2929,23 @@ bool powerpc_cpu::guest_data_xlate(uint32 ea, unsigned width, bool is_store, uin
 		*pa = r.pa;
 		return true;
 	}
+#ifdef SHEEPSHAVER
+	/* Live 04cecd36: SECOND_DSI DAR=68fff0dc after PIC-idle
+	 * fallthrough. Kernel BAT is planted only after G2. Retry
+	 * the load; do not DSI-vector-spin. Do not mill. */
+	if (nw_guest_first_data_dsi_seen() &&
+	    ea == (uint32)NW_G3_HANG_68FFF0DC_EA) {
+		nw_guest_map_kernel_data();
+		r = ppc32_guest_mmu().translate(ea, PPC32_XLATE_DR, width);
+		if (r.ok) {
+			*pa = r.pa;
+			return true;
+		}
+		nw_dec_log_hang_04cecd36(pc(), ea, gpr(1));
+		pc() = pc() + 4;
+		return false;
+	}
+#endif
 	take_data_dsi(ea, is_store);
 	return false;
 }
@@ -22940,10 +23000,20 @@ void powerpc_cpu::execute(uint32 entry)
 					 * EE. Do not mill.
 					 */
 					if (nw_guest_first_data_dsi_seen()) {
-						nw_dec_plant_pic_idle(pic);
-						nw_dec_plant_pic_idle(
-							nw_nk_irq_pic_ea(RAMBase));
-						gpr(30) = nw_nk_irq_status_idle();
+						const uint32 pic_ea =
+							nw_nk_irq_pic_ea(RAMBase);
+						/* Known PIC stays idle so the
+						 * poll can fall through. After
+						 * leave, r28/r30 are live walk
+						 * regs — zeroing r28 planted a
+						 * NULL callback (04cecd36 /
+						 * 68fff0dc). Do not clobber. */
+						nw_dec_plant_pic_idle(pic_ea);
+						if (!(nw_dec_leave_50325(rom_off) ||
+						      nw_dec_is_walk_off(rom_off))) {
+							nw_dec_plant_pic_idle(pic);
+							gpr(30) = nw_nk_irq_status_idle();
+						}
 						if (nw_dec_leave_50325(rom_off) ||
 						    nw_dec_is_walk_off(rom_off)) {
 #if NW_BOOT_LOG
@@ -23005,24 +23075,51 @@ void powerpc_cpu::execute(uint32 entry)
 #endif
 #ifdef SHEEPSHAVER
 		/* Live 24ce21f6: host SIGSEGV fetching pc=baddcb00
-		 * r0=0x2e r1=0. Do not mill the walk. */
-		if ((pc() & 0xffff0000u) == 0xbadd0000u) {
+		 * r0=0x2e r1=0. Live 04cecd36: PIC idle 0 then a
+		 * NULL/04cecd36 callback. After G2 only. Do not mill. */
+		{
+			const int poison_badd =
+				((pc() & 0xffff0000u) == 0xbadd0000u);
+			const int hang_04 =
+				nw_guest_first_data_dsi_seen() &&
+				(pc() == (uint32)NW_G3_HANG_04CECD36_PC ||
+				 pc() == 0);
+			if (poison_badd || hang_04) {
+				if (hang_04 ||
+				    gpr(1) == (uint32)NW_G3_HANG_68FFF0DC_EA)
+					nw_dec_log_hang_04cecd36(pc(), 0,
+								  gpr(1));
 #if NW_BOOT_LOG
-			static int npoi;
-			if (npoi < 4) {
-				npoi++;
-				char buf[96];
-				snprintf(buf, sizeof(buf),
-					 "G3: poison pc=%08x r0=%08x r1=%08x",
-					 (unsigned)pc(),
-					 (unsigned)gpr(0),
-					 (unsigned)gpr(1));
-				nw_boot_log(buf);
-			}
+				static int npoi;
+				if (npoi < 4) {
+					npoi++;
+					char buf[96];
+					snprintf(buf, sizeof(buf),
+						 "G3: poison pc=%08x r0=%08x r1=%08x",
+						 (unsigned)pc(),
+						 (unsigned)gpr(0),
+						 (unsigned)gpr(1));
+					nw_boot_log(buf);
+				}
 #endif
-			if (nw_dec_handler_srr0) {
-				NW_DEC_RESTORE_SAVED();
-				continue;
+				if (nw_dec_pc_is_guest_code(lr())) {
+					pc() = lr();
+					continue;
+				}
+				if (nw_dec_in_handler && nw_dec_handler_srr0) {
+					NW_DEC_RESTORE_SAVED();
+					continue;
+				}
+				if (hang_04 &&
+				    nw_dec_pc_is_guest_code(
+					    nw_dec_handler_srr0)) {
+					pc() = nw_dec_handler_srr0;
+					continue;
+				}
+				if (poison_badd && nw_dec_handler_srr0) {
+					NW_DEC_RESTORE_SAVED();
+					continue;
+				}
 			}
 		}
 #endif
