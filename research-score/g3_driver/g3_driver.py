@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""G3 driver: classify NW-BOOT hangs by opcode class. No SheepShaver C++ mill."""
+"""G3 driver: classify NW-BOOT hangs by opcode class. No SheepShaver C++ mill.
+
+Default command is `run`: no flags. Ctrl-C saves state; the next run continues.
+"""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -17,6 +23,16 @@ from classify import classify_text, escalate_action, format_classify, load_taxon
 from debug_run import debug_sha, repo_root
 from mill_escalate import write_escalate
 from qwen_lock import score_g3
+
+_STOP = False
+DONE_STATES = (
+    "escalate_ready",
+    "scored",
+    "stop-refuse",
+    "stop-cap",
+    "g3-lock",
+    "fail-closed",
+)
 
 
 def _state_path() -> Path:
@@ -92,61 +108,118 @@ def cmd_debug(args: argparse.Namespace) -> int:
 
 
 def _find_log(sha: str) -> Optional[Path]:
-    short = sha[:8]
+    short = sha[:8].lower()
     cands = [
         Path("/tmp/ss-pr10-%s.log" % short),
         Path("/tmp/ss-pr10-%s.log" % sha),
         repo_root() / "research-score" / ("ss-pr10-%s.log" % short),
-        HERE / "fixtures" / "ss-pr10-2d295270.tail.txt",
+        repo_root() / "research-score" / ("ss-pr10-%s.log" % sha),
     ]
+    if short == "2d295270":
+        cands.append(HERE / "fixtures" / "ss-pr10-2d295270.tail.txt")
     for p in cands:
         if p.is_file():
             return p
     return None
 
 
-def cmd_once(args: argparse.Namespace) -> int:
-    sha = args.sha.strip()
+def current_g3_sha() -> Optional[str]:
+    root = repo_root()
+    subprocess.call(
+        ["git", "fetch", "origin", "g3"],
+        cwd=str(root),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "origin/g3"],
+            cwd=str(root),
+            stderr=subprocess.DEVNULL,
+        )
+        return out.decode().strip().lower()
+    except subprocess.CalledProcessError:
+        tax = load_taxonomy()
+        return (tax.get("working_tip") or "").lower() or None
+
+
+def next_step(st: Dict[str, Any], sha: str) -> str:
+    """process | wait | g3-done | skip-e298."""
+    short = sha.lower()[:8]
+    if short == "e298371e":
+        return "skip-e298"
+    run = st.get("run") or {}
+    if run.get("g3") == "yes":
+        return "g3-done"
+    tip = (st.get("tips") or {}).get(short) or {}
+    if tip.get("action") == "g3-lock" or tip.get("state") == "g3-lock":
+        return "g3-done"
+    if tip.get("state") in DONE_STATES:
+        return "wait"
+    return "process"
+
+
+def process_sha(
+    sha: str,
+    log: Optional[str] = None,
+    dd: Optional[str] = None,
+    window: str = "unknown",
+    force: bool = False,
+) -> int:
+    sha = sha.strip()
     tax = load_taxonomy()
     denylist = set(x.lower()[:8] for x in tax.get("denylist") or [])
     st = load_state()
     short = sha.lower()[:8]
-    force = bool(args.force)
+    if short == "e298371e":
+        print("e298371e denylisted; do not use as tip")
+        return 2
 
-    log_path = Path(args.log) if args.log else _find_log(sha)
+    log_path = Path(log) if log else _find_log(sha)
     need_debug = log_path is None
     if short in denylist and not force:
         need_debug = False
+        print("denylist sha=%s skip Debug" % short)
         if log_path is None:
-            # still classify if we can find any log; else stop
-            print("denylist sha=%s skip Debug" % short)
-            if short == "e298371e":
-                print("e298371e denylisted; do not use as tip")
-                return 2
-            # e25a61f1: classify existing research log if present
-            alt = repo_root() / "research-score" / ("ss-pr10-%s.log" % short)
-            if alt.is_file():
-                log_path = alt
-            else:
-                log_path = HERE / "fixtures" / "ss-pr10-2d295270.tail.txt"
+            print("no log for %s; not launching SheepShaver" % short)
+            st.setdefault("tips", {})
+            st["tips"][short] = {
+                "tip_sha": sha,
+                "state": "fail-closed",
+                "action": "missing-log",
+                "class": None,
+            }
+            save_state(st)
+            return 2
 
     if need_debug:
-        r = debug_sha(sha, dd=Path(args.dd) if args.dd else None, force=force)
+        print("debug %s (SheepShaver hang-cap)" % short)
+        r = debug_sha(sha, dd=Path(dd) if dd else None, force=force)
         if not r.get("ok"):
             print("FAIL_CLOSED=%s" % r.get("fail"))
+            _record_tip(st, sha, {
+                "LIVE_CLASS": None,
+                "last_hb": {},
+                "g2_live": False,
+            }, "fail-closed")
+            st["tips"][short]["state"] = "fail-closed"
+            st["tips"][short]["fail"] = r.get("fail")
+            save_state(st)
             return 2
         log_path = Path(str(r["log"]))
 
     assert log_path is not None
+    print("classify log=%s" % log_path)
     text = _read_log(log_path)
     report = classify_text(text)
     print(format_classify(report))
-    window = args.window or "unknown"
     lock = score_g3(report, window=window)
     print("QWEN_G3=%s skipped=%s" % (lock["g3"], lock["skipped"]))
     if window == "yes" and report.get("g2_live") and lock["g3"] == "yes":
         print("G3=yes")
         _record_tip(st, sha, report, "g3-lock")
+        st["tips"][short]["state"] = "g3-lock"
+        st.setdefault("run", {})["g3"] = "yes"
         save_state(st)
         return 0
 
@@ -158,6 +231,7 @@ def cmd_once(args: argparse.Namespace) -> int:
         print("escalate=%s" % path)
         _record_tip(st, sha, report, action)
         st["tips"][sha[:8]]["state"] = "escalate_ready"
+        st["tips"][sha[:8]]["escalate"] = str(path)
         if action == "widen":
             st.setdefault("widen", {})
             st["widen"].setdefault(short, {})
@@ -166,11 +240,11 @@ def cmd_once(args: argparse.Namespace) -> int:
         save_state(st)
         if action == "stop-cap":
             print("DO_NOT_MILL_AGAIN")
-            return 0
         return 0
     if action == "stop-refuse":
         print("REFUSE_AS_WAIT LIVE_CLASS=%s" % report["LIVE_CLASS"])
         _record_tip(st, sha, report, "stop-refuse")
+        st["tips"][short]["state"] = "stop-refuse"
         save_state(st)
         return 0
     _record_tip(st, sha, report, "classify")
@@ -178,9 +252,100 @@ def cmd_once(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_once(args: argparse.Namespace) -> int:
+    return process_sha(
+        args.sha,
+        log=args.log,
+        dd=args.dd,
+        window=args.window or "unknown",
+        force=bool(args.force),
+    )
+
+
+def _handle_stop(signum: int, frame: Any) -> None:
+    global _STOP
+    _STOP = True
+    print("\nCtrl-C: stopping after this step; next run resumes from state.json")
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    global _STOP
+    _STOP = False
+    signal.signal(signal.SIGINT, _handle_stop)
+    signal.signal(signal.SIGTERM, _handle_stop)
+    window = args.window or os.environ.get("G3_WINDOW", "unknown")
+    poll = int(os.environ.get("G3_POLL_SEC", "30"))
+    st = load_state()
+    st.setdefault("run", {})
+    last = (st.get("run") or {}).get("last_sha")
+    if last:
+        print("resume last_sha=%s" % last)
+    save_state(st)
+    print("run until Ctrl-C. SheepShaver only when a new tip needs a hang-cap.")
+    while not _STOP:
+        sha = current_g3_sha()
+        if not sha:
+            print("no origin/g3; wait")
+            _sleep_poll(poll)
+            continue
+        short = sha[:8]
+        step = next_step(st, sha)
+        st = load_state()
+        st.setdefault("run", {})
+        st["run"]["last_sha"] = sha
+        st["run"]["step"] = step
+        save_state(st)
+        print("g3=%s step=%s" % (short, step))
+        if step == "g3-done":
+            print("G3=yes; nothing left")
+            return 0
+        if step == "skip-e298":
+            print("skip e298371e")
+            _sleep_poll(poll)
+            continue
+        if step == "wait":
+            tip = (st.get("tips") or {}).get(short) or {}
+            print(
+                "already %s class=%s; waiting for origin/g3 to move"
+                % (tip.get("state"), tip.get("class"))
+            )
+            esc = tip.get("escalate")
+            if esc:
+                print("escalate=%s" % esc)
+            _sleep_poll(poll)
+            continue
+        rc = process_sha(
+            sha,
+            window=window,
+            force=bool(getattr(args, "force", False)),
+        )
+        st = load_state()
+        if rc != 0:
+            print("step rc=%s; will retry after wait" % rc)
+            _sleep_poll(poll)
+            continue
+        if (st.get("run") or {}).get("g3") == "yes":
+            print("G3=yes")
+            return 0
+    print("stopped. state saved. run again to continue.")
+    return 0
+
+
+def _sleep_poll(sec: int) -> None:
+    n = max(1, int(sec))
+    for _ in range(n):
+        if _STOP:
+            return
+        time.sleep(1)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=False)
+
+    p = sub.add_parser("run", help="default: continue until Ctrl-C")
+    p.add_argument("--window", default=None, choices=["yes", "no", "unknown"])
+    p.add_argument("--force", action="store_true")
 
     p = sub.add_parser("classify")
     p.add_argument("--log", required=True)
@@ -202,13 +367,20 @@ def main() -> int:
     p.add_argument("--force", action="store_true")
 
     args = ap.parse_args()
-    if args.cmd == "classify":
+    cmd = args.cmd or "run"
+    if cmd == "run":
+        if not hasattr(args, "window"):
+            args.window = None
+        if not hasattr(args, "force"):
+            args.force = False
+        return cmd_run(args)
+    if cmd == "classify":
         return cmd_classify(args)
-    if args.cmd == "score":
+    if cmd == "score":
         return cmd_score(args)
-    if args.cmd == "debug":
+    if cmd == "debug":
         return cmd_debug(args)
-    if args.cmd == "once":
+    if cmd == "once":
         return cmd_once(args)
     return 2
 

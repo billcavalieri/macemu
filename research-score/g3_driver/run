@@ -1,0 +1,4 @@
+#!/bin/sh
+# One command. Ctrl-C stops. Run again to resume from state.json.
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$DIR/g3_driver.py" run "$@"

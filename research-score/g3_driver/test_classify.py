@@ -21,6 +21,7 @@ from classify import (
 )
 from mill_escalate import write_escalate
 from parse_log import parse_log
+from g3_driver import next_step
 
 FIXTURE = HERE / "fixtures" / "ss-pr10-2d295270.tail.txt"
 G2_SNIP = HERE / "fixtures" / "ss-pr10-g2-hit.snippet.txt"
@@ -124,6 +125,26 @@ class FixtureTests(unittest.TestCase):
         self.assertIn("Do not treat 50326564 900107d4/7c0604a6 as a wait", body)
         # LIVE_CLASS is refuse, not a wait mill
         self.assertEqual(report["LIVE_CLASS"], "false-stw-spr")
+
+
+class NextStepTests(unittest.TestCase):
+    def test_new_sha_is_process(self) -> None:
+        self.assertEqual(next_step({"tips": {}}, "e25a61f1"), "process")
+
+    def test_escalate_ready_waits(self) -> None:
+        st = {"tips": {"e25a61f1": {"state": "escalate_ready", "class": "wait-cmp-fwd-bc"}}}
+        self.assertEqual(next_step(st, "e25a61f1"), "wait")
+
+    def test_new_tip_after_wait_is_process(self) -> None:
+        st = {"tips": {"e25a61f1": {"state": "escalate_ready"}}}
+        self.assertEqual(next_step(st, "aaaaaaaa"), "process")
+
+    def test_g3_lock_done(self) -> None:
+        st = {"run": {"g3": "yes"}, "tips": {}}
+        self.assertEqual(next_step(st, "e25a61f1"), "g3-done")
+
+    def test_skip_e298(self) -> None:
+        self.assertEqual(next_step({"tips": {}}, "e298371e"), "skip-e298")
 
 
 if __name__ == "__main__":

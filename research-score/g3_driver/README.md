@@ -6,7 +6,21 @@ Python 3.9+ stdlib. Classifies SheepShaver Debug NW-BOOT hangs by **opcode class
 
 This tree does not mill C++. A later PR mills off `g3` from an escalate file.
 
-## Commands
+## One command
+
+```bash
+./research-score/g3_driver/run
+```
+
+Same as `python3 research-score/g3_driver/g3_driver.py` with no args.
+
+It reads `state.json`, fetches `origin/g3`, and does the next unfinished SHA (classify / Qwen lock / escalate; Debug hang-cap only if that tip has no log). Ctrl-C stops. Run again to resume. Do not pass a SHA.
+
+When a tip is already `escalate_ready`, it waits for `origin/g3` to move (a later mill PR). It does not re-Debug that SHA.
+
+WINDOW yes: `G3_WINDOW=yes ./research-score/g3_driver/run`
+
+## Other commands
 
 ```bash
 python3 research-score/g3_driver/g3_driver.py classify --log PATH
@@ -15,7 +29,7 @@ python3 research-score/g3_driver/g3_driver.py debug   --sha SHA --dd /tmp/macemu
 python3 research-score/g3_driver/g3_driver.py once    --sha SHA
 ```
 
-`once` writes a class mill prompt (`escalate-<sha>.md`) when policy says so. It does not launch Grok Build. Cloud cannot run SheepShaver.
+`once` is one SHA. `run` is the loop. Neither launches Grok Build. Cloud cannot run SheepShaver.
 
 `classify` / `unittest` run if `PLAN-extract-qwen.txt` and `QWEN-32K-ENVELOPE.md` are missing.
 
