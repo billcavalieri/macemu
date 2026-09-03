@@ -870,6 +870,12 @@ int main(int argc, char **argv)
 				UserPrefsPath = argv[i];
 				argv[i] = NULL;
 			}
+		} else if (strcmp(argv[i], "--g3-skip-68k") == 0) {
+			argv[i++] = NULL;
+			if (i < argc) {
+				setenv("G3_SKIP_68K_OFF", argv[i], 1);
+				argv[i] = NULL;
+			}
 		} else if (strcmp(argv[i], "--nogui") == 0) {
 			// We intercept the --nogui commandline so that the settings
 			// window can change the setting from the prefs file

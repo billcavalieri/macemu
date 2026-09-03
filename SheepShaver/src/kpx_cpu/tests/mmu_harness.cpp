@@ -11,6 +11,10 @@
 #include "cpu/ppc/ppc-mmu.hpp"
 #include "nw_boot_contract.h"
 
+extern "C" void nw_boot_host_pump(void)
+{
+}
+
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -1527,6 +1531,20 @@ int main()
 			CHECK(nw_video_fb_guest_dirty(a, b, sizeof(a)));
 			CHECK(!nw_video_fb_guest_dirty(NULL, b, sizeof(a)));
 			CHECK(!nw_video_fb_guest_dirty(a, b, 0));
+		}
+
+		{
+			int x, y, w, h;
+			CHECK(!nw_g3_click_box(&x, &y, &w, &h));
+			nw_g3_click_bridge_arm(640, 480);
+			CHECK(nw_g3_click_box(&x, &y, &w, &h));
+			CHECK(w == 160 && h == 120);
+			CHECK(x == 240 && y == 180);
+			CHECK(!nw_g3_click_consumed());
+			nw_g3_host_click(0, 0, 1);
+			CHECK(!nw_g3_click_consumed());
+			nw_g3_host_click(320, 240, 1);
+			CHECK(nw_g3_click_consumed());
 		}
 	}
 

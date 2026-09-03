@@ -119,6 +119,9 @@ int nw_htab_gate_pass(const struct nw_htab_gate *gate);
 uint32_t nw_be32_load(const uint8_t *mem, uint32_t off);
 void nw_be32_store(uint8_t *mem, uint32_t off, uint32_t value);
 
+/* G3 mill: env G3_SKIP_68K_OFF=0xNN (or --g3-skip-68k). 0 = use compiled mill. */
+uint32_t nw_g3_skip_68k_runtime_off(void);
+
 /* Debug-only live boot log (NW_BOOT_LOG=1 on Xcode SheepShaver Debug). */
 const char *nw_boot_line_g0_newworld(void);
 const char *nw_boot_line_g1_tree(void);
@@ -265,6 +268,13 @@ int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
 				   int nqd, int dirty);
 
 void nw_boot_log(const char *line);
+/* CPU-thread SDL_PumpEvents + present. Keeps Cocoa from Force-Quit. */
+void nw_boot_host_pump(void);
+/* Host click probe: white-screen box. Not G3. */
+void nw_g3_click_bridge_arm(int win_w, int win_h);
+void nw_g3_host_click(int x, int y, int button);
+int nw_g3_click_box(int *x, int *y, int *w, int *h);
+int nw_g3_click_consumed(void);
 void nw_log_g0_decode(const uint8_t *rom, size_t size);
 void nw_log_g1_tree(void);
 void nw_log_g1_kdp(const uint8_t *page);

@@ -1,0 +1,40 @@
+{
+  "known_complete": ["wait-cmp-fwd-bc"],
+  "refuse_as_wait": ["false-stw-spr", "false-cmp-li", "false-back-bc"],
+  "log_level": ["pic-idle", "hang-04cecd36", "unknown-hb", "g3-lock"],
+  "override": ["empty-vector", "dsi-on-store", "msr-collapse"],
+  "refuse_examples": [
+    {
+      "class": "false-cmp-li",
+      "pc": "503256f4",
+      "op": "2c9e0000",
+      "nxt": "3bc00000",
+      "note": "cmp+li at 503256f4"
+    },
+    {
+      "class": "false-back-bc",
+      "pc": "503264fc",
+      "op": "4082fff0",
+      "nxt": null,
+      "note": "backward bne at 503264fc"
+    },
+    {
+      "class": "false-stw-spr",
+      "pc": "50326564",
+      "op": "900107d4",
+      "nxt": "7c0604a6",
+      "note": "stw+mfsr at 50326564 900107d4 / 7c0604a6"
+    }
+  ],
+  "denylist": [
+    "2d295270", "c0fa1685", "6b413a91", "cfa79ce9", "3081e072", "a4f0c6ce",
+    "3530b06f", "2edb0ca6", "a9769256", "4aefec8d", "6e42f3d0", "8c21341f",
+    "fbc1967c", "cf12cf07", "751b8ba3", "bcdc3aba", "13ab796b", "0b9c914c",
+    "04cecd36", "54bc576f", "183d5833", "d7dc8625", "5d8f7852", "b83a3bfe",
+    "7543d747", "c3b5d982", "24ce21f6", "5e3539ca", "d37d031a", "183fe016",
+    "e25a61f1", "042a7f54", "5dd8d481", "e298371e"
+  ],
+  "working_tip": "e25a61f1",
+  "widen_cap_per_class_per_tip": 1,
+  "base_branch": "g3"
+}

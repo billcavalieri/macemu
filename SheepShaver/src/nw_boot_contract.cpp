@@ -5,7 +5,23 @@
 #include "nw_boot_contract.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+uint32_t nw_g3_skip_68k_runtime_off(void)
+{
+	static uint32_t off;
+	static int inited;
+	if (!inited) {
+		const char *e;
+
+		inited = 1;
+		e = getenv("G3_SKIP_68K_OFF");
+		if (e && e[0])
+			off = (uint32_t)strtoul(e, NULL, 0);
+	}
+	return off;
+}
 
 /* Must match rom_patches.h ROMTYPE_NEWWORLD. */
 enum { NW_ROMTYPE_NEWWORLD = 5 };
@@ -799,6 +815,63 @@ int nw_video_clip_dirty(int *x, int *y, int *w, int *h, int sw, int sh)
 	return (*w > 0 && *h > 0) ? 1 : 0;
 }
 
+static int g3_click_armed;
+static int g3_click_consumed;
+static int g3_box_x, g3_box_y, g3_box_w, g3_box_h;
+
+void nw_g3_click_bridge_arm(int win_w, int win_h)
+{
+	if (win_w < 8 || win_h < 8)
+		return;
+	g3_click_armed = 1;
+	g3_click_consumed = 0;
+	g3_box_w = win_w / 4;
+	g3_box_h = win_h / 4;
+	if (g3_box_w < 32)
+		g3_box_w = 32;
+	if (g3_box_h < 32)
+		g3_box_h = 32;
+	g3_box_x = (win_w - g3_box_w) / 2;
+	g3_box_y = (win_h - g3_box_h) / 2;
+	nw_boot_log("G3: click bridge armed");
+}
+
+void nw_g3_host_click(int x, int y, int button)
+{
+	char buf[96];
+
+	if (!g3_click_armed)
+		return;
+	snprintf(buf, sizeof(buf), "G3: host click seen x=%d y=%d b=%d",
+		 x, y, button);
+	nw_boot_log(buf);
+	if (x >= g3_box_x && x < g3_box_x + g3_box_w &&
+	    y >= g3_box_y && y < g3_box_y + g3_box_h) {
+		g3_click_consumed = 1;
+		nw_boot_log("G3: click plumb consumed");
+	}
+}
+
+int nw_g3_click_box(int *x, int *y, int *w, int *h)
+{
+	if (!g3_click_armed)
+		return 0;
+	if (x)
+		*x = g3_box_x;
+	if (y)
+		*y = g3_box_y;
+	if (w)
+		*w = g3_box_w;
+	if (h)
+		*h = g3_box_h;
+	return 1;
+}
+
+int nw_g3_click_consumed(void)
+{
+	return g3_click_consumed;
+}
+
 void nw_boot_log(const char *line)
 {
 #if NW_BOOT_LOG
@@ -951,6 +1024,7 @@ void nw_log_pc(uint32_t pc, uint32_t msr)
 		snprintf(buf, sizeof(buf), "pc=%08x msr=%08x",
 			 (unsigned)pc, (unsigned)msr);
 		nw_boot_log(buf);
+		nw_boot_host_pump();
 		return;
 	}
 	if ((++ticks & 0x0000ffffu) == 0) {
@@ -964,6 +1038,7 @@ void nw_log_pc(uint32_t pc, uint32_t msr)
 		snprintf(buf, sizeof(buf), "heartbeat pc=%08x msr=%08x same=%u",
 			 (unsigned)pc, (unsigned)msr, same);
 		nw_boot_log(buf);
+		nw_boot_host_pump();
 	}
 #else
 	(void)pc;

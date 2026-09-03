@@ -131,6 +131,7 @@ static SDL_Thread *redraw_thread = NULL;			// Redraw thread
 static volatile bool thread_stop_req = false;
 static volatile bool thread_stop_ack = false;		// Acknowledge for thread_stop_req
 #endif
+static void handle_events(void);
 
 #ifdef ENABLE_VOSF
 static bool use_vosf = false;						// Flag: VOSF enabled
@@ -786,17 +787,20 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
 	if (!sdl_window) {
 		float m = get_mag_rate();
 		sdl_window = SDL_CreateWindow(
-			"",
-			SDL_WINDOWPOS_UNDEFINED,
-			SDL_WINDOWPOS_UNDEFINED,
+			"SheepShaver",
+			SDL_WINDOWPOS_CENTERED,
+			SDL_WINDOWPOS_CENTERED,
 			m * window_width,
 			m * window_height,
-			window_flags);
+			window_flags | SDL_WINDOW_SHOWN);
 		if (!sdl_window) {
 			shutdown_sdl_video();
 			return NULL;
 		}
 		set_window_name();
+		SDL_ShowWindow(sdl_window);
+		SDL_RaiseWindow(sdl_window);
+		SDL_PumpEvents();
 	}
 	if (flags & SDL_WINDOW_FULLSCREEN) SDL_SetWindowGrab(sdl_window, SDL_TRUE);
 	
@@ -1184,8 +1188,9 @@ void driver_base::adapt_to_video_mode() {
 	sdl_update_video_rect.h = VIDEO_MODE_Y;
 	SDL_UnlockMutex(sdl_update_video_mutex);
 	
-	// Hide cursor
-	SDL_ShowCursor(hardware_cursor);
+	/* Guest FB does not paint a Mac cursor until NQD. Keep the host
+	 * pointer visible. hardcursor can hide it later. */
+	SDL_ShowCursor(1);
 
 	// Set window name/class
 	set_window_name();
@@ -1442,6 +1447,17 @@ bool SDL_monitor_desc::video_open(void)
 			       (size_t)VIDEO_MODE_ROW_BYTES * (size_t)VIDEO_MODE_Y);
 		update_sdl_video(drv->s, 0, 0, (Sint32)VIDEO_MODE_X,
 				 (Sint32)VIDEO_MODE_Y);
+		{
+			char buf[80];
+			nw_g3_click_bridge_arm((int)VIDEO_MODE_X,
+					       (int)VIDEO_MODE_Y);
+			snprintf(buf, sizeof(buf),
+				 "G3: window shown %ux%u",
+				 (unsigned)VIDEO_MODE_X,
+				 (unsigned)VIDEO_MODE_Y);
+			nw_boot_log(buf);
+			nw_boot_log("G3: host cursor shown");
+		}
 		VideoPresent();
 #if NW_BOOT_LOG
 		{
@@ -1913,8 +1929,68 @@ int VideoGuestPresent(uint32 msr)
 	return 0;
 }
 
+extern "C" void nw_boot_host_pump(void)
+{
+	SDL_PumpEvents();
+	handle_events();
+	VideoPresent();
+}
+
+#ifdef SHEEPSHAVER
+static void g3_paint_click_box(void)
+{
+	int bx, by, bw, bh;
+	int pitch;
+	int bpp;
+	int y;
+	size_t fb_bytes;
+
+	if (!the_buffer || !drv || nw_g3_click_consumed())
+		return;
+	if (!nw_g3_click_box(&bx, &by, &bw, &bh))
+		return;
+	{
+		const VIDEO_MODE &mode = drv->mode;
+		pitch = (int)VIDEO_MODE_ROW_BYTES;
+		if (pitch <= 0 || VIDEO_MODE_X <= 0)
+			return;
+		bpp = pitch / (int)VIDEO_MODE_X;
+		if (bpp < 1)
+			bpp = 1;
+		fb_bytes = (size_t)pitch * (size_t)VIDEO_MODE_Y;
+		/* calloc left the FB black. White paper, black box. */
+		memset(the_buffer, 0xff, fb_bytes);
+		if (the_buffer_copy)
+			memset(the_buffer_copy, 0xff, fb_bytes);
+		if (bx < 0)
+			bx = 0;
+		if (by < 0)
+			by = 0;
+		if (bx + bw > (int)VIDEO_MODE_X)
+			bw = (int)VIDEO_MODE_X - bx;
+		if (by + bh > (int)VIDEO_MODE_Y)
+			bh = (int)VIDEO_MODE_Y - by;
+		for (y = by; y < by + bh; y++) {
+			uint8 *row = the_buffer + (size_t)y * (size_t)pitch +
+				     (size_t)bx * (size_t)bpp;
+			memset(row, 0x00, (size_t)bw * (size_t)bpp);
+			if (the_buffer_copy)
+				memset(the_buffer_copy + (size_t)y * (size_t)pitch +
+					       (size_t)bx * (size_t)bpp,
+				       0x00, (size_t)bw * (size_t)bpp);
+		}
+		if (drv->s)
+			update_sdl_video(drv->s, 0, 0, (Sint32)VIDEO_MODE_X,
+					 (Sint32)VIDEO_MODE_Y);
+	}
+}
+#endif
+
 void VideoPresent(void)
 {
+#ifdef SHEEPSHAVER
+	g3_paint_click_box();
+#endif
 	int rc = present_sdl_video();
 #if NW_BOOT_LOG
 	{
@@ -2210,6 +2286,10 @@ bool video_can_change_cursor(void)
 #ifdef SHEEPSHAVER
 void video_set_cursor(void)
 {
+	if (!video_can_change_cursor()) {
+		SDL_ShowCursor(1);
+		return;
+	}
 	// Set new cursor image if it was changed
 	if (sdl_cursor) {
 		SDL_FreeCursor(sdl_cursor);
@@ -2511,6 +2591,11 @@ static void handle_events(void)
 			// Mouse button
 			case SDL_MOUSEBUTTONDOWN: {
 				unsigned int button = event.button.button;
+#ifdef SHEEPSHAVER
+				nw_g3_host_click((int)event.button.x,
+						 (int)event.button.y,
+						 (int)button);
+#endif
 				if (button == SDL_BUTTON_LEFT)
 					ADBMouseDown(0);
 				else if (button == SDL_BUTTON_RIGHT)
@@ -2616,15 +2701,17 @@ static void handle_events(void)
 					case SDL_WINDOWEVENT_RESTORED:
 						force_complete_window_refresh();
 						break;
+					case SDL_WINDOWEVENT_CLOSE:
+						QuitEmulator();
+						break;
 				}
 				break;
 			}
 
-			// Window "close" widget clicked
+			// Window "close" widget clicked. Guest is hung: Power
+			// key does nothing. Quit the host.
 			case SDL_QUIT:
-				if (SDL_GetModState() & (KMOD_LALT | KMOD_RALT)) break;
-				ADBKeyDown(0x7f);	// Power key
-				ADBKeyUp(0x7f);
+				QuitEmulator();
 				break;
 			}
 		}
