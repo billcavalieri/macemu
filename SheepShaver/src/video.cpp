@@ -55,6 +55,10 @@ uint8 MacCursor[68] = {16, 1};	// Mac cursor image
 bool keyfile_valid;		// Flag: Keyfile is valid, enable full-screen modes
 
 #if !defined(USE_SDL_VIDEO)
+extern "C" void nw_boot_host_pump(void)
+{
+}
+
 void VideoPresent(void)
 {
 }

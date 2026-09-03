@@ -59,3 +59,48 @@ prefs
 .sheepshaver_prefs
 os921-local/
 SheepShaver/src/MacOSX/SDL2.framework
+
+#
+# Python
+#
+__pycache__/
+*.py[cod]
+*$py.class
+
+#
+# G3 mill / research-score local noise. Keep driver source, fixtures, taxonomy.
+# Hang-cap logs, Qwen extracts, generated packs, and mill resume state stay local.
+#
+*.log
+ss-pr10*.log
+ss-pr10*-last80g.txt
+research-score/ss-g3-*
+research-score/ss-pr10*
+research-score/SCORE-*.md
+research-score/DEBUG-*.md
+research-score/qwen-post-*.py
+research-score/qwen-raw.txt
+research-score/qwen-reply.json
+research-score/qwen-plan-slot.txt
+research-score/PLAN-extract-qwen.txt
+research-score/plan-slot*.txt
+research-score/extract-*.py
+research-score/*.md5
+research-score/*-qwen-reply.json
+research-score/*-qwen-raw.txt
+research-score/*-qwen-pack.json
+research-score/*-ppc-cpu-file.txt
+research-score/*-last80g.txt
+research-score/*-log-slot.txt
+research-score/*-plan.txt
+research-score/g3_driver/pack.md
+research-score/g3_driver/pack.json
+research-score/g3_driver/pack-log.md
+research-score/g3_driver/pack-slim.md
+research-score/g3_driver/state.json
+# Redirected ROM disasm listings (keep rom_disasm.py).
+rom-disasm.md
+rom-disasm.txt
+research-score/rom-disasm*
+research-score/**/rom-disasm*.md
+research-score/**/rom-disasm*.txt

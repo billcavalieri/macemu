@@ -133,6 +133,9 @@ def live_class_from_parsed(parsed: Dict[str, Any]) -> str:
     if parsed.get("msr_collapse"):
         return "msr-collapse"
 
+    if last_hb and last_hb.get("pc") == 0x50366084:
+        return "68k-hang"
+
     if last_hb and last_hb.get("op") is not None:
         return classify_pair(last_hb.get("op"), last_hb.get("nxt"))
 
@@ -196,7 +199,11 @@ def format_classify(report: Dict[str, Any]) -> str:
 
 
 def escalate_action(report: Dict[str, Any], state: Dict[str, Any], tip_sha: str) -> str:
-    """Return escalate | widen | stop-refuse | stop-cap | classify."""
+    """Return mill | escalate | widen | stop-cap | classify.
+
+    refuse_as_wait means do not mill as wait-cmp-fwd-bc. The run
+    loop still mills a skip for those classes.
+    """
     live = report["LIVE_CLASS"]
     tax = load_taxonomy()
     known = set(tax.get("known_complete") or [])
@@ -206,7 +213,7 @@ def escalate_action(report: Dict[str, Any], state: Dict[str, Any], tip_sha: str)
     if live in ("empty-vector", "dsi-on-store", "msr-collapse"):
         return "escalate"
     if live in refuse:
-        return "stop-refuse"
+        return "mill"
     if live == "NEW":
         return "escalate"
     if live in known:

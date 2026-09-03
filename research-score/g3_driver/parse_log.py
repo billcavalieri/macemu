@@ -2,6 +2,7 @@
 """Parse SheepShaver Debug NW-BOOT logs. Decode hex only; tags are not evidence."""
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -157,10 +158,8 @@ def parse_log(text: str) -> Dict[str, Any]:
             if in_cluster_pc(p.get("pc")):
                 cluster_pairs.append(p)
 
+    # xlatehow=miss is not LIVE_CLASS. PIC probe 10010002 is G2, not a store DSI.
     dsi_on_store = False
-    for ea in miss_eas:
-        if ea != 0x10010002:
-            dsi_on_store = True
 
     last_msr = last_hb["msr"] if last_hb else None
     msr_collapse = False
@@ -173,6 +172,9 @@ def parse_log(text: str) -> Dict[str, Any]:
         g2_live = False
 
     last_80_g = [ln for ln in lines if _is_nw_g(ln)][-80:]
+    reached_68k = any(h.get("pc") == 0x50366084 for h in heartbeats) or (
+        "pc=50366084" in text
+    )
 
     return {
         "last_hb": last_hb,
@@ -193,7 +195,81 @@ def parse_log(text: str) -> Dict[str, Any]:
         "handler_cut": handler_cut,
         "last_dec_leave_idx": last_dec_leave_idx,
         "window_heuristic": "unknown",
+        "reached_68k": reached_68k,
     }
+
+
+def hangcap_early_fail(text: str, saw_68k: bool = False) -> Optional[str]:
+    """Worse-mill signals that can stop the hang-cap wait. KEEP walks are not a fail.
+
+    68k-loss: only after G2 HIT *and* this log reached pc=50366084, then last
+    heartbeat is 50325/50326. Do not abort on 50326 before 68k (KEEP mill-1116
+    walks ~1200 50326 heartbeats first).
+    """
+    if not text:
+        return None
+    if "hang 04cecd36" in text:
+        return "hang_04cecd36"
+    low = text.lower()
+    if "empty 0x300" in low or "illegal pc=00000300" in low:
+        return "empty_300"
+    if "or-in EE" in text or "or in EE" in text:
+        return "ee_forced"
+    mill_max = 0
+    for m in RE_MILL.finditer(text):
+        mill_max = max(mill_max, int(m.group(1)))
+    if mill_max:
+        return "mill"
+    if saw_68k and "pc=50366084" in text:
+        g2 = "first DSI" in text and "DRhit=1" in text
+        last = None
+        for hm in RE_HB.finditer(text):
+            last = int(hm.group(1), 16)
+        if g2 and last is not None:
+            off = last - 0x50000000 if last >= 0x50000000 else last
+            if 0x325000 <= off < 0x327000:
+                return "68k_loss"
+    return None
+
+
+def hangcap_g0_stuck(text: str, elapsed_sec: float, limit: float = 15.0) -> bool:
+    """DecodeROM then silence: no G1, no G2, no heartbeat. mill-4230/4235."""
+    if elapsed_sec < float(limit):
+        return False
+    if not text or "NW-BOOT G0:" not in text:
+        return False
+    if "G1: HardwareInit" in text:
+        return False
+    if "heartbeat pc=" in text:
+        return False
+    if "first DSI" in text:
+        return False
+    return True
+
+
+def keep_stable_n() -> int:
+    try:
+        n = int(os.environ.get("G3_KEEP_STABLE_N", "8"))
+    except ValueError:
+        n = 8
+    return max(2, min(n, 60))
+
+
+def hangcap_keep_stable(text: str, n: Optional[int] = None) -> bool:
+    """True when this log has 68k pc=50366084 and the last n heartbeats are that PC.
+
+    Does not fire on 50325/50326. mill-1116 50326-then-68k is not stable until
+    the tail is 50366084.
+    """
+    if not text or "pc=50366084" not in text:
+        return False
+    need = keep_stable_n() if n is None else max(2, int(n))
+    pcs: List[int] = []
+    for hm in RE_HB.finditer(text):
+        pcs.append(int(hm.group(1), 16))
+    if len(pcs) < need:
+        return False
+    return all(p == 0x50366084 for p in pcs[-need:])
 
 
 def pin_g2_packet(parsed: Dict[str, Any]) -> List[str]:

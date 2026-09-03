@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write a Grok Build class-mill prompt. This PR does not mill C++."""
+"""Write a class-mill prompt. run applies canned mills; this is the leftover card."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -101,6 +101,8 @@ def write_escalate(
         a("")
         a("**DO_NOT_MILL_AGAIN** — widen cap hit for this LIVE_CLASS on this tip.")
     a("")
-    a("Closed PRs #5–#10 are history. Mill C++ later off g3.")
+    a("Closed PRs #5–#10 are history. Base mill work on g3.")
+    a("`./research-score/g3_driver/run` mills skip-pair for refuse-as-wait classes.")
+    a("Do not re-apply e298371e (50326564 as wait-cmp-fwd-bc).")
     path.write_text("\n".join(lines) + "\n")
     return path

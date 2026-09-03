@@ -544,7 +544,7 @@ static int g3_r24_ok(uint32 r24)
 			return 0;
 		/* Slot helper + dest-RTS 2f30 0x2699e + selector table.
 		 * Keep 0x26612. Dest 0x26de0 MOVEA (not dest-RTS 0x26db4). */
-		if (off >= 0x26614u && off < 0x26de0u)
+		if (off >= 0x26614u && off < 0x26e90u)
 			return 0;
 		/* 'PACK' GetResource unpacker + dest-edge mill.
 		 * Keep 0x2bdee. Dest 0x2bec0 MOVEM. */
@@ -556,7 +556,7 @@ static int g3_r24_ok(uint32 r24)
 			return 0;
 		/* Slot selector offset table + JMP (A1). Keep 0x26c50.
 		 * Dest 0x26de0 MOVEA. */
-		if (off >= 0x26c52u && off < 0x26de0u)
+		if (off >= 0x26c52u && off < 0x26e90u)
 			return 0;
 		/* 2f30 dest-RTS before copy mill. Keep 0x1e90e BRA.W
 		 * opcode (not ext 0be0 at 0x1e910). Dest 0x1e920. */
@@ -1824,8 +1824,8 @@ static uint32 g3_fix_r24(uint32 r24)
 				t = ROMBase + 0xa882eu;
 			if (t >= ROMBase + 0xa8848u && t < ROMBase + 0xa884cu)
 				t = ROMBase + 0xa884cu;
-			if (t >= ROMBase + 0x26614u && t < ROMBase + 0x26de0u)
-				t = ROMBase + 0x26de0u;
+			if (t >= ROMBase + 0x26614u && t < ROMBase + 0x26e90u)
+				t = ROMBase + 0x26e90u;
 			if (t >= ROMBase + 0x2bdf0u && t < ROMBase + 0x2bec0u)
 				t = ROMBase + 0x2bec0u;
 			if (t >= ROMBase + 0x1e910u && t < ROMBase + 0x1e920u)
@@ -1874,8 +1874,8 @@ static uint32 g3_fix_r24(uint32 r24)
 				t = ROMBase + 0x1fef6u;
 			if (t >= ROMBase + 0x24c52u && t < ROMBase + 0x24e80u)
 				t = ROMBase + 0x255f6u;
-			if (t >= ROMBase + 0x26c52u && t < ROMBase + 0x26de0u)
-				t = ROMBase + 0x26de0u;
+			if (t >= ROMBase + 0x26c52u && t < ROMBase + 0x26e90u)
+				t = ROMBase + 0x26e90u;
 			if (t >= ROMBase + 0x215c4u && t < ROMBase + 0x22394u)
 				t = ROMBase + 0x22394u;
 			if (t >= ROMBase + 0x2449au && t < ROMBase + 0x24c50u)
@@ -3063,7 +3063,19 @@ bool powerpc_cpu::guest_data_xlate(uint32 ea, unsigned width, bool is_store, uin
 			*pa = r.pa;
 			return true;
 		}
-		nw_dec_log_hang_04cecd36(pc(), ea, gpr(1));
+#if NW_BOOT_LOG
+		{
+			static int npoi;
+			if (!npoi) {
+				npoi = 1;
+				char buf[96];
+				snprintf(buf, sizeof(buf),
+					 "G3: poison callback skip ea=%08x pc=%08x",
+					 (unsigned)ea, (unsigned)pc());
+				nw_boot_log(buf);
+			}
+		}
+#endif
 		pc() = pc() + 4;
 		return false;
 	}
@@ -4538,6 +4550,33 @@ void powerpc_cpu::execute(uint32 entry)
 				uint32 op68 = vm_read_memory_2(r24);
 				r24 += 2;
 #if NW_BOOT_LOG
+				{
+					/* Unique 68k ROM PC map. Cap log at 16384 lines. */
+					const uint32 pc68 = r24 - 2u;
+					if (pc68 >= ROMBase &&
+					    pc68 < ROMBase + 0x400000u &&
+					    (pc68 & 1u) == 0) {
+						static uint8 g3_r24_map[262144];
+						static unsigned nmap;
+						const uint32 off = pc68 - ROMBase;
+						const unsigned idx = off >> 1;
+						const unsigned bi = idx >> 3;
+						const unsigned bj = idx & 7u;
+						if (bi < sizeof(g3_r24_map) &&
+						    !(g3_r24_map[bi] & (1u << bj))) {
+							g3_r24_map[bi] |= (uint8)(1u << bj);
+							if (nmap < 16384u) {
+								nmap++;
+								char buf[72];
+								snprintf(buf, sizeof(buf),
+									 "G3: 68k map r24=%08x op=%04x",
+									 (unsigned)pc68,
+									 (unsigned)op68);
+								nw_boot_log(buf);
+							}
+						}
+					}
+				}
 				if (r24 - 2u == ROMBase + 0x8e770u ||
 				    r24 - 2u == ROMBase + 0x8e7a0u) {
 					static unsigned nbits;
@@ -9292,7 +9331,7 @@ void powerpc_cpu::execute(uint32 entry)
 					continue;
 				}
 				if (r24 - 2u >= ROMBase + 0x26612u &&
-				    r24 - 2u < ROMBase + 0x26de0u) {
+				    r24 - 2u < ROMBase + 0x26e90u) {
 					const uint32 sp = gpr(1);
 					uint32 dest = g3_rom0(vm_read_memory_4(sp));
 					gpr(1) = sp + 4;
@@ -9300,8 +9339,8 @@ void powerpc_cpu::execute(uint32 entry)
 					g3_ccr = 4;
 					if (!g3_r24_ok(dest) || dest == r24 - 2u ||
 					    (dest >= ROMBase + 0x26612u &&
-					     dest < ROMBase + 0x26de0u))
-						dest = ROMBase + 0x26de0u;
+					     dest < ROMBase + 0x26e90u))
+						dest = ROMBase + 0x26e90u;
 					gpr(24) = dest;
 					gpr(27) = 0xffffffffu;
 					gpr(29) = ROMBase + 0x380000u;
@@ -9311,11 +9350,43 @@ void powerpc_cpu::execute(uint32 entry)
 						static unsigned nslot3;
 						if (nslot3 < 8) {
 							nslot3++;
-							nw_boot_log("G3: 68k skip slot helper 0x26de0");
+							nw_boot_log("G3: 68k skip slot helper 0x26e90");
 						}
 					}
 #endif
 					continue;
+				}
+				{
+					uint32 skip68 = nw_g3_skip_68k_runtime_off();
+					if (!skip68)
+						skip68 = 0x1a84eu;
+					{
+						static const char g3_mill_68k_stamp[] =
+							"G3-MILL-68K-0x1a84e";
+						(void)g3_mill_68k_stamp[0];
+					}
+					if (r24 - 2u == ROMBase + skip68) {
+						gpr(8) = 0;
+						g3_ccr = 4;
+						gpr(24) = ROMBase + skip68 + 8u;
+						gpr(27) = 0xffffffffu;
+						gpr(29) = ROMBase + 0x380000u;
+						pc() = ROMBase + 0x366084u;
+#if NW_BOOT_LOG
+						{
+							static unsigned nr24s;
+							if (nr24s < 8) {
+								nr24s++;
+								char buf[80];
+								snprintf(buf, sizeof(buf),
+									 "G3: 68k r24 skip G3-MILL-68K-0x%x",
+									 (unsigned)skip68);
+								nw_boot_log(buf);
+							}
+						}
+#endif
+						continue;
+					}
 				}
 				if (r24 - 2u >= ROMBase + 0x2bdf0u &&
 				    r24 - 2u < ROMBase + 0x2bec0u) {
@@ -9831,7 +9902,7 @@ void powerpc_cpu::execute(uint32 entry)
 					continue;
 				}
 				if (r24 - 2u >= ROMBase + 0x26c50u &&
-				    r24 - 2u < ROMBase + 0x26de0u) {
+				    r24 - 2u < ROMBase + 0x26e90u) {
 					const uint32 sp = gpr(1);
 					uint32 dest = g3_rom0(vm_read_memory_4(sp));
 					gpr(1) = sp + 4;
@@ -9839,8 +9910,8 @@ void powerpc_cpu::execute(uint32 entry)
 					g3_ccr = 4;
 					if (!g3_r24_ok(dest) || dest == r24 - 2u ||
 					    (dest >= ROMBase + 0x26c50u &&
-					     dest < ROMBase + 0x26de0u))
-						dest = ROMBase + 0x26de0u;
+					     dest < ROMBase + 0x26e90u))
+						dest = ROMBase + 0x26e90u;
 					gpr(24) = dest;
 					gpr(27) = 0xffffffffu;
 					gpr(29) = ROMBase + 0x380000u;
@@ -11984,8 +12055,8 @@ void powerpc_cpu::execute(uint32 entry)
 						p = ROMBase + 0xa88e2u;
 					if (p >= ROMBase + 0xa8900u && p < ROMBase + 0xa894au)
 						p = ROMBase + 0xa894au;
-					if (p >= ROMBase + 0x26614u && p < ROMBase + 0x26de0u)
-						p = ROMBase + 0x26de0u;
+					if (p >= ROMBase + 0x26614u && p < ROMBase + 0x26e90u)
+						p = ROMBase + 0x26e90u;
 					if (p >= ROMBase + 0x271d0u && p < ROMBase + 0x27620u)
 						p = ROMBase + 0x27620u;
 					if (p >= ROMBase + 0x2c858u && p < ROMBase + 0x2ca0eu)
@@ -12048,8 +12119,8 @@ void powerpc_cpu::execute(uint32 entry)
 						p = ROMBase + 0x1ddb2u;
 					if (p >= ROMBase + 0x24c52u && p < ROMBase + 0x24e80u)
 						p = ROMBase + 0x255f6u;
-					if (p >= ROMBase + 0x26c52u && p < ROMBase + 0x26de0u)
-						p = ROMBase + 0x26de0u;
+					if (p >= ROMBase + 0x26c52u && p < ROMBase + 0x26e90u)
+						p = ROMBase + 0x26e90u;
 					if (p >= ROMBase + 0xeac8u && p < ROMBase + 0xf170u)
 						p = ROMBase + 0xf170u;
 					if (p >= ROMBase + 0x160e2u && p < ROMBase + 0x16780u)
@@ -21998,6 +22069,17 @@ void powerpc_cpu::execute(uint32 entry)
 						uint32 sp = gpr(1);
 						if (g3_ea_data(sp))
 							sel = vm_read_memory_2(sp);
+						if (sel == 0xfffcu) {
+#if NW_BOOT_LOG
+							{
+								static unsigned ncfmnat;
+								if (ncfmnat < 8) {
+									ncfmnat++;
+									nw_boot_log("G3: 68k CFM AA5A sel=65532 native");
+								}
+							}
+#endif
+						} else {
 						/* Pascal: result word under args+selector.
 						 * Sel 1 GetSharedLibrary 26 bytes above result.
 						 * Sel 5 FindSymbol 18 bytes above result. */
@@ -22036,6 +22118,7 @@ void powerpc_cpu::execute(uint32 entry)
 							}
 						}
 #endif
+						}
 					} else if (op68 == 0xa96fu) {
 						uint32 elem = g3_rom0(gpr(16));
 						uint32 qh = g3_rom0(gpr(17));
@@ -22449,21 +22532,21 @@ void powerpc_cpu::execute(uint32 entry)
 						   op68 == 0xa450u) {
 						/* Read / HFS glue A450. noErr +
 						 * 0 bytes retried with SetFPos.
-						 * eofErr so the loop can exit.
-						 * Keep Write. */
+						 * mill-22 KEEP 68k: eofErr still
+						 * looped HGetFileInfo. noErr + 0
+						 * actCount. Keep Write. */
 						uint32 pb = g3_rom0(gpr(16));
 						if (g3_ea_data(pb + 16u))
-							vm_write_memory_2(pb + 16u,
-									  0xffd9u);
+							vm_write_memory_2(pb + 16u, 0);
 						if (g3_ea_data(pb + 40u))
 							vm_write_memory_4(pb + 40u, 0);
-						gpr(8) = 0xffffffd9u;
+						gpr(8) = 0;
 #if NW_BOOT_LOG
 						{
 							static unsigned nrd;
 							if (nrd < 8) {
 								nrd++;
-								nw_boot_log("G3: 68k Read A002/A450 eofErr");
+								nw_boot_log("G3: 68k Read A002/A450 noErr");
 							}
 						}
 #endif
@@ -22520,20 +22603,18 @@ void powerpc_cpu::execute(uint32 entry)
 						}
 #endif
 					} else if (op68 == 0xa044u) {
-						/* SetFPos(PB). noErr retried at
-						 * 0xa8248. eofErr (-39) so the
-						 * read loop can exit. */
+						/* mill-22 KEEP 68k: eofErr still
+						 * looped. noErr ioResult. */
 						uint32 pb = g3_rom0(gpr(16));
 						if (g3_ea_data(pb + 16u))
-							vm_write_memory_2(pb + 16u,
-									  0xffd9u);
-						gpr(8) = 0xffffffd9u;
+							vm_write_memory_2(pb + 16u, 0);
+						gpr(8) = 0;
 #if NW_BOOT_LOG
 						{
 							static unsigned nsfp;
 							if (nsfp < 8) {
 								nsfp++;
-								nw_boot_log("G3: 68k SetFPos A044 eofErr");
+								nw_boot_log("G3: 68k SetFPos A044 noErr");
 							}
 						}
 #endif
@@ -22635,8 +22716,18 @@ void powerpc_cpu::execute(uint32 entry)
 							}
 						}
 #endif
-					} else
-						gpr(8) = 0;
+					} else {
+						/* mill trap-68k: do not false-noErr unknown A-lines. */
+#if NW_BOOT_LOG
+						{
+							static unsigned naln;
+							if (naln < 8) {
+								naln++;
+								nw_boot_log("G3: 68k A-line default native");
+							}
+						}
+#endif
+					}
 					if (op68 == 0xa746u) {
 						gpr(16) = RAMBase + 0x9000u;
 						gpr(8) = 0;
@@ -23665,6 +23756,93 @@ void powerpc_cpu::execute(uint32 entry)
 				}
 				if (poison_badd && nw_dec_handler_srr0) {
 					NW_DEC_RESTORE_SAVED();
+					continue;
+				}
+			}
+		}
+#endif
+#ifdef SHEEPSHAVER
+		/* Live mill-3: 04cecd36 / 68fff0dc after unstick.
+		 * Skip the poison callback. Do not mill ppc-mmu. */
+		if (nw_dec_did_leave &&
+		    (pc() == (uint32)NW_G3_HANG_04CECD36_PC ||
+		     pc() == (uint32)NW_G3_HANG_68FFF0DC_EA)) {
+#if NW_BOOT_LOG
+			{
+				static int npoi2;
+				if (!npoi2) {
+					npoi2 = 1;
+					char buf[96];
+					snprintf(buf, sizeof(buf),
+						 "G3: poison callback skip ea=%08x pc=%08x",
+						 (unsigned)pc(),
+						 (unsigned)pc());
+					nw_boot_log(buf);
+				}
+			}
+#endif
+			if (nw_dec_pc_is_guest_code(lr()))
+				pc() = lr();
+			else
+				pc() += 4u;
+			continue;
+		}
+#endif
+#ifdef SHEEPSHAVER
+		/* Live mill-4 KEEP hang. Skip that insn.
+		 * Do not skip 0x3264fc. Do not skip 0x326564.
+		 * Do not skip-list 50325. */
+		if (nw_dec_did_leave) {
+			const uint32 hang_off =
+				(pc() >= ROMBase &&
+				 pc() < ROMBase + 0x500000u)
+					? pc() - ROMBase
+					: 0xffffffffu;
+			if (hang_off == 0x3265a4u) {
+#if NW_BOOT_LOG
+				{
+					static int nhang;
+					if (!nhang) {
+						nhang = 1;
+						char buf[96];
+						snprintf(buf, sizeof(buf),
+							 "G3: KEEP hang skip pc=%08x off=%08x",
+							 (unsigned)pc(),
+							 (unsigned)hang_off);
+						nw_boot_log(buf);
+					}
+				}
+#endif
+				pc() += 4u;
+				continue;
+			}
+			/* mill reenter-68k: mill-3239 last_hb 50326554,
+			 * no 68k. One-shot from 50326 wait into 68k
+			 * interp. Do not skip HARD 0x3264fc/564/568. */
+			if (hang_off >= 0x326000u && hang_off < 0x327000u &&
+			    hang_off != 0x3264fcu &&
+			    hang_off != 0x326564u &&
+			    hang_off != 0x326568u) {
+				static int nre68;
+				if (!nre68) {
+					nre68 = 1;
+					uint32 r24 = g3_fix_r24(gpr(24));
+					if (!g3_r24_ok(r24))
+						r24 = ROMBase + 0x2au;
+					gpr(24) = r24;
+					gpr(27) = 0xffffffffu;
+					gpr(29) = ROMBase + 0x380000u;
+					pc() = ROMBase + 0x366084u;
+#if NW_BOOT_LOG
+					{
+						char buf[96];
+						snprintf(buf, sizeof(buf),
+							 "G3: 68k reenter from hang off=%08x r24=%08x",
+							 (unsigned)hang_off,
+							 (unsigned)r24);
+						nw_boot_log(buf);
+					}
+#endif
 					continue;
 				}
 			}

@@ -51,16 +51,66 @@ def qwen_available() -> bool:
         return False
 
 
+def zero_usage() -> Dict[str, int]:
+    return {"in": 0, "out": 0, "total": 0}
+
+
+def usage_from_response(data: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    u = (data or {}).get("usage") or {}
+    pin = int(u.get("prompt_tokens") or 0)
+    pout = int(u.get("completion_tokens") or 0)
+    tot = int(u.get("total_tokens") or 0)
+    if tot == 0:
+        tot = pin + pout
+    return {"in": pin, "out": pout, "total": tot}
+
+
+def format_tokens(
+    who: str,
+    usage: Optional[Dict[str, Any]] = None,
+    role: str = "",
+) -> str:
+    u = usage or zero_usage()
+    extra = (" (%s)" % role) if role else ""
+    return "TOKENS %s in=%d out=%d total=%d%s" % (
+        who,
+        int(u.get("in") or 0),
+        int(u.get("out") or 0),
+        int(u.get("total") or 0),
+        extra,
+    )
+
+
+def add_usage(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    aa = a or zero_usage()
+    bb = b or zero_usage()
+    return {
+        "in": int(aa.get("in") or 0) + int(bb.get("in") or 0),
+        "out": int(aa.get("out") or 0) + int(bb.get("out") or 0),
+        "total": int(aa.get("total") or 0) + int(bb.get("total") or 0),
+    }
+
+
 def score_g3(
     report: Dict[str, Any],
     window: str = "unknown",
 ) -> Dict[str, Any]:
-    """Return {g3, raw, skipped}. skipped if Qwen down."""
+    """Return {g3, raw, skipped, usage}. skipped if Qwen down or WINDOW is not yes."""
     window = (window or "unknown").lower()
     if window not in ("yes", "no", "unknown"):
         window = "unknown"
-    out = {"g3": "no", "window": window, "skipped": False, "raw": ""}
-    # Operator WINDOW unknown: Qwen YES/UNKNOWN => operator G3 NO.
+    out = {
+        "g3": "no",
+        "window": window,
+        "skipped": False,
+        "raw": "",
+        "usage": zero_usage(),
+        "who": "qwen",
+    }
+    if window != "yes":
+        out["skipped"] = True
+        out["g3"] = "no"
+        return out
     log_lines = pin_g2_packet(report.get("parsed") or report)
     log_txt = "\n".join(log_lines[-80:])
     if not qwen_available():
@@ -96,6 +146,7 @@ def score_g3(
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read().decode())
         raw = data["choices"][0]["message"]["content"]
+        out["usage"] = usage_from_response(data)
     except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError, OSError) as e:
         out["skipped"] = True
         out["raw"] = str(e)
