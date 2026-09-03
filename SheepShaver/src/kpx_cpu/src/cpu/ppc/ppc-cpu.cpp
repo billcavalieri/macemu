@@ -9359,10 +9359,10 @@ void powerpc_cpu::execute(uint32 entry)
 				{
 					uint32 skip68 = nw_g3_skip_68k_runtime_off();
 					if (!skip68)
-						skip68 = 0x1a84eu;
+						skip68 = 0x1a85au;
 					{
 						static const char g3_mill_68k_stamp[] =
-							"G3-MILL-68K-0x1a84e";
+							"G3-MILL-68K-0x1a85a";
 						(void)g3_mill_68k_stamp[0];
 					}
 					if (r24 - 2u == ROMBase + skip68) {
