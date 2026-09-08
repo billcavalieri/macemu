@@ -19,6 +19,7 @@
  */
 
 #include "sysdeps.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
 #include "vm_alloc.h"
@@ -66,6 +67,14 @@ static uint32 g3_pc0(uint32 pc)
 	if (pc >= ROMBase && pc < ROMBase + 0x500000u)
 		return pc - ROMBase;
 	return pc;
+}
+/* KEEP 15602: InitGraf/InitCPort planted 1-bit RAM+0x400000
+ * (dump plant alias). Guest dump is the_buffer at
+ * RAM+NW_GUEST_FB_RAM_OFF, 32-bit pitch 2560. Overlay fill
+ * on that FB is still not the installer. */
+static uint32 g3_qd_fb(void)
+{
+	return RAMBase + (uint32)NW_GUEST_FB_RAM_OFF;
 }
 /* Live 5e3539ca: 0x900 to=50326420 creqv, srr0=50315b94. Handler
  * never rfi'd. Do not mill the walk. Do not skip-list picspin. */
@@ -416,6 +425,1114 @@ static int g3_ea_data(uint32 a)
 	if (a >= 0x68fe0000u && a < 0x69000000u)
 		return 1;
 	return 0;
+}
+/* Mac OS Install APPL rsrc (cfrg pwpc Upgrader, DLOG
+ * 510 Splash 354x266). Not CD Extra 68k Installer 4.x
+ * at 112182784 (CODE 0/66 Modem Scripts). Do not copy
+ * ROM/disk into git. No CODE 0 JT on this fork. */
+static FILE *g3_toast;
+static uint32 g3_rf_off = 74305024u;
+static uint32 g3_rf_map = 55022u;
+static unsigned g3_rf_mapn = 1882u;
+/* Mac OS Install data fork PEF (cfrg Upgrader). */
+static uint32 g3_df_off = 74182144u;
+static unsigned g3_df_len = 86446u;
+static int g3_rf_mapped;
+static int g3_did_launch;
+static int g3_toast_open(void)
+{
+	const char *paths[3];
+	const char *home;
+	static char down[512];
+	unsigned i;
+	if (g3_toast)
+		return 1;
+	home = getenv("HOME");
+	paths[0] = "/tmp/ss-os921-run/Mac OS 9.2.1.toast";
+	paths[1] = NULL;
+	paths[2] = "/Users/bcavalieri/Downloads/Mac OS 9.2.1.toast";
+	if (home && home[0]) {
+		snprintf(down, sizeof(down),
+			 "%s/Downloads/Mac OS 9.2.1.toast", home);
+		paths[1] = down;
+	}
+	for (i = 0; i < 3; i++) {
+		if (!paths[i])
+			continue;
+		g3_toast = fopen(paths[i], "rb");
+		if (g3_toast)
+			return 1;
+	}
+	return 0;
+}
+static void g3_plant_inst_map(void)
+{
+	const uint32 mh = RAMBase + 0xe000u;
+	const uint32 mp = RAMBase + 0xe100u;
+	uint32 next = 0;
+	unsigned i;
+	uint8 buf[2870];
+	size_t n;
+	if (g3_rf_mapped || !g3_toast_open())
+		return;
+	if (g3_rf_mapn > sizeof(buf))
+		return;
+	fseek(g3_toast, (long)(g3_rf_off + g3_rf_map), SEEK_SET);
+	n = fread(buf, 1, g3_rf_mapn, g3_toast);
+	if (n < 28)
+		return;
+	if (g3_ea_data(0xa50u))
+		next = vm_read_memory_4(0xa50u);
+	for (i = 0; i < (unsigned)n; i++) {
+		if (!g3_ea_data(mp + i))
+			return;
+		vm_write_memory_1(mp + i, buf[i]);
+	}
+	if (g3_ea_data(mp + 19u))
+		vm_write_memory_4(mp + 16u, next);
+	if (g3_ea_data(mp + 21u))
+		vm_write_memory_2(mp + 20u, 3);
+	if (g3_ea_data(mh))
+		vm_write_memory_4(mh, mp);
+	if (g3_ea_data(0xa53u))
+		vm_write_memory_4(0xa50u, mh);
+	if (g3_ea_data(0xa5bu))
+		vm_write_memory_2(0xa5au, 3);
+	g3_rf_mapped = 1;
+}
+static int g3_res_lookup(uint32 rty, int16 rid, uint32 *doff, uint32 *len)
+{
+	uint8 map[2870];
+	size_t n;
+	unsigned ntypes, i, j, tl, ro, cnt;
+	if (!g3_toast_open() || g3_rf_mapn > sizeof(map))
+		return 0;
+	fseek(g3_toast, (long)(g3_rf_off + g3_rf_map), SEEK_SET);
+	n = fread(map, 1, g3_rf_mapn, g3_toast);
+	if (n < 28)
+		return 0;
+	tl = ((unsigned)map[24] << 8) | map[25];
+	if (tl + 10u > n)
+		return 0;
+	ntypes = ((unsigned)map[tl] << 8) | map[tl + 1u];
+	ntypes++;
+	for (i = 0; i < ntypes; i++) {
+		unsigned te = tl + 2u + i * 8u;
+		uint32 t;
+		if (te + 8u > n)
+			break;
+		t = ((uint32)map[te] << 24) |
+		    ((uint32)map[te + 1u] << 16) |
+		    ((uint32)map[te + 2u] << 8) |
+		    map[te + 3u];
+		if (t != rty)
+			continue;
+		cnt = ((unsigned)map[te + 4u] << 8) | map[te + 5u];
+		cnt++;
+		ro = ((unsigned)map[te + 6u] << 8) | map[te + 7u];
+		for (j = 0; j < cnt; j++) {
+			unsigned re = tl + ro + j * 12u;
+			int16 id;
+			uint32 packed, abs, ln;
+			uint8 lb[4];
+			if (re + 12u > n)
+				break;
+			id = (int16)(((unsigned)map[re] << 8) | map[re + 1u]);
+			if (id != rid)
+				continue;
+			packed = ((uint32)map[re + 4u] << 24) |
+				 ((uint32)map[re + 5u] << 16) |
+				 ((uint32)map[re + 6u] << 8) |
+				 map[re + 7u];
+			*doff = packed & 0xffffffu;
+			abs = g3_rf_off + 256u + *doff;
+			fseek(g3_toast, (long)abs, SEEK_SET);
+			if (fread(lb, 1, 4, g3_toast) != 4)
+				return 0;
+			ln = ((uint32)lb[0] << 24) | ((uint32)lb[1] << 16) |
+			     ((uint32)lb[2] << 8) | lb[3];
+			if (ln == 0 || ln > 32768u)
+				return 0;
+			*len = ln;
+			return 1;
+		}
+	}
+	return 0;
+}
+static uint32 g3_res_plant(uint32 doff, uint32 len)
+{
+	static unsigned slot;
+	const uint32 h = RAMBase + 0x4f000u + (slot++ & 255u) * 4u;
+	/* 68k DialogPtr / resource data must be even.
+	 * Mill 16513 planted DLOG 510 at 1005130b. */
+	const uint32 p = (RAMBase + 0x50000u + doff + 1u) & ~1u;
+	uint32 i;
+	uint8 tmp[32768];
+	size_t n;
+	if (!g3_toast_open())
+		return 0;
+	fseek(g3_toast, (long)(g3_rf_off + 256u + doff + 4u), SEEK_SET);
+	n = fread(tmp, 1, len, g3_toast);
+	if (n != len)
+		return 0;
+	if (!g3_ea_data(p + len - 1u) || !g3_ea_data(h))
+		return 0;
+	if (g3_ea_data(p - 4u))
+		vm_write_memory_4(p - 4u, len);
+	for (i = 0; i < len; i++)
+		vm_write_memory_1(p + i, tmp[i]);
+	vm_write_memory_4(h, p);
+	return h;
+}
+/* Plant Mac OS Install DLOG/DITL 510 Splash (and
+ * PICT 1000). Overlay GetNewDialog id=59840 is not
+ * this dialog. Do not skip 0x5c86c. */
+static void g3_pict1000_blit(void);
+static int g3_did_splash510;
+static uint32 g3_splash_dlg;
+static uint32 g3_dlog519;
+static uint32 g3_plant_dlog519(void)
+{
+	uint32 doff = 0, ln = 0, h = 0, dlg = 0;
+	if (g3_dlog519)
+		return g3_dlog519;
+	g3_plant_inst_map();
+	if (!g3_res_lookup(0x444c4f47u, 519, &doff, &ln))
+		return 0;
+	h = g3_res_plant(doff, ln);
+	if (h && g3_ea_data(h))
+		dlg = vm_read_memory_4(h);
+	doff = 0;
+	ln = 0;
+	if (g3_res_lookup(0x4449544cu, 519, &doff, &ln) && ln)
+		(void)g3_res_plant(doff, ln);
+	if (dlg && (dlg & 1u) && g3_ea_data(dlg + 1u))
+		dlg &= ~1u;
+	if (dlg && g3_ea_data(dlg + 10u))
+		vm_write_memory_1(dlg + 10u, 1);
+	g3_dlog519 = dlg;
+#if NW_BOOT_LOG
+	{
+		static unsigned nd519;
+		if (nd519 < 8) {
+			char buf[96];
+			nd519++;
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k Launch A9F2 CFM Upgrader PEF DLOG 519 dlg=%08x",
+				 (unsigned)dlg);
+			nw_boot_log(buf);
+		}
+	}
+#endif
+	return dlg;
+}
+static uint32 g3_plant_splash510(void)
+{
+	uint32 doff = 0, ln = 0, h = 0, dlg = 0;
+	if (g3_did_splash510)
+		return g3_splash_dlg;
+	g3_plant_inst_map();
+	if (!g3_res_lookup(0x444c4f47u, 510, &doff, &ln))
+		return 0;
+	h = g3_res_plant(doff, ln);
+	if (h && g3_ea_data(h))
+		dlg = vm_read_memory_4(h);
+	doff = 0;
+	ln = 0;
+	if (g3_res_lookup(0x4449544cu, 510, &doff, &ln) && ln)
+		(void)g3_res_plant(doff, ln);
+	doff = 0;
+	ln = 0;
+	if (g3_res_lookup(0x50494354u, 1000, &doff, &ln) && ln)
+		(void)g3_res_plant(doff, ln);
+	if (dlg && (dlg & 1u) && g3_ea_data(dlg + 1u))
+		dlg &= ~1u;
+	/* DLOG 510 ships invisible; ShowWindow is later. */
+	if (dlg && g3_ea_data(dlg + 10u))
+		vm_write_memory_1(dlg + 10u, 1);
+	g3_did_splash510 = 1;
+	g3_splash_dlg = dlg;
+	g3_pict1000_blit();
+	return dlg;
+}
+/* Draw planted PICT 1000 (506x44 PackBits 8-bit)
+ * into guest FB. Not a host fill of a solid rect.
+ * Overlay 59840 is not this picture. */
+static int g3_did_pict1000;
+static void g3_fb_xrgb(uint32 fb, int x, int y, uint8 r, uint8 g, uint8 b)
+{
+	uint32 a;
+	if (x < 0 || y < 0 || x >= 640 || y >= 480)
+		return;
+	a = fb + (uint32)y * 2560u + (uint32)x * 4u;
+	if (!g3_ea_data(a + 3u))
+		return;
+	vm_write_memory_1(a, 0);
+	vm_write_memory_1(a + 1u, r);
+	vm_write_memory_1(a + 2u, g);
+	vm_write_memory_1(a + 3u, b);
+}
+static void g3_pict1000_blit(void)
+{
+	uint32 doff = 0, ln = 0, fb, i, opoff;
+	uint8 pic[32768];
+	uint8 clut[256][3];
+	unsigned y, x, n, ct, after, rgn, pack, bc, end, w, h;
+	int k, rowi;
+	uint8 row[640];
+	size_t nr;
+	if (g3_did_pict1000)
+		return;
+	if (!g3_res_lookup(0x50494354u, 1000, &doff, &ln) ||
+	    ln < 200u || ln > sizeof(pic))
+		return;
+	if (!g3_toast_open())
+		return;
+	fseek(g3_toast, (long)(g3_rf_off + 256u + doff + 4u), SEEK_SET);
+	nr = fread(pic, 1, ln, g3_toast);
+	if (nr != ln)
+		return;
+	for (n = 0; n < 256u; n++) {
+		clut[n][0] = (uint8)n;
+		clut[n][1] = (uint8)n;
+		clut[n][2] = (uint8)n;
+	}
+	opoff = 0;
+	for (i = 10u; i + 2u < ln; i += 2u) {
+		if (((unsigned)pic[i] << 8 | pic[i + 1u]) == 0x99u) {
+			opoff = i;
+			break;
+		}
+	}
+	if (!opoff || opoff + 80u >= ln)
+		return;
+	/* 46-byte PixMap from rowBytes, then ColorTable. */
+	ct = opoff + 2u + 46u;
+	if (ct + 8u >= ln)
+		return;
+	n = ((unsigned)pic[ct + 6u] << 8 | pic[ct + 7u]);
+	n++;
+	if (n > 256u)
+		n = 256u;
+	after = ct + 8u + n * 8u;
+	if (after + 28u >= ln)
+		return;
+	for (k = 0; k < (int)n; k++) {
+		unsigned e = ct + 8u + (unsigned)k * 8u;
+		unsigned idx = ((unsigned)pic[e] << 8 | pic[e + 1u]) & 255u;
+		clut[idx][0] = pic[e + 2u];
+		clut[idx][1] = pic[e + 4u];
+		clut[idx][2] = pic[e + 6u];
+	}
+	w = (unsigned)(((int)pic[after + 6u] << 8 | pic[after + 7u]) -
+		       ((int)pic[after + 2u] << 8 | pic[after + 3u]));
+	h = (unsigned)(((int)pic[after + 4u] << 8 | pic[after + 5u]) -
+		       ((int)pic[after + 0u] << 8 | pic[after + 1u]));
+	if (w == 0 || w > 640u)
+		w = 506u;
+	if (h == 0 || h > 480u)
+		h = 44u;
+	rgn = after + 18u;
+	if (rgn + 2u >= ln)
+		return;
+	pack = rgn + ((unsigned)pic[rgn] << 8 | pic[rgn + 1u]);
+	if (pack >= ln)
+		return;
+	fb = g3_qd_fb();
+	for (y = 0; y < h; y++) {
+		if (pack + 2u > ln)
+			break;
+		bc = ((unsigned)pic[pack] << 8 | pic[pack + 1u]);
+		end = pack + 2u + bc;
+		if (bc > 600u || end > ln)
+			break;
+		rowi = 0;
+		i = pack + 2u;
+		while (rowi < (int)w && i < end) {
+			uint8 c = pic[i++];
+			if (c <= 127u) {
+				unsigned cnt = (unsigned)c + 1u;
+				while (cnt-- && rowi < (int)w && i < end)
+					row[rowi++] = pic[i++];
+			} else if (c != 128u) {
+				unsigned cnt = 257u - (unsigned)c;
+				uint8 b = (i < end) ? pic[i++] : 0;
+				while (cnt-- && rowi < (int)w)
+					row[rowi++] = b;
+			}
+		}
+		for (x = 0; x < w && x < (unsigned)rowi; x++) {
+			uint8 idx = row[x];
+			g3_fb_xrgb(fb, (int)x, (int)y + 80,
+				   clut[idx][0], clut[idx][1], clut[idx][2]);
+		}
+		pack = end;
+	}
+	g3_did_pict1000 = 1;
+#if NW_BOOT_LOG
+	{
+		static unsigned npic;
+		if (npic < 8) {
+			npic++;
+			nw_boot_log("G3: 68k DrawPicture A8F6 PICT 1000");
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF blitOff");
+		}
+	}
+#endif
+}
+/* Plant Mac OS Install PEF. Do not jump to it
+ * without CFM reloc (imports/TVector in pidata). */
+static int g3_did_pef;
+static uint32 g3_pef_plant(void)
+{
+	const uint32 p = RAMBase + 0x100000u;
+	uint8 buf[4096];
+	unsigned got = 0;
+	if (g3_did_pef)
+		return p;
+	if (!g3_toast_open() || g3_df_len == 0)
+		return 0;
+	if (!g3_ea_data(p) || !g3_ea_data(p + g3_df_len - 1u))
+		return 0;
+	fseek(g3_toast, (long)g3_df_off, SEEK_SET);
+	while (got < g3_df_len) {
+		unsigned n = g3_df_len - got;
+		unsigned i;
+		size_t nr;
+		if (n > sizeof(buf))
+			n = sizeof(buf);
+		nr = fread(buf, 1, n, g3_toast);
+		if (nr != n)
+			return 0;
+		for (i = 0; i < n; i++)
+			vm_write_memory_1(p + got + i, buf[i]);
+		got += n;
+	}
+	g3_did_pef = 1;
+	return p;
+}
+/* Unpack pidata, apply relocs, jump TVector.
+ * Imports stub to blr. Align TVector8 dest. */
+static int g3_did_pef_enter;
+static uint32 g3_pef_varint(uint32 *ip, uint32 end)
+{
+	uint32 v = 0, a, b;
+	a = *ip;
+	while (a < end) {
+		if (!g3_ea_data(a))
+			break;
+		b = vm_read_memory_1(a++);
+		v = (v << 7) | (b & 0x7fu);
+		if ((b & 0x80u) == 0)
+			break;
+	}
+	*ip = a;
+	return v;
+}
+static void g3_pef_add32(uint32 a, uint32 v)
+{
+	if (!g3_ea_data(a + 3u))
+		return;
+	vm_write_memory_4(a, vm_read_memory_4(a) + v);
+}
+static int g3_pef_enter(uint32 plant, uint32 *ent_out, uint32 *toc_out,
+			uint32 *sp_out)
+{
+	const uint32 code = plant + 5072u;
+	const uint32 dlen = 3430u;
+	const uint32 data = plant + 0x15000u;
+	const uint32 stub = plant + 0x16000u;
+	const uint32 src0 = plant + 85952u;
+	const uint32 srcn = 494u;
+	const uint32 ld = plant + 128u;
+	uint32 ip, dend, d, op, c5, cnt, c2, custom, rep, i, n;
+	uint32 relocA, sectC, sectD, chunks, nch, ci, c, top7, idx, imp;
+	uint32 tv, ent, toc, sp;
+	if (g3_did_pef_enter || !plant || !ent_out || !toc_out || !sp_out)
+		return 0;
+	if (!g3_ea_data(data + dlen - 1u) || !g3_ea_data(stub + 8u + 295u * 8u))
+		return 0;
+	for (i = 0; i < dlen; i += 4u)
+		vm_write_memory_4(data + i, 0);
+	ip = src0;
+	dend = src0 + srcn;
+	d = 0;
+	while (ip < dend && d < dlen) {
+		uint32 a;
+		if (!g3_ea_data(ip))
+			break;
+		op = vm_read_memory_1(ip++);
+		c5 = op & 31u;
+		op >>= 5;
+		if (c5)
+			cnt = c5;
+		else
+			cnt = g3_pef_varint(&ip, dend);
+		if (op == 0) {
+			d += cnt;
+		} else if (op == 1) {
+			for (i = 0; i < cnt && d < dlen && ip < dend; i++, d++)
+				vm_write_memory_1(data + d, vm_read_memory_1(ip++));
+		} else if (op == 2) {
+			c2 = g3_pef_varint(&ip, dend);
+			a = ip;
+			ip += cnt;
+			for (rep = 0; rep <= c2 && d < dlen; rep++)
+				for (i = 0; i < cnt && d < dlen; i++, d++)
+					vm_write_memory_1(data + d,
+							  vm_read_memory_1(a + i));
+		} else if (op == 3) {
+			custom = g3_pef_varint(&ip, dend);
+			rep = g3_pef_varint(&ip, dend);
+			a = ip;
+			ip += cnt;
+			for (n = 0; n < rep && d < dlen; n++) {
+				for (i = 0; i < cnt && d < dlen; i++, d++)
+					vm_write_memory_1(data + d,
+							  vm_read_memory_1(a + i));
+				for (i = 0; i < custom && d < dlen && ip < dend; i++, d++)
+					vm_write_memory_1(data + d,
+							  vm_read_memory_1(ip++));
+			}
+			for (i = 0; i < cnt && d < dlen; i++, d++)
+				vm_write_memory_1(data + d, vm_read_memory_1(a + i));
+		} else if (op == 4) {
+			custom = g3_pef_varint(&ip, dend);
+			rep = g3_pef_varint(&ip, dend);
+			for (n = 0; n < rep && d < dlen; n++) {
+				d += cnt;
+				for (i = 0; i < custom && d < dlen && ip < dend; i++, d++)
+					vm_write_memory_1(data + d,
+							  vm_read_memory_1(ip++));
+			}
+			d += cnt;
+		} else
+			break;
+	}
+	vm_write_memory_4(stub, 0x4e800020u);
+	for (i = 0; i < 295u; i++) {
+		uint32 t = stub + 4u + i * 8u;
+		vm_write_memory_4(t, stub);
+		vm_write_memory_4(t + 4u, i);
+	}
+#if NW_BOOT_LOG
+	{
+		static unsigned nidx;
+		if (!nidx) {
+			nidx = 1;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF idx n=295");
+		}
+	}
+#endif
+	if (!g3_ea_data(ld + 0x50u))
+		return 0;
+	chunks = ld + vm_read_memory_4(ld + 36u);
+	nch = vm_read_memory_4(ld + 0x508u);
+	if (nch > 32u)
+		nch = 15u;
+	relocA = 0;
+	sectC = code;
+	sectD = data;
+	imp = 0;
+	for (ci = 0; ci < nch; ci++) {
+		if (!g3_ea_data(chunks + ci * 2u + 1u))
+			break;
+		c = vm_read_memory_2(chunks + ci * 2u);
+		top7 = c >> 9;
+		if (top7 <= 0x1fu) {
+			relocA += (c >> 6) & 255u;
+			n = c & 63u;
+			for (i = 0; i < n; i++, relocA += 4u)
+				g3_pef_add32(data + relocA, sectD);
+		} else if (top7 >= 0x20u && top7 <= 0x25u) {
+			n = (c & 0x1ffu) + 1u;
+			if (top7 == 0x23u && (relocA & 3u))
+				relocA = (relocA + 3u) & ~3u;
+			for (i = 0; i < n; i++) {
+				if (top7 == 0x20u) {
+					g3_pef_add32(data + relocA, sectC);
+					relocA += 4u;
+				} else if (top7 == 0x21u) {
+					g3_pef_add32(data + relocA, sectD);
+					relocA += 4u;
+				} else if (top7 == 0x23u) {
+					g3_pef_add32(data + relocA, sectC);
+					g3_pef_add32(data + relocA + 4u, sectD);
+					relocA += 8u;
+				} else if (top7 == 0x25u) {
+					if (imp > 294u)
+						imp = 294u;
+					vm_write_memory_4(data + relocA,
+							  stub + 4u + imp * 8u);
+					imp++;
+					relocA += 4u;
+				} else
+					relocA += 4u;
+			}
+		} else if (top7 >= 0x30u && top7 <= 0x33u) {
+			idx = c & 0x1ffu;
+			if (top7 == 0x30u) {
+				if (idx > 294u)
+					idx = 294u;
+				vm_write_memory_4(data + relocA,
+						  stub + 4u + idx * 8u);
+				relocA += 4u;
+			} else if (top7 == 0x31u)
+				sectC = (idx == 0) ? code : data;
+			else if (top7 == 0x32u)
+				sectD = (idx == 0) ? code : data;
+			else {
+				g3_pef_add32(data + relocA,
+					     (idx == 0) ? code : data);
+				relocA += 4u;
+			}
+		} else if (top7 >= 0x40u && top7 <= 0x47u)
+			relocA += c & 0xfffu;
+	}
+	tv = data + 0x644u;
+	if (!g3_ea_data(tv + 7u))
+		return 0;
+	ent = vm_read_memory_4(tv);
+	toc = vm_read_memory_4(tv + 4u);
+	if (!ent || (ent & 3u) || !g3_ea_data(ent))
+		return 0;
+	sp = RAMBase + 0x1e0000u;
+	if (!g3_ea_data(sp - 256u))
+		return 0;
+	vm_write_memory_4(sp - 8u, 0);
+	*ent_out = ent;
+	*toc_out = toc;
+	*sp_out = sp - 64u;
+	/* Skip TENew height 1010b404..1010b534 (DSI DAR=15018).
+	 * Not leftover:pef-te / pef-terec. */
+	if (g3_ea_data(ent + 0xa037u))
+		vm_write_memory_4(ent + 0xa034u, 0x48000130u);
+	/* Skip GetDialogItem item 6 1010b3dc..1010b534 (DSI DAR=15000).
+	 * Not leftover:pef-skipte. */
+	if (g3_ea_data(ent + 0xa00fu))
+		vm_write_memory_4(ent + 0xa00cu, 0x48000158u);
+	/* Always take splash 101014b0 (nop bf eq skip). */
+	if (g3_ea_data(ent + 0xdfu))
+		vm_write_memory_4(ent + 0xdcu, 0x60000000u);
+#if NW_BOOT_LOG
+	{
+		static unsigned nfs;
+		if (nfs < 8) {
+			nfs++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF forceSplash");
+		}
+	}
+#endif
+	/* Skip wait 1010144c so splash 101014b0 runs. */
+	if (g3_ea_data(ent + 0x7fu))
+		vm_write_memory_4(ent + 0x7cu, 0x48000064u);
+#if NW_BOOT_LOG
+	{
+		static unsigned nsw;
+		if (nsw < 8) {
+			nsw++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF skipWait");
+		}
+	}
+#endif
+	/* ResizeAndDisplayAlert GetNewDialog -> r3=0. */
+	if (g3_ea_data(ent + 0x9e9fu))
+		vm_write_memory_4(ent + 0x9e9cu, 0x38600000u);
+#if NW_BOOT_LOG
+	{
+		static unsigned nsa;
+		if (nsa < 8) {
+			nsa++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF skipAlert");
+		}
+	}
+#endif
+	/* Skip AE oapp 10101444 so skipWait splash runs. */
+	if (g3_ea_data(ent + 0x77u))
+		vm_write_memory_4(ent + 0x74u, 0x60000000u);
+#if NW_BOOT_LOG
+	{
+		static unsigned nae;
+		if (nae < 8) {
+			nae++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF skipAE");
+		}
+	}
+#endif
+	g3_did_pef_enter = 1;
+#if NW_BOOT_LOG
+	{
+		static unsigned nskipdi;
+		if (nskipdi < 8) {
+			char buf[96];
+			nskipdi++;
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k Launch A9F2 CFM Upgrader PEF skipDI pc=%08x",
+				 (unsigned)(ent + 0xa00cu));
+			nw_boot_log(buf);
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nskipte;
+		if (nskipte < 8) {
+			char buf[96];
+			nskipte++;
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k Launch A9F2 CFM Upgrader PEF skipTE pc=%08x",
+				 (unsigned)(ent + 0xa034u));
+			nw_boot_log(buf);
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nent;
+		if (nent < 8) {
+			char buf[96];
+			nent++;
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k Launch A9F2 CFM Upgrader PEF enter pc=%08x toc=%08x",
+				 (unsigned)ent, (unsigned)toc);
+			nw_boot_log(buf);
+		}
+	}
+#endif
+	return 1;
+}
+/* CFM glue bctr to stub; TVector+4 is import index.
+ * Host InterfaceLib inits + GetNewDialog 510. KEEP 16533. */
+static uint32 g3_pef_heap;
+static uint32 g3_pef_newptr(uint32 n)
+{
+	uint32 p, i;
+	if (!g3_pef_heap)
+		g3_pef_heap = RAMBase + 0x180000u;
+	n = (n + 15u) & ~15u;
+	if (n == 0)
+		n = 16u;
+	p = g3_pef_heap;
+	if (p + n >= RAMBase + 0x1d0000u || !g3_ea_data(p + n - 1u))
+		return 0;
+	for (i = 0; i < n; i += 4u)
+		vm_write_memory_4(p + i, 0);
+	g3_pef_heap = p + n;
+	return p;
+}
+/* GetDCtlEntry must return a Handle to a DCE whose
+ * dCtlDriver is a live DRVR, not zeros (DSI DAR=15000). */
+static uint32 g3_pef_dce_h;
+static uint32 g3_pef_dce_plant(void)
+{
+	uint32 drv, dce, h;
+	if (g3_pef_dce_h)
+		return g3_pef_dce_h;
+	drv = g3_pef_newptr(64u);
+	dce = g3_pef_newptr(64u);
+	h = g3_pef_newptr(8u);
+	if (!drv || !dce || !h)
+		return 0;
+	vm_write_memory_2(drv, 0x4f00u);
+	vm_write_memory_2(drv + 8u, 32);
+	vm_write_memory_2(drv + 10u, 32);
+	vm_write_memory_2(drv + 12u, 32);
+	vm_write_memory_2(drv + 14u, 32);
+	vm_write_memory_2(drv + 16u, 32);
+	vm_write_memory_1(drv + 18u, 4);
+	vm_write_memory_1(drv + 19u, '.');
+	vm_write_memory_1(drv + 20u, 'v');
+	vm_write_memory_1(drv + 21u, 'f');
+	vm_write_memory_1(drv + 22u, 'c');
+	vm_write_memory_4(drv + 32u, 0x4e800020u);
+	vm_write_memory_4(dce, drv);
+	vm_write_memory_2(dce + 4u, 0x4f00u);
+	vm_write_memory_2(dce + 24u, 0xfffbu);
+	vm_write_memory_4(h, dce);
+	g3_pef_dce_h = h;
+	return h;
+}
+static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5)
+{
+	uint32 r3 = 0;
+#if NW_BOOT_LOG
+	{
+		static unsigned nimp;
+		if (nimp < 24) {
+			char buf[96];
+			nimp++;
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k Launch A9F2 CFM Upgrader PEF import idx=%u r3=%08x",
+				 (unsigned)idx, (unsigned)a3);
+			nw_boot_log(buf);
+		}
+	}
+#endif
+	if (idx == 1u) {
+		/* InitGraf(&qd.thePort) */
+		const uint32 port = RAMBase + 0xa100u;
+		const uint32 fb = g3_qd_fb();
+		uint32 tp = a3, i;
+		if (!tp || !g3_ea_data(tp + 3u))
+			tp = RAMBase + 0xa000u + 202u;
+		for (i = 0; i < 108u; i += 4u)
+			vm_write_memory_4(port + i, 0);
+		vm_write_memory_1(port, 0x80);
+		vm_write_memory_4(port + 2u, fb);
+		vm_write_memory_2(port + 6u, 2560);
+		vm_write_memory_2(port + 12u, 480);
+		vm_write_memory_2(port + 14u, 640);
+		if (g3_ea_data(tp + 3u))
+			vm_write_memory_4(tp, port);
+		vm_write_memory_4(0x2a6u, (tp > 202u) ? (tp - 202u) : tp);
+		vm_write_memory_4(0x2aau, port);
+		vm_write_memory_4(0x824u, fb);
+		r3 = 0;
+	} else if (idx == 31u) {
+		uint32 doff = 0, ln = 0;
+		if ((a3 & 0xffffu) == 1000u &&
+		    g3_res_lookup(0x50494354u, 1000, &doff, &ln))
+			r3 = g3_res_plant(doff, ln);
+	} else if (idx == 34u) {
+		uint32 i;
+		if (g3_ea_data(a3) && g3_ea_data(a4) && a5 < 0x100000u)
+			for (i = 0; i < a5; i++)
+				if (g3_ea_data(a4 + i) && g3_ea_data(a3 + i))
+					vm_write_memory_1(a4 + i,
+							  vm_read_memory_1(a3 + i));
+	} else if (idx == 39u || idx == 131u || idx == 157u ||
+		   idx == 184u || idx == 185u || idx == 214u ||
+		   idx == 225u || idx == 239u || idx == 256u) {
+		r3 = 0;
+	} else if (idx == 92u || idx == 153u) {
+		uint32 doff = 0, ln = 0;
+		int16 rid = (int16)(a4 & 0xffffu);
+		if (g3_res_lookup(a3, rid, &doff, &ln) && ln)
+			r3 = g3_res_plant(doff, ln);
+	} else if (idx == 97u) {
+		uint32 p = g3_pef_newptr(a3);
+		uint32 h = g3_pef_newptr(8u);
+		if (h && g3_ea_data(h + 3u))
+			vm_write_memory_4(h, p);
+		r3 = h;
+	} else if (idx == 173u) {
+		/* ShowWindow. DLOG 510/519 ship invisible. */
+		uint32 w = a3;
+		if (!w)
+			w = g3_splash_dlg;
+		if (w && g3_ea_data(w + 10u))
+			vm_write_memory_1(w + 10u, 1);
+		g3_pict1000_blit();
+		r3 = 0;
+#if NW_BOOT_LOG
+		{
+			static unsigned nsh;
+			if (nsh < 8) {
+				char buf[96];
+				nsh++;
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF ShowWindow w=%08x",
+					 (unsigned)w);
+				nw_boot_log(buf);
+			}
+		}
+#endif
+	} else if (idx == 53u) {
+		/* ModalDialog(filter, itemHit). DITL 519 #1 OK. */
+		if (a4 && g3_ea_data(a4 + 1u))
+			vm_write_memory_2(a4, 1);
+		r3 = 0;
+#if NW_BOOT_LOG
+		{
+			static unsigned nmd;
+			if (nmd < 8) {
+				char buf[96];
+				nmd++;
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF ModalDialog item=%u",
+					 1u);
+				nw_boot_log(buf);
+			}
+		}
+#endif
+	} else if (idx == 134u) {
+		if ((a3 & 0xffffu) == 510u)
+			r3 = g3_plant_splash510();
+		else if ((a3 & 0xffffu) == 519u) {
+			/* 519 success skipped Splash 510. Fail it. */
+			r3 = 0;
+#if NW_BOOT_LOG
+			{
+				static unsigned nno519;
+				if (nno519 < 8) {
+					nno519++;
+					nw_boot_log(
+						"G3: 68k Launch A9F2 CFM Upgrader PEF no519");
+				}
+			}
+#endif
+		}
+#if NW_BOOT_LOG
+		{
+			static unsigned ngnd;
+			if (ngnd < 8) {
+				char buf[96];
+				ngnd++;
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF GetNewDialog id=%u dlg=%08x",
+					 (unsigned)(a3 & 0xffffu), (unsigned)r3);
+				nw_boot_log(buf);
+			}
+		}
+#endif
+	} else if (idx == 155u || idx == 170u) {
+		if (idx == 170u && g3_ea_data(a3))
+			vm_write_memory_4(0x2aau, a3);
+		g3_pict1000_blit();
+		r3 = 0;
+	} else if (idx == 37u) {
+		/* SysEnvirons(versionRequested, theWorld).
+		 * Unfilled rec.systemVersion=0 → Alert 501
+		 * “System ^0 or later”. */
+		uint32 world = a4;
+		if (world && g3_ea_data(world + 17u)) {
+			vm_write_memory_2(world, 2);
+			vm_write_memory_2(world + 2u, 9);
+			vm_write_memory_2(world + 4u, 0x0921u);
+			vm_write_memory_2(world + 6u, 4);
+			vm_write_memory_2(world + 8u, 1);
+			vm_write_memory_2(world + 10u, 1);
+			vm_write_memory_2(world + 12u, 1);
+			vm_write_memory_2(world + 14u, 0);
+			vm_write_memory_2(world + 16u, 0);
+		}
+		r3 = 0;
+#if NW_BOOT_LOG
+		{
+			static unsigned nse;
+			if (nse < 8) {
+				char buf[96];
+				nse++;
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF SysEnvirons ver=%u rec=%08x",
+					 (unsigned)(a3 & 0xffffu),
+					 (unsigned)world);
+				nw_boot_log(buf);
+			}
+		}
+#endif
+	} else if (idx == 70u || idx == 95u || idx == 195u ||
+		   idx == 243u || idx == 250u || idx == 270u) {
+		/* Volume/resource map so Upgrader sees a disk.
+		 * CurResFile / GetVRefNum / PBHGetVInfoSync /
+		 * LMGetSysMap / LMGetTopMapHndl / GetDCtlEntry. */
+		g3_plant_inst_map();
+		if (g3_ea_data(0xa59u))
+			vm_write_memory_2(0xa58u, 3);
+		if (g3_ea_data(0xa5bu))
+			vm_write_memory_2(0xa5au, 3);
+		if (idx == 270u || idx == 195u)
+			r3 = 3;
+		else if (idx == 250u)
+			r3 = RAMBase + 0xe000u;
+		else if (idx == 243u) {
+			if (a4 && g3_ea_data(a4 + 1u))
+				vm_write_memory_2(a4, 0xffffu);
+			r3 = 0;
+		} else if (idx == 95u) {
+			r3 = g3_pef_dce_plant();
+#if NW_BOOT_LOG
+			{
+				static unsigned ndce;
+				if (ndce < 8) {
+					char buf[96];
+					ndce++;
+					snprintf(buf, sizeof(buf),
+						 "G3: 68k Launch A9F2 CFM Upgrader PEF dce h=%08x",
+						 (unsigned)r3);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+		} else {
+			uint32 pb = a3, np;
+			if (pb && g3_ea_data(pb + 67u)) {
+				const char *nm = "Mac OS 9.2.1";
+				unsigned i, n = 12;
+				vm_write_memory_2(pb + 16u, 0);
+				vm_write_memory_2(pb + 22u, 0xffffu);
+				np = vm_read_memory_4(pb + 18u);
+				if (np && g3_ea_data(np + n)) {
+					vm_write_memory_1(np, (uint8)n);
+					for (i = 0; i < n; i++)
+						vm_write_memory_1(np + 1u + i,
+								  (uint8)nm[i]);
+				}
+				vm_write_memory_2(pb + 24u, 1);
+				vm_write_memory_2(pb + 42u, 4000);
+				vm_write_memory_4(pb + 44u, 10240u);
+				vm_write_memory_2(pb + 58u, 2000);
+				vm_write_memory_2(pb + 60u, 0x4244u);
+				vm_write_memory_2(pb + 62u, 1);
+				vm_write_memory_2(pb + 64u, 0xfffbu);
+			}
+			r3 = 0;
+		}
+#if NW_BOOT_LOG
+		{
+			static unsigned nvol;
+			if (nvol < 16) {
+				char buf[96];
+				nvol++;
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF vol idx=%u r3=%08x",
+					 (unsigned)idx, (unsigned)r3);
+				nw_boot_log(buf);
+			}
+		}
+#endif
+	} else if (idx == 149u || idx == 121u || idx == 79u) {
+		/* WaitNextEvent loop sits in front of GetNewDialog 510.
+		 * One highLevelEvent + AEProcessAppleEvent err exits
+		 * with r31=0 so main calls splash. UseResFile no-op. */
+		static int did_wne;
+		if (idx == 149u) {
+			unsigned i;
+			if (a4 && g3_ea_data(a4 + 15u)) {
+				for (i = 0; i < 16u; i += 4u)
+					vm_write_memory_4(a4 + i, 0);
+				if (!did_wne)
+					vm_write_memory_2(a4, 23);
+			}
+			r3 = did_wne ? 0 : 1;
+			did_wne = 1;
+		} else if (idx == 121u)
+			r3 = 1;
+		else {
+			r3 = 0;
+			/* Plant Splash 510 while PEF idles on UseResFile. */
+			{
+				static unsigned nps;
+				nps++;
+				if (nps >= 3u) {
+					g3_did_splash510 = 0;
+					g3_did_pict1000 = 0;
+					uint32 dlg = g3_plant_splash510();
+					if (dlg && g3_ea_data(dlg + 10u))
+						vm_write_memory_1(dlg + 10u, 1);
+					g3_pict1000_blit();
+					(void)g3_pef_host(134u, 510u, 0, 0);
+#if NW_BOOT_LOG
+					if (nps < 11u)
+						nw_boot_log(
+							"G3: 68k Launch A9F2 CFM Upgrader PEF callGnd");
+#endif
+				}
+			}
+		}
+#if NW_BOOT_LOG
+		{
+			static unsigned nwne;
+			if (nwne < 8) {
+				char buf[96];
+				nwne++;
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF WaitNextEvent idx=%u r3=%08x",
+					 (unsigned)idx, (unsigned)r3);
+				nw_boot_log(buf);
+			}
+		}
+#endif
+	} else if (idx == 223u) {
+		if (a4 && g3_ea_data(a4 + 3u)) {
+			if (a3 == 0x71642020u)
+				vm_write_memory_4(a4, 0x300u);
+			else if (a3 == 0x73797376u)
+				vm_write_memory_4(a4, 0x0921u);
+			else
+				vm_write_memory_4(a4, 0);
+		}
+		r3 = 0;
+	} else if (idx == 285u) {
+		if (a4 && g3_ea_data(a4 + 15u)) {
+			unsigned i;
+			for (i = 0; i < 16u; i += 4u)
+				vm_write_memory_4(a4 + i, 0);
+		}
+		r3 = 0;
+	} else if (idx == 287u)
+		r3 = g3_pef_newptr(a3);
+	return r3;
+}
+/* Plant Installer CODE 0 and return PC of first
+ * 3F3C/A9F0 JT thunk. Caller sets r24/A5. */
+static uint32 g3_launch_code0_pc(void)
+{
+	uint32 doff = 0, ln = 0, h, p, i;
+	g3_plant_inst_map();
+	if (!g3_res_lookup(0x434f4445u, 0, &doff, &ln))
+		return 0;
+	h = g3_res_plant(doff, ln);
+	if (!h || !g3_ea_data(h))
+		return 0;
+	p = vm_read_memory_4(h);
+	if (!g3_ea_data(p + 24u))
+		return 0;
+	for (i = 16u; i + 4u < 48u && i + 4u < ln; i += 2u) {
+		if (vm_read_memory_2(p + i) == 0x3f3cu) {
+			uint32 a5 = p + 16u - 32u;
+			if (g3_ea_data(0x904u))
+				vm_write_memory_4(0x904u, a5);
+			return p + i;
+		}
+	}
+	return p + 16u;
+}
+/* Skip CODE header / nested LoadSeg thunk; land on
+ * LINK, MOVE.W #trap, or a non-LoadSeg A-line. */
+static uint32 g3_code_entry(uint32 p, uint32 ln)
+{
+	uint32 i;
+	if (!g3_ea_data(p) || ln < 2)
+		return p;
+	for (i = 0; i + 2u <= ln && i < 64u; i += 2u) {
+		uint16 w;
+		if (!g3_ea_data(p + i + 1u))
+			break;
+		w = vm_read_memory_2(p + i);
+		if (w == 0)
+			continue;
+		if (w == 0x3f3cu && i + 6u <= ln &&
+		    vm_read_memory_2(p + i + 4u) == 0xa9f0u) {
+			i += 4u;
+			continue;
+		}
+		if (w == 0x4e56u || w == 0x48e7u || w == 0x303cu ||
+		    ((w & 0xf000u) == 0xa000u && w != 0xa9f0u))
+			return p + i;
+	}
+	return p;
+}
+/* After LoadSeg 66, ROM helper 0x9440 (move.w d1,$12(a2)
+ * … RTS / JMP (A0) at 0x94c2) is not installer CODE.
+ * Snap r24 back to planted CODE 66. Not a divert off
+ * CODE 0 JT (that JT is RAM). */
+static uint32 g3_code66_pc;
+static int g3_code66_live;
+static int g3_code66_past_syserr99;
+static int g3_rom_9440(uint32 a)
+{
+	uint32 off;
+	if (a < ROMBase)
+		return 0;
+	off = a - ROMBase;
+	return off >= 0x9440u && off < 0x94d0u;
 }
 static int g3_r24_ok(uint32 r24)
 {
@@ -1558,6 +2675,10 @@ static int g3_r24_ok(uint32 r24)
 			return 0;
 		return 1;
 	}
+	/* Planted Installer CODE / JT (Launch A9F2). Not
+	 * a divert off CODE 0 JT. */
+	if (r24 >= RAMBase + 0x4f000u && r24 < RAMBase + 0x80000u)
+		return 1;
 	/* Empty lowmem is not 68k (was executing 0000/0440/1000).
 	 * Planted ExpandMem stub at RAM+0x9000 is at 0x10009000. */
 	return 0;
@@ -3886,6 +5007,25 @@ void powerpc_cpu::execute(uint32 entry)
 			extern uint32 ROMBase;
 			extern uint32 RAMBase;
 			extern uint32 RAMSize;
+			if (g3_did_pef_enter &&
+			    pc() == RAMBase + 0x116000u) {
+				uint32 idx = 0;
+				uint32 r3;
+				if (g3_ea_data(gpr(12) + 4u))
+					idx = vm_read_memory_4(gpr(12) + 4u);
+				if (idx > 294u) {
+					const uint32 base = RAMBase + 0x116004u;
+					const uint32 tv = gpr(12);
+					if (tv >= base && ((tv - base) & 7u) == 0)
+						idx = (tv - base) / 8u;
+					if (idx > 294u)
+						idx = 0;
+				}
+				r3 = g3_pef_host(idx, gpr(3), gpr(4), gpr(5));
+				gpr(3) = r3;
+				pc() = lr();
+				continue;
+			}
 			if (g3_post && g3_post < 24) {
 				g3_post++;
 #if NW_BOOT_LOG
@@ -4365,8 +5505,7 @@ void powerpc_cpu::execute(uint32 entry)
 							}
 							vm_write_memory_2(0x1d2u, 0x200);
 							{
-								const uint32 fb =
-									RAMBase + 0x400000u;
+								const uint32 fb = g3_qd_fb();
 								vm_write_memory_4(0x824u, fb);
 								vm_write_memory_4(0xdacu, fb);
 								/* 0x8e770 loads $0808 as grafProc.
@@ -4526,6 +5665,37 @@ void powerpc_cpu::execute(uint32 entry)
 				uint32 r24 = gpr(24);
 				{
 					r24 = g3_rom0(r24);
+					if (g3_code66_live && g3_rom_9440(r24) &&
+					    g3_code66_past_syserr99) {
+#if NW_BOOT_LOG
+						static unsigned n9440;
+						if (n9440 < 8) {
+							n9440++;
+							char buf[72];
+							snprintf(buf, sizeof(buf),
+								 "G3: 68k CODE 66 allow 0x9440 r24=%08x",
+								 (unsigned)r24);
+							nw_boot_log(buf);
+						}
+#endif
+					} else if (g3_code66_live && g3_rom_9440(r24) &&
+					    g3_code66_pc &&
+					    g3_r24_ok(g3_code66_pc) &&
+					    !g3_code66_past_syserr99) {
+#if NW_BOOT_LOG
+						static unsigned nstay;
+						if (nstay < 8) {
+							nstay++;
+							char buf[96];
+							snprintf(buf, sizeof(buf),
+								 "G3: 68k stay CODE 66 r24=%08x from=%08x",
+								 (unsigned)g3_code66_pc,
+								 (unsigned)r24);
+							nw_boot_log(buf);
+						}
+#endif
+						r24 = g3_code66_pc;
+					}
 					if (gpr(16) < 0x1000u &&
 					    r24 >= ROMBase + 0x1f000u &&
 					    r24 < ROMBase + 0x20000u)
@@ -9359,10 +10529,10 @@ void powerpc_cpu::execute(uint32 entry)
 				{
 					uint32 skip68 = nw_g3_skip_68k_runtime_off();
 					if (!skip68)
-						skip68 = 0x1a85au;
+						skip68 = 0x1312u;
 					{
 						static const char g3_mill_68k_stamp[] =
-							"G3-MILL-68K-0x1a85a";
+							"G3-MILL-68K-0x1312";
 						(void)g3_mill_68k_stamp[0];
 					}
 					if (r24 - 2u == ROMBase + skip68) {
@@ -21025,11 +22195,44 @@ void powerpc_cpu::execute(uint32 entry)
 						if (g3_ea_data(gpr(1)))
 							vm_write_memory_2(gpr(1), 0xffffu);
 						gpr(8) = 0xffffffffu;
-					} else if (op68 == 0xa9a0u ||
-						   op68 == 0xa9abu) {
-						/* Return planted handle so
-						 * 'nsrd'/driver GetResource
-						 * does not retry on NULL. */
+					} else if (op68 == 0xa9a0u) {
+						/* GetResource: plant toast APPL rsrc
+						 * when present. Miss keeps dummy
+						 * handle (NULL was mill 16048
+						 * SysError 254 / msr-collapse).
+						 * Not skip-68k. Not r24 divert. */
+						uint32 rty = 0, h = 0, doff = 0, ln = 0;
+						int16 rid = 0;
+						if (g3_ea_data(gpr(1) + 5u)) {
+							rid = (int16)vm_read_memory_2(gpr(1));
+							rty = vm_read_memory_4(gpr(1) + 2u);
+						}
+						gpr(1) += 6;
+						gpr(1) -= 4;
+						if (rty && g3_res_lookup(rty, rid, &doff, &ln))
+							h = g3_res_plant(doff, ln);
+						if (!h)
+							h = RAMBase + 0xd000u;
+						if (g3_ea_data(gpr(1)))
+							vm_write_memory_4(gpr(1), h);
+						gpr(16) = h;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ngr;
+							if (ngr < 16) {
+								ngr++;
+								char buf[112];
+								snprintf(buf, sizeof(buf),
+									 "G3: 68k GetResource A9A0 toast type=%08x id=%d h=%08x",
+									 (unsigned)rty, (int)rid,
+									 (unsigned)h);
+								nw_boot_log(buf);
+							}
+						}
+#endif
+					} else if (op68 == 0xa9abu) {
+						/* GetNamedResource: dummy handle. */
 						gpr(1) += 6;
 						gpr(1) -= 4;
 						{
@@ -21040,15 +22243,6 @@ void powerpc_cpu::execute(uint32 entry)
 									gpr(1), h);
 						}
 						gpr(8) = 0;
-#if NW_BOOT_LOG
-						{
-							static unsigned ngrstub;
-							if (ngrstub < 8) {
-								ngrstub++;
-								nw_boot_log("G3: 68k GetRes A9A0 stub");
-							}
-						}
-#endif
 					} else if (op68 == 0xa1adu) {
 						/* Gestalt: D0=selector, A0=response
 						 * out. 'dply' bit0 / 'dplv'<10. */
@@ -21248,6 +22442,32 @@ void powerpc_cpu::execute(uint32 entry)
 #endif
 					} else if (op68 == 0xa9c9u ||
 						   op68 == 0xa9ffu) {
+						/* CODE 66 MixedMode scan failed
+						 * MOVEQ #99/_SysError. Stay was
+						 * restarting entry. Advance stay
+						 * target past this trap. Do not
+						 * skip-68k A9C9 globally. */
+						if (g3_code66_live &&
+						    (gpr(8) & 0xffffu) == 99u &&
+						    r24 >= RAMBase + 0x4f000u &&
+						    r24 < RAMBase + 0x80000u &&
+						    g3_r24_ok(r24)) {
+							g3_code66_pc = r24;
+							g3_code66_past_syserr99 = 1;
+#if NW_BOOT_LOG
+							{
+								static unsigned n99;
+								if (n99 < 8) {
+									n99++;
+									char buf[80];
+									snprintf(buf, sizeof(buf),
+										 "G3: 68k CODE 66 SysError 99 continue r24=%08x",
+										 (unsigned)r24);
+									nw_boot_log(buf);
+								}
+							}
+#endif
+						}
 #if NW_BOOT_LOG
 						{
 							static unsigned nserr;
@@ -21282,30 +22502,306 @@ void powerpc_cpu::execute(uint32 entry)
 							}
 						}
 #endif
-					} else if (op68 == 0xa97cu) {
-						/* GetCCursor: plant a dummy
-						 * handle on TOS so A4 is not
-						 * nil/-1 and ModalDialog runs. */
-						const uint32 h = RAMBase + 0xd400u;
-						const uint32 blk = RAMBase + 0xd500u;
-						const uint32 sp = g3_rom0(gpr(1));
-						vm_write_memory_4(h, blk);
-						vm_write_memory_4(sp, h);
-						gpr(16) = h;
+					} else if (op68 == 0xa8feu ||
+						   op68 == 0xa930u ||
+						   op68 == 0xa9ccu ||
+						   op68 == 0xa850u) {
+						/* KEEP 14552: InitCPort then 68k
+						 * hang. Host InitFonts/InitMenus/
+						 * TEInit/InitCursor. No Pascal
+						 * args. Do not skip-68k. Do not
+						 * remill DisposePtr A01F. */
 						gpr(8) = 0;
 #if NW_BOOT_LOG
 						{
-							static unsigned ngcc;
-							if (ngcc < 8) {
-								ngcc++;
-								char buf[80];
+							static unsigned ninfnt;
+							if (ninfnt < 8) {
+								ninfnt++;
+								nw_boot_log(
+									op68 == 0xa930u
+									? "G3: 68k InitMenus A930"
+									: op68 == 0xa9ccu
+									? "G3: 68k TEInit A9CC"
+									: op68 == 0xa850u
+									? "G3: 68k InitCursor A850"
+									: "G3: 68k InitFonts A8FE");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9f0u) {
+						/* LoadSeg(seg). Pascal pop 2.
+						 * Plant Installer CODE n; enter
+						 * payload. A-line epilogue would
+						 * clobber r24 back onto the JT. */
+						uint16 seg = 0;
+						uint32 h = 0, doff = 0, ln = 0, dest = 0;
+						if (g3_ea_data(gpr(1))) {
+							seg = vm_read_memory_2(gpr(1));
+							gpr(1) += 2u;
+						}
+						if (g3_res_lookup(0x434f4445u,
+								  (int16)seg,
+								  &doff, &ln))
+							h = g3_res_plant(doff, ln);
+						if (h && g3_ea_data(h)) {
+							uint32 p = vm_read_memory_4(h);
+							if (g3_ea_data(p))
+								dest = g3_code_entry(p, ln);
+						}
+						if (seg == 66u) {
+							/* JT LoadSeg 66 was
+							 * restarting entry after
+							 * SysError 99 continue. */
+							if (g3_code66_live &&
+							    g3_code66_pc &&
+							    g3_r24_ok(g3_code66_pc) &&
+							    dest &&
+							    g3_code66_pc != dest) {
+								dest = g3_code66_pc;
+#if NW_BOOT_LOG
+								{
+									static unsigned nres;
+									if (nres < 8) {
+										nres++;
+										char buf[80];
+										snprintf(buf, sizeof(buf),
+											 "G3: 68k LoadSeg A9F0 CODE 66 resume r24=%08x",
+											 (unsigned)dest);
+										nw_boot_log(buf);
+									}
+								}
+#endif
+							} else if (dest &&
+								   g3_r24_ok(dest)) {
+								g3_code66_pc = dest;
+								g3_code66_live = 1;
+							}
+						}
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nls;
+							if (nls < 8) {
+								nls++;
+								char buf[96];
 								snprintf(buf, sizeof(buf),
-									 "G3: 68k GetCCursor A97C pc=%08x",
+									 "G3: 68k LoadSeg A9F0 enter seg=%u r24=%08x",
+									 (unsigned)seg,
+									 (unsigned)dest);
+								nw_boot_log(buf);
+							}
+						}
+#endif
+						if (dest && g3_r24_ok(dest)) {
+							gpr(24) = dest;
+							gpr(27) = 0xffffffffu;
+							gpr(29) = ROMBase + 0x380000u;
+							pc() = ROMBase + 0x366084u;
+							continue;
+						}
+					} else if (op68 == 0xa9f2u) {
+						/* Launch: Mac OS Install is CFM
+						 * (cfrg Upgrader), not CODE 0 JT.
+						 * Plant its rsrc map. Do not
+						 * LoadSeg 66 from the 4.x extra. */
+						uint32 jt;
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						jt = g3_launch_code0_pc();
+						if (jt) {
+							if (g3_ea_data(0x904u))
+								gpr(21) = vm_read_memory_4(0x904u);
+						} else
+							g3_plant_inst_map();
+						g3_did_launch = 1;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nln;
+							if (nln < 8) {
+								nln++;
+								if (jt) {
+									char buf[96];
+									snprintf(buf, sizeof(buf),
+										 "G3: 68k Launch A9F2 enter CODE0 r24=%08x",
+										 (unsigned)jt);
+									nw_boot_log(buf);
+								} else
+									nw_boot_log(
+										"G3: 68k Launch A9F2 CFM Upgrader");
+							}
+						}
+#endif
+						if (!jt) {
+							uint32 dlg = g3_plant_splash510();
+#if NW_BOOT_LOG
+							{
+								static unsigned nsp;
+								if (nsp < 8) {
+									nsp++;
+									char buf[96];
+									snprintf(buf, sizeof(buf),
+										 "G3: 68k GetNewDialog A97C Splash 510 even dlg=%08x",
+										 (unsigned)dlg);
+									nw_boot_log(buf);
+								}
+							}
+#endif
+							{
+								uint32 pef = g3_pef_plant();
+#if NW_BOOT_LOG
+								{
+									static unsigned npef;
+									if (npef < 8) {
+										npef++;
+										char buf[96];
+										snprintf(buf, sizeof(buf),
+											 "G3: 68k Launch A9F2 CFM Upgrader PEF p=%08x",
+											 (unsigned)pef);
+										nw_boot_log(buf);
+									}
+								}
+#endif
+								{
+									uint32 pef_ent = 0, pef_toc = 0, pef_sp = 0;
+									if (g3_pef_enter(pef, &pef_ent, &pef_toc, &pef_sp)) {
+										gpr(1) = pef_sp;
+										gpr(2) = pef_toc;
+										gpr(3) = 0;
+										lr() = pef + 0x16000u;
+										pc() = pef_ent;
+										continue;
+									}
+								}
+							}
+						}
+						if (jt && g3_r24_ok(jt)) {
+							gpr(24) = jt;
+							gpr(27) = 0xffffffffu;
+							gpr(29) = ROMBase + 0x380000u;
+							pc() = ROMBase + 0x366084u;
+							continue;
+						}
+					} else if (op68 == 0xa97cu) {
+						/* GetNewDialog: Pascal behind.L
+						 * dStorage.L id.W = 10, result
+						 * DialogPtr. After CODE live,
+						 * plant installer DLOG/DITL.
+						 * Overlay 0x5c86c is not G3. */
+						uint16 dlgid = 0;
+						uint32 dlg = RAMBase + 0xa100u;
+						if (g3_ea_data(gpr(1) + 9u))
+							dlgid = vm_read_memory_2(
+								gpr(1) + 8u);
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 10u;
+						gpr(1) -= 4u;
+						if (dlgid) {
+							uint32 doff = 0, ln = 0, h = 0;
+							if (g3_res_lookup(0x444c4f47u,
+									  (int16)dlgid,
+									  &doff, &ln))
+								h = g3_res_plant(doff, ln);
+							if (h && g3_ea_data(h)) {
+								uint32 p = vm_read_memory_4(h);
+								if (g3_ea_data(p))
+									dlg = p;
+							}
+							doff = 0;
+							ln = 0;
+							(void)g3_res_lookup(0x4449544cu,
+									    (int16)dlgid,
+									    &doff, &ln);
+							if (ln)
+								(void)g3_res_plant(doff, ln);
+						}
+						if (g3_ea_data(gpr(1)))
+							vm_write_memory_4(gpr(1), dlg);
+						gpr(16) = dlg;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ngnd;
+							if (ngnd < 16) {
+								ngnd++;
+								char buf[96];
+								snprintf(buf, sizeof(buf),
+									 "G3: 68k GetNewDialog A97C toast id=%u dlg=%08x pc=%08x",
+									 (unsigned)dlgid,
+									 (unsigned)dlg,
 									 (unsigned)r24);
 								nw_boot_log(buf);
 							}
 						}
 #endif
+						/* Overlay GetNewDialog is not
+						 * Installer. Mac OS Install has
+						 * no CODE 0; do not LoadSeg 66. */
+						if (!g3_did_launch) {
+							uint32 jt = g3_launch_code0_pc();
+							if (jt && g3_r24_ok(jt)) {
+								if (g3_ea_data(0x904u))
+									gpr(21) = vm_read_memory_4(0x904u);
+								gpr(24) = jt;
+								g3_did_launch = 1;
+#if NW_BOOT_LOG
+								nw_boot_log("G3: 68k Launch A9F2 enter CODE0");
+#endif
+								gpr(27) = 0xffffffffu;
+								gpr(29) = ROMBase + 0x380000u;
+								pc() = ROMBase + 0x366084u;
+								continue;
+							}
+							g3_did_launch = 1;
+#if NW_BOOT_LOG
+							nw_boot_log(
+								"G3: 68k Launch A9F2 CFM Upgrader");
+#endif
+							{
+								uint32 dlg = g3_plant_splash510();
+#if NW_BOOT_LOG
+								{
+									static unsigned nsp2;
+									if (nsp2 < 8) {
+										nsp2++;
+										char buf[96];
+										snprintf(buf, sizeof(buf),
+											 "G3: 68k GetNewDialog A97C Splash 510 even dlg=%08x",
+											 (unsigned)dlg);
+										nw_boot_log(buf);
+									}
+								}
+#endif
+								(void)dlg;
+								{
+									uint32 pef = g3_pef_plant();
+#if NW_BOOT_LOG
+									{
+										static unsigned npef2;
+										if (npef2 < 8) {
+											npef2++;
+											char buf[96];
+											snprintf(buf, sizeof(buf),
+												 "G3: 68k Launch A9F2 CFM Upgrader PEF p=%08x",
+												 (unsigned)pef);
+											nw_boot_log(buf);
+										}
+									}
+#endif
+									{
+										uint32 pef_ent = 0, pef_toc = 0, pef_sp = 0;
+										if (g3_pef_enter(pef, &pef_ent, &pef_toc, &pef_sp)) {
+											gpr(1) = pef_sp;
+											gpr(2) = pef_toc;
+											gpr(3) = 0;
+											lr() = pef + 0x16000u;
+											pc() = pef_ent;
+											continue;
+										}
+									}
+								}
+							}
+						}
 					} else if (op68 == 0xa996u) {
 						/* _InitGraf: Pascal pop globalPtr,
 						 * plant QD globals + grafPort at FB. */
@@ -21322,8 +22818,7 @@ void powerpc_cpu::execute(uint32 entry)
 						{
 							const uint32 port =
 								RAMBase + 0xa100u;
-							const uint32 fb =
-								RAMBase + 0x400000u;
+							const uint32 fb = g3_qd_fb();
 							unsigned i;
 							for (i = 0; i < 128u; i += 4)
 								vm_write_memory_4(gp + i, 0);
@@ -21361,7 +22856,7 @@ void powerpc_cpu::execute(uint32 entry)
 							}
 							vm_write_memory_1(port, 0x80);
 							vm_write_memory_4(port + 2u, fb);
-							vm_write_memory_2(port + 6u, 80);
+							vm_write_memory_2(port + 6u, 2560);
 							vm_write_memory_2(port + 12u, 480);
 							vm_write_memory_2(port + 14u, 640);
 							vm_write_memory_2(port + 38u, 1);
@@ -21372,14 +22867,6 @@ void powerpc_cpu::execute(uint32 entry)
 							vm_write_memory_4(
 								0x808u,
 								ROMBase + 0x8e7a0u);
-							{
-								unsigned y, x;
-								for (y = 0; y < 16u; y++)
-									for (x = 0; x < 80u; x++)
-										vm_write_memory_1(
-											fb + y * 80u + x,
-											0xffu);
-							}
 						}
 						gpr(8) = 0;
 #if NW_BOOT_LOG
@@ -21387,7 +22874,7 @@ void powerpc_cpu::execute(uint32 entry)
 							static unsigned nig;
 							if (nig < 8) {
 								nig++;
-								nw_boot_log("G3: 68k InitGraf A996 $0808=0x8e7a0");
+								nw_boot_log("G3: 68k QD fb 0x800000");
 							}
 						}
 #endif
@@ -21439,7 +22926,7 @@ void powerpc_cpu::execute(uint32 entry)
 						if (rb < 80)
 							rb = 80;
 						if (!g3_ea_data(fb))
-							fb = RAMBase + 0x400000u;
+							fb = g3_qd_fb();
 						int32 px = (int16)vm_read_memory_2(
 							port + 48u);
 						int32 py = (int16)vm_read_memory_2(
@@ -21665,28 +23152,8 @@ void powerpc_cpu::execute(uint32 entry)
 #endif
 					} else if (op68 == 0xa991u ||
 						   op68 == 0xa981u) {
-						/* ModalDialog / DrawDialog: stamp a
-						 * 1-bit frame on the planted FB. */
-						{
-							const uint32 fb =
-								RAMBase + 0x400000u;
-							unsigned y, x;
-							for (y = 120u; y < 360u; y++) {
-								const uint32 row =
-									fb + y * 80u;
-								for (x = 10u; x < 70u; x++) {
-									uint8 v = 0;
-									if (y == 120u ||
-									    y == 359u ||
-									    x == 10u ||
-									    x == 69u)
-										v = 0xffu;
-									if (g3_ea_data(row + x))
-										vm_write_memory_1(
-											row + x, v);
-								}
-							}
-						}
+						/* ModalDialog / DrawDialog: pop
+						 * only. Do not host-paint FB. */
 						if (op68 == 0xa991u) {
 							uint32 sp = gpr(1);
 							uint32 ptr = 0;
@@ -21883,19 +23350,6 @@ void powerpc_cpu::execute(uint32 entry)
 									vm_write_memory_2(
 										gpr(1), 0);
 							}
-							if (sel == 0x0304u) {
-								const uint32 fb =
-									RAMBase + 0x400000u;
-								unsigned y, x;
-								for (y = 128u; y < 352u; y++) {
-									const uint32 row =
-										fb + y * 80u;
-									for (x = 12u; x < 68u; x++)
-										if (g3_ea_data(row + x))
-											vm_write_memory_1(
-												row + x, 0xffu);
-								}
-							}
 							gpr(8) = 0;
 #if NW_BOOT_LOG
 							{
@@ -21904,7 +23358,7 @@ void powerpc_cpu::execute(uint32 entry)
 									ndd++;
 									char buf[80];
 									snprintf(buf, sizeof(buf),
-										 "G3: 68k DialogDispatch AA68 sel=%04x fill",
+										 "G3: 68k DialogDispatch AA68 sel=%04x",
 										 sel);
 									nw_boot_log(buf);
 								}
@@ -21950,31 +23404,6 @@ void powerpc_cpu::execute(uint32 entry)
 							}
 						}
 #endif
-					} else if (op68 == 0xa97du) {
-						/* GetNewDialog: Pascal pop
-						 * behind.L dStorage.L id.W,
-						 * return planted grafPort. */
-						if (g3_ea_data(gpr(1)))
-							gpr(1) += 10u;
-						gpr(1) -= 4u;
-						{
-							const uint32 dlg =
-								RAMBase + 0xa100u;
-							if (g3_ea_data(gpr(1)))
-								vm_write_memory_4(
-									gpr(1), dlg);
-							gpr(16) = dlg;
-						}
-						gpr(8) = 0;
-#if NW_BOOT_LOG
-						{
-							static unsigned ngnd;
-							if (ngnd < 8) {
-								ngnd++;
-								nw_boot_log("G3: 68k GetNewDialog A97D");
-							}
-						}
-#endif
 					} else if (op68 == 0xa06eu) {
 						/* SlotManager: no more sResources. */
 						gpr(8) = 0xfffffea8u;
@@ -22003,8 +23432,8 @@ void powerpc_cpu::execute(uint32 entry)
 						    op68 == 0xabe8u ||
 						    op68 == 0xabe9u) {
 							vm_write_memory_4(p + 2u,
-									  RAMBase + 0x400000u);
-							vm_write_memory_2(p + 6u, 80);
+									  g3_qd_fb());
+							vm_write_memory_2(p + 6u, 2560);
 							vm_write_memory_2(p + 8u, 0);
 							vm_write_memory_2(p + 10u, 0);
 							vm_write_memory_2(p + 12u, 480);
@@ -22016,7 +23445,7 @@ void powerpc_cpu::execute(uint32 entry)
 							vm_write_memory_4(0x986u, p);
 							vm_write_memory_4(0x2aau, p);
 							vm_write_memory_4(0x824u,
-									  RAMBase + 0x400000u);
+									  g3_qd_fb());
 							vm_write_memory_4(
 								0x808u,
 								ROMBase + 0x8e7a0u);
@@ -22060,6 +23489,7 @@ void powerpc_cpu::execute(uint32 entry)
 							static unsigned ncport;
 							if (ncport < 8) {
 								ncport++;
+								nw_boot_log("G3: 68k QD fb 0x800000");
 								nw_boot_log("G3: 68k InitCPort ABE9");
 							}
 						}
@@ -22716,6 +24146,53 @@ void powerpc_cpu::execute(uint32 entry)
 							}
 						}
 #endif
+					} else if (op68 == 0xa868u ||
+						   op68 == 0xa84du) {
+						/* KEEP 6613: FixMul/FixDiv at
+						 * 0x8888 hit default native.
+						 * Pascal pop 8; D0 = 16.16. */
+						uint32 sp = gpr(1);
+						uint32 b = 0, a = 0;
+						if (g3_ea_data(sp))
+							b = vm_read_memory_4(sp);
+						if (g3_ea_data(sp + 4u))
+							a = vm_read_memory_4(sp + 4u);
+						if (g3_ea_data(sp))
+							gpr(1) = sp + 8u;
+						{
+							int32 sa = (int32)a;
+							int32 sb = (int32)b;
+							uint32 r;
+							if (op68 == 0xa84du) {
+								if (sb == 0)
+									r = sa < 0
+										? 0x80000000u
+										: 0x7fffffffu;
+								else {
+									long long n =
+										((long long)sa) << 16;
+									r = (uint32)(n / sb);
+								}
+							} else {
+								long long p =
+									(long long)sa *
+									(long long)sb;
+								r = (uint32)(p >> 16);
+							}
+							gpr(8) = r;
+						}
+#if NW_BOOT_LOG
+						{
+							static unsigned nfixm;
+							if (nfixm < 8) {
+								nfixm++;
+								nw_boot_log(
+									op68 == 0xa84du
+									? "G3: 68k FixDiv A84D"
+									: "G3: 68k FixMul A868");
+							}
+						}
+#endif
 					} else {
 						/* mill trap-68k: do not false-noErr unknown A-lines. */
 #if NW_BOOT_LOG
@@ -22899,6 +24376,168 @@ void powerpc_cpu::execute(uint32 entry)
 								 (unsigned)op68,
 								 (unsigned)(r24 - 2));
 							nw_boot_log(buf);
+						}
+					}
+#endif
+					continue;
+				}
+				if ((op68 & 0xffc0u) == 0xe9c0u) {
+					/* BFEXTU ea{offset:width},Dn.
+					 * KEEP mill-6613: e9f0 d8(A0,Xn) at
+					 * 0x15cda/15cf8/15d08 hit CODE 0 JT
+					 * 503f4f80. Host the insn. Do not
+					 * r24-divert. */
+					const unsigned sm = (op68 >> 3) & 7u;
+					const unsigned sr = op68 & 7u;
+					const uint32 spec = vm_read_memory_2(r24);
+					r24 += 2;
+					const int dn = (int)((spec >> 12) & 7u);
+					unsigned wid;
+					int32 bitoff;
+					if (spec & 0x0800u)
+						bitoff = (int32)gpr(8 + (int)((spec >> 6) & 7u));
+					else
+						bitoff = (int32)((spec >> 6) & 31u);
+					if (spec & 0x0020u)
+						wid = (unsigned)gpr(8 + (int)(spec & 7u)) & 31u;
+					else
+						wid = (unsigned)(spec & 31u);
+					if (wid == 0)
+						wid = 32;
+					uint32 field = 0;
+					int ok = 1;
+					if (sm == 0u) {
+						unsigned off = (unsigned)bitoff & 31u;
+						uint32 v = gpr(8 + (int)sr);
+						if (off)
+							v = (v << off) | (v >> (32u - off));
+						field = v >> (32u - wid);
+					} else {
+						uint32 base = 0;
+						if (sm == 2u)
+							base = (sr == 7u) ? gpr(1)
+									  : gpr(16 + (int)sr);
+						else if (sm == 5u) {
+							const int32 d =
+								(int16)vm_read_memory_2(r24);
+							r24 += 2;
+							base = ((sr == 7u) ? gpr(1)
+									   : gpr(16 + (int)sr)) + d;
+						} else if (sm == 6u ||
+							   (sm == 7u && sr == 3u)) {
+							const uint32 ext =
+								vm_read_memory_2(r24);
+							r24 += 2;
+							const int da = (int)((ext >> 15) & 1u);
+							const int xr = (int)((ext >> 12) & 7u);
+							const int wl = (int)((ext >> 11) & 1u);
+							const int sc = (int)((ext >> 9) & 3u);
+							uint32 xn = da ? ((xr == 7) ? gpr(1)
+									       : gpr(16 + xr))
+								      : gpr(8 + xr);
+							if (!wl)
+								xn = (uint32)(int32)(int16)xn;
+							xn <<= sc;
+							uint32 an = (sm == 6u)
+								? ((sr == 7u) ? gpr(1)
+									      : gpr(16 + (int)sr))
+								: (r24 - 2u);
+							if ((ext & 0x100u) == 0)
+								base = an +
+								       (int32)(int8)(ext & 0xffu) + xn;
+							else {
+								const int bs = (int)((ext >> 7) & 1u);
+								const int isup = (int)((ext >> 6) & 1u);
+								const int bdsz = (int)((ext >> 4) & 3u);
+								const int iis = (int)(ext & 7u);
+								uint32 bd = 0;
+								if (bdsz == 2) {
+									bd = (uint32)(int32)(int16)
+										vm_read_memory_2(r24);
+									r24 += 2;
+								} else if (bdsz == 3) {
+									bd = vm_read_memory_4(r24);
+									r24 += 4;
+								}
+								uint32 od = 0;
+								if (iis == 2 || iis == 3 ||
+								    iis == 6 || iis == 7) {
+									od = (uint32)(int32)(int16)
+										vm_read_memory_2(r24);
+									r24 += 2;
+								} else if (iis == 4) {
+									od = vm_read_memory_4(r24);
+									r24 += 4;
+								}
+								uint32 inner = (bs ? 0 : an) + bd;
+								if (!isup && iis < 6)
+									inner += xn;
+								if (iis >= 2 && g3_ea_data(inner))
+									inner = vm_read_memory_4(
+										g3_rom0(inner));
+								if (!isup && iis >= 6)
+									inner += xn;
+								base = inner + od;
+							}
+						} else if (sm == 7u && sr == 0u) {
+							base = (uint32)(int32)(int16)
+								vm_read_memory_2(r24);
+							r24 += 2;
+						} else if (sm == 7u && sr == 1u) {
+							base = vm_read_memory_4(r24);
+							r24 += 4;
+						} else if (sm == 7u && sr == 2u) {
+							const int32 d =
+								(int16)vm_read_memory_2(r24);
+							base = r24 + d;
+							r24 += 2;
+						} else
+							ok = 0;
+						if (ok) {
+							int32 b = bitoff % 8;
+							int32 byteoff = bitoff / 8;
+							if (b < 0) {
+								b += 8;
+								byteoff -= 1;
+							}
+							uint32 addr = base + (uint32)byteoff;
+							unsigned got = 0;
+							unsigned bit = (unsigned)b;
+							field = 0;
+							while (got < wid) {
+								uint32 byte = 0;
+								if (g3_ea_data(addr))
+									byte = vm_read_memory_1(
+										g3_rom0(addr));
+								unsigned n = 8u - bit;
+								if (n > wid - got)
+									n = wid - got;
+								field = (field << n) |
+									((byte >> (8u - bit - n)) &
+									 ((1u << n) - 1u));
+								got += n;
+								addr += 1;
+								bit = 0;
+							}
+						}
+					}
+					if (ok)
+						gpr(8 + dn) = field;
+					g3_ccr = 0;
+					if (field == 0)
+						g3_ccr |= 4;
+					if (wid && (field & (1u << (wid - 1))) != 0)
+						g3_ccr |= 8;
+					gpr(24) = r24;
+					gpr(27) = 0xffffffffu;
+					gpr(29) = ROMBase + 0x380000u;
+					pc() = ROMBase + 0x366084u;
+#if NW_BOOT_LOG
+					{
+						static unsigned nbfu;
+						if (nbfu < 8) {
+							nbfu++;
+							nw_boot_log("G3: 68k BFEXTU");
 						}
 					}
 #endif

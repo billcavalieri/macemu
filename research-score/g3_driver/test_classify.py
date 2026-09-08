@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unittest: no SheepShaver, no Qwen."""
+"""Unittest: no SheepShaver, no local LLM."""
 from __future__ import annotations
 
 import os
@@ -22,10 +22,12 @@ from classify import (
 )
 from mill_apply import (
     MARKER_HANG_SKIP,
+    MARKER_INITFONTS,
     MARKER_STW,
     force_skip_68k_off,
     force_skip_hang_off,
     hang_off_millable,
+    is_applied,
     leftover_68k_pending,
     mill_kind,
     mill_moved,
@@ -34,6 +36,7 @@ from mill_apply import (
     next_leftover,
     next_skip_68k_off,
     next_skip_hang_off,
+    patch_cpu_initfonts,
     patch_cpu_remove_skip,
     patch_cpu_skip_hang,
     patch_cpu_text,
@@ -44,7 +47,7 @@ from mill_apply import (
 from mill_escalate import write_escalate
 from mill_pack import append_pack_log, format_pack_md, format_pack_slim_md, pack_from_state
 from parse_log import hangcap_early_fail, hangcap_g0_stuck, hangcap_keep_stable, parse_log
-from qwen_lock import format_tokens, score_g3, usage_from_response, zero_usage
+from g3_lock import format_tokens, score_g3, zero_usage
 from g3_driver import _fmt_sec, format_attempts_table, next_step
 from debug_run import hangcap_sec
 
@@ -190,7 +193,12 @@ class NextStepTests(unittest.TestCase):
                 "tested": ["false-stw-spr"],
             }
         }
-        self.assertEqual(next_step(st, "e25a61f1"), "score-log")
+        log_path = Path("/tmp/ss-g3-mill-1.log")
+        log_path.write_text("hang-cap ignored\n", encoding="utf-8")
+        try:
+            self.assertEqual(next_step(st, "e25a61f1"), "score-log")
+        finally:
+            log_path.unlink(missing_ok=True)
 
     def test_skip_tested_mills_next_kind(self) -> None:
         st = {
@@ -245,16 +253,25 @@ class NextStepTests(unittest.TestCase):
         )
         self.assertEqual(
             next_leftover(exhausted, [], hang_off=0x326510, saw_68k=True),
-            "slot-26e90",
+            "stay-code66",
         )
         self.assertEqual(
             next_leftover(
-                exhausted + ["leftover:slot-26e90"],
+                exhausted + ["leftover:stay-code66"],
                 [],
                 hang_off=0x326510,
                 saw_68k=True,
             ),
-            "skip-3265a4",
+            "launch-upgrader",
+        )
+        self.assertEqual(
+            next_leftover(
+                exhausted + ["leftover:stay-code66", "leftover:slot-26e90"],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+            ),
+            "launch-upgrader",
         )
         done68 = exhausted + [
             "leftover:keep-68k",
@@ -264,11 +281,23 @@ class NextStepTests(unittest.TestCase):
             "leftover:skip-3265a4",
             "leftover:spin-26e88",
             "leftover:skip-326458",
+            "leftover:fixmul-a868",
+            "leftover:disposeptr-a01f",
+            "leftover:initfonts-a8fe",
             "leftover:skip-hang:00326510",
         ]
         self.assertEqual(
             next_leftover(done68, [], hang_off=0x326510, saw_68k=True),
-            "skip-68k",
+            "stay-code66",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68 + ["leftover:stay-code66"],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+            ),
+            "launch-upgrader",
         )
         self.assertNotEqual(
             next_leftover(done68, [], hang_off=0x326510, saw_68k=True),
@@ -293,7 +322,499 @@ class NextStepTests(unittest.TestCase):
         self.assertIsNone(force_skip_68k_off(empty_map, done68, ["leftover:spin-26e88"]))
         self.assertEqual(
             next_leftover(done68, [], hang_off=0x326510, saw_68k=True, mill=empty_map),
-            "cfm-aa5a",
+            "stay-code66",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68 + ["leftover:stay-code66"],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "launch-upgrader",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68 + ["leftover:stay-code66", "leftover:launch-upgrader"],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "splash-510",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                ],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "splash-510-even",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                ],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pict-1000",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                ],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-upgrader",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                ],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-enter",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                ],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-imports",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                ],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-sysenv",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                    "leftover:pef-sysenv",
+                ],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-vol",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                    "leftover:pef-sysenv",
+                    "leftover:pef-vol",
+                ],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-dce",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                    "leftover:pef-sysenv",
+                    "leftover:pef-vol",
+                    "leftover:pef-dce",
+                ],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-wait",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                    "leftover:pef-sysenv",
+                    "leftover:pef-vol",
+                    "leftover:pef-dce",
+                    "leftover:pef-wait",
+                ],
+                [],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-te",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                    "leftover:pef-sysenv",
+                    "leftover:pef-vol",
+                    "leftover:pef-dce",
+                    "leftover:pef-wait",
+                    "leftover:pef-te",
+                ],
+                ["leftover:pef-te"],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-terec",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                    "leftover:pef-sysenv",
+                    "leftover:pef-vol",
+                    "leftover:pef-dce",
+                    "leftover:pef-wait",
+                    "leftover:pef-te",
+                    "leftover:pef-terec",
+                ],
+                ["leftover:pef-te", "leftover:pef-terec"],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-skipte",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                    "leftover:pef-sysenv",
+                    "leftover:pef-vol",
+                    "leftover:pef-dce",
+                    "leftover:pef-wait",
+                    "leftover:pef-te",
+                    "leftover:pef-terec",
+                    "leftover:pef-skipte",
+                ],
+                ["leftover:pef-te", "leftover:pef-terec"],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-skipdi",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                    "leftover:pef-sysenv",
+                    "leftover:pef-vol",
+                    "leftover:pef-dce",
+                    "leftover:pef-wait",
+                    "leftover:pef-te",
+                    "leftover:pef-terec",
+                    "leftover:pef-skipte",
+                    "leftover:pef-skipdi",
+                ],
+                ["leftover:pef-te", "leftover:pef-terec"],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-idx",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                    "leftover:pef-sysenv",
+                    "leftover:pef-vol",
+                    "leftover:pef-dce",
+                    "leftover:pef-wait",
+                    "leftover:pef-te",
+                    "leftover:pef-terec",
+                    "leftover:pef-skipte",
+                    "leftover:pef-skipdi",
+                    "leftover:pef-idx",
+                ],
+                ["leftover:pef-te", "leftover:pef-terec"],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-gnd",
+        )
+        self.assertEqual(
+            next_leftover(
+                done68
+                + [
+                    "leftover:stay-code66",
+                    "leftover:launch-upgrader",
+                    "leftover:splash-510",
+                    "leftover:splash-510-even",
+                    "leftover:pict-1000",
+                    "leftover:pef-upgrader",
+                    "leftover:pef-enter",
+                    "leftover:pef-imports",
+                    "leftover:pef-sysenv",
+                    "leftover:pef-vol",
+                    "leftover:pef-dce",
+                    "leftover:pef-wait",
+                    "leftover:pef-te",
+                    "leftover:pef-terec",
+                    "leftover:pef-skipte",
+                    "leftover:pef-skipdi",
+                    "leftover:pef-idx",
+                    "leftover:pef-gnd",
+                ],
+                ["leftover:pef-te", "leftover:pef-terec"],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-gndid",
+        )
+        pef_done = done68 + [
+            "leftover:stay-code66",
+            "leftover:launch-upgrader",
+            "leftover:splash-510",
+            "leftover:splash-510-even",
+            "leftover:pict-1000",
+            "leftover:pef-upgrader",
+            "leftover:pef-enter",
+            "leftover:pef-imports",
+            "leftover:pef-sysenv",
+            "leftover:pef-vol",
+            "leftover:pef-dce",
+            "leftover:pef-wait",
+            "leftover:pef-te",
+            "leftover:pef-terec",
+            "leftover:pef-skipte",
+            "leftover:pef-skipdi",
+            "leftover:pef-idx",
+            "leftover:pef-gnd",
+            "leftover:pef-gndid",
+            "leftover:pef-d519",
+            "leftover:pef-modal",
+            "leftover:pef-no519",
+            "leftover:pef-show",
+            "leftover:pef-forcesplash",
+        ]
+        pef_rev = ["leftover:pef-te", "leftover:pef-terec"]
+        self.assertEqual(
+            next_leftover(
+                pef_done,
+                pef_rev,
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-skipwait",
+        )
+        self.assertEqual(
+            next_leftover(
+                pef_done + ["leftover:pef-skipwait"],
+                pef_rev,
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-callsplash",
+        )
+        self.assertEqual(
+            next_leftover(
+                pef_done + ["leftover:pef-skipwait"],
+                pef_rev + ["leftover:pef-callsplash"],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-skipalert",
+        )
+        self.assertEqual(
+            next_leftover(
+                pef_done + ["leftover:pef-skipwait", "leftover:pef-skipalert"],
+                pef_rev + ["leftover:pef-callsplash"],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-nimp",
+        )
+        self.assertEqual(
+            next_leftover(
+                pef_done + ["leftover:pef-skipwait", "leftover:pef-skipalert"],
+                pef_rev + ["leftover:pef-callsplash", "leftover:pef-nimp"],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-jumpsplash",
+        )
+        self.assertEqual(
+            next_leftover(
+                pef_done + ["leftover:pef-skipwait", "leftover:pef-skipalert"],
+                pef_rev
+                + [
+                    "leftover:pef-callsplash",
+                    "leftover:pef-nimp",
+                    "leftover:pef-jumpsplash",
+                ],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-plantsplash",
+        )
+        self.assertEqual(
+            next_leftover(
+                pef_done
+                + [
+                    "leftover:pef-skipwait",
+                    "leftover:pef-skipalert",
+                    "leftover:pef-plantsplash",
+                ],
+                pef_rev
+                + [
+                    "leftover:pef-callsplash",
+                    "leftover:pef-nimp",
+                    "leftover:pef-jumpsplash",
+                ],
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-forceblit",
         )
 
 
@@ -307,6 +828,46 @@ class MillApplyTests(unittest.TestCase):
             "false-stw-spr:execute-pair",
         ]), "skip-mfsr")
         self.assertIn("false-stw-spr:skip-pair", tested_keys(["false-stw-spr"], "false-stw-spr"))
+
+    def test_qd_fb_stamp_in_cpu(self) -> None:
+        cpu = (
+            HERE.parents[1]
+            / "SheepShaver"
+            / "src"
+            / "kpx_cpu"
+            / "src"
+            / "cpu"
+            / "ppc"
+            / "ppc-cpu.cpp"
+        ).read_text()
+        self.assertIn("G3: 68k QD fb 0x800000", cpu)
+        self.assertIn("g3_qd_fb", cpu)
+        self.assertNotIn("g3_qd_fill32", cpu)
+        self.assertIn("G3: 68k Launch A9F2 enter CODE0", cpu)
+        self.assertIn("G3: 68k Launch A9F2 CFM Upgrader", cpu)
+        self.assertIn("G3: 68k GetNewDialog A97C Splash 510 even", cpu)
+        self.assertIn("G3: 68k DrawPicture A8F6 PICT 1000", cpu)
+        self.assertIn("G3: 68k Launch A9F2 CFM Upgrader PEF", cpu)
+        self.assertIn("G3: 68k Launch A9F2 CFM Upgrader PEF enter", cpu)
+        self.assertIn("g3_df_off = 74182144u", cpu)
+        self.assertIn("g3_rf_off = 74305024u", cpu)
+        self.assertNotIn("g3_rf_off = 112182784u", cpu)
+        self.assertIn("G3: 68k LoadSeg A9F0 enter", cpu)
+
+    def test_patch_cpu_initfonts_marker(self) -> None:
+        cpu = (
+            HERE.parents[1]
+            / "SheepShaver"
+            / "src"
+            / "kpx_cpu"
+            / "src"
+            / "cpu"
+            / "ppc"
+            / "ppc-cpu.cpp"
+        ).read_text()
+        self.assertIn(MARKER_INITFONTS, cpu)
+        self.assertEqual(patch_cpu_initfonts(cpu), cpu)
+        self.assertTrue(is_applied("leftover", kind="initfonts-a8fe"))
 
     def test_patch_cpu_inserts_skip_marker(self) -> None:
         import subprocess
@@ -406,7 +967,8 @@ class MillApplyTests(unittest.TestCase):
             "last_hb": {"pc": 0x50366084},
             "reached_68k": True,
         }
-        self.assertTrue(
+        # keep_stable at 50366084 can finish in <8s; not worse.
+        self.assertFalse(
             mill_worse(
                 before, after, keep_pc=0x50366084, saw_68k=True, ss_alive_sec=1.6
             )
@@ -424,6 +986,22 @@ class MillApplyTests(unittest.TestCase):
         self.assertFalse(
             mill_worse(
                 before, after, keep_pc=0x50366084, saw_68k=True, ss_alive_sec=12.0
+            )
+        )
+        died = {
+            "parsed": {
+                "g2_live": True,
+                "mill_max": 0,
+                "hang_04cecd36": False,
+                "reached_68k": False,
+            },
+            "g2_live": True,
+            "last_hb": None,
+            "reached_68k": False,
+        }
+        self.assertTrue(
+            mill_worse(
+                before, died, keep_pc=0x50366084, saw_68k=True, ss_alive_sec=1.6
             )
         )
 
@@ -610,12 +1188,12 @@ class MillApplyTests(unittest.TestCase):
         log = td / "keep.log"
         log.write_text(
             "NW-BOOT G3: 68k map r24=500170e6 op=4e71\n"
-            "NW-BOOT G3: 68k GetCCursor A97C pc=5005c86e\n"
+            "NW-BOOT G3: 68k GetNewDialog A97C pc=5005c86e\n"
             "NW-BOOT G3: 68k DialogDispatch AA68 sel=0304 fill\n"
         )
         mill = {"keep_log": str(log), "map_keep_log_only": True}
         off = next_skip_68k_off(mill, [], [])
-        # GetCCursor 0x5c86e is UI path — do not mill skip; map NOP is next.
+        # GetNewDialog overlay 0x5c86e is UI path — do not mill skip; map NOP is next.
         self.assertEqual(off, 0x170E6)
         log2 = td / "keep2.log"
         log2.write_text(
@@ -638,10 +1216,16 @@ class MillApplyTests(unittest.TestCase):
         self.assertFalse(skip_68k_millable(0x5C888))
         self.assertFalse(skip_68k_millable(0x5C8AA))
         self.assertFalse(skip_68k_millable(0x16DE8))
+        self.assertFalse(skip_68k_millable(0x9440))
+        self.assertFalse(skip_68k_millable(0x94C2))
+        self.assertFalse(skip_68k_millable(0x94CE))
         for o in LOOK_AGAIN_SKIP_68K:
             self.assertFalse(skip_68k_millable(o), "look-again 0x%x" % o)
         self.assertTrue(skip_68k_ui_op(0xA97C))
+        self.assertTrue(skip_68k_ui_op(0xA97D))
+        self.assertTrue(skip_68k_ui_op(0xAA1B))
         self.assertTrue(skip_68k_ui_op(0xAA68))
+        self.assertTrue(skip_68k_ui_op(0xA9C9))
         self.assertTrue(skip_68k_ui_op(0xA06E))
         self.assertFalse(skip_68k_ui_op(0x4E71))
         td = Path(tempfile.mkdtemp())
@@ -660,26 +1244,10 @@ class MillApplyTests(unittest.TestCase):
 
 
 class TokenTests(unittest.TestCase):
-    def test_usage_from_response(self) -> None:
-        u = usage_from_response(
-            {
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 2,
-                    "total_tokens": 12,
-                }
-            }
-        )
-        self.assertEqual(u, {"in": 10, "out": 2, "total": 12})
-
-    def test_usage_missing_total(self) -> None:
-        u = usage_from_response({"usage": {"prompt_tokens": 10, "completion_tokens": 2}})
-        self.assertEqual(u["total"], 12)
-
     def test_format_tokens(self) -> None:
         self.assertEqual(
-            format_tokens("qwen", {"in": 1, "out": 2, "total": 3}, "lock"),
-            "TOKENS qwen in=1 out=2 total=3 (lock)",
+            format_tokens("grok", {"in": 1, "out": 2, "total": 3}, "build"),
+            "TOKENS grok in=1 out=2 total=3 (build)",
         )
         self.assertEqual(
             format_tokens("grok", zero_usage(), "mill canned"),
@@ -695,15 +1263,13 @@ class TokenTests(unittest.TestCase):
                     "hang_off": 0x326510,
                     "result": "KEEP",
                     "grok": {"in": 0, "out": 0, "total": 0},
-                    "qwen": {"in": 10, "out": 2, "total": 12},
                 },
                 {
                     "n": 7,
                     "kind": "skip-hang",
                     "hang_off": 0x326640,
                     "result": "REVERT",
-                    "grok": {"in": 0, "out": 0, "total": 0},
-                    "qwen": {"in": 11, "out": 3, "total": 14},
+                    "grok": {"in": 10, "out": 2, "total": 12},
                 },
             ]
         )
@@ -725,12 +1291,26 @@ class TokenTests(unittest.TestCase):
                     "result": "KEEP",
                     "elapsed_sec": 52.3,
                     "grok": {},
-                    "qwen": {},
                 }
             ]
         )
         self.assertIn("52.3s", table)
         self.assertIn("elapsed", table)
+
+
+class G3LockTests(unittest.TestCase):
+    def test_g3_lock_requires_window_yes_and_g2(self) -> None:
+        r = score_g3({"g2_live": True, "parsed": {}}, window="unknown")
+        self.assertTrue(r["skipped"])
+        self.assertEqual(r["g3"], "no")
+        r2 = score_g3({"g2_live": True, "parsed": {}}, window="no")
+        self.assertTrue(r2["skipped"])
+        self.assertEqual(r2["g3"], "no")
+        r3 = score_g3({"g2_live": True, "parsed": {}}, window="yes")
+        self.assertFalse(r3["skipped"])
+        self.assertEqual(r3["g3"], "yes")
+        r4 = score_g3({"g2_live": False, "parsed": {}}, window="yes")
+        self.assertEqual(r4["g3"], "no")
 
 
 class PackTests(unittest.TestCase):
@@ -748,13 +1328,11 @@ class PackTests(unittest.TestCase):
                         "hang_off": 0x326510,
                         "result": "KEEP",
                         "g3": "no",
-                        "qwen": {"in": 10, "out": 2, "total": 12},
                         "grok": {"in": 0, "out": 0, "total": 0},
                     }
                 ],
                 "tokens": {
                     "grok": {"in": 0, "out": 0, "total": 0},
-                    "qwen": {"in": 10, "out": 2, "total": 12},
                 },
             }
         }
@@ -762,7 +1340,7 @@ class PackTests(unittest.TestCase):
         md = format_pack_md(pack)
         self.assertIn("3264fc", md)
         self.assertIn("skip-list 50325", md)
-        self.assertIn("GetCCursor", md)
+        self.assertIn("GetNewDialog", md)
         self.assertIn("0x5c86c-0x5c8c0", md)
         self.assertIn("MILL 1", md)
         self.assertIn("Job (new session: do this)", md)
@@ -781,7 +1359,6 @@ class PackTests(unittest.TestCase):
                         "kind": "skip-hang",
                         "hang_off": 0x326510,
                         "result": "KEEP",
-                        "qwen": {},
                         "grok": {},
                     },
                     {
@@ -789,7 +1366,6 @@ class PackTests(unittest.TestCase):
                         "kind": "skip-hang",
                         "hang_off": 0x326640,
                         "result": "REVERT",
-                        "qwen": {},
                         "grok": {},
                     },
                 ]
@@ -914,14 +1490,16 @@ class PackTests(unittest.TestCase):
         self.assertEqual(rts["text"], "RTS")
         trap = disasm_68k_one(bytes(rom), 0x20)
         self.assertEqual(trap["kind"], "aline")
-        self.assertIn("GetCCursor", trap["text"])
+        self.assertIn("GetNewDialog", trap["text"])
         bra = disasm_68k_one(bytes(rom), 0x30)
         self.assertEqual(bra["kind"], "bra_star")
         self.assertEqual(ppc_one(0x900107D4), "stw")
         self.assertEqual(ppc_one(0x7C0604A6), "mfsr")
         self.assertEqual(A_LINE[0xAA68], "DialogDispatch")
         self.assertEqual(A_LINE[0xA88F], "InitCursor")
-        self.assertEqual(A_LINE[0xA9C9], "GetResource")
+        self.assertEqual(A_LINE[0xA9C9], "SysError")
+        self.assertEqual(A_LINE[0xA9A0], "GetResource")
+        self.assertEqual(A_LINE[0xAA1B], "GetCCursor")
         self.assertEqual(A_LINE[0xA01F], "GetEOF")
         self.assertEqual(A_LINE[0xA023], "GetFPos")
         c = classify_off(bytes(rom), 0x3264FC)
@@ -930,6 +1508,10 @@ class PackTests(unittest.TestCase):
         from rom_disasm import format_report, region_tag
 
         self.assertEqual(region_tag(0x5C86E), "ui-dialog-path")
+        self.assertEqual(region_tag(0x9440), "code66-helper")
+        c_help = classify_off(bytes(rom), 0x9440)
+        self.assertFalse(c_help["millable"])
+        self.assertIn("code66-helper", c_help["note"])
         self.assertEqual(region_tag(0x16DE8), "a190-data-table")
         self.assertEqual(region_tag(0x16FC2), "look-again-keep")
         c_ui = classify_off(bytes(rom), 0x5C86E)
@@ -964,6 +1546,120 @@ class PackTests(unittest.TestCase):
         self.assertTrue(binary_has_stamp(app, mill_stamp_68k(0x27614)))
         self.assertTrue(mill_binary_match(app, kind="skip-68k", hang_off=0x27614))
         self.assertFalse(mill_binary_match(app, kind="skip-68k", hang_off=0x27616))
+        rt = td / "SheepShaver-rt"
+        rt.write_bytes(b"G3: 68k map r24= only")
+        self.assertFalse(
+            mill_binary_match(rt, kind="skip-68k", hang_off=0x27614, runtime=True)
+        )
+        rt.write_bytes(
+            b"G3: 68k map r24= G3: FB dump packed xRGB "
+            b"G3: 68k GetNewDialog A97C"
+        )
+        self.assertTrue(
+            mill_binary_match(rt, kind="skip-68k", hang_off=0x27614, runtime=True)
+        )
+        self.assertFalse(mill_binary_match(rt, kind="grok-escalate"))
+        rt.write_bytes(b"G3: 68k LoadSeg A9F0 enter")
+        self.assertTrue(mill_binary_match(rt, kind="grok-escalate"))
+        self.assertFalse(mill_binary_match(rt, kind="getresource-a9a0"))
+        rt.write_bytes(b"G3: 68k GetResource A9A0 toast")
+        self.assertTrue(mill_binary_match(rt, kind="getresource-a9a0"))
+        self.assertFalse(mill_binary_match(rt, kind="getnewdialog-dlog"))
+        rt.write_bytes(b"G3: 68k GetNewDialog A97C toast")
+        self.assertTrue(mill_binary_match(rt, kind="getnewdialog-dlog"))
+        self.assertFalse(mill_binary_match(rt, kind="code66-syserr99"))
+        rt.write_bytes(b"G3: 68k CODE 66 SysError 99 continue")
+        self.assertTrue(mill_binary_match(rt, kind="code66-syserr99"))
+        self.assertFalse(mill_binary_match(rt, kind="code66-resume"))
+        rt.write_bytes(b"G3: 68k LoadSeg A9F0 CODE 66 resume")
+        self.assertTrue(mill_binary_match(rt, kind="code66-resume"))
+        self.assertFalse(mill_binary_match(rt, kind="code66-allow-9440"))
+        rt.write_bytes(b"G3: 68k CODE 66 allow 0x9440")
+        self.assertTrue(mill_binary_match(rt, kind="code66-allow-9440"))
+        self.assertFalse(mill_binary_match(rt, kind="launch-upgrader"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader")
+        self.assertTrue(mill_binary_match(rt, kind="launch-upgrader"))
+        self.assertFalse(mill_binary_match(rt, kind="splash-510"))
+        rt.write_bytes(b"G3: 68k GetNewDialog A97C Splash 510 dlg=10005000")
+        self.assertTrue(mill_binary_match(rt, kind="splash-510"))
+        self.assertFalse(mill_binary_match(rt, kind="splash-510-even"))
+        rt.write_bytes(b"G3: 68k GetNewDialog A97C Splash 510 even dlg=1005130c")
+        self.assertTrue(mill_binary_match(rt, kind="splash-510-even"))
+        self.assertFalse(mill_binary_match(rt, kind="pict-1000"))
+        rt.write_bytes(b"G3: 68k DrawPicture A8F6 PICT 1000")
+        self.assertTrue(mill_binary_match(rt, kind="pict-1000"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-upgrader"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF p=10100000")
+        self.assertTrue(mill_binary_match(rt, kind="pef-upgrader"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-enter"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF enter pc=101013d0")
+        self.assertTrue(mill_binary_match(rt, kind="pef-enter"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-imports"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF import idx=1 r3=10115c5e")
+        self.assertTrue(mill_binary_match(rt, kind="pef-imports"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-sysenv"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF SysEnvirons ver=2 rec=10115c00")
+        self.assertTrue(mill_binary_match(rt, kind="pef-sysenv"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-vol"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF vol idx=70 r3=00000000")
+        self.assertTrue(mill_binary_match(rt, kind="pef-vol"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-dce"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF dce h=10180040")
+        self.assertTrue(mill_binary_match(rt, kind="pef-dce"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-wait"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF WaitNextEvent idx=149 r3=00000001")
+        self.assertTrue(mill_binary_match(rt, kind="pef-wait"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-te"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF TENew idx=263 r3=10180080")
+        self.assertTrue(mill_binary_match(rt, kind="pef-te"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-terec"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF TERec h=10180080")
+        self.assertTrue(mill_binary_match(rt, kind="pef-terec"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipte"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipTE pc=1010b404")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipte"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipdi"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipDI pc=1010b3dc")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipdi"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-idx"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF idx n=295")
+        self.assertTrue(mill_binary_match(rt, kind="pef-idx"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-gnd"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF GetNewDialog 510 dlg=1005130c")
+        self.assertTrue(mill_binary_match(rt, kind="pef-gnd"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-gndid"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF GetNewDialog id=150 dlg=00000000")
+        self.assertTrue(mill_binary_match(rt, kind="pef-gndid"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipwait"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipWait")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipwait"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-callsplash"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF callSplash")
+        self.assertTrue(mill_binary_match(rt, kind="pef-callsplash"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipalert"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipAlert")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipalert"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-nimp"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF nimp")
+        self.assertTrue(mill_binary_match(rt, kind="pef-nimp"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-jumpsplash"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF jumpSplash")
+        self.assertTrue(mill_binary_match(rt, kind="pef-jumpsplash"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-plantsplash"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF plantSplash")
+        self.assertTrue(mill_binary_match(rt, kind="pef-plantsplash"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-forceblit"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF forceBlit")
+        self.assertTrue(mill_binary_match(rt, kind="pef-forceblit"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-blitoff"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF blitOff")
+        self.assertTrue(mill_binary_match(rt, kind="pef-blitoff"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-callgnd"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF callGnd")
+        self.assertTrue(mill_binary_match(rt, kind="pef-callgnd"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipae"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipAE")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipae"))
 
     def test_grok_build_cmd_is_headless_not_http(self) -> None:
         from grok_build import grok_build_enabled, grok_cmd, write_grok_prompt
@@ -977,20 +1673,14 @@ class PackTests(unittest.TestCase):
         self.assertIn("--prompt-file", joined)
         self.assertIn("--permission-mode", joined)
         self.assertIn("bypassPermissions", joined)
+        self.assertIn("--leader-socket", joined)
+        self.assertIn("/tmp/ss-g3-grok-leader.sock", joined)
         self.assertNotIn("api.x.ai", joined)
         self.assertNotIn("/v1/chat", joined)
         self.assertIn("read_file,search_replace", joined)
         ptxt = prompt.read_text()
         self.assertIn("GetCCursor", ptxt)
         self.assertIn("0x5c86c-0x5c8c0", ptxt)
-
-    def test_qwen_skips_http_unless_window_yes(self) -> None:
-        r = score_g3({"g2_live": True, "parsed": {}}, window="unknown")
-        self.assertTrue(r["skipped"])
-        self.assertEqual(r["g3"], "no")
-        r2 = score_g3({"g2_live": True, "parsed": {}}, window="no")
-        self.assertTrue(r2["skipped"])
-        self.assertEqual(r2["g3"], "no")
 
     def test_pack_slim_is_short_and_has_reply(self) -> None:
         st = {
@@ -1017,6 +1707,8 @@ class PackTests(unittest.TestCase):
         self.assertIn("Grok Build", md)
         self.assertIn("MILL 1:", md)
         self.assertIn("Map remaining", md)
+        self.assertIn("16384 map lines/hang-cap", md)
+        self.assertNotIn("4096 unique cap", md)
         self.assertNotIn("## Every mill", md)
         self.assertLess(len(md), 20000)
 
@@ -1039,6 +1731,284 @@ class PackTests(unittest.TestCase):
             out = patch_cpu_trap_68k(text)
             self.assertIn(MARKER_TRAP_68K, out)
 
+    def test_hangcap_media_paths_and_copy(self) -> None:
+        from debug_run import copy_hangcap_media, hangcap_media_paths
+
+        log = Path("/tmp/ss-g3-mill-42.log")
+        p = hangcap_media_paths(log)
+        self.assertEqual(p["log"], log)
+        self.assertEqual(p["log_gz"], Path("/tmp/ss-g3-mill-42.log.gz"))
+        self.assertEqual(p["png"], Path("/tmp/ss-g3-mill-42.png"))
+        self.assertEqual(p["plant_png"], Path("/tmp/ss-g3-mill-42-fb-plant.png"))
+        self.assertEqual(p["fb"], Path("/tmp/ss-g3-mill-42-fb.pgm"))
+        self.assertEqual(p["plant"], Path("/tmp/ss-g3-mill-42-fb-plant.pgm"))
+        gz_in = hangcap_media_paths(Path("/tmp/ss-g3-mill-42.log.gz"))
+        self.assertEqual(gz_in["png"], Path("/tmp/ss-g3-mill-42.png"))
+        td = Path(tempfile.mkdtemp())
+        src = td / "ss-g3-mill-7.log"
+        src.write_text("log\n")
+        (td / "ss-g3-mill-7.png").write_bytes(b"png")
+        dest = td / "out"
+        copy_hangcap_media(src, dest)
+        self.assertFalse((dest / "ss-g3-mill-7.log").exists())
+        self.assertTrue((dest / "ss-g3-mill-7.log.gz").is_file())
+        self.assertTrue((dest / "ss-g3-mill-7.png").is_file())
+        self.assertFalse((dest / "ss-g3-mill-7-fb.pgm").exists())
+        from mill_log import read_log
+
+        self.assertEqual(read_log(dest / "ss-g3-mill-7.log.gz"), "log\n")
+        self.assertTrue(src.is_file())
+
+    def test_pgm_to_png_guest_fb(self) -> None:
+        from debug_run import pgm_to_png, png_is_valid, read_pgm
+
+        td = Path(tempfile.mkdtemp())
+        pgm = td / "fb.pgm"
+        png = td / "fb.png"
+        pixels = bytes([0, 255, 128, 64])
+        pgm.write_bytes(b"P5\n2 2\n255\n" + pixels)
+        self.assertEqual(read_pgm(pgm), (2, 2, pixels))
+        self.assertTrue(pgm_to_png(pgm, png))
+        self.assertTrue(png_is_valid(png))
+        self.assertGreater(png.stat().st_size, 32)
+        self.assertFalse(pgm_to_png(td / "missing.pgm", td / "no.png"))
+        ppm = td / "fb.ppm"
+        rgb_png = td / "fb-rgb.png"
+        ppm.write_bytes(b"P6\n2 1\n255\n" + bytes([255, 0, 0, 0, 255, 0]))
+        self.assertEqual(read_pgm(ppm)[0:2], (2, 1))
+        self.assertTrue(pgm_to_png(ppm, rgb_png))
+        self.assertTrue(png_is_valid(rgb_png))
+
+    def test_notify_skip68k_empty_glass(self) -> None:
+        from unittest.mock import patch
+        from debug_run import notify_skip68k_empty
+
+        with patch("debug_run.subprocess.call") as call:
+            with patch.dict("os.environ", {"G3_FB_NOTIFY": "0"}):
+                self.assertFalse(notify_skip68k_empty({"n": 16123}))
+                call.assert_not_called()
+            with patch.dict("os.environ", {"G3_FB_NOTIFY": "1"}):
+                self.assertTrue(notify_skip68k_empty({"n": 16123}))
+                self.assertTrue(call.called)
+                joined = " ".join(str(c) for c in call.call_args_list)
+                self.assertIn("osascript", joined)
+
+    def test_notify_fb_glass_only_when_fb_yes(self) -> None:
+        from unittest.mock import patch
+        from debug_run import notify_fb_glass
+
+        log = Path("/tmp/ss-g3-mill-9.log")
+        with patch("debug_run.subprocess.call") as call:
+            self.assertFalse(notify_fb_glass(log, {"fb": "no", "plant": "yes"}))
+            call.assert_not_called()
+            self.assertFalse(notify_fb_glass(log, {"fb": "unknown"}))
+            call.assert_not_called()
+            with patch.dict("os.environ", {"G3_FB_NOTIFY": "0"}):
+                self.assertFalse(notify_fb_glass(log, {"fb": "yes"}))
+                call.assert_not_called()
+            with patch.dict("os.environ", {"G3_FB_NOTIFY": "1"}):
+                self.assertTrue(notify_fb_glass(log, {"fb": "yes", "plant": "no"}))
+                self.assertTrue(call.called)
+                joined = " ".join(str(c) for c in call.call_args_list)
+                self.assertIn("osascript", joined)
+
+    def test_screenshot_sheepshaver_window_id(self) -> None:
+        from unittest.mock import patch
+        from debug_run import screenshot_sheepshaver
+
+        td = Path(tempfile.mkdtemp())
+        dest = td / "shot.png"
+
+        class R:
+            returncode = 0
+            stdout = "12345\n"
+
+        def fake_call(cmd, **kwargs):
+            from debug_run import PNG_MAGIC
+
+            dest.write_bytes(PNG_MAGIC + b"\x00" * 16)
+            self.assertIn("screencapture", cmd[0])
+            self.assertIn("-t", cmd)
+            self.assertIn("png", cmd)
+            self.assertIn("-l", cmd)
+            self.assertIn("12345", cmd)
+            return 0
+
+        with patch("debug_run.trip_screen_recording", return_value={"ok": True}):
+            with patch("debug_run.subprocess.run", return_value=R()):
+                with patch("debug_run.subprocess.call", side_effect=fake_call):
+                    self.assertTrue(screenshot_sheepshaver(dest))
+
+    def test_trip_screen_recording_screencapture_probe(self) -> None:
+        from unittest.mock import patch
+        import debug_run
+
+        debug_run._SCREEN_RECORDING_TRIPPED = False
+        calls = []
+
+        def fake_call(cmd, **kwargs):
+            from debug_run import PNG_MAGIC
+
+            calls.append(cmd)
+            self.assertIn("-t", cmd)
+            self.assertIn("png", cmd)
+            Path(cmd[-1]).write_bytes(PNG_MAGIC + b"\x00" * 16)
+            return 0
+
+        with patch("debug_run.ctypes.util.find_library", return_value=None):
+            with patch("debug_run.subprocess.call", side_effect=fake_call):
+                r = debug_run.trip_screen_recording()
+        self.assertTrue(r["screencapture"])
+        self.assertTrue(r["ok"])
+        self.assertEqual(calls[0][0], "screencapture")
+        self.assertIn("-R", calls[0])
+        self.assertTrue(debug_run._SCREEN_RECORDING_TRIPPED)
+
+    def test_png_is_valid_rejects_tcc_stub(self) -> None:
+        from debug_run import PNG_MAGIC, png_is_valid, unlink_invalid_png
+
+        td = Path(tempfile.mkdtemp())
+        stub = td / "stub.png"
+        stub.write_bytes(b"PNG")
+        self.assertFalse(png_is_valid(stub))
+        unlink_invalid_png(stub)
+        self.assertFalse(stub.exists())
+        real = td / "real.png"
+        real.write_bytes(PNG_MAGIC + b"\x00" * 16)
+        self.assertTrue(png_is_valid(real))
+        unlink_invalid_png(real)
+        self.assertTrue(real.exists())
+
+    def test_mill_log_gzip_stream_roundtrip(self) -> None:
+        from mill_apply import _68k_pairs_from_log
+        from mill_log import gzip_log, gzip_mill_logs, read_log, resolve_log
+
+        td = Path(tempfile.mkdtemp())
+        plain = td / "ss-g3-mill-3.log"
+        body = (
+            "NW-BOOT heartbeat pc=50366084 msr=00003010 same=8\n"
+            "NW-BOOT G3: 68k map r24=500264d4 op=4e75\n"
+        )
+        plain.write_text(body)
+        gz = gzip_log(plain, unlink_src=True)
+        self.assertIsNotNone(gz)
+        self.assertTrue(gz.is_file())
+        self.assertFalse(plain.exists())
+        self.assertEqual(read_log(plain), body)
+        self.assertEqual(read_log(gz), body)
+        self.assertEqual(resolve_log(plain), gz)
+        pairs = _68k_pairs_from_log(plain)
+        self.assertEqual(pairs[0][0], 0x264D4)
+        other = td / "ss-g3-mill-4.log"
+        other.write_text(body)
+        r = gzip_mill_logs([td])
+        self.assertEqual(r["ok"], 1)
+        self.assertFalse(other.exists())
+        self.assertEqual(read_log(td / "ss-g3-mill-4.log"), body)
+
+    def test_compare_keep_fb_hash(self) -> None:
+        from debug_run import compare_keep_fb, file_sha256, format_fb_changed
+
+        td = Path(tempfile.mkdtemp())
+        keep_log = td / "ss-g3-mill-1.log"
+        mill_log = td / "ss-g3-mill-2.log"
+        keep_log.write_text("k\n")
+        mill_log.write_text("m\n")
+        keep_fb = td / "ss-g3-mill-1-fb.pgm"
+        mill_fb = td / "ss-g3-mill-2-fb.pgm"
+        keep_plant = td / "ss-g3-mill-1-fb-plant.pgm"
+        mill_plant = td / "ss-g3-mill-2-fb-plant.pgm"
+        keep_fb.write_bytes(b"P5\n1 1\n255\nA")
+        mill_fb.write_bytes(b"P5\n1 1\n255\nA")
+        keep_plant.write_bytes(b"P5\n1 1\n255\nB")
+        mill_plant.write_bytes(b"P5\n1 1\n255\nB")
+        same = compare_keep_fb(keep_log, mill_log)
+        self.assertEqual(same["fb_changed"], "no")
+        self.assertEqual(same["fb"], "no")
+        self.assertEqual(same["plant"], "no")
+        self.assertEqual(same["keep_fb"], file_sha256(keep_fb))
+        mill_fb.write_bytes(b"P5\n1 1\n255\nC")
+        changed = compare_keep_fb(keep_log, mill_log)
+        self.assertEqual(changed["fb_changed"], "yes")
+        self.assertEqual(changed["fb"], "yes")
+        self.assertEqual(changed["plant"], "no")
+        self.assertGreaterEqual(changed["fb_diff"], 0.10)
+        (td / "ss-g3-mill-1.png").write_bytes(b"keep-png")
+        (td / "ss-g3-mill-2.png").write_bytes(b"mill-png-different")
+        png_ignored = compare_keep_fb(keep_log, mill_log)
+        self.assertEqual(png_ignored["fb_changed"], "yes")
+        quiet = td / "ss-g3-mill-3.log"
+        quiet.write_text("q\n")
+        keep10 = td / "ss-g3-mill-1-fb.pgm"
+        mill10 = td / "ss-g3-mill-3-fb.pgm"
+        (td / "ss-g3-mill-3-fb-plant.pgm").write_bytes(b"P5\n1 1\n255\nB")
+        pix = bytearray(b"\x00" * 100)
+        keep10.write_bytes(b"P5\n10 10\n255\n" + bytes(pix))
+        pix[0] = 1
+        mill10.write_bytes(b"P5\n10 10\n255\n" + bytes(pix))
+        tiny = compare_keep_fb(keep_log, quiet)
+        self.assertEqual(tiny["fb"], "no")
+        self.assertLess(tiny["fb_diff"], 0.10)
+        mill10.write_bytes(b"P5\n10 10\n255\n" + (b"\xff" * 100))
+        big = compare_keep_fb(keep_log, quiet)
+        self.assertEqual(big["fb"], "yes")
+        trunc = td / "ss-g3-mill-4.log"
+        trunc.write_text("t\n")
+        (td / "ss-g3-mill-4-fb.pgm").write_bytes(b"P5\n2560 480\n255\n" + b"\x00" * 100)
+        (td / "ss-g3-mill-4-fb-plant.pgm").write_bytes(b"P5\n1 1\n255\nB")
+        bad = compare_keep_fb(keep_log, trunc)
+        self.assertEqual(bad["fb"], "unknown")
+        line = format_fb_changed(changed)
+        self.assertIn("fb_changed=yes", line)
+        self.assertIn("fb=yes", line)
+        missing = compare_keep_fb(None, mill_log)
+        self.assertEqual(missing["fb_changed"], "unknown")
+        self.assertEqual(missing["reason"], "no-keep-log")
+        empty = Path(tempfile.mkdtemp()) / "ss-g3-mill-9.log"
+        empty.write_text("x\n")
+        no_pgm = compare_keep_fb(keep_log, empty)
+        self.assertEqual(no_pgm["fb_changed"], "unknown")
+
+    def test_fb_vision_prompt_json_and_socket(self) -> None:
+        import json as json_mod
+        from fb_vision import (
+            VISION_SOCK,
+            acp_prompt_json,
+            grok_vision_cmd,
+            image_block,
+            parse_window,
+            resolve_pngs,
+        )
+
+        td = Path(tempfile.mkdtemp())
+        png = td / "shot.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 16)
+        block = image_block(png)
+        self.assertEqual(block["type"], "image")
+        self.assertEqual(block["mimeType"], "image/png")
+        self.assertTrue(block["data"])
+        payload = acp_prompt_json([png])
+        data = json_mod.loads(payload)
+        self.assertEqual(data["type"], "acp")
+        types = [b["type"] for b in data["content"]]
+        self.assertIn("text", types)
+        self.assertIn("image", types)
+        cmd = grok_vision_cmd(payload)
+        joined = " ".join(cmd)
+        self.assertIn("--prompt-json", joined)
+        self.assertIn(VISION_SOCK, joined)
+        self.assertNotIn("/tmp/ss-g3-grok-leader.sock", joined)
+        self.assertIn("bypassPermissions", joined)
+        self.assertIn("--max-turns", joined)
+        self.assertNotIn("search_replace", joined)
+        self.assertNotIn("api.x.ai", joined)
+        self.assertEqual(parse_window("WINDOW=yes\n"), "yes")
+        self.assertEqual(parse_window("blah WINDOW=no"), "no")
+        self.assertEqual(parse_window('{"text":"WINDOW=yes"}'), "yes")
+        self.assertEqual(parse_window("no window line"), "unknown")
+        picked = resolve_pngs(n=7)
+        self.assertEqual(picked["pngs"], [Path("/tmp/ss-g3-mill-7.png")])
+
     def test_hangcap_sec_default_and_floor(self) -> None:
         old = os.environ.get("G3_HANGCAP_SEC")
         try:
@@ -1053,6 +2023,241 @@ class PackTests(unittest.TestCase):
                 os.environ.pop("G3_HANGCAP_SEC", None)
             else:
                 os.environ["G3_HANGCAP_SEC"] = old
+
+
+class TestMillAnnotations(unittest.TestCase):
+    def test_skip_candidate_priority_and_protected_block(self) -> None:
+        from mill_annotations import clear_annotations, load_annotations
+        from mill_apply import next_skip_68k_off, skip_68k_blocked
+
+        doc = {
+            "format": "NewWorldView-mill-annotations",
+            "version": 1,
+            "romKey": "fixture",
+            "entries": [
+                {
+                    "id": "a",
+                    "address": "68K:00026E90",
+                    "romOffset": "0x26E90",
+                    "action": "skipCandidate",
+                    "kind": "millableSpin",
+                    "symbol": "SlotHelperSpin",
+                    "evidence": ["logHits:412"],
+                    "reasoning": "Spin",
+                    "approvedAt": "2026-09-04T00:00:00Z",
+                },
+                {
+                    "id": "b",
+                    "address": "68K:0005C86C",
+                    "romOffset": "0x5C86C",
+                    "action": "revert",
+                    "kind": "protected",
+                    "symbol": None,
+                    "evidence": ["tag:get-ccursor-proc"],
+                    "reasoning": "UI path",
+                    "approvedAt": "2026-09-04T00:00:00Z",
+                },
+            ],
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            import json
+
+            json.dump(doc, fh)
+            path = Path(fh.name)
+        try:
+            clear_annotations()
+            ann = load_annotations(path)
+            self.assertTrue(skip_68k_blocked(0x5C86C))
+            self.assertFalse(skip_68k_blocked(0x26E90))
+            mill = {"map_keep_log_only": True}
+            off = next_skip_68k_off(mill, [], [])
+            self.assertEqual(off, 0x26E90)
+        finally:
+            path.unlink(missing_ok=True)
+            clear_annotations()
+
+    def test_format_pack_section(self) -> None:
+        from mill_annotations import MillAnnotations
+
+        ann = MillAnnotations(
+            Path("fixture.json"),
+            {
+                "format": "NewWorldView-mill-annotations",
+                "version": 1,
+                "romKey": "fixture",
+                "entries": [
+                    {
+                        "romOffset": "0x26E90",
+                        "action": "skipCandidate",
+                        "kind": "millableSpin",
+                    }
+                ],
+            },
+        )
+        section = ann.format_pack_section()
+        self.assertIn("NewWorldView annotations", section)
+        self.assertIn("0x26e90", section)
+
+    def test_token_usage_from_document_and_entries(self) -> None:
+        from mill_annotations import MillAnnotations, parse_usage
+
+        ann = MillAnnotations(
+            Path("fixture.json"),
+            {
+                "format": "NewWorldView-mill-annotations",
+                "version": 1,
+                "romKey": "fixture",
+                "tokenUsage": {"in": 500, "out": 20, "total": 520},
+                "entries": [
+                    {
+                        "romOffset": "0x26E90",
+                        "action": "skipCandidate",
+                        "kind": "millableSpin",
+                        "tokenUsage": {"in": 100, "out": 4, "total": 104},
+                    }
+                ],
+            },
+        )
+        self.assertEqual(parse_usage({"in": 1, "out": 2}), {"in": 1, "out": 2, "total": 3})
+        self.assertEqual(ann.token_usage()["total"], 520)
+        self.assertIn("TOKENS apple_fm in=500 out=20 total=520", ann.format_token_line())
+
+    def test_apple_fm_mill_usage_for_skip_entry(self) -> None:
+        import json
+
+        import g3_driver as gd
+        from mill_annotations import load_annotations
+
+        doc = {
+            "format": "NewWorldView-mill-annotations",
+            "version": 1,
+            "romKey": "fixture",
+            "tokenUsage": {"in": 500, "out": 20, "total": 520},
+            "entries": [
+                {
+                    "romOffset": "0x1ddd4",
+                    "action": "skipCandidate",
+                    "kind": "millableSpin",
+                    "tokenUsage": {"in": 100, "out": 4, "total": 104},
+                }
+            ],
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(doc, fh)
+            path = Path(fh.name)
+        try:
+            load_annotations(path)
+            usage, role = gd._apple_fm_mill_usage(0x1DDD4, "skip-68k")
+            self.assertEqual(usage["total"], 104)
+            self.assertIn("skip-68k", role)
+            st: dict = {}
+            total = gd._apple_fm_total_usage(st)
+            self.assertEqual(total["total"], 520)
+            self.assertEqual(st["mill"]["tokens"]["apple_fm"]["total"], 520)
+        finally:
+            path.unlink(missing_ok=True)
+            from mill_annotations import clear_annotations
+
+            clear_annotations()
+
+
+class TestMillHistogram(unittest.TestCase):
+    def test_ranked_offs_and_skip_priority(self) -> None:
+        from mill_histogram import clear_histogram, load_histogram
+        from mill_apply import next_skip_68k_off
+
+        doc = {
+            "format": "NewWorldView-mill-histogram",
+            "version": 1,
+            "romKey": "fixture",
+            "scannedLogs": 42,
+            "entries": [
+                {"romOffset": "0x1ddd4", "count": 120, "space": "m68kToolbox"},
+                {"romOffset": "0x26e90", "count": 88, "space": "m68kToolbox"},
+            ],
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            import json
+
+            json.dump(doc, fh)
+            path = Path(fh.name)
+        try:
+            clear_histogram()
+            hist = load_histogram(path)
+            self.assertEqual(hist.ranked_offs(), [0x1DDD4, 0x26E90])
+            mill = {"map_keep_log_only": True}
+            off = next_skip_68k_off(mill, [], [])
+            self.assertEqual(off, 0x1DDD4)
+        finally:
+            path.unlink(missing_ok=True)
+            clear_histogram()
+
+    def test_histogram_after_annotations(self) -> None:
+        from mill_annotations import clear_annotations, load_annotations
+        from mill_histogram import clear_histogram, load_histogram
+        from mill_apply import next_skip_68k_off
+
+        ann_doc = {
+            "format": "NewWorldView-mill-annotations",
+            "version": 1,
+            "romKey": "fixture",
+            "entries": [
+                {
+                    "romOffset": "0x26E90",
+                    "action": "skipCandidate",
+                    "kind": "millableSpin",
+                }
+            ],
+        }
+        hist_doc = {
+            "format": "NewWorldView-mill-histogram",
+            "version": 1,
+            "romKey": "fixture",
+            "entries": [
+                {"romOffset": "0x1ddd4", "count": 120},
+                {"romOffset": "0x26e90", "count": 88},
+            ],
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            import json
+
+            json.dump(ann_doc, fh)
+            ann_path = Path(fh.name)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            import json
+
+            json.dump(hist_doc, fh)
+            hist_path = Path(fh.name)
+        try:
+            clear_annotations()
+            clear_histogram()
+            load_annotations(ann_path)
+            load_histogram(hist_path)
+            mill = {"map_keep_log_only": True}
+            off = next_skip_68k_off(mill, [], [])
+            self.assertEqual(off, 0x26E90)
+        finally:
+            ann_path.unlink(missing_ok=True)
+            hist_path.unlink(missing_ok=True)
+            clear_annotations()
+            clear_histogram()
+
+    def test_format_pack_section(self) -> None:
+        from mill_histogram import MillHistogram
+
+        hist = MillHistogram(
+            Path("fixture.json"),
+            {
+                "format": "NewWorldView-mill-histogram",
+                "version": 1,
+                "romKey": "fixture",
+                "scannedLogs": 10,
+                "entries": [{"romOffset": "0x1ddd4", "count": 5}],
+            },
+        )
+        section = hist.format_pack_section()
+        self.assertIn("NewWorldView histogram", section)
+        self.assertIn("0x1ddd4", section)
 
 
 if __name__ == "__main__":

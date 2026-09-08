@@ -107,8 +107,8 @@ def write_grok_prompt(slim_path: Path, dest: Optional[Path] = None) -> Path:
                 "Do not remill skip-pair / skip-mfsr / unstick-stw / spin-26e88 / skip-326458.",
                 "Do not skip 0x3264fc / 0x326564 / 0x326568. Do not remill e298371e.",
                 "Do not r24-divert off CODE 0 JT. Do not or-in EE. Do not mill ppc-mmu for 68fff0dc.",
-                "Do not skip-68k GetCCursor/DialogDispatch/SetPort/DisposeDialog/OpenResFile/GetResource/InitCursor/GetEOF/GetFPos/Read.",
-                "Do not skip-68k UI path 0x5c86c-0x5c8c0 or $a190 data 0x16de8-0x16e20.",
+                "Do not skip-68k GetNewDialog A97C/NewDialog A97D/GetCCursor AA1B/DialogDispatch/SetPort/DisposeDialog/OpenResFile/GetResource/SysError A9C9/InitCursor/GetEOF/GetFPos/Read.",
+                "Do not skip-68k UI path 0x5c86c-0x5c8c0, CODE 66 helper 0x9440-0x94cf, or $a190 data 0x16de8-0x16e20.",
                 "Do not remill look-again KEEP OpenResFile/GetResource/InitCursor/GetFPos/GetEOF.",
                 "",
                 "When the mill is in the tree, print exactly:",
@@ -123,10 +123,15 @@ def write_grok_prompt(slim_path: Path, dest: Optional[Path] = None) -> Path:
     return dest
 
 
+def grok_leader_socket() -> str:
+    return "/tmp/ss-g3-grok-leader.sock"
+
+
 def grok_cmd(slim_path: Path, prompt_path: Path) -> List[str]:
     bin_p = grok_bin()
     if bin_p is None:
         raise FileNotFoundError("grok binary not found")
+    # Unique leader socket: nested grok must not attach to this chat's TUI.
     return [
         str(bin_p),
         "--permission-mode",
@@ -139,6 +144,9 @@ def grok_cmd(slim_path: Path, prompt_path: Path) -> List[str]:
         str(repo_root()),
         "--no-plan",
         "--disable-web-search",
+        "--no-alt-screen",
+        "--leader-socket",
+        grok_leader_socket(),
         "--tools",
         "read_file,search_replace,grep,list_dir",
         "--prompt-file",
@@ -172,7 +180,10 @@ def _parse_grok_stdout(raw: str) -> Dict[str, Any]:
     return {"text": text, "usage": usage, "applied_mark": applied}
 
 
-def run_grok_build(slim_path: Path) -> Dict[str, Any]:
+def run_grok_build(
+    slim_path: Path,
+    prompt_path: Optional[Path] = None,
+) -> Dict[str, Any]:
     """Run grok headless. Returns {ok, applied, rc, usage, reason, log}."""
     out: Dict[str, Any] = {
         "ok": False,
@@ -190,8 +201,19 @@ def run_grok_build(slim_path: Path) -> Dict[str, Any]:
         out["reason"] = "no-grok-bin"
         return out
     slim_path = Path(slim_path)
-    prompt_path = write_grok_prompt(slim_path)
-    cmd = grok_cmd(slim_path, prompt_path)
+    env_prompt = os.environ.get("G3_GROK_PROMPT", "").strip()
+    use_prompt = Path(prompt_path) if prompt_path else None
+    if use_prompt is None and env_prompt:
+        candidate = Path(env_prompt)
+        if candidate.is_file():
+            use_prompt = candidate
+    if use_prompt is None:
+        sibling = slim_path.parent / "grok-prompt.md"
+        if sibling.is_file():
+            use_prompt = sibling
+    if use_prompt is None or not use_prompt.is_file():
+        use_prompt = write_grok_prompt(slim_path)
+    cmd = grok_cmd(slim_path, use_prompt)
     logp = Path(str(out["log"]))
     try:
         proc = subprocess.run(
@@ -204,7 +226,15 @@ def run_grok_build(slim_path: Path) -> Dict[str, Any]:
     except subprocess.TimeoutExpired as e:
         out["reason"] = "timeout"
         out["rc"] = -1
-        logp.write_text((e.stdout or "") + "\n" + (e.stderr or ""))
+        logp.write_text(
+            "timeout after %ss (nested grok TUI / leader.sock?)\ncmd=%s\nstdout:\n%s\nstderr:\n%s\n"
+            % (
+                grok_build_sec(),
+                " ".join(cmd),
+                e.stdout or "",
+                e.stderr or "",
+            )
+        )
         return out
     except OSError as e:
         out["reason"] = str(e)
@@ -222,3 +252,24 @@ def run_grok_build(slim_path: Path) -> Dict[str, Any]:
     if not out["applied"]:
         out["reason"] = out["reason"] or "no-mill"
     return out
+
+
+def run_grok_escalation_dir(directory: Path) -> Dict[str, Any]:
+    """Run Grok Build from a NewWorldView escalation export folder."""
+    directory = Path(directory)
+    pack = directory / "pack-escalation.md"
+    if not pack.is_file():
+        return {
+            "ok": False,
+            "applied": False,
+            "rc": None,
+            "usage": {"in": 0, "out": 0, "total": 0},
+            "reason": "no-pack-escalation",
+            "log": "/tmp/ss-g3-grok-build.log",
+            "text": "",
+        }
+    prompt = directory / "grok-prompt.md"
+    return run_grok_build(
+        pack,
+        prompt_path=prompt if prompt.is_file() else None,
+    )

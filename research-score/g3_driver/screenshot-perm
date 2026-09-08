@@ -1,0 +1,4 @@
+#!/bin/sh
+# Trip macOS Screen Recording TCC. Does not launch SheepShaver.
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$DIR/g3_driver.py" screenshot-perm "$@"

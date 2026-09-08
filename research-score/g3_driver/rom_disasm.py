@@ -26,6 +26,8 @@ from debug_run import prefs_path
 from mill_apply import (
     A190_DATA_HI,
     A190_DATA_LO,
+    CODE66_HELPER_HI,
+    CODE66_HELPER_LO,
     HARD_SKIP_OFFS,
     LOOK_AGAIN_SKIP_68K,
     NO_SKIP_68K_OPS,
@@ -92,11 +94,11 @@ A_LINE = {
     0xA8A3: "DisposeWindow",
     0xA914: "GetNewWindow",
     0xA91F: "GetNewControl",
-    0xA97B: "GetCursor",
-    0xA97C: "GetCCursor",
+    0xA97B: "InitDialogs",
+    0xA97C: "GetNewDialog",
+    0xA97D: "NewDialog",
     0xA983: "DisposeDialog",
-    0xA985: "NewDialog",
-    0xA97D: "GetNewDialog",
+    0xAA1B: "GetCCursor",
     0xAA68: "DialogDispatch",
     0xAA5A: "CodeFragmentDispatch",
     0xABE8: "InitCPort",
@@ -113,7 +115,7 @@ A_LINE = {
     0xA06E: "OpenResFile",
     0xA9A0: "GetResource",
     0xA9A2: "LoadResource",
-    0xA9C9: "GetResource",
+    0xA9C9: "SysError",
 }
 
 STRING_NEEDLES = (
@@ -526,6 +528,8 @@ def region_tag(off: int) -> Optional[str]:
             return name
     if UI_SKIP_68K_LO <= o < UI_SKIP_68K_HI:
         return "ui-dialog-path"
+    if CODE66_HELPER_LO <= o < CODE66_HELPER_HI:
+        return "code66-helper"
     if A190_DATA_LO <= o < A190_DATA_HI:
         return "a190-data-table"
     if o in LOOK_AGAIN_SKIP_68K:
@@ -670,8 +674,12 @@ def format_report(
     a("## Do not skip-68k (ROM findings)")
     a("")
     a(
-        "- UI path 0x%x-0x%x: GetCCursor/DialogDispatch/SetPort/DisposeDialog (WINDOW)"
+        "- UI path 0x%x-0x%x: GetNewDialog A97C/DialogDispatch/SetPort/DisposeDialog (WINDOW)"
         % (UI_SKIP_68K_LO, UI_SKIP_68K_HI)
+    )
+    a(
+        "- CODE 66 helper 0x%x-0x%x: stay-code66, not skip-68k"
+        % (CODE66_HELPER_LO, CODE66_HELPER_HI)
     )
     a(
         "- $a190 data 0x%x-0x%x: repeating table, not code"

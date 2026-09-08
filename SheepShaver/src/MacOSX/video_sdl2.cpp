@@ -52,6 +52,7 @@
 #include <SDL_mutex.h>
 #include <SDL_thread.h>
 #include <errno.h>
+#include <stdio.h>
 #include <vector>
 #include <string>
 #include <math.h>
@@ -1937,59 +1938,117 @@ extern "C" void nw_boot_host_pump(void)
 }
 
 #ifdef SHEEPSHAVER
-static void g3_paint_click_box(void)
+static void g3_write_pgm(const char *path, const uint8 *src, int w, int h, int pitch)
 {
-	int bx, by, bw, bh;
-	int pitch;
-	int bpp;
-	int y;
-	size_t fb_bytes;
+	FILE *f;
+	int y, row;
 
-	if (!the_buffer || !drv || nw_g3_click_consumed())
+	if (!path || !src || w <= 0 || h <= 0 || pitch <= 0)
 		return;
-	if (!nw_g3_click_box(&bx, &by, &bw, &bh))
+	row = w < pitch ? w : pitch;
+	{
+		char tmp[256];
+		snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+		f = fopen(tmp, "wb");
+		if (!f)
+			return;
+		fprintf(f, "P5\n%d %d\n255\n", row, h);
+		for (y = 0; y < h; y++)
+			fwrite(src + (size_t)y * (size_t)pitch, 1, (size_t)row, f);
+		fclose(f);
+		rename(tmp, path);
+	}
+}
+
+/* Pack the_buffer as mode WxH (not pitch). 32-bit SDL masks R=0xff000000. */
+static void g3_write_fb_packed(const char *path, const uint8 *src, int w, int h, int pitch)
+{
+	FILE *f;
+	int x, y, bpp;
+	char tmp[256];
+
+	if (!path || !src || w <= 0 || h <= 0 || pitch <= 0)
+		return;
+	bpp = pitch / w;
+	if (bpp < 1)
+		bpp = 1;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	f = fopen(tmp, "wb");
+	if (!f)
+		return;
+	if (bpp >= 4) {
+		fprintf(f, "P6\n%d %d\n255\n", w, h);
+		for (y = 0; y < h; y++) {
+			const uint8 *row = src + (size_t)y * (size_t)pitch;
+			for (x = 0; x < w; x++) {
+				const uint8 *p = row + (size_t)x * (size_t)bpp;
+				uint8 rgb[3];
+				/* Mac 32-bit xRGB in memory: pad, R, G, B. SDL glass is red
+				 * when p[1] is red; p[3],p[2],p[1] packed as BGR. */
+				rgb[0] = p[1];
+				rgb[1] = p[2];
+				rgb[2] = p[3];
+				fwrite(rgb, 1, 3, f);
+			}
+		}
+	} else if (bpp == 2) {
+		fprintf(f, "P6\n%d %d\n255\n", w, h);
+		for (y = 0; y < h; y++) {
+			const uint8 *row = src + (size_t)y * (size_t)pitch;
+			for (x = 0; x < w; x++) {
+				uint16 v = (uint16)row[(size_t)x * 2] |
+					   ((uint16)row[(size_t)x * 2 + 1] << 8);
+				uint8 rgb[3];
+				rgb[0] = (uint8)(((v >> 11) & 0x1fu) << 3);
+				rgb[1] = (uint8)(((v >> 5) & 0x3fu) << 2);
+				rgb[2] = (uint8)((v & 0x1fu) << 3);
+				fwrite(rgb, 1, 3, f);
+			}
+		}
+	} else {
+		int row = w < pitch ? w : pitch;
+		fprintf(f, "P5\n%d %d\n255\n", row, h);
+		for (y = 0; y < h; y++)
+			fwrite(src + (size_t)y * (size_t)pitch, 1, (size_t)row, f);
+	}
+	fclose(f);
+	rename(tmp, path);
+}
+
+static void g3_dump_hangcap_fb(void)
+{
+	int pitch, w, h, plant_h;
+	static unsigned n;
+
+	if (!the_buffer || !drv)
 		return;
 	{
 		const VIDEO_MODE &mode = drv->mode;
+		w = (int)VIDEO_MODE_X;
+		h = (int)VIDEO_MODE_Y;
 		pitch = (int)VIDEO_MODE_ROW_BYTES;
-		if (pitch <= 0 || VIDEO_MODE_X <= 0)
-			return;
-		bpp = pitch / (int)VIDEO_MODE_X;
-		if (bpp < 1)
-			bpp = 1;
-		fb_bytes = (size_t)pitch * (size_t)VIDEO_MODE_Y;
-		/* calloc left the FB black. White paper, black box. */
-		memset(the_buffer, 0xff, fb_bytes);
-		if (the_buffer_copy)
-			memset(the_buffer_copy, 0xff, fb_bytes);
-		if (bx < 0)
-			bx = 0;
-		if (by < 0)
-			by = 0;
-		if (bx + bw > (int)VIDEO_MODE_X)
-			bw = (int)VIDEO_MODE_X - bx;
-		if (by + bh > (int)VIDEO_MODE_Y)
-			bh = (int)VIDEO_MODE_Y - by;
-		for (y = by; y < by + bh; y++) {
-			uint8 *row = the_buffer + (size_t)y * (size_t)pitch +
-				     (size_t)bx * (size_t)bpp;
-			memset(row, 0x00, (size_t)bw * (size_t)bpp);
-			if (the_buffer_copy)
-				memset(the_buffer_copy + (size_t)y * (size_t)pitch +
-					       (size_t)bx * (size_t)bpp,
-				       0x00, (size_t)bw * (size_t)bpp);
-		}
-		if (drv->s)
-			update_sdl_video(drv->s, 0, 0, (Sint32)VIDEO_MODE_X,
-					 (Sint32)VIDEO_MODE_Y);
+	}
+	if (w <= 0 || h <= 0 || pitch <= 0)
+		return;
+	g3_write_fb_packed("/tmp/ss-g2-fb.pgm", the_buffer, w, h, pitch);
+	if (RAMBaseHost && RAMSize > 0x400000u + 80u * 480u) {
+		plant_h = h > 480 ? 480 : h;
+		g3_write_pgm("/tmp/ss-g2-fb-plant.pgm",
+			     RAMBaseHost + 0x400000u, 80, plant_h, 80);
+	}
+	if (n < 1) {
+		n++;
+		nw_boot_log("G3: FB dump packed xRGB");
 	}
 }
+
 #endif
 
 void VideoPresent(void)
 {
 #ifdef SHEEPSHAVER
-	g3_paint_click_box();
+	/* Click plumbing stays in nw_boot_contract. Do not paint over the_buffer. */
+	g3_dump_hangcap_fb();
 #endif
 	int rc = present_sdl_video();
 #if NW_BOOT_LOG

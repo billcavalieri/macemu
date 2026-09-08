@@ -72,6 +72,7 @@ __pycache__/
 # Hang-cap logs, Qwen extracts, generated packs, and mill resume state stay local.
 #
 *.log
+*.log.gz
 ss-pr10*.log
 ss-pr10*-last80g.txt
 research-score/ss-g3-*

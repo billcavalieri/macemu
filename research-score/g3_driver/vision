@@ -1,0 +1,4 @@
+#!/bin/sh
+# Grok Build CLI WINDOW yes/no from hang-cap PNG. Not nested from ./run.
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$DIR/fb_vision.py" "$@"

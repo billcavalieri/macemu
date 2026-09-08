@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from classify import classify_text
-from mill_apply import HARD_SKIP_OFFS, leftover_map_remaining
+from g3_lock import format_tokens
+from mill_apply import HARD_SKIP_OFFS, MAP_LOG_CAP, leftover_map_remaining
 from mill_escalate import REFUSE_VERBATIM
+from mill_log import mill_log_stem, read_log, resolve_log
 from parse_log import pin_g2_packet
 
 HERE = Path(__file__).resolve().parent
@@ -26,14 +28,14 @@ def _hx(n: Optional[int]) -> str:
 
 def _log_for_n(n: int, mill: Dict[str, Any]) -> Optional[Path]:
     p = Path("/tmp/ss-g3-mill-%d.log" % int(n))
-    if p.is_file():
-        return p
-    copy = HERE.parent / ("ss-g3-mill-%d.log" % int(n))
-    if copy.is_file():
-        return copy
+    found = resolve_log(p)
+    if found is not None:
+        return found
     keep = mill.get("keep_log") or mill.get("base_log")
-    if keep and Path(str(keep)).is_file() and Path(str(keep)).name == p.name:
-        return Path(str(keep))
+    if keep:
+        k = resolve_log(keep)
+        if k is not None and mill_log_stem(k).name == mill_log_stem(p).name:
+            return k
     return None
 
 
@@ -49,9 +51,11 @@ def _summarize_log(path: Optional[Path]) -> Dict[str, Any]:
         "hang04_line": None,
         "skip_line": None,
     }
-    if path is None or not path.is_file():
+    resolved = resolve_log(path) if path else None
+    if resolved is None:
         return out
-    text = path.read_text(errors="replace")
+    out["log"] = str(resolved)
+    text = read_log(resolved)
     report = classify_text(text)
     hb = report.get("last_hb") or {}
     out["LIVE_CLASS"] = report.get("LIVE_CLASS")
@@ -107,7 +111,6 @@ def _synth_from_log(n: int, mill: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "hang_off": hang_off,
         "result": result,
         "g3": "no",
-        "qwen": {},
         "grok": {},
         "_synth": True,
     }
@@ -141,7 +144,6 @@ def _attempt_row(a: Dict[str, Any], mill: Dict[str, Any]) -> Dict[str, Any]:
         g_keep = g_lines[-REVERT_G:]
     else:
         g_keep = g_lines[-KEEP_G:]
-    q = a.get("qwen") or {}
     g = a.get("grok") or {}
     return {
         "n": n,
@@ -157,9 +159,6 @@ def _attempt_row(a: Dict[str, Any], mill: Dict[str, Any]) -> Dict[str, Any]:
         "skip_line": summ.get("skip_line"),
         "hang04_line": summ.get("hang04_line"),
         "g_tail": g_keep,
-        "qwen_in": int(q.get("in") or 0),
-        "qwen_out": int(q.get("out") or 0),
-        "qwen_total": int(q.get("total") or 0),
         "grok_in": int(g.get("in") or 0),
         "grok_out": int(g.get("out") or 0),
         "grok_total": int(g.get("total") or 0),
@@ -188,7 +187,7 @@ def pack_from_state(st: Dict[str, Any]) -> Dict[str, Any]:
             "LIVE_CLASS=wait-cmp-fwd-bc with unknown-hb is not a wait mill. 50326564 900107d4/7c0604a6 is stw+mfsr, not wait-cmp.",
             "Do not remill e298371e. Do not merge arm64-jit. Do not commit ROM/disk. Do not mill ppc-mmu for 68fff0dc.",
             "Host window/cursor/close/click probe already KEEP. Do not break open .app launch or QuitEmulator on close.",
-            "Qwen is G3 lock only. Do not ask Qwen to pick the mill.",
+            "Skip-68k candidates come from NewWorldView Apple FM (mill-annotations.json). Grok Build for escalate only.",
             "After mill-22/35 68k pc=50366084, mill leftover skip-68k from the r24 map until the map is empty, then canned successor / Grok Build escalate. Do not mill skip-hang 50326 while saw_68k. Do not +2 walk ROM. Never idle except Grok Build escalate, Ctrl-C, or G3.",
         ],
         "file": "SheepShaver/src/kpx_cpu/src/cpu/ppc/ppc-cpu.cpp",
@@ -201,10 +200,11 @@ def pack_from_state(st: Dict[str, Any]) -> Dict[str, Any]:
             "r24 divert off CODE 0 JT",
             "or-in EE",
             "mill ppc-mmu for 68fff0dc",
-            "skip-68k UI path 0x5c86c-0x5c8c0 (GetCCursor/DialogDispatch/SetPort/DisposeDialog)",
-            "skip-68k A-lines GetCCursor/DialogDispatch/SetPort/DisposeDialog/CloseRgn/OpenResFile/GetResource/InitCursor/GetEOF/GetFPos/Read/SetFPos",
+            "skip-68k UI path 0x5c86c-0x5c8c0 (GetNewDialog A97C/DialogDispatch/SetPort/DisposeDialog)",
+            "skip-68k A-lines GetNewDialog/NewDialog/GetCCursor/DialogDispatch/SetPort/DisposeDialog/CloseRgn/OpenResFile/GetResource/SysError/InitCursor/GetEOF/GetFPos/Read/SetFPos",
             "remill look-again KEEP OpenResFile/GetResource/InitCursor/GetFPos/GetEOF",
             "skip-68k $a190 data 0x16de8-0x16e20",
+            "skip-68k CODE 66 helper 0x9440-0x94cf",
         ],
         "tested": list(mill.get("tested") or []),
         "reverted": list(mill.get("reverted_kinds") or []),
@@ -269,7 +269,7 @@ def format_pack_md(pack: Dict[str, Any]) -> str:
     a.append("")
     a.append("## Attempts")
     a.append("")
-    a.append("| n | kind | hang_off | result | elapsed | last_hb | hang04 | g2 | qwen_tot |")
+    a.append("| n | kind | hang_off | result | elapsed | last_hb | hang04 | g2 | grok_tot |")
     a.append("|---|------|----------|--------|---------|---------|--------|----|----------|")
     for row in pack.get("attempts") or []:
         el = row.get("elapsed_sec")
@@ -285,20 +285,20 @@ def format_pack_md(pack: Dict[str, Any]) -> str:
                 _hx(row.get("last_hb_pc")),
                 row.get("hang_04cecd36"),
                 row.get("g2_live"),
-                row.get("qwen_total"),
+                row.get("grok_total"),
             )
         )
     tok = pack.get("tokens") or {}
-    q = tok.get("qwen") or {}
     g = tok.get("grok") or {}
+    afm = tok.get("apple_fm") or {}
     a.append("")
     a.append(
         "TOKENS sum grok in=%s out=%s total=%s"
         % (g.get("in") or 0, g.get("out") or 0, g.get("total") or 0)
     )
     a.append(
-        "TOKENS sum qwen in=%s out=%s total=%s"
-        % (q.get("in") or 0, q.get("out") or 0, q.get("total") or 0)
+        "TOKENS sum apple_fm in=%s out=%s total=%s"
+        % (afm.get("in") or 0, afm.get("out") or 0, afm.get("total") or 0)
     )
     a.append("")
     a.append("## KEEP last G lines")
@@ -426,7 +426,8 @@ def format_pack_slim_md(st: Dict[str, Any]) -> str:
     a.append("- Mill C++ on allowlist: ppc-cpu.cpp and/or research-score/g3_driver/mill_apply.py.")
     a.append("- Then the user runs ./research-score/g3_driver/run to hang-cap.")
     a.append("- KEEP/REVERT already decided: hang04 or G2 loss or 68k-loss is worse. Do not remill reverted.")
-    a.append("- Qwen is G3 lock only. Do not ask Qwen to pick the mill.")
+    a.append("- G3 lock: operator WINDOW=yes and live G2 HIT in log. Skip-68k: NewWorldView mill-annotations.json.")
+    a.append("- When: hang-cap LoadSeg A9F0 enter (keep r24) alone. GetResource/FrameRect/CFM only after CODE is live. Events only after a real window. Do not host-paint the_buffer. Overlay 0x5c86c is not G3.")
     a.append("")
     a.append("## HARD")
     a.append("")
@@ -442,10 +443,11 @@ def format_pack_slim_md(st: Dict[str, Any]) -> str:
         "mill ppc-mmu for 68fff0dc",
         "remill e298371e",
         "commit ROM/disk",
-        "skip-68k UI path 0x5c86c-0x5c8c0 (GetCCursor/DialogDispatch/SetPort/DisposeDialog)",
-        "skip-68k A-lines GetCCursor/DialogDispatch/SetPort/DisposeDialog/CloseRgn/OpenResFile/GetResource/InitCursor/GetEOF/GetFPos/Read/SetFPos",
+        "skip-68k UI path 0x5c86c-0x5c8c0 (GetNewDialog A97C/DialogDispatch/SetPort/DisposeDialog)",
+        "skip-68k A-lines GetNewDialog/NewDialog/GetCCursor/DialogDispatch/SetPort/DisposeDialog/CloseRgn/OpenResFile/GetResource/SysError/InitCursor/GetEOF/GetFPos/Read/SetFPos",
         "remill look-again KEEP OpenResFile/GetResource/InitCursor/GetFPos/GetEOF",
         "skip-68k $a190 data 0x16de8-0x16e20",
+        "skip-68k CODE 66 helper 0x9440-0x94cf",
     ):
         a.append("- do not %s" % s)
     a.append("")
@@ -462,7 +464,10 @@ def format_pack_slim_md(st: Dict[str, Any]) -> str:
     a.append("- LIVE_CLASS: `%s`" % (keep.get("LIVE_CLASS") or "-"))
     a.append("- g2_live: `%s` hang_04cecd36: `%s`" % (keep.get("g2_live"), keep.get("hang_04cecd36")))
     a.append("- skip-68k KEEP=`%s` REVERT=`%s` n=`%s`" % (keep_n, revert_n, n))
-    a.append("- map remaining: `%s` (4096 unique cap, not whole ROM)" % n_remain)
+    a.append(
+        "- map remaining: `%s` (KEEP-log millable offs; %s map lines/hang-cap, bitmap is full ROM)"
+        % (n_remain, MAP_LOG_CAP)
+    )
     a.append("")
     a.append("## Attempts (last 20)")
     a.append("")
@@ -523,6 +528,23 @@ def format_pack_slim_md(st: Dict[str, Any]) -> str:
         row = dict(row)
         row["g_tail"] = gtail
         a.extend(_mill_section(row))
+    try:
+        from mill_annotations import active
+
+        ann = active()
+        if ann:
+            section = ann.format_pack_section()
+            if section:
+                a.append(section)
+        from mill_histogram import active as active_histogram
+
+        hist = active_histogram()
+        if hist:
+            section = hist.format_pack_section()
+            if section:
+                a.append(section)
+    except ImportError:
+        pass
     a.append("## Reply")
     a.append("")
     a.append("- One mill. Do not remill reverted. Do not skip-68k +2.")

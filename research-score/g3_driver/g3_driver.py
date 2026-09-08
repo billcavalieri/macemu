@@ -24,8 +24,13 @@ if str(HERE) not in sys.path:
 
 from classify import classify_text, escalate_action, format_classify, load_taxonomy
 from debug_run import (
+    compare_keep_fb,
+    copy_hangcap_media,
     debug_sha,
+    format_fb_changed,
     hangcap_sec,
+    notify_fb_glass,
+    notify_skip68k_empty,
     hangcap_working_tree,
     mill_app,
     mill_binary_match,
@@ -59,6 +64,7 @@ from mill_apply import (
     stash_files,
     tested_keys,
 )
+from mill_log import gzip_mill_logs, read_log, read_log_tail, resolve_log
 from mill_apply import _log_for_n_simple
 from mill_apply import revert as mill_revert
 from mill_escalate import write_escalate
@@ -67,11 +73,13 @@ from grok_build import (
     grok_build_enabled,
     grok_max_calls,
     run_grok_build,
+    run_grok_escalation_dir,
 )
 from mill_pack import append_attempt_pack_log, write_pack
-from qwen_lock import add_usage, format_tokens, score_g3, zero_usage
+from g3_lock import add_usage, format_tokens, score_g3, zero_usage
 
 _STOP = False
+_NW_ARGS: Optional[argparse.Namespace] = None
 
 
 def _iso_now() -> str:
@@ -122,8 +130,153 @@ def save_state(st: Dict[str, Any]) -> None:
     _state_path().write_text(json.dumps(st, separators=(",", ":")) + "\n")
 
 
+def _add_nw_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--annotations",
+        default=None,
+        help="NewWorldView mill-annotations.json (approved Apple FM / Grok judgments)",
+    )
+    p.add_argument(
+        "--escalation-dir",
+        default=None,
+        help="Folder with pack-escalation.md + grok-prompt.md from NewWorldView",
+    )
+    p.add_argument(
+        "--histogram",
+        default=None,
+        help="NewWorldView mill-histogram.json (historical 68k frequency hints)",
+    )
+
+
+def _load_nw_histogram(args: Optional[argparse.Namespace] = None) -> Any:
+    from mill_histogram import clear_histogram, load_histogram, resolve_path as resolve_histogram_path
+
+    explicit = getattr(args, "histogram", None) if args is not None else None
+    hist_path = resolve_histogram_path(explicit)
+    if hist_path is None:
+        default = HERE / "mill-histogram.json"
+        if default.is_file():
+            hist_path = default
+    if hist_path:
+        return load_histogram(hist_path)
+    clear_histogram()
+    return None
+
+
+def _load_nw_annotations(args: Optional[argparse.Namespace] = None) -> Any:
+    from mill_annotations import clear_annotations, load_annotations, resolve_path
+
+    explicit = getattr(args, "annotations", None) if args is not None else None
+    ann_path = resolve_path(explicit)
+    if ann_path is None:
+        default = HERE / "mill-annotations.json"
+        if default.is_file():
+            ann_path = default
+    if ann_path:
+        return load_annotations(ann_path)
+    clear_annotations()
+    return None
+
+
+def _ensure_nw_annotations(args: Optional[argparse.Namespace] = None) -> Any:
+    from mill_annotations import active
+
+    ann = active()
+    if ann is not None:
+        return ann
+    return _load_nw_annotations(args)
+
+
+def _apple_fm_total_usage(
+    st: Dict[str, Any],
+    args: Optional[argparse.Namespace] = None,
+) -> Dict[str, int]:
+    ann = _ensure_nw_annotations(args)
+    if ann is None:
+        return zero_usage()
+    usage = ann.token_usage()
+    tok = st.setdefault("mill", {}).setdefault("tokens", {"grok": zero_usage()})
+    tok["apple_fm"] = usage
+    return dict(usage)
+
+
+def _apple_fm_mill_usage(
+    hang_off: Optional[int],
+    kind: str,
+    args: Optional[argparse.Namespace] = None,
+) -> Tuple[Dict[str, int], str]:
+    from mill_annotations import parse_usage
+
+    ann = _ensure_nw_annotations(args)
+    if ann is not None and kind == "skip-68k" and hang_off is not None:
+        entry = ann.entry_at(int(hang_off))
+        if entry is not None:
+            usage = parse_usage(entry.get("tokenUsage"))
+            return usage, "skip-68k 0x%x" % int(hang_off)
+    if ann is not None:
+        return zero_usage(), "mill canned"
+    return zero_usage(), "no mill-annotations.json"
+
+
+def _configure_nw_paths(args: argparse.Namespace) -> None:
+    ann = _load_nw_annotations(args)
+    if ann:
+        print(
+            "ANNOTATIONS %s romKey=%s entries=%s skip=%s"
+            % (
+                ann.path,
+                ann.rom_key or "-",
+                len(ann.entries),
+                len(ann.skip_candidate_offs()),
+            )
+        )
+        print(ann.format_token_line())
+        st = load_state()
+        tok = st.setdefault("mill", {}).setdefault("tokens", {"grok": zero_usage()})
+        tok["apple_fm"] = ann.token_usage()
+        save_state(st)
+    else:
+        from mill_annotations import clear_annotations
+
+        clear_annotations()
+
+    hist = _load_nw_histogram(args)
+    if hist:
+        print(
+            "HISTOGRAM %s romKey=%s entries=%s scanned=%s"
+            % (
+                hist.path,
+                hist.rom_key or "-",
+                len(hist.entries),
+                hist.scanned_logs,
+            )
+        )
+        print(hist.format_token_line())
+
+    esc = (getattr(args, "escalation_dir", None) or os.environ.get("G3_ESCALATION_DIR", "")).strip()
+    if esc:
+        st = load_state()
+        st.setdefault("mill", {})["escalation_dir"] = esc
+        save_state(st)
+        print("ESCALATION_DIR %s" % esc)
+
+
+def _resolve_grok_pack(st: Dict[str, Any]) -> Tuple[Path, Optional[Path]]:
+    mill = st.get("mill") or {}
+    esc = str(mill.get("escalation_dir") or os.environ.get("G3_ESCALATION_DIR", "")).strip()
+    if esc:
+        directory = Path(esc)
+        pack = directory / "pack-escalation.md"
+        prompt = directory / "grok-prompt.md"
+        if pack.is_file():
+            print("Grok Build NW escalation %s" % pack)
+            return pack, prompt if prompt.is_file() else None
+    path = _write_grok_build_pack(st)
+    return path, None
+
+
 def _read_log(path: Path) -> str:
-    return path.read_text(errors="replace")
+    return read_log(path)
 
 
 def cmd_classify(args: argparse.Namespace) -> int:
@@ -158,8 +311,8 @@ def cmd_score(args: argparse.Namespace) -> int:
     print(format_classify(report))
     window = args.window or "unknown"
     lock = score_g3(report, window=window)
-    print("QWEN_G3=%s skipped=%s window=%s" % (lock["g3"], lock["skipped"], window))
-    print(format_tokens("qwen", lock.get("usage"), "lock" + (" skipped" if lock.get("skipped") else "")))
+    print("G3_LOCK=%s skipped=%s window=%s (%s)" % (
+        lock["g3"], lock["skipped"], window, lock.get("raw") or "-"))
     print(format_tokens("grok", zero_usage(), "mill canned"))
     if window == "yes" and report.get("g2_live") and lock["g3"] == "yes":
         print("G3=yes")
@@ -230,8 +383,8 @@ def next_step(st: Dict[str, Any], sha: str) -> str:
         return "g3-done"
     mill = st.get("mill") or {}
     if mill.get("last_fail") and mill.get("n"):
-        p = Path("/tmp/ss-g3-mill-%d.log" % int(mill["n"]))
-        if p.is_file():
+        p = resolve_log(Path("/tmp/ss-g3-mill-%d.log" % int(mill["n"])))
+        if p is not None:
             return "score-log"
     if mill.get("pending_hangcap"):
         return "hangcap"
@@ -304,8 +457,8 @@ def process_sha(
     report = classify_text(text)
     print(format_classify(report))
     lock = score_g3(report, window=window)
-    print("QWEN_G3=%s skipped=%s" % (lock["g3"], lock["skipped"]))
-    print(format_tokens("qwen", lock.get("usage"), "lock" + (" skipped" if lock.get("skipped") else "")))
+    print("G3_LOCK=%s skipped=%s (%s)" % (
+        lock["g3"], lock["skipped"], lock.get("raw") or "-"))
     print(format_tokens("grok", zero_usage(), "mill canned"))
     if window == "yes" and report.get("g2_live") and lock["g3"] == "yes":
         print("G3=yes")
@@ -363,8 +516,8 @@ def _classify_log(log_path: Path, window: str) -> Dict[str, Any]:
     report = classify_text(text)
     print(format_classify(report))
     lock = score_g3(report, window=window)
-    print("QWEN_G3=%s skipped=%s window=%s" % (lock["g3"], lock["skipped"], window))
-    print(format_tokens("qwen", lock.get("usage"), "lock" + (" skipped" if lock.get("skipped") else "")))
+    print("G3_LOCK=%s skipped=%s window=%s (%s)" % (
+        lock["g3"], lock["skipped"], window, lock.get("raw") or "-"))
     print(format_tokens("grok", zero_usage(), "mill canned"))
     report["_lock"] = lock
     if window == "yes" and report.get("g2_live") and lock["g3"] == "yes":
@@ -384,7 +537,7 @@ def _sum_who(attempts: Any, who: str) -> Dict[str, int]:
 
 
 def format_attempts_table(attempts: Any) -> str:
-    fmt = "%-4s %-12s %-8s %-7s %8s %8s %8s %8s %8s %8s %8s"
+    fmt = "%-4s %-12s %-8s %-7s %8s %8s %8s %8s"
     rows = [
         fmt
         % (
@@ -396,16 +549,12 @@ def format_attempts_table(attempts: Any) -> str:
             "grok_in",
             "grok_out",
             "grok_tot",
-            "qwen_in",
-            "qwen_out",
-            "qwen_tot",
         )
     ]
     for a in attempts or []:
         off = a.get("hang_off")
         off_s = ("%x" % int(off)) if off is not None else "-"
         g = a.get("grok") or zero_usage()
-        q = a.get("qwen") or zero_usage()
         rows.append(
             fmt
             % (
@@ -417,13 +566,9 @@ def format_attempts_table(attempts: Any) -> str:
                 int(g.get("in") or 0),
                 int(g.get("out") or 0),
                 int(g.get("total") or 0),
-                int(q.get("in") or 0),
-                int(q.get("out") or 0),
-                int(q.get("total") or 0),
             )
         )
     gtot = _sum_who(attempts, "grok")
-    qtot = _sum_who(attempts, "qwen")
     rows.append(
         fmt
         % (
@@ -435,9 +580,6 @@ def format_attempts_table(attempts: Any) -> str:
             gtot["in"],
             gtot["out"],
             gtot["total"],
-            qtot["in"],
-            qtot["out"],
-            qtot["total"],
         )
     )
     return "\n".join(rows)
@@ -451,8 +593,6 @@ def _record_attempt(
     result: str,
 ) -> None:
     mill = st.setdefault("mill", {})
-    lock = report.get("_lock") or {}
-    qwen_u = lock.get("usage") or zero_usage()
     grok_u = zero_usage()
     if kind == "grok-escalate":
         grok_u = mill.pop("grok_last_usage", None) or zero_usage()
@@ -472,8 +612,6 @@ def _record_attempt(
         "result": result,
         "g3": report.get("_g3") or "no",
         "grok": dict(grok_u),
-        "qwen": dict(qwen_u),
-        "qwen_skipped": bool(lock.get("skipped")),
         "started_at": mill.get("attempt_started"),
         "ended_at": _iso_now(),
         "elapsed_sec": None if elapsed is None else round(elapsed, 1),
@@ -484,9 +622,8 @@ def _record_attempt(
         mill["keep_count"] = int(mill.get("keep_count") or 0) + 1
     elif result == "REVERT":
         mill["revert_count"] = int(mill.get("revert_count") or 0) + 1
-    tok = mill.setdefault("tokens", {"grok": zero_usage(), "qwen": zero_usage()})
+    tok = mill.setdefault("tokens", {"grok": zero_usage(), "apple_fm": zero_usage()})
     tok["grok"] = add_usage(tok.get("grok"), grok_u)
-    tok["qwen"] = add_usage(tok.get("qwen"), qwen_u)
     print(
         "TIME mill=%s elapsed=%s avg=%s n=%s session_start=%s"
         % (
@@ -502,12 +639,12 @@ def _record_attempt(
         % (attempt["n"], kind, ("%x" % int(off)) if off is not None else "-", result)
     )
     print(format_tokens("grok", grok_u, "mill canned"))
-    role = "lock skipped" if lock.get("skipped") else "lock"
-    print(format_tokens("qwen", qwen_u, role))
     gtot = mill["tokens"]["grok"]
-    qtot = mill["tokens"]["qwen"]
     print("TOKENS sum grok in=%d out=%d total=%d" % (gtot["in"], gtot["out"], gtot["total"]))
-    print("TOKENS sum qwen in=%d out=%d total=%d" % (qtot["in"], qtot["out"], qtot["total"]))
+    mill_u, mill_role = _apple_fm_mill_usage(off, kind, _NW_ARGS)
+    print(format_tokens("apple_fm", mill_u, mill_role))
+    afm = _apple_fm_total_usage(st, _NW_ARGS)
+    print("TOKENS sum apple_fm in=%d out=%d total=%d" % (afm["in"], afm["out"], afm["total"]))
     try:
         append_attempt_pack_log(st, attempt)
     except OSError:
@@ -594,6 +731,12 @@ def _force_leftover_mill(mill: Dict[str, Any]) -> Tuple[str, int]:
     saw_68k = bool(mill.get("saw_68k") or keep_is_68k(mill.get("keep_pc")))
     if saw_68k:
         mill["saw_68k"] = True
+        keys = set(tested_keys(mill.get("tested"), "leftover"))
+        rev = set(mill.get("reverted_kinds") or [])
+        if "leftover:stay-code66" not in keys and "leftover:stay-code66" not in rev:
+            mill["kind"] = "stay-code66"
+            mill["hang_off"] = None
+            return "stay-code66", 0
         off = next_skip_68k_off(mill, mill.get("tested"), mill.get("reverted_kinds"))
         if off is not None:
             mill["hang_off"] = off
@@ -611,7 +754,50 @@ def _force_leftover_mill(mill: Dict[str, Any]) -> Tuple[str, int]:
             mill["hang_off"] = None
             mill["stuck"] = "grok-escalate"
             return "grok-escalate", 0
-        if kind in ("cfm-aa5a", "trap-68k", "reenter-68k"):
+        if kind in (
+            "cfm-aa5a",
+            "trap-68k",
+            "reenter-68k",
+            "getresource-a9a0",
+            "getnewdialog-dlog",
+            "code66-syserr99",
+            "code66-resume",
+            "code66-allow-9440",
+            "stay-code66",
+            "launch-upgrader",
+            "splash-510",
+            "splash-510-even",
+            "pict-1000",
+            "pef-upgrader",
+            "pef-enter",
+            "pef-imports",
+            "pef-sysenv",
+            "pef-vol",
+            "pef-dce",
+            "pef-wait",
+            "pef-te",
+            "pef-terec",
+            "pef-skipte",
+            "pef-skipdi",
+            "pef-idx",
+            "pef-gnd",
+            "pef-gndid",
+            "pef-d519",
+            "pef-modal",
+            "pef-no519",
+            "pef-show",
+            "pef-forcesplash",
+            "pef-skipwait",
+            "pef-callsplash",
+            "pef-skipalert",
+            "pef-nimp",
+            "pef-jumpsplash",
+            "pef-plantsplash",
+            "pef-forceblit",
+            "pef-blitoff",
+            "pef-callgnd",
+            "pef-skipae",
+        ):
             mill["kind"] = kind
             mill["hang_off"] = None
             return kind, 0
@@ -662,15 +848,15 @@ def _begin_grok_escalate(st: Dict[str, Any]) -> Optional[int]:
         print("Grok Build hang-cap working tree (call %s)" % mill["grok_calls"])
         save_state(st)
         return None
-    path = _write_grok_build_pack(st)
+    path, prompt_path = _resolve_grok_pack(st)
     if grok_build_enabled() and grok_bin() is not None:
         stash_files()
         print("Grok Build headless grok -p slim=%s" % path)
         save_state(st)
-        r = run_grok_build(path)
+        r = run_grok_build(path, prompt_path=prompt_path)
         mill["grok_last_rc"] = r.get("rc")
         mill["grok_last_reason"] = r.get("reason")
-        tok = mill.setdefault("tokens", {"grok": zero_usage(), "qwen": zero_usage()})
+        tok = mill.setdefault("tokens", {"grok": zero_usage()})
         tok["grok"] = add_usage(tok.get("grok"), r.get("usage"))
         print(
             "Grok Build applied=%s ok=%s rc=%s reason=%s"
@@ -687,14 +873,26 @@ def _begin_grok_escalate(st: Dict[str, Any]) -> Optional[int]:
             save_state(st)
             print("Grok Build mill in tree; hang-cap")
             return None
+        # Timeout / no-bin: nested grok hung. Do not retry 600s. Mill in this chat.
+        if r.get("reason") in ("timeout", "no-grok-bin", "disabled"):
+            mill["stuck"] = "grok-escalate"
+            mill["grok_waiting"] = True
+            mill["pending_hangcap"] = False
+            mill["grok_fail_n"] = 0
+            save_state(st)
+            print(
+                "stuck=grok-escalate reason=%s. Mill C++ from %s then ./run. See /tmp/ss-g3-grok-build.log"
+                % (r.get("reason"), path)
+            )
+            return 0
         mill["grok_fail_n"] = int(mill.get("grok_fail_n") or 0) + 1
         save_state(st)
         if mill["grok_fail_n"] >= 2:
-            mill["stuck"] = "grok-build-fail"
+            mill["stuck"] = "grok-escalate"
             mill["grok_waiting"] = True
             mill["pending_hangcap"] = False
             save_state(st)
-            print("stuck=grok-build-fail. See /tmp/ss-g3-grok-build.log")
+            print("stuck=grok-escalate (no mill). See /tmp/ss-g3-grok-build.log")
             return 0
         print("Grok Build mill missing; retry leftover")
         return None
@@ -729,10 +927,12 @@ def _score_hangcap_log(
     window: str,
 ) -> Dict[str, Any]:
     mill = st.setdefault("mill", {})
+    log_path = resolve_log(log_path) or Path(log_path)
     before = None
     base = mill.get("base_log") or mill.get("last_log")
-    if base and Path(str(base)).is_file() and Path(str(base)).resolve() != log_path.resolve():
-        before = classify_text(_read_log(Path(str(base))))
+    base_p = resolve_log(base) if base else None
+    if base_p is not None and base_p.resolve() != log_path.resolve():
+        before = classify_text(_read_log(base_p))
     print("classify log=%s" % log_path)
     report = _classify_log(log_path, window)
     worse = before is not None and mill_worse(
@@ -793,10 +993,12 @@ def _score_hangcap_log(
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    global _STOP
+    global _STOP, _NW_ARGS
+    _NW_ARGS = args
     _STOP = False
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
+    _configure_nw_paths(args)
     window = args.window or os.environ.get("G3_WINDOW", "unknown")
     poll = int(os.environ.get("G3_POLL_SEC", "15"))
     st = load_state()
@@ -873,7 +1075,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         if step == "score-log":
             live = mill.get("live_class") or "false-stw-spr"
             kind = mill.get("kind") or "skip-pair"
-            log_path = Path("/tmp/ss-g3-mill-%d.log" % int(mill.get("n") or 1))
+            log_path = resolve_log(
+                Path("/tmp/ss-g3-mill-%d.log" % int(mill.get("n") or 1))
+            ) or Path("/tmp/ss-g3-mill-%d.log" % int(mill.get("n") or 1))
             print("score ignored hang-cap log=%s (perl_exit is not a discard if heartbeat)" % log_path)
             report = _score_hangcap_log(st, log_path, live, kind, window)
             save_state(st)
@@ -902,10 +1106,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                         p68 = _log_for_n_simple(n68)
                         if p68 is None:
                             continue
-                        try:
-                            tail = p68.read_text(errors="replace")[-12000:]
-                        except OSError:
-                            continue
+                        tail = read_log_tail(p68, 12000)
                         if "pc=50366084" in tail:
                             mill["keep_log"] = str(p68)
                             mill["keep_pc"] = 0x50366084
@@ -921,14 +1122,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                     keep_log, mill.get("tested"), mill.get("reverted_kinds")
                 )
             if kind is None:
-                lp = Path(str(keep_log))
+                lp = resolve_log(keep_log) or Path(str(keep_log))
                 last = mill.get("last_log")
                 # Do not reclassify a reverted mill log (mill-3 skip-mfsr).
                 if last and last != keep_log and ("%s:%s" % (live, mill.get("kind") or "")) in (
                     mill.get("reverted_kinds") or []
                 ):
                     mill["last_log"] = keep_log
-                if lp.is_file() and kind is None:
+                if resolve_log(lp) is not None and kind is None:
                     report = classify_text(_read_log(lp))
                     print("KEEP log %s -> %s" % (lp, format_classify(report)))
                     last_hb = report.get("last_hb") or {}
@@ -975,8 +1176,53 @@ def cmd_run(args: argparse.Namespace) -> int:
                         mill["hang_off"] = hang_off
                         if hang_off is None:
                             kind = None
-                    elif kind in ("cfm-aa5a", "trap-68k", "reenter-68k", "grok-escalate"):
+                    elif kind in (
+                        "cfm-aa5a",
+                        "trap-68k",
+                        "reenter-68k",
+                        "grok-escalate",
+                        "stay-code66",
+                        "launch-upgrader",
+                        "splash-510",
+                        "splash-510-even",
+                        "pict-1000",
+                        "pef-upgrader",
+                        "pef-enter",
+                        "pef-imports",
+                        "pef-sysenv",
+                        "pef-vol",
+                        "pef-dce",
+                        "pef-wait",
+                        "pef-te",
+                        "pef-terec",
+                        "pef-skipte",
+                        "pef-skipdi",
+                        "pef-idx",
+                        "pef-gnd",
+                        "pef-gndid",
+                        "pef-d519",
+                        "pef-modal",
+                        "pef-no519",
+                        "pef-show",
+                        "pef-forcesplash",
+                        "pef-skipwait",
+                        "pef-callsplash",
+                        "pef-skipalert",
+                        "pef-nimp",
+                        "pef-jumpsplash",
+                        "pef-plantsplash",
+                        "pef-forceblit",
+                        "pef-blitoff",
+                        "pef-callgnd",
+                        "pef-skipae",
+                        "getresource-a9a0",
+                        "getnewdialog-dlog",
+                        "code66-syserr99",
+                        "code66-resume",
+                        "code66-allow-9440",
+                    ):
                         mill["hang_off"] = None
+                        hang_off = None
                     elif kind in (
                         "keep-68k",
                         "read-noerr",
@@ -992,6 +1238,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                             "leftover mill kind=%s hang_off=%s"
                             % (kind, ("%x" % hang_off) if hang_off else None)
                         )
+                        if kind == "grok-escalate":
+                            notify_skip68k_empty(mill)
             if kind is None:
                 kind, hang_off = _force_leftover_mill(mill)
                 live = "leftover"
@@ -999,12 +1247,53 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "leftover mill kind=%s hang_off=%s"
                     % (kind, ("%x" % hang_off) if hang_off else None)
                 )
+                if kind == "grok-escalate":
+                    notify_skip68k_empty(mill)
             if kind in (
                 "skip-68k",
                 "skip-hang",
                 "cfm-aa5a",
                 "trap-68k",
                 "reenter-68k",
+                "stay-code66",
+                "launch-upgrader",
+                "splash-510",
+                "splash-510-even",
+                "pict-1000",
+                "pef-upgrader",
+                "pef-enter",
+                "pef-imports",
+                "pef-sysenv",
+                "pef-vol",
+                "pef-dce",
+                "pef-wait",
+                "pef-te",
+                "pef-terec",
+                "pef-skipte",
+                "pef-skipdi",
+                "pef-idx",
+                "pef-gnd",
+                "pef-gndid",
+                "pef-d519",
+                "pef-modal",
+                "pef-no519",
+                "pef-show",
+                "pef-forcesplash",
+                "pef-skipwait",
+                "pef-callsplash",
+                "pef-skipalert",
+                "pef-nimp",
+                "pef-jumpsplash",
+                "pef-plantsplash",
+                "pef-forceblit",
+                "pef-blitoff",
+                "pef-callgnd",
+                "pef-skipae",
+                "getresource-a9a0",
+                "getnewdialog-dlog",
+                "code66-syserr99",
+                "code66-resume",
+                "code66-allow-9440",
             ):
                 mill["grok_waiting"] = False
             if kind == "grok-escalate":
@@ -1155,6 +1444,25 @@ def cmd_run(args: argparse.Namespace) -> int:
             mill["pending_hangcap"] = False
             mill["ss_alive_sec"] = r.get("ss_alive_sec")
             mill["ss_seen"] = r.get("ss_seen")
+            if r.get("screenshot"):
+                print("screenshot %s (guest fb)" % r["screenshot"])
+            else:
+                print("screenshot missing fb=%s" % (r.get("fb") or "-"))
+            if r.get("fb"):
+                print("fb %s" % r["fb"])
+            if r.get("fb_plant"):
+                print("fb-plant %s" % r["fb_plant"])
+            if r.get("fb_plant_png"):
+                print("fb-plant-png %s" % r["fb_plant_png"])
+            cmp = compare_keep_fb(mill.get("keep_log"), log_path)
+            mill["fb_changed"] = cmp.get("fb_changed")
+            mill["fb_cmp"] = {
+                "fb_changed": cmp.get("fb_changed"),
+                "fb": cmp.get("fb"),
+                "plant": cmp.get("plant"),
+            }
+            print(format_fb_changed(cmp))
+            notify_fb_glass(log_path, cmp)
             if r.get("early_fail"):
                 print("hang-cap early fail=%s (timeout interrupted)" % r["early_fail"])
             if r.get("early_stop"):
@@ -1177,7 +1485,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 ) and log_path.is_file():
                     report = _score_hangcap_log(st, log_path, live, kind, window)
                     try:
-                        shutil.copy2(log_path, HERE.parent / ("ss-g3-mill-%d.log" % n))
+                        copy_hangcap_media(log_path, HERE.parent)
                     except OSError:
                         pass
                     save_state(st)
@@ -1190,9 +1498,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             if r.get("perl_exit_warn") is not None:
                 print("perl_exit=%s (log has heartbeat; scoring anyway)" % r.get("perl_exit_warn"))
             report = _score_hangcap_log(st, log_path, live, kind, window)
-            copy = HERE.parent / ("ss-g3-mill-%d.log" % n)
             try:
-                shutil.copy2(log_path, copy)
+                copy_hangcap_media(log_path, HERE.parent)
             except OSError:
                 pass
             save_state(st)
@@ -1234,6 +1541,7 @@ def main() -> int:
     p = sub.add_parser("run", help="default: continue until Ctrl-C")
     p.add_argument("--window", default=None, choices=["yes", "no", "unknown"])
     p.add_argument("--force", action="store_true")
+    _add_nw_args(p)
 
     p = sub.add_parser("classify")
     p.add_argument("--log", required=True)
@@ -1254,11 +1562,13 @@ def main() -> int:
     p.add_argument("--window", default="unknown", choices=["yes", "no", "unknown"])
     p.add_argument("--force", action="store_true")
 
-    sub.add_parser("tokens", help="print grok/qwen in/out/total per mill attempt")
+    p = sub.add_parser("tokens", help="print grok + apple_fm in/out/total (mills and NW annotations)")
+    _add_nw_args(p)
 
     p = sub.add_parser("pack", help="write grok pack from hang-cap logs (Grok Build, no API)")
     p.add_argument("--out", default=None)
     p.add_argument("--slim", action="store_true", help="write pack-slim.md for Grok Build")
+    _add_nw_args(p)
 
     p = sub.add_parser("rom", help="disassemble local prefs ROM for mill targeting (does not copy ROM)")
     p.add_argument("--rom", default=None)
@@ -1266,6 +1576,42 @@ def main() -> int:
     p.add_argument("--next", type=int, default=12)
     p.add_argument("--count", type=int, default=12)
     p.add_argument("--no-nk", action="store_true")
+    _add_nw_args(p)
+
+    p = sub.add_parser(
+        "screenshot-perm",
+        help="trip macOS Screen Recording TCC (no SheepShaver)",
+    )
+
+    p = sub.add_parser(
+        "gzip-logs",
+        help="gzip existing ss-g3-mill-N.log files in /tmp and research-score (durable .log.gz)",
+    )
+
+    p = sub.add_parser(
+        "vision",
+        help="Grok Build CLI WINDOW yes/no from hang-cap PNG (not nested from ./run)",
+    )
+    p.add_argument("--png", action="append", default=[], help="Hang-cap window PNG (repeatable)")
+    p.add_argument("--keep-png", default=None, help="KEEP window PNG for side-by-side")
+    p.add_argument("--n", type=int, default=None, help="Use /tmp/ss-g3-mill-N.png")
+    p.add_argument("--log", default=None, help="Hang-cap log; uses sibling .png")
+
+    p = sub.add_parser(
+        "grok-escalate",
+        help="run Grok Build from NewWorldView escalation export or pack-slim.md",
+    )
+    p.add_argument(
+        "--dir",
+        default=None,
+        help="Export folder with pack-escalation.md and grok-prompt.md",
+    )
+    p.add_argument(
+        "--slim",
+        default=None,
+        help="Use pack-slim.md instead (default: state.json slim pack)",
+    )
+    _add_nw_args(p)
 
     args = ap.parse_args()
     cmd = args.cmd or "run"
@@ -1284,17 +1630,30 @@ def main() -> int:
     if cmd == "once":
         return cmd_once(args)
     if cmd == "tokens":
+        global _NW_ARGS
+        _NW_ARGS = args
+        _configure_nw_paths(args)
         return cmd_tokens()
     if cmd == "pack":
         return cmd_pack(args)
+    if cmd == "screenshot-perm":
+        return cmd_screenshot_perm()
+    if cmd == "gzip-logs":
+        return cmd_gzip_logs()
+    if cmd == "vision":
+        return cmd_vision(args)
+    if cmd == "grok-escalate":
+        return cmd_grok_escalate(args)
     if cmd == "rom":
         from rom_disasm import cmd_rom
 
+        _configure_nw_paths(args)
         return cmd_rom(args)
     return 2
 
 
 def cmd_pack(args: argparse.Namespace) -> int:
+    _configure_nw_paths(args)
     st = load_state()
     dest = Path(args.out) if getattr(args, "out", None) else None
     slim = bool(getattr(args, "slim", False))
@@ -1309,11 +1668,93 @@ def cmd_pack(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_screenshot_perm() -> int:
+    from debug_run import trip_screen_recording
+
+    r = trip_screen_recording()
+    print(
+        "screen-recording preflight=%s request=%s cg=%s screencapture=%s ok=%s"
+        % (
+            r.get("preflight"),
+            r.get("request"),
+            r.get("cg_image"),
+            r.get("screencapture"),
+            r.get("ok"),
+        )
+    )
+    if r.get("probe"):
+        print("probe %s" % r["probe"])
+    if not r.get("screencapture"):
+        print(
+            "screencapture wrote no valid PNG (TCC stub is not an image). "
+            "grant Screen Recording to Terminal and python3 "
+            "(System Settings → Privacy & Security), then rerun"
+        )
+        return 1
+    return 0
+
+
+def cmd_gzip_logs() -> int:
+    dirs = [Path("/tmp"), HERE.parent]
+    r = gzip_mill_logs(dirs)
+    print(
+        "gzip-logs ok=%s fail=%s saved=%s"
+        % (r.get("ok"), r.get("fail"), r.get("saved"))
+    )
+    return 0 if not r.get("fail") else 1
+
+
+def cmd_vision(args: argparse.Namespace) -> int:
+    """Operator WINDOW check. Never called from ./run."""
+    from fb_vision import resolve_pngs, run_vision
+
+    pngs = resolve_pngs(
+        pngs=list(getattr(args, "png", None) or []),
+        keep_png=getattr(args, "keep_png", None),
+        n=getattr(args, "n", None),
+        log=getattr(args, "log", None),
+        mill_n=(load_state().get("mill") or {}).get("n"),
+    )
+    r = run_vision(pngs)
+    print("WINDOW=%s" % (r.get("window") or "unknown"))
+    print(
+        "Grok Build vision ok=%s rc=%s reason=%s"
+        % (r.get("ok"), r.get("rc"), r.get("reason"))
+    )
+    print(format_tokens("grok", r.get("usage"), "vision"))
+    if r.get("log"):
+        print("log %s" % r["log"])
+    return 0 if r.get("window") in ("yes", "no") else 1
+
+
+def cmd_grok_escalate(args: argparse.Namespace) -> int:
+    _configure_nw_paths(args)
+    esc = (getattr(args, "dir", None) or os.environ.get("G3_ESCALATION_DIR", "")).strip()
+    if esc:
+        r = run_grok_escalation_dir(Path(esc))
+    else:
+        slim = getattr(args, "slim", None)
+        if slim:
+            pack = Path(slim)
+        else:
+            st = load_state()
+            pack, _ = _resolve_grok_pack(st)
+        r = run_grok_build(pack)
+    print(
+        "Grok Build applied=%s ok=%s rc=%s reason=%s"
+        % (r.get("applied"), r.get("ok"), r.get("rc"), r.get("reason"))
+    )
+    print(format_tokens("grok", r.get("usage"), "build"))
+    return 0 if r.get("applied") else 1
+
+
 def cmd_tokens() -> int:
     st = load_state()
     mill = st.get("mill") or {}
     attempts = mill.get("attempts") or []
     print(format_attempts_table(attempts))
+    afm = _apple_fm_total_usage(st, _NW_ARGS)
+    print("TOKENS sum apple_fm in=%d out=%d total=%d" % (afm["in"], afm["out"], afm["total"]))
     return 0
 
 
