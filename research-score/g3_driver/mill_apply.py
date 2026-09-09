@@ -10,6 +10,115 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from mill_log import read_log, read_log_tail, resolve_log
+from mill_pef_batch import (
+    PEF_BATCH_KINDS,
+    apply_pef_batch,
+    is_applied_pef_batch,
+    mill_binary_match_pef_batch,
+    next_pef_batch,
+)
+from mill_pef_splash import (
+    PEF_SPLASH_KINDS,
+    apply_pef_splash,
+    is_applied_pef_splash,
+    next_pef_splash,
+)
+from mill_pef_more import (
+    PEF_MORE_KINDS,
+    apply_pef_more,
+    is_applied_pef_more,
+    next_pef_more,
+)
+from mill_pef_next import (
+    PEF_NEXT_KINDS,
+    apply_pef_next,
+    is_applied_pef_next,
+    next_pef_next,
+)
+from mill_pef_disp import (
+    PEF_DISP_KINDS,
+    apply_pef_disp,
+    is_applied_pef_disp,
+    next_pef_disp,
+)
+from mill_pef_urf import (
+    PEF_URF_KINDS,
+    apply_pef_urf,
+    is_applied_pef_urf,
+    next_pef_urf,
+)
+from mill_pef_h2h import (
+    PEF_H2H_KINDS,
+    apply_pef_h2h,
+    is_applied_pef_h2h,
+    next_pef_h2h,
+)
+from mill_pef_nrd import (
+    PEF_NRD_KINDS,
+    apply_pef_nrdq,
+    is_applied_pef_nrd,
+    next_pef_nrd,
+)
+from mill_pef_gnd import (
+    PEF_GND_KINDS,
+    apply_pef_gndq,
+    is_applied_pef_gnd,
+    next_pef_gnd,
+)
+from mill_pef_sw import (
+    PEF_SW_KINDS,
+    apply_pef_swq,
+    is_applied_pef_sw,
+    next_pef_sw,
+)
+from mill_pef_rest import (
+    PEF_REST_KINDS,
+    apply_pef_restq,
+    is_applied_pef_rest,
+    next_pef_rest,
+)
+from mill_pef_fmt import (
+    PEF_FMT_KINDS,
+    apply_pef_fmtq,
+    is_applied_pef_fmt,
+    mill_binary_match_pef_fmt,
+    next_pef_fmt,
+)
+from mill_pef_fmt2 import (
+    PEF_FMT2_KINDS,
+    apply_pef_fmt2q,
+    is_applied_pef_fmt2,
+    mill_binary_match_pef_fmt2,
+    next_pef_fmt2,
+)
+from mill_pef_fmt3 import (
+    PEF_FMT3_KINDS,
+    apply_pef_fmt3q,
+    is_applied_pef_fmt3,
+    mill_binary_match_pef_fmt3,
+    next_pef_fmt3,
+)
+from mill_pef_fmt4 import (
+    PEF_FMT4_KINDS,
+    apply_pef_fmt4q,
+    is_applied_pef_fmt4,
+    mill_binary_match_pef_fmt4,
+    next_pef_fmt4,
+)
+from mill_pef_doc import (
+    PEF_DOC_KINDS,
+    apply_pef_docq,
+    is_applied_pef_doc,
+    mill_binary_match_pef_doc,
+    next_pef_doc,
+)
+from mill_pef_open import (
+    PEF_OPEN_KINDS,
+    apply_pef_openq,
+    is_applied_pef_open,
+    mill_binary_match_pef_open,
+    next_pef_open,
+)
 
 HERE = Path(__file__).resolve().parent
 
@@ -82,6 +191,26 @@ MARKER_PEF_D519 = "G3: 68k Launch A9F2 CFM Upgrader PEF DLOG 519"
 MARKER_PEF_MODAL = "G3: 68k Launch A9F2 CFM Upgrader PEF ModalDialog"
 MARKER_PEF_NO519 = "G3: 68k Launch A9F2 CFM Upgrader PEF no519"
 MARKER_PEF_SHOW = "G3: 68k Launch A9F2 CFM Upgrader PEF ShowWindow"
+MARKER_PEF_GNCW = "G3: 68k Launch A9F2 CFM Upgrader PEF GetNewCWindow id="
+MARKER_PEF_CALL798C = "G3: 68k Launch A9F2 CFM Upgrader PEF call798c"
+MARKER_PEF_NOSPLJMP = "G3: 68k Launch A9F2 CFM Upgrader PEF noSplJmp"
+MARKER_PEF_GNCWLR = "G3: 68k Launch A9F2 CFM Upgrader PEF GetNewCWindow lr id="
+MARKER_PEF_SHOWW128 = "G3: 68k Launch A9F2 CFM Upgrader PEF ShowWindow wind128 w="
+MARKER_PEF_WINREC = "G3: 68k Launch A9F2 CFM Upgrader PEF WindowRecord id="
+MARKER_PEF_DOCRES = "G3: 68k Launch A9F2 CFM Upgrader PEF Get1Resource ty="
+MARKER_PEF_TOC604 = "G3: 68k Launch A9F2 CFM Upgrader PEF toc604 h="
+MARKER_PEF_TOC604B = "G3: 68k Launch A9F2 CFM Upgrader PEF toc604b h="
+MARKER_PEF_CALLB7 = "G3: 68k Launch A9F2 CFM Upgrader PEF callB7"
+MARKER_PEF_CALL5C38 = "G3: 68k Launch A9F2 CFM Upgrader PEF call5c38"
+MARKER_PEF_CALL2738 = "G3: 68k Launch A9F2 CFM Upgrader PEF call2738"
+MARKER_PEF_INDSTR = "G3: 68k Launch A9F2 CFM Upgrader PEF GetIndString id="
+MARKER_PEF_GETSTR = "G3: 68k Launch A9F2 CFM Upgrader PEF GetString id="
+MARKER_PEF_CALLALERT = "G3: 68k Launch A9F2 CFM Upgrader PEF callAlert"
+MARKER_PEF_NOCAP = "G3: 68k Launch A9F2 CFM Upgrader PEF noCap"
+MARKER_PEF_FSPRF = "G3: 68k Launch A9F2 CFM Upgrader PEF FSpOpenResFile r3="
+MARKER_PEF_FMT1 = "G3: 68k Launch A9F2 CFM Upgrader PEF fmt1"
+MARKER_PEF_PFMTW = "G3: 68k Launch A9F2 CFM Upgrader PEF pfmtw"
+MARKER_PEF_UNFSPL = "G3: 68k Launch A9F2 CFM Upgrader PEF unfSpl"
 MARKER_PEF_FORCESPLASH = "G3: 68k Launch A9F2 CFM Upgrader PEF forceSplash"
 MARKER_PEF_SKIPWAIT = "G3: 68k Launch A9F2 CFM Upgrader PEF skipWait"
 MARKER_PEF_CALLSPLASH = "G3: 68k Launch A9F2 CFM Upgrader PEF callSplash"
@@ -93,6 +222,25 @@ MARKER_PEF_FORCEBLIT = "G3: 68k Launch A9F2 CFM Upgrader PEF forceBlit"
 MARKER_PEF_BLITOFF = "G3: 68k Launch A9F2 CFM Upgrader PEF blitOff"
 MARKER_PEF_CALLGND = "G3: 68k Launch A9F2 CFM Upgrader PEF callGnd"
 MARKER_PEF_SKIPAE = "G3: 68k Launch A9F2 CFM Upgrader PEF skipAE"
+MARKER_PEF_SKIPHEAP = "G3: 68k Launch A9F2 CFM Upgrader PEF skipHeap"
+MARKER_PEF_SKIPB7 = "G3: 68k Launch A9F2 CFM Upgrader PEF skipB7"
+MARKER_PEF_SKIP20EC = "G3: 68k Launch A9F2 CFM Upgrader PEF skip20ec"
+MARKER_PEF_SKIP21BC = "G3: 68k Launch A9F2 CFM Upgrader PEF skip21bc"
+MARKER_PEF_SKIP2FB8 = "G3: 68k Launch A9F2 CFM Upgrader PEF skip2fb8"
+MARKER_PEF_SKIPGLUE = "G3: 68k Launch A9F2 CFM Upgrader PEF skipGlue"
+MARKER_PEF_ALERT = "G3: 68k Launch A9F2 CFM Upgrader PEF Alert"
+MARKER_PEF_GLUE0 = "G3: 68k Launch A9F2 CFM Upgrader PEF glue"
+MARKER_PEF_TOCPICT = "G3: 68k Launch A9F2 CFM Upgrader PEF tocPict"
+MARKER_PEF_MAINDEV = "G3: 68k Launch A9F2 CFM Upgrader PEF MainDevice"
+MARKER_PEF_SKIPGMD = "G3: 68k Launch A9F2 CFM Upgrader PEF skipGmd"
+MARKER_PEF_NEWPTRC = "G3: 68k Launch A9F2 CFM Upgrader PEF NewPtrClear"
+MARKER_PEF_NRD = "G3: 68k Launch A9F2 CFM Upgrader PEF NewRoutineDescriptor"
+MARKER_PEF_NOURF = "G3: 68k Launch A9F2 CFM Upgrader PEF noUrF"
+MARKER_PEF_CUP = "G3: 68k Launch A9F2 CFM Upgrader PEF CallUniversalProc"
+MARKER_PEF_TICK = "G3: 68k Launch A9F2 CFM Upgrader PEF TickCount"
+MARKER_PEF_DRAWDLG = "G3: 68k Launch A9F2 CFM Upgrader PEF DrawDialog"
+MARKER_PEF_SIZEWIN = "G3: 68k Launch A9F2 CFM Upgrader PEF SizeWindow"
+MARKER_PEF_SETDITM = "G3: 68k Launch A9F2 CFM Upgrader PEF SetDialogItem"
 OFF_3265A4 = 0x3265A4
 OFF_326458 = 0x326458
 
@@ -137,6 +285,26 @@ LEFTOVER = [
     "pef-modal",
     "pef-no519",
     "pef-show",
+    "pef-gncw",
+    "pef-call798c",
+    "pef-nospljmp",
+    "pef-gncwlr",
+    "pef-showw128",
+    "pef-winrec",
+    "pef-docres",
+    "pef-toc604",
+    "pef-toc604b",
+    "pef-callb7",
+    "pef-call5c38",
+    "pef-call2738",
+    "pef-indstr",
+    "pef-getstr",
+    "pef-callalert",
+    "pef-nocap",
+    "pef-fsprf",
+    "pef-fmt1",
+    "pef-pfmtw",
+    "pef-unfspl",
     "pef-forcesplash",
     "pef-skipwait",
     "pef-callsplash",
@@ -148,6 +316,42 @@ LEFTOVER = [
     "pef-blitoff",
     "pef-callgnd",
     "pef-skipae",
+    "pef-skipheap",
+    "pef-skipb7",
+    "pef-skip20ec",
+    "pef-skip21bc",
+    "pef-skip2fb8",
+    "pef-skipglue",
+    "pef-alert",
+    "pef-glue0",
+    "pef-tocpict",
+    "pef-maindev",
+    "pef-skipgmd",
+    "pef-newptrc",
+    "pef-nrd",
+    "pef-nourf",
+    "pef-cup",
+    "pef-tick",
+    "pef-drawdlg",
+    "pef-sizewin",
+    "pef-setditm",
+    *PEF_BATCH_KINDS,
+    *PEF_SPLASH_KINDS,
+    *PEF_MORE_KINDS,
+    *PEF_NEXT_KINDS,
+    *PEF_DISP_KINDS,
+    *PEF_URF_KINDS,
+    *PEF_H2H_KINDS,
+    *PEF_NRD_KINDS,
+    *PEF_GND_KINDS,
+    *PEF_SW_KINDS,
+    *PEF_REST_KINDS,
+    *PEF_FMT_KINDS,
+    *PEF_FMT2_KINDS,
+    *PEF_FMT3_KINDS,
+    *PEF_FMT4_KINDS,
+    *PEF_DOC_KINDS,
+    *PEF_OPEN_KINDS,
     "skip-68k",
     "cfm-aa5a",
     "trap-68k",
@@ -193,6 +397,26 @@ KIND_68K = (
     "pef-modal",
     "pef-no519",
     "pef-show",
+    "pef-gncw",
+    "pef-call798c",
+    "pef-nospljmp",
+    "pef-gncwlr",
+    "pef-showw128",
+    "pef-winrec",
+    "pef-docres",
+    "pef-toc604",
+    "pef-toc604b",
+    "pef-callb7",
+    "pef-call5c38",
+    "pef-call2738",
+    "pef-indstr",
+    "pef-getstr",
+    "pef-callalert",
+    "pef-nocap",
+    "pef-fsprf",
+    "pef-fmt1",
+    "pef-pfmtw",
+    "pef-unfspl",
     "pef-forcesplash",
     "pef-skipwait",
     "pef-callsplash",
@@ -204,6 +428,42 @@ KIND_68K = (
     "pef-blitoff",
     "pef-callgnd",
     "pef-skipae",
+    "pef-skipheap",
+    "pef-skipb7",
+    "pef-skip20ec",
+    "pef-skip21bc",
+    "pef-skip2fb8",
+    "pef-skipglue",
+    "pef-alert",
+    "pef-glue0",
+    "pef-tocpict",
+    "pef-maindev",
+    "pef-skipgmd",
+    "pef-newptrc",
+    "pef-nrd",
+    "pef-nourf",
+    "pef-cup",
+    "pef-tick",
+    "pef-drawdlg",
+    "pef-sizewin",
+    "pef-setditm",
+    *PEF_BATCH_KINDS,
+    *PEF_SPLASH_KINDS,
+    *PEF_MORE_KINDS,
+    *PEF_NEXT_KINDS,
+    *PEF_DISP_KINDS,
+    *PEF_URF_KINDS,
+    *PEF_H2H_KINDS,
+    *PEF_NRD_KINDS,
+    *PEF_GND_KINDS,
+    *PEF_SW_KINDS,
+    *PEF_REST_KINDS,
+    *PEF_FMT_KINDS,
+    *PEF_FMT2_KINDS,
+    *PEF_FMT3_KINDS,
+    *PEF_FMT4_KINDS,
+    *PEF_DOC_KINDS,
+    *PEF_OPEN_KINDS,
     "skip-68k",
     "cfm-aa5a",
     "trap-68k",
@@ -457,6 +717,26 @@ def leftover_68k_pending(
             "pef-modal",
             "pef-no519",
             "pef-show",
+            "pef-gncw",
+            "pef-call798c",
+            "pef-nospljmp",
+            "pef-gncwlr",
+            "pef-showw128",
+            "pef-winrec",
+            "pef-docres",
+            "pef-toc604",
+            "pef-toc604b",
+            "pef-callb7",
+            "pef-call5c38",
+            "pef-call2738",
+            "pef-indstr",
+            "pef-getstr",
+            "pef-callalert",
+            "pef-nocap",
+            "pef-fsprf",
+            "pef-fmt1",
+            "pef-pfmtw",
+            "pef-unfspl",
             "pef-forcesplash",
             "pef-skipwait",
             "pef-callsplash",
@@ -468,6 +748,42 @@ def leftover_68k_pending(
             "pef-blitoff",
             "pef-callgnd",
             "pef-skipae",
+            "pef-skipheap",
+            "pef-skipb7",
+            "pef-skip20ec",
+            "pef-skip21bc",
+            "pef-skip2fb8",
+            "pef-skipglue",
+            "pef-alert",
+            "pef-glue0",
+            "pef-tocpict",
+            "pef-maindev",
+            "pef-skipgmd",
+            "pef-newptrc",
+            "pef-nrd",
+            "pef-nourf",
+            "pef-cup",
+            "pef-tick",
+            "pef-drawdlg",
+            "pef-sizewin",
+            "pef-setditm",
+            *PEF_BATCH_KINDS,
+            *PEF_SPLASH_KINDS,
+            *PEF_MORE_KINDS,
+            *PEF_NEXT_KINDS,
+            *PEF_DISP_KINDS,
+            *PEF_URF_KINDS,
+            *PEF_H2H_KINDS,
+            *PEF_NRD_KINDS,
+            *PEF_GND_KINDS,
+            *PEF_SW_KINDS,
+            *PEF_REST_KINDS,
+            *PEF_FMT_KINDS,
+            *PEF_FMT2_KINDS,
+            *PEF_FMT3_KINDS,
+            *PEF_FMT4_KINDS,
+            *PEF_DOC_KINDS,
+            *PEF_OPEN_KINDS,
             "cfm-aa5a",
             "trap-68k",
             "reenter-68k",
@@ -515,6 +831,26 @@ def leftover_68k_pending(
             "pef-modal",
             "pef-no519",
             "pef-show",
+            "pef-gncw",
+            "pef-call798c",
+            "pef-nospljmp",
+            "pef-gncwlr",
+            "pef-showw128",
+            "pef-winrec",
+            "pef-docres",
+            "pef-toc604",
+            "pef-toc604b",
+            "pef-callb7",
+            "pef-call5c38",
+            "pef-call2738",
+            "pef-indstr",
+            "pef-getstr",
+            "pef-callalert",
+            "pef-nocap",
+            "pef-fsprf",
+            "pef-fmt1",
+            "pef-pfmtw",
+            "pef-unfspl",
             "pef-forcesplash",
             "pef-skipwait",
             "pef-callsplash",
@@ -526,6 +862,42 @@ def leftover_68k_pending(
             "pef-blitoff",
             "pef-callgnd",
             "pef-skipae",
+            "pef-skipheap",
+            "pef-skipb7",
+            "pef-skip20ec",
+            "pef-skip21bc",
+            "pef-skip2fb8",
+            "pef-skipglue",
+            "pef-alert",
+            "pef-glue0",
+            "pef-tocpict",
+            "pef-maindev",
+            "pef-skipgmd",
+            "pef-newptrc",
+            "pef-nrd",
+            "pef-nourf",
+            "pef-cup",
+            "pef-tick",
+            "pef-drawdlg",
+            "pef-sizewin",
+            "pef-setditm",
+            *PEF_BATCH_KINDS,
+            *PEF_SPLASH_KINDS,
+            *PEF_MORE_KINDS,
+            *PEF_NEXT_KINDS,
+            *PEF_DISP_KINDS,
+            *PEF_URF_KINDS,
+            *PEF_H2H_KINDS,
+            *PEF_NRD_KINDS,
+            *PEF_GND_KINDS,
+            *PEF_SW_KINDS,
+            *PEF_REST_KINDS,
+            *PEF_FMT_KINDS,
+            *PEF_FMT2_KINDS,
+            *PEF_FMT3_KINDS,
+            *PEF_FMT4_KINDS,
+            *PEF_DOC_KINDS,
+            *PEF_OPEN_KINDS,
             "getresource-a9a0",
             "getnewdialog-dlog",
             "code66-syserr99",
@@ -969,6 +1341,84 @@ def next_leftover(
         key = "leftover:pef-show"
         if key not in keys and key not in rev:
             return "pef-show"
+        key = "leftover:pef-gncw"
+        if key not in keys and key not in rev:
+            return "pef-gncw"
+        key = "leftover:pef-call798c"
+        if key not in keys and key not in rev:
+            return "pef-call798c"
+        key = "leftover:pef-nospljmp"
+        if key not in keys and key not in rev:
+            return "pef-nospljmp"
+        key = "leftover:pef-gncwlr"
+        if key not in keys and key not in rev:
+            return "pef-gncwlr"
+        key = "leftover:pef-showw128"
+        if key not in keys and key not in rev:
+            return "pef-showw128"
+        key = "leftover:pef-winrec"
+        if key not in keys and key not in rev:
+            return "pef-winrec"
+        key = "leftover:pef-docres"
+        if key not in keys and key not in rev:
+            return "pef-docres"
+        key = "leftover:pef-toc604"
+        if key not in keys and key not in rev:
+            return "pef-toc604"
+        key = "leftover:pef-toc604b"
+        if key not in keys and key not in rev:
+            return "pef-toc604b"
+        key = "leftover:pef-callb7"
+        if key not in keys and key not in rev:
+            return "pef-callb7"
+        key = "leftover:pef-call5c38"
+        if key not in keys and key not in rev:
+            return "pef-call5c38"
+        key = "leftover:pef-call2738"
+        if key not in keys and key not in rev:
+            return "pef-call2738"
+        key = "leftover:pef-indstr"
+        if key not in keys and key not in rev:
+            return "pef-indstr"
+        key = "leftover:pef-getstr"
+        if key not in keys and key not in rev:
+            return "pef-getstr"
+        key = "leftover:pef-callalert"
+        if key not in keys and key not in rev:
+            return "pef-callalert"
+        key = "leftover:pef-nocap"
+        if key not in keys and key not in rev:
+            return "pef-nocap"
+        key = "leftover:pef-fsprf"
+        if key not in keys and key not in rev:
+            return "pef-fsprf"
+        key = "leftover:pef-fmt1"
+        if key not in keys and key not in rev:
+            return "pef-fmt1"
+        key = "leftover:pef-pfmtw"
+        if key not in keys and key not in rev:
+            return "pef-pfmtw"
+        nxt = next_pef_fmt(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_fmt2(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_fmt3(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_fmt4(keys, rev)
+        if nxt:
+            return nxt
+        key = "leftover:pef-unfspl"
+        if key not in keys and key not in rev:
+            return "pef-unfspl"
+        nxt = next_pef_doc(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_open(keys, rev)
+        if nxt:
+            return nxt
         key = "leftover:pef-forcesplash"
         if key not in keys and key not in rev:
             return "pef-forcesplash"
@@ -1002,6 +1452,96 @@ def next_leftover(
         key = "leftover:pef-skipae"
         if key not in keys and key not in rev:
             return "pef-skipae"
+        key = "leftover:pef-skipheap"
+        if key not in keys and key not in rev:
+            return "pef-skipheap"
+        key = "leftover:pef-skipb7"
+        if key not in keys and key not in rev:
+            return "pef-skipb7"
+        key = "leftover:pef-skip20ec"
+        if key not in keys and key not in rev:
+            return "pef-skip20ec"
+        key = "leftover:pef-skip21bc"
+        if key not in keys and key not in rev:
+            return "pef-skip21bc"
+        key = "leftover:pef-skip2fb8"
+        if key not in keys and key not in rev:
+            return "pef-skip2fb8"
+        key = "leftover:pef-skipglue"
+        if key not in keys and key not in rev:
+            return "pef-skipglue"
+        key = "leftover:pef-alert"
+        if key not in keys and key not in rev:
+            return "pef-alert"
+        key = "leftover:pef-glue0"
+        if key not in keys and key not in rev:
+            return "pef-glue0"
+        key = "leftover:pef-tocpict"
+        if key not in keys and key not in rev:
+            return "pef-tocpict"
+        key = "leftover:pef-maindev"
+        if key not in keys and key not in rev:
+            return "pef-maindev"
+        key = "leftover:pef-skipgmd"
+        if key not in keys and key not in rev:
+            return "pef-skipgmd"
+        key = "leftover:pef-newptrc"
+        if key not in keys and key not in rev:
+            return "pef-newptrc"
+        key = "leftover:pef-nrd"
+        if key not in keys and key not in rev:
+            return "pef-nrd"
+        key = "leftover:pef-nourf"
+        if key not in keys and key not in rev:
+            return "pef-nourf"
+        key = "leftover:pef-cup"
+        if key not in keys and key not in rev:
+            return "pef-cup"
+        key = "leftover:pef-tick"
+        if key not in keys and key not in rev:
+            return "pef-tick"
+        key = "leftover:pef-drawdlg"
+        if key not in keys and key not in rev:
+            return "pef-drawdlg"
+        key = "leftover:pef-sizewin"
+        if key not in keys and key not in rev:
+            return "pef-sizewin"
+        key = "leftover:pef-setditm"
+        if key not in keys and key not in rev:
+            return "pef-setditm"
+        nxt = next_pef_batch(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_splash(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_more(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_next(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_disp(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_urf(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_h2h(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_nrd(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_gnd(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_sw(keys, rev)
+        if nxt:
+            return nxt
+        nxt = next_pef_rest(keys, rev)
+        if nxt:
+            return nxt
     for k in LEFTOVER:
         if k == "skip-hang":
             if saw_68k:
@@ -1039,6 +1579,26 @@ def next_leftover(
             "pef-modal",
             "pef-no519",
             "pef-show",
+            "pef-gncw",
+            "pef-call798c",
+            "pef-nospljmp",
+            "pef-gncwlr",
+            "pef-showw128",
+            "pef-winrec",
+            "pef-docres",
+            "pef-toc604",
+            "pef-toc604b",
+            "pef-callb7",
+            "pef-call5c38",
+            "pef-call2738",
+            "pef-indstr",
+            "pef-getstr",
+            "pef-callalert",
+            "pef-nocap",
+            "pef-fsprf",
+            "pef-fmt1",
+            "pef-pfmtw",
+            "pef-unfspl",
             "pef-forcesplash",
             "pef-skipwait",
             "pef-callsplash",
@@ -1050,6 +1610,42 @@ def next_leftover(
             "pef-blitoff",
             "pef-callgnd",
             "pef-skipae",
+            "pef-skipheap",
+            "pef-skipb7",
+            "pef-skip20ec",
+            "pef-skip21bc",
+            "pef-skip2fb8",
+            "pef-skipglue",
+            "pef-alert",
+            "pef-glue0",
+            "pef-tocpict",
+            "pef-maindev",
+            "pef-skipgmd",
+            "pef-newptrc",
+            "pef-nrd",
+            "pef-nourf",
+            "pef-cup",
+            "pef-tick",
+            "pef-drawdlg",
+            "pef-sizewin",
+            "pef-setditm",
+            *PEF_BATCH_KINDS,
+            *PEF_SPLASH_KINDS,
+            *PEF_MORE_KINDS,
+            *PEF_NEXT_KINDS,
+            *PEF_DISP_KINDS,
+            *PEF_URF_KINDS,
+            *PEF_H2H_KINDS,
+            *PEF_NRD_KINDS,
+            *PEF_GND_KINDS,
+            *PEF_SW_KINDS,
+            *PEF_REST_KINDS,
+            *PEF_FMT_KINDS,
+            *PEF_FMT2_KINDS,
+            *PEF_FMT3_KINDS,
+            *PEF_FMT4_KINDS,
+            *PEF_DOC_KINDS,
+            *PEF_OPEN_KINDS,
             "cfm-aa5a",
             "trap-68k",
             "reenter-68k",
@@ -1209,6 +1805,46 @@ def is_applied(
             return MARKER_PEF_NO519 in text
         if k == "pef-show":
             return MARKER_PEF_SHOW in text
+        if k == "pef-gncw":
+            return MARKER_PEF_GNCW in text
+        if k == "pef-call798c":
+            return MARKER_PEF_CALL798C in text
+        if k == "pef-nospljmp":
+            return MARKER_PEF_NOSPLJMP in text
+        if k == "pef-gncwlr":
+            return MARKER_PEF_GNCWLR in text
+        if k == "pef-showw128":
+            return MARKER_PEF_SHOWW128 in text
+        if k == "pef-winrec":
+            return MARKER_PEF_WINREC in text
+        if k == "pef-docres":
+            return MARKER_PEF_DOCRES in text
+        if k == "pef-toc604":
+            return MARKER_PEF_TOC604 in text
+        if k == "pef-toc604b":
+            return MARKER_PEF_TOC604B in text
+        if k == "pef-callb7":
+            return MARKER_PEF_CALLB7 in text
+        if k == "pef-call5c38":
+            return MARKER_PEF_CALL5C38 in text
+        if k == "pef-call2738":
+            return MARKER_PEF_CALL2738 in text
+        if k == "pef-indstr":
+            return MARKER_PEF_INDSTR in text
+        if k == "pef-getstr":
+            return MARKER_PEF_GETSTR in text
+        if k == "pef-callalert":
+            return MARKER_PEF_CALLALERT in text
+        if k == "pef-nocap":
+            return MARKER_PEF_NOCAP in text
+        if k == "pef-fsprf":
+            return MARKER_PEF_FSPRF in text
+        if k == "pef-fmt1":
+            return MARKER_PEF_FMT1 in text
+        if k == "pef-pfmtw":
+            return MARKER_PEF_PFMTW in text
+        if k == "pef-unfspl":
+            return MARKER_PEF_UNFSPL in text
         if k == "pef-forcesplash":
             return MARKER_PEF_FORCESPLASH in text
         if k == "pef-skipwait":
@@ -1231,6 +1867,95 @@ def is_applied(
             return MARKER_PEF_CALLGND in text
         if k == "pef-skipae":
             return MARKER_PEF_SKIPAE in text
+        if k == "pef-skipheap":
+            return MARKER_PEF_SKIPHEAP in text
+        if k == "pef-skipb7":
+            return MARKER_PEF_SKIPB7 in text
+        if k == "pef-skip20ec":
+            return MARKER_PEF_SKIP20EC in text
+        if k == "pef-skip21bc":
+            return MARKER_PEF_SKIP21BC in text
+        if k == "pef-skip2fb8":
+            return MARKER_PEF_SKIP2FB8 in text
+        if k == "pef-skipglue":
+            return MARKER_PEF_SKIPGLUE in text
+        if k == "pef-alert":
+            return MARKER_PEF_ALERT in text
+        if k == "pef-glue0":
+            return MARKER_PEF_GLUE0 in text
+        if k == "pef-tocpict":
+            return MARKER_PEF_TOCPICT in text
+        if k == "pef-maindev":
+            return MARKER_PEF_MAINDEV in text
+        if k == "pef-skipgmd":
+            return MARKER_PEF_SKIPGMD in text
+        if k == "pef-newptrc":
+            return MARKER_PEF_NEWPTRC in text
+        if k == "pef-nrd":
+            return MARKER_PEF_NRD in text
+        if k == "pef-nourf":
+            return MARKER_PEF_NOURF in text
+        if k == "pef-cup":
+            return MARKER_PEF_CUP in text
+        if k == "pef-tick":
+            return MARKER_PEF_TICK in text
+        if k == "pef-drawdlg":
+            return MARKER_PEF_DRAWDLG in text
+        if k == "pef-sizewin":
+            return MARKER_PEF_SIZEWIN in text
+        if k == "pef-setditm":
+            return MARKER_PEF_SETDITM in text
+        splash = is_applied_pef_splash(k, text)
+        if splash is not None:
+            return splash
+        more = is_applied_pef_more(k, text)
+        if more is not None:
+            return more
+        nxtm = is_applied_pef_next(k, text)
+        if nxtm is not None:
+            return nxtm
+        disp = is_applied_pef_disp(k, text)
+        if disp is not None:
+            return disp
+        urf = is_applied_pef_urf(k, text)
+        if urf is not None:
+            return urf
+        h2h = is_applied_pef_h2h(k, text)
+        if h2h is not None:
+            return h2h
+        nrd = is_applied_pef_nrd(k, text)
+        if nrd is not None:
+            return nrd
+        gnd = is_applied_pef_gnd(k, text)
+        if gnd is not None:
+            return gnd
+        sw = is_applied_pef_sw(k, text)
+        if sw is not None:
+            return sw
+        rest = is_applied_pef_rest(k, text)
+        if rest is not None:
+            return rest
+        fmt = is_applied_pef_fmt(k, text)
+        if fmt is not None:
+            return fmt
+        fmt2 = is_applied_pef_fmt2(k, text)
+        if fmt2 is not None:
+            return fmt2
+        fmt3 = is_applied_pef_fmt3(k, text)
+        if fmt3 is not None:
+            return fmt3
+        fmt4 = is_applied_pef_fmt4(k, text)
+        if fmt4 is not None:
+            return fmt4
+        doc = is_applied_pef_doc(k, text)
+        if doc is not None:
+            return doc
+        op = is_applied_pef_open(k, text)
+        if op is not None:
+            return op
+        batch = is_applied_pef_batch(k, text)
+        if batch is not None:
+            return batch
         if k == "getresource-a9a0":
             return MARKER_GETRESOURCE_A9A0 in text
         if k == "getnewdialog-dlog":
@@ -2680,6 +3405,1204 @@ def apply_pef_show(root: Optional[Path] = None) -> None:
     cpu.write_text(patch_cpu_pef_show(cpu.read_text()))
 
 
+def patch_cpu_pef_gncw(text: str) -> str:
+    """Host GetNewCWindow idx 29: plant WIND 128/129, force wrapper call."""
+    if MARKER_PEF_GNCW in text:
+        return text
+    old_fn = (
+        "static uint32 g3_splash_dlg;\n"
+        "static uint32 g3_dlog519;\n"
+    )
+    new_fn = (
+        "static uint32 g3_splash_dlg;\n"
+        "static uint32 g3_wind128;\n"
+        "static uint32 g3_plant_wind(uint32 id)\n"
+        "{\n"
+        "	uint32 doff = 0, ln = 0, h = 0, w = 0;\n"
+        "	if (id != 128u && id != 129u)\n"
+        "		id = 128u;\n"
+        "	if (id == 128u && g3_wind128)\n"
+        "		return g3_wind128;\n"
+        "	g3_plant_inst_map();\n"
+        "	if (!g3_res_lookup(0x57494E44u, (int16)id, &doff, &ln))\n"
+        "		return 0;\n"
+        "	h = g3_res_plant(doff, ln);\n"
+        "	if (h && g3_ea_data(h))\n"
+        "		w = vm_read_memory_4(h);\n"
+        "	if (w && (w & 1u) && g3_ea_data(w + 1u))\n"
+        "		w &= ~1u;\n"
+        "	if (id == 128u)\n"
+        "		g3_wind128 = w;\n"
+        "	return w;\n"
+        "}\n"
+        "static uint32 g3_dlog519;\n"
+    )
+    text = _replace_once(text, old_fn, new_fn, "cpu-pef-gncw-fn")
+    old_idx = (
+        "	if (idx == 29u) {\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned n;\n"
+        "			if (n < 8) {\n"
+        "				n++;\n"
+        "				nw_boot_log(\n"
+        "					\"G3: 68k Launch A9F2 CFM Upgrader PEF GetNewCWindow\");\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "		return r3;\n"
+        "	}\n"
+    )
+    new_idx = (
+        "	if (idx == 29u) {\n"
+        "		uint32 id = a3 & 0xffffu;\n"
+        "		if (id != 128u && id != 129u && id != 0u) {\n"
+        "			r3 = 0;\n"
+        "		} else {\n"
+        "			if (id == 0u)\n"
+        "				id = 128u;\n"
+        "			r3 = g3_plant_wind(id);\n"
+        "		}\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned ngncw;\n"
+        "			if (ngncw < 8) {\n"
+        "				char buf[96];\n"
+        "				ngncw++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF GetNewCWindow id=%u w=%08x\",\n"
+        "					 (unsigned)id, (unsigned)r3);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "		return r3;\n"
+        "	}\n"
+    )
+    text = _replace_once(text, old_idx, new_idx, "cpu-pef-gncw-idx")
+    old_enter = "	g3_did_pef_enter = 1;\n"
+    new_enter = (
+        "	/* Wrapper 0x101077b8 skips GetNewCWindow when TOC+0x604 is 0.\n"
+        "	 * NOP the beq and reload r3 from the saved windowID. */\n"
+        "	if (g3_ea_data(ent + 0x6413u))\n"
+        "		vm_write_memory_4(ent + 0x6410u, 0x60000000u);\n"
+        "	if (g3_ea_data(ent + 0x6417u))\n"
+        "		vm_write_memory_4(ent + 0x6414u, 0xa861006au);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned ngncwc;\n"
+        "		if (ngncwc < 8) {\n"
+        "			ngncwc++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF gncwCall\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old_enter, new_enter, "cpu-pef-gncw-enter")
+
+
+def apply_pef_gncw(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_gncw(cpu.read_text()))
+
+
+def patch_cpu_pef_call798c(text: str) -> str:
+    """Undo skipHeap NOP of bl 0x1010798c (GetNewCWindow wrapper)."""
+    if MARKER_PEF_CALL798C in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF gncwCall\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF gncwCall\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* skipHeap NOPed 10101434; restore bl 0x1010798c. */\n"
+        "	if (g3_ea_data(ent + 0x67u))\n"
+        "		vm_write_memory_4(ent + 0x64u, 0x48006559u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nc798;\n"
+        "		if (nc798 < 8) {\n"
+        "			nc798++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF call798c\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-call798c")
+
+
+def apply_pef_call798c(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_call798c(cpu.read_text()))
+
+
+def patch_cpu_pef_nospljmp(text: str) -> str:
+    """Undo glueSpl/glue2Sp jump from 10101408 to splash 101014b0."""
+    if MARKER_PEF_NOSPLJMP in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF glueSpl\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	if (g3_ea_data(ent + 0xaa7u))\n"
+        "		vm_write_memory_4(ent + 0xaa4u, 0x48000004u);\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF glueSpl\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* Restore cmplwi r3,0 / beq 10101428 so bl 1010798c runs. */\n"
+        "	if (g3_ea_data(ent + 0x3bu))\n"
+        "		vm_write_memory_4(ent + 0x38u, 0x28030000u);\n"
+        "	if (g3_ea_data(ent + 0x3fu))\n"
+        "		vm_write_memory_4(ent + 0x3cu, 0x4182001cu);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nnsj;\n"
+        "		if (nnsj < 8) {\n"
+        "			nnsj++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF noSplJmp\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	if (g3_ea_data(ent + 0xaa7u))\n"
+        "		vm_write_memory_4(ent + 0xaa4u, 0x48000004u);\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-nospljmp")
+
+
+def apply_pef_nospljmp(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_nospljmp(cpu.read_text()))
+
+
+def patch_cpu_pef_gncwlr(text: str) -> str:
+    """Plant WIND when GetNewCWindow bl returns; mill idx is 276 not 29."""
+    if MARKER_PEF_GNCWLR in text:
+        return text
+    old = (
+        "				r3 = g3_pef_host(idx, gpr(3), gpr(4), gpr(5),\n"
+        "						 gpr(6), gpr(7));\n"
+        "				gpr(3) = r3;\n"
+    )
+    new = (
+        "				{\n"
+        "					uint32 a3g = gpr(3);\n"
+        "				r3 = g3_pef_host(idx, gpr(3), gpr(4), gpr(5),\n"
+        "						 gpr(6), gpr(7));\n"
+        "				gpr(3) = r3;\n"
+        "				if (lr() == 0x101077ecu) {\n"
+        "					uint32 id = a3g & 0xffffu;\n"
+        "					if (id != 128u && id != 129u)\n"
+        "						id = 128u;\n"
+        "					r3 = g3_plant_wind(id);\n"
+        "					gpr(3) = r3;\n"
+        "#if NW_BOOT_LOG\n"
+        "					{\n"
+        "						static unsigned nglw;\n"
+        "						if (nglw < 8) {\n"
+        "							char buf[96];\n"
+        "							nglw++;\n"
+        "							snprintf(buf, sizeof(buf),\n"
+        "								 \"G3: 68k Launch A9F2 CFM Upgrader PEF GetNewCWindow lr id=%u w=%08x\",\n"
+        "								 (unsigned)id, (unsigned)r3);\n"
+        "							nw_boot_log(buf);\n"
+        "						}\n"
+        "					}\n"
+        "#endif\n"
+        "				}\n"
+        "				}\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-gncwlr")
+
+
+def apply_pef_gncwlr(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_gncwlr(cpu.read_text()))
+
+
+def patch_cpu_pef_showw128(text: str) -> str:
+    """Set WIND 128 visible after GetNewCWindow plant (DLOG-style +10)."""
+    if MARKER_PEF_SHOWW128 in text:
+        return text
+    old = (
+        "							snprintf(buf, sizeof(buf),\n"
+        "								 \"G3: 68k Launch A9F2 CFM Upgrader PEF GetNewCWindow lr id=%u w=%08x\",\n"
+        "								 (unsigned)id, (unsigned)r3);\n"
+        "							nw_boot_log(buf);\n"
+    )
+    new = (
+        "							snprintf(buf, sizeof(buf),\n"
+        "								 \"G3: 68k Launch A9F2 CFM Upgrader PEF GetNewCWindow lr id=%u w=%08x\",\n"
+        "								 (unsigned)id, (unsigned)r3);\n"
+        "							nw_boot_log(buf);\n"
+        "							if (r3 && g3_ea_data(r3 + 10u))\n"
+        "								vm_write_memory_1(r3 + 10u, 1);\n"
+        "							{\n"
+        "								char buf2[96];\n"
+        "								snprintf(buf2, sizeof(buf2),\n"
+        "									 \"G3: 68k Launch A9F2 CFM Upgrader PEF ShowWindow wind128 w=%08x\",\n"
+        "									 (unsigned)r3);\n"
+        "								nw_boot_log(buf2);\n"
+        "							}\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-showw128")
+
+
+def apply_pef_showw128(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_showw128(cpu.read_text()))
+
+
+def patch_cpu_pef_winrec(text: str) -> str:
+    """Plant a GrafPort WindowRecord for WIND 128, not the 22-byte template."""
+    if MARKER_PEF_WINREC in text:
+        return text
+    old = (
+        "static uint32 g3_plant_wind(uint32 id)\n"
+        "{\n"
+        "	uint32 doff = 0, ln = 0, h = 0, w = 0;\n"
+        "	if (id != 128u && id != 129u)\n"
+        "		id = 128u;\n"
+        "	if (id == 128u && g3_wind128)\n"
+        "		return g3_wind128;\n"
+        "	g3_plant_inst_map();\n"
+        "	if (!g3_res_lookup(0x57494E44u, (int16)id, &doff, &ln))\n"
+        "		return 0;\n"
+        "	h = g3_res_plant(doff, ln);\n"
+        "	if (h && g3_ea_data(h))\n"
+        "		w = vm_read_memory_4(h);\n"
+        "	if (w && (w & 1u) && g3_ea_data(w + 1u))\n"
+        "		w &= ~1u;\n"
+        "	if (id == 128u)\n"
+        "		g3_wind128 = w;\n"
+        "	return w;\n"
+        "}\n"
+    )
+    new = (
+        "static uint32 g3_plant_wind(uint32 id)\n"
+        "{\n"
+        "	uint32 doff = 0, ln = 0, h = 0, src = 0, w, i, fb;\n"
+        "	int16 top = 100, left = 100, bot = 398, right = 606;\n"
+        "	if (id != 128u && id != 129u)\n"
+        "		id = 128u;\n"
+        "	if (id == 128u && g3_wind128)\n"
+        "		return g3_wind128;\n"
+        "	g3_plant_inst_map();\n"
+        "	if (g3_res_lookup(0x57494E44u, (int16)id, &doff, &ln) && ln >= 18u) {\n"
+        "		h = g3_res_plant(doff, ln);\n"
+        "		if (h && g3_ea_data(h))\n"
+        "			src = vm_read_memory_4(h);\n"
+        "		if (src && (src & 1u) && g3_ea_data(src + 1u))\n"
+        "			src &= ~1u;\n"
+        "		if (src && g3_ea_data(src + 15u)) {\n"
+        "			top = (int16)vm_read_memory_2(src);\n"
+        "			left = (int16)vm_read_memory_2(src + 2u);\n"
+        "			bot = (int16)vm_read_memory_2(src + 4u);\n"
+        "			right = (int16)vm_read_memory_2(src + 6u);\n"
+        "		}\n"
+        "	}\n"
+        "	w = RAMBase + 0x4e000u;\n"
+        "	if (!g3_ea_data(w + 255u))\n"
+        "		return 0;\n"
+        "	for (i = 0; i < 256u; i += 4u)\n"
+        "		vm_write_memory_4(w + i, 0);\n"
+        "	fb = g3_qd_fb();\n"
+        "	vm_write_memory_1(w, 0x80);\n"
+        "	vm_write_memory_4(w + 2u, fb);\n"
+        "	vm_write_memory_2(w + 6u, 2560);\n"
+        "	vm_write_memory_2(w + 8u, (uint32)(uint16)top);\n"
+        "	vm_write_memory_2(w + 10u, (uint32)(uint16)left);\n"
+        "	vm_write_memory_2(w + 12u, (uint32)(uint16)bot);\n"
+        "	vm_write_memory_2(w + 14u, (uint32)(uint16)right);\n"
+        "	vm_write_memory_2(w + 16u, 0);\n"
+        "	vm_write_memory_2(w + 18u, 0);\n"
+        "	vm_write_memory_2(w + 20u, (uint32)(uint16)(bot - top));\n"
+        "	vm_write_memory_2(w + 22u, (uint32)(uint16)(right - left));\n"
+        "	vm_write_memory_2(w + 108u, 8);\n"
+        "	vm_write_memory_1(w + 110u, 1);\n"
+        "	vm_write_memory_1(w + 111u, 1);\n"
+        "	vm_write_memory_1(w + 112u, 1);\n"
+        "	if (g3_ea_data(0x2aau))\n"
+        "		vm_write_memory_4(0x2aau, w);\n"
+        "	g3_wind128 = w;\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nwr;\n"
+        "		if (nwr < 8) {\n"
+        "			char buf[96];\n"
+        "			nwr++;\n"
+        "			snprintf(buf, sizeof(buf),\n"
+        "				 \"G3: 68k Launch A9F2 CFM Upgrader PEF WindowRecord id=%u w=%08x\",\n"
+        "				 (unsigned)id, (unsigned)w);\n"
+        "			nw_boot_log(buf);\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	return w;\n"
+        "}\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-winrec")
+
+
+def apply_pef_winrec(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_winrec(cpu.read_text()))
+
+
+def patch_cpu_pef_docres(text: str) -> str:
+    """Lookup Get1Resource on Install Mac OS 9.2.1 document fork too."""
+    if MARKER_PEF_DOCRES in text:
+        return text
+    old_off = (
+        "static uint32 g3_rf_off = 74305024u;\n"
+        "static uint32 g3_rf_map = 55022u;\n"
+        "static unsigned g3_rf_mapn = 1882u;\n"
+    )
+    new_off = (
+        "static uint32 g3_rf_off = 74305024u;\n"
+        "static uint32 g3_rf_map = 55022u;\n"
+        "static unsigned g3_rf_mapn = 1882u;\n"
+        "static uint32 g3_doc_rf_off = 73895424u;\n"
+        "static uint32 g3_doc_rf_map = 276953u;\n"
+        "static unsigned g3_doc_rf_mapn = 2600u;\n"
+        "static uint32 g3_res_src_off = 74305024u;\n"
+    )
+    text = _replace_once(text, old_off, new_off, "cpu-pef-docres-off")
+    old_lu = (
+        "	if (!g3_toast_open() || g3_rf_mapn > sizeof(map))\n"
+        "		return 0;\n"
+        "	fseek(g3_toast, (long)(g3_rf_off + g3_rf_map), SEEK_SET);\n"
+        "	n = fread(map, 1, g3_rf_mapn, g3_toast);\n"
+        "	if (n < 28)\n"
+        "		return 0;\n"
+        "	tl = ((unsigned)map[24] << 8) | map[25];\n"
+        "	if (tl + 10u > n)\n"
+        "		return 0;\n"
+        "	ntypes = ((unsigned)map[tl] << 8) | map[tl + 1u];\n"
+        "	ntypes++;\n"
+        "	for (i = 0; i < ntypes; i++) {\n"
+    )
+    new_lu = (
+        "	uint32 forks[2], maps[2];\n"
+        "	unsigned mapns[2], f;\n"
+        "	if (!g3_toast_open())\n"
+        "		return 0;\n"
+        "	forks[0] = g3_rf_off; maps[0] = g3_rf_map; mapns[0] = g3_rf_mapn;\n"
+        "	forks[1] = g3_doc_rf_off; maps[1] = g3_doc_rf_map; mapns[1] = g3_doc_rf_mapn;\n"
+        "	for (f = 0; f < 2u; f++) {\n"
+        "	if (mapns[f] > sizeof(map))\n"
+        "		continue;\n"
+        "	fseek(g3_toast, (long)(forks[f] + maps[f]), SEEK_SET);\n"
+        "	n = fread(map, 1, mapns[f], g3_toast);\n"
+        "	if (n < 28)\n"
+        "		continue;\n"
+        "	tl = ((unsigned)map[24] << 8) | map[25];\n"
+        "	if (tl + 10u > n)\n"
+        "		continue;\n"
+        "	ntypes = ((unsigned)map[tl] << 8) | map[tl + 1u];\n"
+        "	ntypes++;\n"
+        "	for (i = 0; i < ntypes; i++) {\n"
+    )
+    text = _replace_once(text, old_lu, new_lu, "cpu-pef-docres-lu")
+    old_abs = (
+        "			*doff = packed & 0xffffffu;\n"
+        "			abs = g3_rf_off + 256u + *doff;\n"
+    )
+    new_abs = (
+        "			*doff = packed & 0xffffffu;\n"
+        "			abs = forks[f] + 256u + *doff;\n"
+        "			g3_res_src_off = forks[f];\n"
+    )
+    text = _replace_once(text, old_abs, new_abs, "cpu-pef-docres-abs")
+    old_end = (
+        "			return 1;\n"
+        "		}\n"
+        "	}\n"
+        "	return 0;\n"
+        "}\n"
+        "static uint32 g3_res_plant(uint32 doff, uint32 len)\n"
+    )
+    new_end = (
+        "			return 1;\n"
+        "		}\n"
+        "	}\n"
+        "	}\n"
+        "	return 0;\n"
+        "}\n"
+        "static uint32 g3_res_plant(uint32 doff, uint32 len)\n"
+    )
+    text = _replace_once(text, old_end, new_end, "cpu-pef-docres-end")
+    old_pl = (
+        "	fseek(g3_toast, (long)(g3_rf_off + 256u + doff + 4u), SEEK_SET);\n"
+        "	n = fread(tmp, 1, len, g3_toast);\n"
+        "	if (n != len)\n"
+        "		return 0;\n"
+        "	if (!g3_ea_data(p + len - 1u) || !g3_ea_data(h))\n"
+        "		return 0;\n"
+    )
+    new_pl = (
+        "	fseek(g3_toast, (long)(g3_res_src_off + 256u + doff + 4u), SEEK_SET);\n"
+        "	n = fread(tmp, 1, len, g3_toast);\n"
+        "	if (n != len)\n"
+        "		return 0;\n"
+        "	if (!g3_ea_data(p + len - 1u) || !g3_ea_data(h))\n"
+        "		return 0;\n"
+    )
+    text = _replace_once(text, old_pl, new_pl, "cpu-pef-docres-plant")
+    old_idx = (
+        "	} else if (idx == 92u || idx == 153u) {\n"
+        "		uint32 doff = 0, ln = 0;\n"
+        "		int16 rid = (int16)(a4 & 0xffffu);\n"
+        "		if (g3_res_lookup(a3, rid, &doff, &ln) && ln)\n"
+        "			r3 = g3_res_plant(doff, ln);\n"
+    )
+    new_idx = (
+        "	} else if (idx == 92u || idx == 153u) {\n"
+        "		uint32 doff = 0, ln = 0;\n"
+        "		int16 rid = (int16)(a4 & 0xffffu);\n"
+        "		if (g3_res_lookup(a3, rid, &doff, &ln) && ln)\n"
+        "			r3 = g3_res_plant(doff, ln);\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned ng1r;\n"
+        "			if (ng1r < 16) {\n"
+        "				char buf[96];\n"
+        "				ng1r++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF Get1Resource ty=%08x id=%d r3=%08x\",\n"
+        "					 (unsigned)a3, (int)rid, (unsigned)r3);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+    )
+    return _replace_once(text, old_idx, new_idx, "cpu-pef-docres-idx")
+
+
+def apply_pef_docres(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_docres(cpu.read_text()))
+
+
+def patch_cpu_pef_toc604(text: str) -> str:
+    """Empty cursor table Handle at TOC+0x604 so 101078e0 skips the CURS spin."""
+    if MARKER_PEF_TOC604 in text:
+        return text
+    old = (
+        "	if (g3_ea_data(0x2aau))\n"
+        "		vm_write_memory_4(0x2aau, w);\n"
+        "	g3_wind128 = w;\n"
+    )
+    new = (
+        "	if (g3_ea_data(0x2aau))\n"
+        "		vm_write_memory_4(0x2aau, w);\n"
+        "	g3_wind128 = w;\n"
+        "	{\n"
+        "		const uint32 tab = RAMBase + 0x4d000u;\n"
+        "		const uint32 hh = RAMBase + 0x4d0f0u;\n"
+        "		if (g3_ea_data(tab + 7u) && g3_ea_data(hh + 3u)) {\n"
+        "			vm_write_memory_4(tab, 0);\n"
+        "			vm_write_memory_4(tab + 4u, 0);\n"
+        "			vm_write_memory_4(hh, tab);\n"
+        "			if (g3_ea_data(0x10115607u))\n"
+        "				vm_write_memory_4(0x10115604u, hh);\n"
+        "		}\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned nt6;\n"
+        "			if (nt6 < 8) {\n"
+        "				char buf[96];\n"
+        "				nt6++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF toc604 h=%08x\",\n"
+        "					 (unsigned)hh);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "	}\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-toc604")
+
+
+def apply_pef_toc604(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_toc604(cpu.read_text()))
+
+
+def patch_cpu_pef_toc604b(text: str) -> str:
+    """Re-plant TOC+0x604 after MoveControl, before the CURS count loop."""
+    if MARKER_PEF_TOC604B in text:
+        return text
+    old = (
+        "				}\n"
+        "				}\n"
+        "				if (g3_ea_data(gpr(1) + 23u)) {\n"
+        "					uint32 toc = vm_read_memory_4(gpr(1) + 20u);\n"
+        "					if (toc == 0x10115000u)\n"
+        "						gpr(2) = toc;\n"
+        "				}\n"
+    )
+    new = (
+        "				}\n"
+        "				}\n"
+        "				if (lr() == 0x101078a4u) {\n"
+        "					const uint32 tab = RAMBase + 0x4d000u;\n"
+        "					const uint32 hh = RAMBase + 0x4d0f0u;\n"
+        "					if (g3_ea_data(tab + 7u) && g3_ea_data(hh + 3u)) {\n"
+        "						vm_write_memory_4(tab, 0);\n"
+        "						vm_write_memory_4(tab + 4u, 0);\n"
+        "						vm_write_memory_4(hh, tab);\n"
+        "						if (g3_ea_data(0x10115607u))\n"
+        "							vm_write_memory_4(0x10115604u, hh);\n"
+        "					}\n"
+        "#if NW_BOOT_LOG\n"
+        "					{\n"
+        "						static unsigned nt6b;\n"
+        "						if (nt6b < 8) {\n"
+        "							char buf[96];\n"
+        "							nt6b++;\n"
+        "							snprintf(buf, sizeof(buf),\n"
+        "								 \"G3: 68k Launch A9F2 CFM Upgrader PEF toc604b h=%08x\",\n"
+        "								 (unsigned)hh);\n"
+        "							nw_boot_log(buf);\n"
+        "						}\n"
+        "					}\n"
+        "#endif\n"
+        "				}\n"
+        "				if (g3_ea_data(gpr(1) + 23u)) {\n"
+        "					uint32 toc = vm_read_memory_4(gpr(1) + 20u);\n"
+        "					if (toc == 0x10115000u)\n"
+        "						gpr(2) = toc;\n"
+        "				}\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-toc604b")
+
+
+def apply_pef_toc604b(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_toc604b(cpu.read_text()))
+
+
+def patch_cpu_pef_callb7(text: str) -> str:
+    """Undo skipB7 NOP of bl 0x1010b7b0 after window setup."""
+    if MARKER_PEF_CALLB7 in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF call798c\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF call798c\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	if (g3_ea_data(ent + 0x6fu))\n"
+        "		vm_write_memory_4(ent + 0x6cu, 0x4800a375u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned ncb7;\n"
+        "		if (ncb7 < 8) {\n"
+        "			ncb7++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF callB7\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-callb7")
+
+
+def apply_pef_callb7(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_callb7(cpu.read_text()))
+
+
+def patch_cpu_pef_call5c38(text: str) -> str:
+    """Undo skipAE NOP of bl 0x10105c38 (10101444)."""
+    if MARKER_PEF_CALL5C38 in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF callB7\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF callB7\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	if (g3_ea_data(ent + 0x77u))\n"
+        "		vm_write_memory_4(ent + 0x74u, 0x480047f5u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nc5c;\n"
+        "		if (nc5c < 8) {\n"
+        "			nc5c++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF call5c38\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-call5c38")
+
+
+def apply_pef_call5c38(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_call5c38(cpu.read_text()))
+
+
+def patch_cpu_pef_call2738(text: str) -> str:
+    """Undo skipWait b 101014b0 at 1010144c; restore bl 0x10102738."""
+    if MARKER_PEF_CALL2738 in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF call5c38\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF call5c38\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* skipWait overwrote 1010144c with b 101014b0; restore bl 0x10102738. */\n"
+        "	if (g3_ea_data(ent + 0x7fu))\n"
+        "		vm_write_memory_4(ent + 0x7cu, 0x480012edu);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nc273;\n"
+        "		if (nc273 < 8) {\n"
+        "			nc273++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF call2738\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-call2738")
+
+
+def apply_pef_call2738(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_call2738(cpu.read_text()))
+
+
+def patch_cpu_pef_indstr(text: str) -> str:
+    """Host GetIndString from toast STR# (Welcome STR# 3500)."""
+    if MARKER_PEF_INDSTR in text:
+        return text
+    old = (
+        "	} else if (idx == 162u) {\n"
+        "		if (a3 && g3_ea_data(a3))\n"
+        "			vm_write_memory_1(a3, 0);\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned ngi;\n"
+        "			if (ngi < 8) {\n"
+        "				ngi++;\n"
+        "				nw_boot_log(\n"
+        "					\"G3: 68k Launch A9F2 CFM Upgrader PEF GetIndString\");\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+    )
+    new = (
+        "	} else if (idx == 162u) {\n"
+        "		int16 sid = (int16)(a4 & 0xffffu);\n"
+        "		int16 six = (int16)(a5 & 0xffffu);\n"
+        "		uint32 doff = 0, ln = 0;\n"
+        "		if (a3 && g3_ea_data(a3))\n"
+        "			vm_write_memory_1(a3, 0);\n"
+        "		if (g3_res_lookup(0x53545223u, sid, &doff, &ln) && ln >= 2u) {\n"
+        "			uint8 tmp[32768];\n"
+        "			size_t nrd;\n"
+        "			unsigned i, nstr, off;\n"
+        "			fseek(g3_toast,\n"
+        "			      (long)(g3_res_src_off + 256u + doff + 4u),\n"
+        "			      SEEK_SET);\n"
+        "			nrd = fread(tmp, 1, ln, g3_toast);\n"
+        "			if (nrd >= 2u) {\n"
+        "				nstr = ((unsigned)tmp[0] << 8) | tmp[1];\n"
+        "				off = 2;\n"
+        "				for (i = 1; i <= nstr && off < nrd; i++) {\n"
+        "					unsigned sl = tmp[off];\n"
+        "					if (i == (unsigned)six && a3 &&\n"
+        "					    g3_ea_data(a3 + sl) &&\n"
+        "					    off + 1u + sl <= nrd) {\n"
+        "						unsigned k;\n"
+        "						vm_write_memory_1(a3, (uint8)sl);\n"
+        "						for (k = 0; k < sl; k++)\n"
+        "							vm_write_memory_1(\n"
+        "								a3 + 1u + k,\n"
+        "								tmp[off + 1u + k]);\n"
+        "						break;\n"
+        "					}\n"
+        "					off += 1u + sl;\n"
+        "				}\n"
+        "			}\n"
+        "		}\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned ngi;\n"
+        "			if (ngi < 16) {\n"
+        "				char buf[96];\n"
+        "				ngi++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF GetIndString id=%d ix=%d\",\n"
+        "					 (int)sid, (int)six);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-indstr")
+
+
+def apply_pef_indstr(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_indstr(cpu.read_text()))
+
+
+def patch_cpu_pef_getstr(text: str) -> str:
+    """Host GetString from toast STR resources."""
+    if MARKER_PEF_GETSTR in text:
+        return text
+    old = (
+        "	if (idx == 72u) {\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned n;\n"
+        "			if (n < 8) {\n"
+        "				n++;\n"
+        "				nw_boot_log(\n"
+        "					\"G3: 68k Launch A9F2 CFM Upgrader PEF GetString\");\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "		return r3;\n"
+        "	}\n"
+    )
+    new = (
+        "	if (idx == 72u) {\n"
+        "		int16 sid = (int16)(a3 & 0xffffu);\n"
+        "		uint32 doff = 0, ln = 0;\n"
+        "		r3 = 0;\n"
+        "		if (g3_res_lookup(0x53545220u, sid, &doff, &ln) && ln)\n"
+        "			r3 = g3_res_plant(doff, ln);\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned n;\n"
+        "			if (n < 16) {\n"
+        "				char buf[96];\n"
+        "				n++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF GetString id=%d r3=%08x\",\n"
+        "					 (int)sid, (unsigned)r3);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "		return r3;\n"
+        "	}\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-getstr")
+
+
+def apply_pef_getstr(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_getstr(cpu.read_text()))
+
+
+def patch_cpu_pef_callalert(text: str) -> str:
+    """Undo skipAlert li r3,0 at 1010b26c; restore bl GetNewDialog."""
+    if MARKER_PEF_CALLALERT in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF call2738\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF call2738\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* skipAlert wrote li r3,0 at 1010b26c; restore bl GetNewDialog. */\n"
+        "	if (g3_ea_data(ent + 0x9e9fu))\n"
+        "		vm_write_memory_4(ent + 0x9e9cu, 0x480088b1u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned ncal;\n"
+        "		if (ncal < 8) {\n"
+        "			ncal++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF callAlert\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-callalert")
+
+
+def apply_pef_callalert(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_callalert(cpu.read_text()))
+
+
+def patch_cpu_pef_nocap(text: str) -> str:
+    """Stamp noCap. Hang-cap keep_stable skip is in debug_run for pef-*."""
+    if MARKER_PEF_NOCAP in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF callAlert\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF callAlert\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nnc;\n"
+        "		if (nnc < 8) {\n"
+        "			nnc++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF noCap\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-nocap")
+
+
+def apply_pef_nocap(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_nocap(cpu.read_text()))
+
+
+def patch_cpu_pef_fsprf(text: str) -> str:
+    """FSpOpenResFile returns refNum 4; Count1Resources returns 8."""
+    if MARKER_PEF_FSPRF in text:
+        return text
+    old = (
+        "	if (idx == 262u) {\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned n;\n"
+        "			if (n < 8) {\n"
+        "				n++;\n"
+        "				nw_boot_log(\n"
+        "					\"G3: 68k Launch A9F2 CFM Upgrader PEF FSpOpenResFile\");\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "		return r3;\n"
+        "	}\n"
+    )
+    new = (
+        "	if (idx == 262u) {\n"
+        "		r3 = 4;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned n;\n"
+        "			if (n < 8) {\n"
+        "				char buf[96];\n"
+        "				n++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF FSpOpenResFile r3=%08x\",\n"
+        "					 (unsigned)r3);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "		return r3;\n"
+        "	}\n"
+    )
+    text = _replace_once(text, old, new, "cpu-pef-fsprf")
+    old2 = (
+        "	if (idx == 222u) {\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned n;\n"
+        "			if (n < 8) {\n"
+        "				n++;\n"
+        "				nw_boot_log(\n"
+        "					\"G3: 68k Launch A9F2 CFM Upgrader PEF Count1Resources\");\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "		return r3;\n"
+        "	}\n"
+    )
+    new2 = (
+        "	if (idx == 222u) {\n"
+        "		r3 = 8;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned n;\n"
+        "			if (n < 16) {\n"
+        "				char buf[96];\n"
+        "				n++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF Count1Resources ty=%08x r3=%08x\",\n"
+        "					 (unsigned)a3, (unsigned)r3);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "		return r3;\n"
+        "	}\n"
+    )
+    return _replace_once(text, old2, new2, "cpu-pef-fsprf-cnt")
+
+
+def apply_pef_fsprf(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_fsprf(cpu.read_text()))
+
+
+def patch_cpu_pef_fmt1(text: str) -> str:
+    """Count1Resources by type, Get1IndResource from toast, plant pfmt, log NumToString."""
+    if MARKER_PEF_FMT1 in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF noCap\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF noCap\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nfmt;\n"
+        "		if (nfmt < 8) {\n"
+        "			nfmt++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF fmt1\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    text = _replace_once(text, old, new, "cpu-pef-fmt1-enter")
+    old_g1 = (
+        "	if (idx == 52u) {\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned n;\n"
+        "			if (n < 8) {\n"
+        "				n++;\n"
+        "				nw_boot_log(\n"
+        "					\"G3: 68k Launch A9F2 CFM Upgrader PEF Get1IndResource\");\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "		return r3;\n"
+        "	}\n"
+    )
+    new_g1 = (
+        "	if (idx == 52u) {\n"
+        "		int16 ix = (int16)(a4 & 0xffffu);\n"
+        "		uint32 doff = 0, ln = 0;\n"
+        "		r3 = 0;\n"
+        "		if (a3 == 0x70666d74u && ix == 1) {\n"
+        "			static const uint8 pfmt[4] = { 0, 4, 1, 1 };\n"
+        "			r3 = g3_plant_raw(pfmt, 4u);\n"
+        "		} else if (g3_res_nth(a3, ix, &doff, &ln) && ln)\n"
+        "			r3 = g3_res_plant(doff, ln);\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned n;\n"
+        "			if (n < 16) {\n"
+        "				char buf[96];\n"
+        "				n++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF Get1IndResource ty=%08x ix=%d r3=%08x\",\n"
+        "					 (unsigned)a3, (int)ix, (unsigned)r3);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "		return r3;\n"
+        "	}\n"
+    )
+    if old_g1 in text:
+        text = _replace_once(text, old_g1, new_g1, "cpu-pef-fmt1-g1ind")
+    old_c = (
+        "	if (idx == 222u) {\n"
+        "		r3 = 8;\n"
+    )
+    new_c = (
+        "	if (idx == 222u) {\n"
+        "		r3 = g3_res_count(a3);\n"
+    )
+    if old_c in text:
+        text = _replace_once(text, old_c, new_c, "cpu-pef-fmt1-cnt")
+    old_n = (
+        "	} else if (idx == 268u) {\n"
+        "		uint32 s = a4 ? a4 : a3;\n"
+        "		if (s && g3_ea_data(s + 1u)) {\n"
+        "			vm_write_memory_1(s, 1);\n"
+        "			vm_write_memory_1(s + 1u, '0');\n"
+        "		}\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned nns;\n"
+        "			if (nns < 8) {\n"
+        "				nns++;\n"
+        "				nw_boot_log(\n"
+        "					\"G3: 68k Launch A9F2 CFM Upgrader PEF NumToString\");\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+    )
+    new_n = (
+        "	} else if (idx == 268u) {\n"
+        "		char buf[16];\n"
+        "		int n;\n"
+        "		uint32 s = a4;\n"
+        "		n = snprintf(buf, sizeof(buf), \"%d\", (int)a3);\n"
+        "		if (n < 0)\n"
+        "			n = 0;\n"
+        "		if (n > 255)\n"
+        "			n = 255;\n"
+        "		if (s && n >= 0 && g3_ea_data(s + (uint32)n)) {\n"
+        "			unsigned i;\n"
+        "			vm_write_memory_1(s, (uint8)n);\n"
+        "			for (i = 0; i < (unsigned)n; i++)\n"
+        "				vm_write_memory_1(s + 1u + i, (uint8)buf[i]);\n"
+        "		}\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned nns;\n"
+        "			if (nns < 16) {\n"
+        "				char lbuf[96];\n"
+        "				nns++;\n"
+        "				snprintf(lbuf, sizeof(lbuf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF NumToString n=%d\",\n"
+        "					 (int)a3);\n"
+        "				nw_boot_log(lbuf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+    )
+    if old_n in text:
+        text = _replace_once(text, old_n, new_n, "cpu-pef-fmt1-n2s")
+    return text
+
+
+def apply_pef_fmt1(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_fmt1(cpu.read_text()))
+
+
+def patch_cpu_pef_pfmtw(text: str) -> str:
+    """Plant pfmt as 01 01 00 04 (first int16 matches sfmt+2)."""
+    if MARKER_PEF_PFMTW in text:
+        return text
+    old = "			static const uint8 pfmt[4] = { 0, 4, 1, 1 };\n"
+    new = "			static const uint8 pfmt[4] = { 1, 1, 0, 4 };\n"
+    if old in text:
+        text = _replace_once(text, old, new, "cpu-pef-pfmtw-bytes")
+    old_e = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF fmt1\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new_e = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF fmt1\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned npw;\n"
+        "		if (npw < 8) {\n"
+        "			npw++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF pfmtw\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old_e, new_e, "cpu-pef-pfmtw-enter")
+
+
+def apply_pef_pfmtw(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_pfmtw(cpu.read_text()))
+
+
 def patch_cpu_pef_forcesplash(text: str) -> str:
     if MARKER_PEF_FORCESPLASH in text:
         return text
@@ -2710,6 +4633,38 @@ def patch_cpu_pef_forcesplash(text: str) -> str:
 def apply_pef_forcesplash(root: Optional[Path] = None) -> None:
     cpu = cpu_path(root)
     cpu.write_text(patch_cpu_pef_forcesplash(cpu.read_text()))
+
+
+def patch_cpu_pef_unfspl(text: str) -> str:
+    """Undo forceSplash nop of bne 101014ac; restore 0x40820014."""
+    if MARKER_PEF_UNFSPL in text:
+        return text
+    old = "	g3_did_pef_enter = 1;\n"
+    n = text.count(old)
+    if n != 1:
+        raise ValueError("mill patch missing: cpu-pef-unfspl enter count=%s" % n)
+    new = (
+        "	g3_did_pef_enter = 1;\n"
+        "	/* forceSplash nops bne 101014ac; restore cmpwi r0,0 skip splash. */\n"
+        "	if (g3_ea_data(ent + 0xdfu))\n"
+        "		vm_write_memory_4(ent + 0xdcu, 0x40820014u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nunfs;\n"
+        "		if (nunfs < 8) {\n"
+        "			nunfs++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF unfSpl\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+    )
+    return text.replace(old, new, 1)
+
+
+def apply_pef_unfspl(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_unfspl(cpu.read_text()))
 
 
 def patch_cpu_pef_skipwait(text: str) -> str:
@@ -3081,6 +5036,768 @@ def patch_cpu_pef_skipae(text: str) -> str:
 def apply_pef_skipae(root: Optional[Path] = None) -> None:
     cpu = cpu_path(root)
     cpu.write_text(patch_cpu_pef_skipae(cpu.read_text()))
+
+
+def patch_cpu_pef_skipheap(text: str) -> str:
+    if MARKER_PEF_SKIPHEAP in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skipAE\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skipAE\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* Skip 1010798c (10101434) so skipWait splash runs. */\n"
+        "	if (g3_ea_data(ent + 0x67u))\n"
+        "		vm_write_memory_4(ent + 0x64u, 0x60000000u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nsh;\n"
+        "		if (nsh < 8) {\n"
+        "			nsh++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skipHeap\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-skipheap")
+
+
+def apply_pef_skipheap(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_skipheap(cpu.read_text()))
+
+
+def patch_cpu_pef_skipb7(text: str) -> str:
+    if MARKER_PEF_SKIPB7 in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skipHeap\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skipHeap\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* Skip 1010b7b0 (1010143c) so skipWait splash runs. */\n"
+        "	if (g3_ea_data(ent + 0x6fu))\n"
+        "		vm_write_memory_4(ent + 0x6cu, 0x60000000u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nb7;\n"
+        "		if (nb7 < 8) {\n"
+        "			nb7++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skipB7\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-skipb7")
+
+
+def apply_pef_skipb7(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_skipb7(cpu.read_text()))
+
+
+def patch_cpu_pef_skip20ec(text: str) -> str:
+    if MARKER_PEF_SKIP20EC in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skipB7\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skipB7\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* Skip 101020ec (10101428) so skipWait splash runs. */\n"
+        "	if (g3_ea_data(ent + 0x5bu))\n"
+        "		vm_write_memory_4(ent + 0x58u, 0x60000000u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned n0ec;\n"
+        "		if (n0ec < 8) {\n"
+        "			n0ec++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip20ec\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-skip20ec")
+
+
+def apply_pef_skip20ec(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_skip20ec(cpu.read_text()))
+
+
+def patch_cpu_pef_skip21bc(text: str) -> str:
+    if MARKER_PEF_SKIP21BC in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip20ec\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip20ec\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* Skip 101021bc (101013fc) so skipWait splash runs. */\n"
+        "	if (g3_ea_data(ent + 0x2fu))\n"
+        "		vm_write_memory_4(ent + 0x2cu, 0x60000000u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned n21;\n"
+        "		if (n21 < 8) {\n"
+        "			n21++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip21bc\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-skip21bc")
+
+
+def apply_pef_skip21bc(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_skip21bc(cpu.read_text()))
+
+
+def patch_cpu_pef_skip2fb8(text: str) -> str:
+    if MARKER_PEF_SKIP2FB8 in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip21bc\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip21bc\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* Skip 10102fb8 (101013f4) so skipWait splash runs. */\n"
+        "	if (g3_ea_data(ent + 0x27u))\n"
+        "		vm_write_memory_4(ent + 0x24u, 0x60000000u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned n2f;\n"
+        "		if (n2f < 8) {\n"
+        "			n2f++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip2fb8\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-skip2fb8")
+
+
+def apply_pef_skip2fb8(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_skip2fb8(cpu.read_text()))
+
+
+def patch_cpu_pef_skipglue(text: str) -> str:
+    if MARKER_PEF_SKIPGLUE in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip2fb8\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip2fb8\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* Skip glue 10101400/10101410 so skipWait splash runs. */\n"
+        "	if (g3_ea_data(ent + 0x33u))\n"
+        "		vm_write_memory_4(ent + 0x30u, 0x60000000u);\n"
+        "	if (g3_ea_data(ent + 0x43u))\n"
+        "		vm_write_memory_4(ent + 0x40u, 0x60000000u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned ngl;\n"
+        "		if (ngl < 8) {\n"
+        "			ngl++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skipGlue\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-skipglue")
+
+
+def apply_pef_skipglue(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_skipglue(cpu.read_text()))
+
+
+def patch_cpu_pef_alert(text: str) -> str:
+    if MARKER_PEF_ALERT in text:
+        return text
+    old = (
+        "	} else if (idx == 149u || idx == 121u || idx == 79u) {\n"
+    )
+    new = (
+        "	} else if (idx == 125u) {\n"
+        "		/* Alert: r3=0 so main 1010140c proceeds to splash. */\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned nal;\n"
+        "			if (nal < 8) {\n"
+        "				nal++;\n"
+        "				nw_boot_log(\n"
+        "					\"G3: 68k Launch A9F2 CFM Upgrader PEF Alert\");\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "	} else if (idx == 149u || idx == 121u || idx == 79u) {\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-alert")
+
+
+def apply_pef_alert(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_alert(cpu.read_text()))
+
+
+def patch_cpu_pef_glue0(text: str) -> str:
+    if MARKER_PEF_GLUE0 in text:
+        return text
+    old = (
+        "				r3 = g3_pef_host(idx, gpr(3), gpr(4), gpr(5));\n"
+        "				gpr(3) = r3;\n"
+        "				pc() = lr();\n"
+        "				continue;\n"
+    )
+    new = (
+        "				r3 = g3_pef_host(idx, gpr(3), gpr(4), gpr(5));\n"
+        "				gpr(3) = r3;\n"
+        "				/* 10101400 glue: r3=0 so 1010140c takes splash. */\n"
+        "				if (lr() == 0x10101404u || lr() == 0x10101414u) {\n"
+        "					gpr(3) = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "					{\n"
+        "						static unsigned ngl0;\n"
+        "						if (ngl0 < 8) {\n"
+        "							char buf[96];\n"
+        "							ngl0++;\n"
+        "							snprintf(buf, sizeof(buf),\n"
+        "								 \"G3: 68k Launch A9F2 CFM Upgrader PEF glue idx=%u\",\n"
+        "								 (unsigned)idx);\n"
+        "							nw_boot_log(buf);\n"
+        "						}\n"
+        "					}\n"
+        "#endif\n"
+        "				}\n"
+        "				pc() = lr();\n"
+        "				continue;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-glue0")
+
+
+def apply_pef_glue0(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_glue0(cpu.read_text()))
+
+
+def patch_cpu_pef_tocpict(text: str) -> str:
+    if MARKER_PEF_TOCPICT in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip2fb8\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skip2fb8\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* Splash early-out if TOC+0xc50 PICT ids are 0. */\n"
+        "	if (g3_ea_data(toc + 0xc53u)) {\n"
+        "		vm_write_memory_2(toc + 0xc50u, 1000);\n"
+        "		vm_write_memory_2(toc + 0xc52u, 1000);\n"
+        "	}\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned ntp;\n"
+        "		if (ntp < 8) {\n"
+        "			ntp++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF tocPict\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-tocpict")
+
+
+def apply_pef_tocpict(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_tocpict(cpu.read_text()))
+
+
+def patch_cpu_pef_maindev(text: str) -> str:
+    if MARKER_PEF_MAINDEV in text:
+        return text
+    old = (
+        "	} else if (idx == 125u) {\n"
+    )
+    new = (
+        "	} else if (idx == 43u) {\n"
+        "		/* GetMainDevice: GDHandle + PixMap on guest FB. */\n"
+        "		static uint32 gdh;\n"
+        "		if (!gdh) {\n"
+        "			uint32 fb = g3_qd_fb();\n"
+        "			uint32 pm = g3_pef_newptr(64u);\n"
+        "			uint32 pmh = g3_pef_newptr(8u);\n"
+        "			uint32 gd = g3_pef_newptr(64u);\n"
+        "			uint32 h = g3_pef_newptr(8u);\n"
+        "			if (pm && pmh && gd && h) {\n"
+        "				vm_write_memory_4(pm, fb);\n"
+        "				vm_write_memory_2(pm + 4u, 0x8a00u);\n"
+        "				vm_write_memory_2(pm + 6u, 0);\n"
+        "				vm_write_memory_2(pm + 8u, 0);\n"
+        "				vm_write_memory_2(pm + 10u, 480);\n"
+        "				vm_write_memory_2(pm + 12u, 640);\n"
+        "				vm_write_memory_4(pm + 22u, 0x00480000u);\n"
+        "				vm_write_memory_4(pm + 26u, 0x00480000u);\n"
+        "				vm_write_memory_2(pm + 30u, 16);\n"
+        "				vm_write_memory_2(pm + 32u, 32);\n"
+        "				vm_write_memory_2(pm + 34u, 3);\n"
+        "				vm_write_memory_2(pm + 36u, 8);\n"
+        "				vm_write_memory_4(pmh, pm);\n"
+        "				vm_write_memory_2(gd + 4u, 2);\n"
+        "				vm_write_memory_2(gd + 20u, 1);\n"
+        "				vm_write_memory_4(gd + 22u, pmh);\n"
+        "				vm_write_memory_2(gd + 34u, 0);\n"
+        "				vm_write_memory_2(gd + 36u, 0);\n"
+        "				vm_write_memory_2(gd + 38u, 480);\n"
+        "				vm_write_memory_2(gd + 40u, 640);\n"
+        "				vm_write_memory_4(h, gd);\n"
+        "				if (g3_ea_data(0x8a7u))\n"
+        "					vm_write_memory_4(0x8a4u, h);\n"
+        "				if (g3_ea_data(0xccbu))\n"
+        "					vm_write_memory_4(0xcc8u, h);\n"
+        "				gdh = h;\n"
+        "			}\n"
+        "		}\n"
+        "		r3 = gdh;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned nmd;\n"
+        "			if (nmd < 8) {\n"
+        "				char buf[96];\n"
+        "				nmd++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF MainDevice h=%08x\",\n"
+        "					 (unsigned)r3);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "	} else if (idx == 125u) {\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-maindev")
+
+
+def apply_pef_maindev(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_maindev(cpu.read_text()))
+
+
+def patch_cpu_pef_skipgmd(text: str) -> str:
+    if MARKER_PEF_SKIPGMD in text:
+        return text
+    old = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF tocPict\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    new = (
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF tocPict\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	/* Skip GetMainDevice 10101f94 (DSI DAR=15016). */\n"
+        "	if (g3_ea_data(ent + 0xbb7u))\n"
+        "		vm_write_memory_4(ent + 0xbb4u, 0x48000038u);\n"
+        "#if NW_BOOT_LOG\n"
+        "	{\n"
+        "		static unsigned nsg;\n"
+        "		if (nsg < 8) {\n"
+        "			nsg++;\n"
+        "			nw_boot_log(\n"
+        "				\"G3: 68k Launch A9F2 CFM Upgrader PEF skipGmd\");\n"
+        "		}\n"
+        "	}\n"
+        "#endif\n"
+        "	g3_did_pef_enter = 1;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-skipgmd")
+
+
+def apply_pef_skipgmd(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_skipgmd(cpu.read_text()))
+
+
+def patch_cpu_pef_newptrc(text: str) -> str:
+    if MARKER_PEF_NEWPTRC in text:
+        return text
+    old = (
+        "	} else if (idx == 287u)\n"
+        "		r3 = g3_pef_newptr(a3);\n"
+        "	return r3;\n"
+    )
+    new = (
+        "	} else if (idx == 160u) {\n"
+        "		r3 = g3_pef_newptr(a3);\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned npc;\n"
+        "			if (npc < 8) {\n"
+        "				char buf[96];\n"
+        "				npc++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF NewPtrClear p=%08x\",\n"
+        "					 (unsigned)r3);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "	} else if (idx == 287u)\n"
+        "		r3 = g3_pef_newptr(a3);\n"
+        "	return r3;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-newptrc")
+
+
+def apply_pef_newptrc(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_newptrc(cpu.read_text()))
+
+
+def patch_cpu_pef_nrd(text: str) -> str:
+    if MARKER_PEF_NRD in text:
+        return text
+    old = (
+        "	} else if (idx == 160u) {\n"
+        "		r3 = g3_pef_newptr(a3);\n"
+    )
+    new = (
+        "	} else if (idx == 159u) {\n"
+        "		/* NewRoutineDescriptor: PPC UPP is the ProcPtr. */\n"
+        "		r3 = a3;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned nnrd;\n"
+        "			if (nnrd < 8) {\n"
+        "				char buf[96];\n"
+        "				nnrd++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF NewRoutineDescriptor p=%08x\",\n"
+        "					 (unsigned)r3);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "	} else if (idx == 160u) {\n"
+        "		r3 = g3_pef_newptr(a3);\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-nrd")
+
+
+def apply_pef_nrd(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_nrd(cpu.read_text()))
+
+
+def patch_cpu_pef_nourf(text: str) -> str:
+    if MARKER_PEF_NOURF in text:
+        return text
+    old = (
+        "		else {\n"
+        "			r3 = 0;\n"
+        "			/* Plant Splash 510 while PEF idles on UseResFile. */\n"
+        "			{\n"
+        "				static unsigned nps;\n"
+        "				nps++;\n"
+        "				if (nps >= 3u) {\n"
+        "					g3_did_splash510 = 0;\n"
+        "					g3_did_pict1000 = 0;\n"
+        "					uint32 dlg = g3_plant_splash510();\n"
+        "					if (dlg && g3_ea_data(dlg + 10u))\n"
+        "						vm_write_memory_1(dlg + 10u, 1);\n"
+        "					g3_pict1000_blit();\n"
+        "					(void)g3_pef_host(134u, 510u, 0, 0);\n"
+        "#if NW_BOOT_LOG\n"
+        "					if (nps < 11u)\n"
+        "						nw_boot_log(\n"
+        "							\"G3: 68k Launch A9F2 CFM Upgrader PEF callGnd\");\n"
+        "#endif\n"
+        "				}\n"
+        "			}\n"
+    )
+    new = (
+        "		else {\n"
+        "			r3 = 0;\n"
+        "			/* UseResFile: do not re-plant splash. */\n"
+        "#if NW_BOOT_LOG\n"
+        "			{\n"
+        "				static unsigned nuf;\n"
+        "				if (nuf < 8) {\n"
+        "					nuf++;\n"
+        "					nw_boot_log(\n"
+        "						\"G3: 68k Launch A9F2 CFM Upgrader PEF noUrF\");\n"
+        "				}\n"
+        "			}\n"
+        "#endif\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-nourf")
+
+
+def apply_pef_nourf(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_nourf(cpu.read_text()))
+
+
+def patch_cpu_pef_cup(text: str) -> str:
+    if MARKER_PEF_CUP in text:
+        return text
+    old = (
+        "	} else if (idx == 159u) {\n"
+        "		/* NewRoutineDescriptor: PPC UPP is the ProcPtr. */\n"
+        "		r3 = a3;\n"
+    )
+    new = (
+        "	} else if (idx == 68u || idx == 64u) {\n"
+        "		/* CallUniversalProc / CallOSTrapUniversalProc no-op. */\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned ncup;\n"
+        "			if (ncup < 8) {\n"
+        "				char buf[96];\n"
+        "				ncup++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF CallUniversalProc idx=%u\",\n"
+        "					 (unsigned)idx);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "	} else if (idx == 159u) {\n"
+        "		/* NewRoutineDescriptor: PPC UPP is the ProcPtr. */\n"
+        "		r3 = a3;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-cup")
+
+
+def apply_pef_cup(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_cup(cpu.read_text()))
+
+
+def patch_cpu_pef_tick(text: str) -> str:
+    if MARKER_PEF_TICK in text:
+        return text
+    old = (
+        "	} else if (idx == 68u || idx == 64u) {\n"
+        "		/* CallUniversalProc / CallOSTrapUniversalProc no-op. */\n"
+        "		r3 = 0;\n"
+    )
+    new = (
+        "	} else if (idx == 110u) {\n"
+        "		static uint32 ticks = 60;\n"
+        "		r3 = ticks++;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned ntk;\n"
+        "			if (ntk < 8) {\n"
+        "				char buf[96];\n"
+        "				ntk++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF TickCount t=%u\",\n"
+        "					 (unsigned)r3);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "	} else if (idx == 68u || idx == 64u) {\n"
+        "		/* CallUniversalProc / CallOSTrapUniversalProc no-op. */\n"
+        "		r3 = 0;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-tick")
+
+
+def apply_pef_tick(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_tick(cpu.read_text()))
+
+
+def patch_cpu_pef_drawdlg(text: str) -> str:
+    if MARKER_PEF_DRAWDLG in text:
+        return text
+    old = (
+        "	} else if (idx == 155u || idx == 170u) {\n"
+        "		if (idx == 170u && g3_ea_data(a3))\n"
+        "			vm_write_memory_4(0x2aau, a3);\n"
+        "		g3_pict1000_blit();\n"
+        "		r3 = 0;\n"
+    )
+    new = (
+        "	} else if (idx == 155u || idx == 170u) {\n"
+        "		if (idx == 170u && g3_ea_data(a3))\n"
+        "			vm_write_memory_4(0x2aau, a3);\n"
+        "		g3_pict1000_blit();\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned ndd;\n"
+        "			if (ndd < 8) {\n"
+        "				ndd++;\n"
+        "				nw_boot_log(\n"
+        "					\"G3: 68k Launch A9F2 CFM Upgrader PEF DrawDialog\");\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-drawdlg")
+
+
+def apply_pef_drawdlg(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_drawdlg(cpu.read_text()))
+
+
+def patch_cpu_pef_sizewin(text: str) -> str:
+    if MARKER_PEF_SIZEWIN in text:
+        return text
+    old = (
+        "	} else if (idx == 110u) {\n"
+        "		static uint32 ticks = 60;\n"
+        "		r3 = ticks++;\n"
+    )
+    new = (
+        "	} else if (idx == 189u || idx == 193u) {\n"
+        "		/* SizeWindow / MoveWindow. */\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned nsw;\n"
+        "			if (nsw < 8) {\n"
+        "				char buf[96];\n"
+        "				nsw++;\n"
+        "				snprintf(buf, sizeof(buf),\n"
+        "					 \"G3: 68k Launch A9F2 CFM Upgrader PEF SizeWindow idx=%u\",\n"
+        "					 (unsigned)idx);\n"
+        "				nw_boot_log(buf);\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "	} else if (idx == 110u) {\n"
+        "		static uint32 ticks = 60;\n"
+        "		r3 = ticks++;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-sizewin")
+
+
+def apply_pef_sizewin(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_sizewin(cpu.read_text()))
+
+
+def patch_cpu_pef_setditm(text: str) -> str:
+    if MARKER_PEF_SETDITM in text:
+        return text
+    old = (
+        "	} else if (idx == 189u || idx == 193u) {\n"
+        "		/* SizeWindow / MoveWindow. */\n"
+        "		r3 = 0;\n"
+    )
+    new = (
+        "	} else if (idx == 30u) {\n"
+        "		r3 = 0;\n"
+        "#if NW_BOOT_LOG\n"
+        "		{\n"
+        "			static unsigned nsdi;\n"
+        "			if (nsdi < 8) {\n"
+        "				nsdi++;\n"
+        "				nw_boot_log(\n"
+        "					\"G3: 68k Launch A9F2 CFM Upgrader PEF SetDialogItem\");\n"
+        "			}\n"
+        "		}\n"
+        "#endif\n"
+        "	} else if (idx == 189u || idx == 193u) {\n"
+        "		/* SizeWindow / MoveWindow. */\n"
+        "		r3 = 0;\n"
+    )
+    return _replace_once(text, old, new, "cpu-pef-setditm")
+
+
+def apply_pef_setditm(root: Optional[Path] = None) -> None:
+    cpu = cpu_path(root)
+    cpu.write_text(patch_cpu_pef_setditm(cpu.read_text()))
 
 
 def patch_cpu_trap_68k(text: str) -> str:
@@ -3517,6 +6234,46 @@ def apply(
             apply_pef_no519(root)
         elif k == "pef-show":
             apply_pef_show(root)
+        elif k == "pef-gncw":
+            apply_pef_gncw(root)
+        elif k == "pef-call798c":
+            apply_pef_call798c(root)
+        elif k == "pef-nospljmp":
+            apply_pef_nospljmp(root)
+        elif k == "pef-gncwlr":
+            apply_pef_gncwlr(root)
+        elif k == "pef-showw128":
+            apply_pef_showw128(root)
+        elif k == "pef-winrec":
+            apply_pef_winrec(root)
+        elif k == "pef-docres":
+            apply_pef_docres(root)
+        elif k == "pef-toc604":
+            apply_pef_toc604(root)
+        elif k == "pef-toc604b":
+            apply_pef_toc604b(root)
+        elif k == "pef-callb7":
+            apply_pef_callb7(root)
+        elif k == "pef-call5c38":
+            apply_pef_call5c38(root)
+        elif k == "pef-call2738":
+            apply_pef_call2738(root)
+        elif k == "pef-indstr":
+            apply_pef_indstr(root)
+        elif k == "pef-getstr":
+            apply_pef_getstr(root)
+        elif k == "pef-callalert":
+            apply_pef_callalert(root)
+        elif k == "pef-nocap":
+            apply_pef_nocap(root)
+        elif k == "pef-fsprf":
+            apply_pef_fsprf(root)
+        elif k == "pef-fmt1":
+            apply_pef_fmt1(root)
+        elif k == "pef-pfmtw":
+            apply_pef_pfmtw(root)
+        elif k == "pef-unfspl":
+            apply_pef_unfspl(root)
         elif k == "pef-forcesplash":
             apply_pef_forcesplash(root)
         elif k == "pef-skipwait":
@@ -3539,6 +6296,78 @@ def apply(
             apply_pef_callgnd(root)
         elif k == "pef-skipae":
             apply_pef_skipae(root)
+        elif k == "pef-skipheap":
+            apply_pef_skipheap(root)
+        elif k == "pef-skipb7":
+            apply_pef_skipb7(root)
+        elif k == "pef-skip20ec":
+            apply_pef_skip20ec(root)
+        elif k == "pef-skip21bc":
+            apply_pef_skip21bc(root)
+        elif k == "pef-skip2fb8":
+            apply_pef_skip2fb8(root)
+        elif k == "pef-skipglue":
+            apply_pef_skipglue(root)
+        elif k == "pef-alert":
+            apply_pef_alert(root)
+        elif k == "pef-glue0":
+            apply_pef_glue0(root)
+        elif k == "pef-tocpict":
+            apply_pef_tocpict(root)
+        elif k == "pef-maindev":
+            apply_pef_maindev(root)
+        elif k == "pef-skipgmd":
+            apply_pef_skipgmd(root)
+        elif k == "pef-newptrc":
+            apply_pef_newptrc(root)
+        elif k == "pef-nrd":
+            apply_pef_nrd(root)
+        elif k == "pef-nourf":
+            apply_pef_nourf(root)
+        elif k == "pef-cup":
+            apply_pef_cup(root)
+        elif k == "pef-tick":
+            apply_pef_tick(root)
+        elif k == "pef-drawdlg":
+            apply_pef_drawdlg(root)
+        elif k == "pef-sizewin":
+            apply_pef_sizewin(root)
+        elif k == "pef-setditm":
+            apply_pef_setditm(root)
+        elif k in PEF_SPLASH_KINDS:
+            apply_pef_splash(k, cpu_path(root))
+        elif k in PEF_MORE_KINDS:
+            apply_pef_more(k, cpu_path(root))
+        elif k in PEF_NEXT_KINDS:
+            apply_pef_next(k, cpu_path(root))
+        elif k in PEF_DISP_KINDS:
+            apply_pef_disp(k, cpu_path(root))
+        elif k in PEF_URF_KINDS:
+            apply_pef_urf(k, cpu_path(root))
+        elif k in PEF_H2H_KINDS:
+            apply_pef_h2h(k, cpu_path(root))
+        elif k in PEF_NRD_KINDS:
+            apply_pef_nrdq(k, cpu_path(root))
+        elif k in PEF_GND_KINDS:
+            apply_pef_gndq(k, cpu_path(root))
+        elif k in PEF_SW_KINDS:
+            apply_pef_swq(k, cpu_path(root))
+        elif k in PEF_REST_KINDS:
+            apply_pef_restq(k, cpu_path(root))
+        elif k in PEF_FMT_KINDS:
+            apply_pef_fmtq(k, cpu_path(root))
+        elif k in PEF_FMT2_KINDS:
+            apply_pef_fmt2q(k, cpu_path(root))
+        elif k in PEF_FMT3_KINDS:
+            apply_pef_fmt3q(k, cpu_path(root))
+        elif k in PEF_FMT4_KINDS:
+            apply_pef_fmt4q(k, cpu_path(root))
+        elif k in PEF_DOC_KINDS:
+            apply_pef_docq(k, cpu_path(root))
+        elif k in PEF_OPEN_KINDS:
+            apply_pef_openq(k, cpu_path(root))
+        elif k in PEF_BATCH_KINDS:
+            apply_pef_batch(k, cpu_path(root))
         elif k == "getresource-a9a0":
             pass
         elif k == "getnewdialog-dlog":

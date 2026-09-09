@@ -816,6 +816,33 @@ class NextStepTests(unittest.TestCase):
             ),
             "pef-forceblit",
         )
+        from mill_apply import LEFTOVER
+        from mill_pef_splash import PEF_SPLASH_KINDS
+
+        before_splash = list(done68)
+        for k in LEFTOVER:
+            if k in PEF_SPLASH_KINDS:
+                break
+            if k.startswith("pef-") or k in (
+                "stay-code66",
+                "launch-upgrader",
+                "splash-510",
+                "splash-510-even",
+                "pict-1000",
+            ):
+                key = "leftover:%s" % k
+                if key not in before_splash:
+                    before_splash.append(key)
+        self.assertEqual(
+            next_leftover(
+                before_splash,
+                pef_rev,
+                hang_off=0x326510,
+                saw_68k=True,
+                mill=empty_map,
+            ),
+            "pef-frontwin",
+        )
 
 
 class MillApplyTests(unittest.TestCase):
@@ -853,6 +880,58 @@ class MillApplyTests(unittest.TestCase):
         self.assertIn("g3_rf_off = 74305024u", cpu)
         self.assertNotIn("g3_rf_off = 112182784u", cpu)
         self.assertIn("G3: 68k LoadSeg A9F0 enter", cpu)
+
+    def test_pef_gncw_patch(self) -> None:
+        from mill_apply import MARKER_PEF_GNCW, patch_cpu_pef_gncw
+
+        cpu_path = (
+            HERE.parents[1]
+            / "SheepShaver"
+            / "src"
+            / "kpx_cpu"
+            / "src"
+            / "cpu"
+            / "ppc"
+            / "ppc-cpu.cpp"
+        )
+        raw = cpu_path.read_text()
+        if MARKER_PEF_GNCW in raw:
+            text = raw
+        else:
+            text = patch_cpu_pef_gncw(raw)
+        self.assertIn(MARKER_PEF_GNCW, text)
+        self.assertIn("g3_plant_wind", text)
+        self.assertIn("0x57494E44u", text)
+        self.assertIn("0xa861006au", text)
+        self.assertIn("ent + 0x6410u", text)
+        self.assertIn("PEF gncwCall", text)
+        self.assertNotEqual(text.count("GetNewCWindow id="), 0)
+        self.assertEqual(patch_cpu_pef_gncw(text), text)
+
+    def test_pef_call798c_patch(self) -> None:
+        from mill_apply import MARKER_PEF_CALL798C, patch_cpu_pef_call798c, patch_cpu_pef_gncw
+
+        cpu_path = (
+            HERE.parents[1]
+            / "SheepShaver"
+            / "src"
+            / "kpx_cpu"
+            / "src"
+            / "cpu"
+            / "ppc"
+            / "ppc-cpu.cpp"
+        )
+        raw = cpu_path.read_text()
+        if MARKER_PEF_CALL798C in raw:
+            text = raw
+        else:
+            if "PEF gncwCall" not in raw:
+                raw = patch_cpu_pef_gncw(raw)
+            text = patch_cpu_pef_call798c(raw)
+        self.assertIn(MARKER_PEF_CALL798C, text)
+        self.assertIn("0x48006559u", text)
+        self.assertIn("ent + 0x64u", text)
+        self.assertEqual(patch_cpu_pef_call798c(text), text)
 
     def test_patch_cpu_initfonts_marker(self) -> None:
         cpu = (
@@ -1660,6 +1739,104 @@ class PackTests(unittest.TestCase):
         self.assertFalse(mill_binary_match(rt, kind="pef-skipae"))
         rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipAE")
         self.assertTrue(mill_binary_match(rt, kind="pef-skipae"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipheap"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipHeap")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipheap"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipb7"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipB7")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipb7"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skip20ec"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skip20ec")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skip20ec"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skip21bc"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skip21bc")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skip21bc"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skip2fb8"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skip2fb8")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skip2fb8"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipglue"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipGlue")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipglue"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-alert"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF Alert")
+        self.assertTrue(mill_binary_match(rt, kind="pef-alert"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-glue0"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF glue idx=125")
+        self.assertTrue(mill_binary_match(rt, kind="pef-glue0"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-tocpict"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF tocPict")
+        self.assertTrue(mill_binary_match(rt, kind="pef-tocpict"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-maindev"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF MainDevice")
+        self.assertTrue(mill_binary_match(rt, kind="pef-maindev"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipgmd"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipGmd")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipgmd"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-newptrc"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF NewPtrClear")
+        self.assertTrue(mill_binary_match(rt, kind="pef-newptrc"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-nrd"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF NewRoutineDescriptor")
+        self.assertTrue(mill_binary_match(rt, kind="pef-nrd"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-nourf"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF noUrF")
+        self.assertTrue(mill_binary_match(rt, kind="pef-nourf"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-cup"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF CallUniversalProc")
+        self.assertTrue(mill_binary_match(rt, kind="pef-cup"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-tick"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF TickCount")
+        self.assertTrue(mill_binary_match(rt, kind="pef-tick"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-drawdlg"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF DrawDialog")
+        self.assertTrue(mill_binary_match(rt, kind="pef-drawdlg"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-sizewin"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF SizeWindow")
+        self.assertTrue(mill_binary_match(rt, kind="pef-sizewin"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-setditm"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF SetDialogItem")
+        self.assertTrue(mill_binary_match(rt, kind="pef-setditm"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-nrdblr"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF nrdBlr p=10180010")
+        self.assertTrue(mill_binary_match(rt, kind="pef-nrdblr"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-i042"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF void idx=%u i042")
+        self.assertTrue(mill_binary_match(rt, kind="pef-i042"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF void idx=%u i042 i050")
+        self.assertTrue(mill_binary_match(rt, kind="pef-i050"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-frontwin"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF FrontWindow w=1005130c")
+        self.assertTrue(mill_binary_match(rt, kind="pef-frontwin"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-getport"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF GetPort p=1005130c")
+        self.assertTrue(mill_binary_match(rt, kind="pef-getport"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-stublr"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF stubLR lr=10116000 to=101014b4")
+        self.assertTrue(mill_binary_match(rt, kind="pef-stublr"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-textfont"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF TextFont")
+        self.assertTrue(mill_binary_match(rt, kind="pef-textfont"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-hostlr"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF hostLR idx=117 lr=10116000 r0=00000000 s8=10102a00")
+        self.assertTrue(mill_binary_match(rt, kind="pef-hostlr"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-hostlr2"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF hostLR2 idx=117 lr=10102a00 r0=10116000 s8=10101d68")
+        self.assertTrue(mill_binary_match(rt, kind="pef-hostlr2"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-navrun"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF NavServicesCanRun")
+        self.assertTrue(mill_binary_match(rt, kind="pef-navrun"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipunld"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipUnld")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipunld"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipnav"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipNav")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipnav"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipdisp"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipDisp")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipdisp"))
+        self.assertFalse(mill_binary_match(rt, kind="pef-skipurf"))
+        rt.write_bytes(b"G3: 68k Launch A9F2 CFM Upgrader PEF skipUrf")
+        self.assertTrue(mill_binary_match(rt, kind="pef-skipurf"))
 
     def test_grok_build_cmd_is_headless_not_http(self) -> None:
         from grok_build import grok_build_enabled, grok_cmd, write_grok_prompt

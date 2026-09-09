@@ -737,11 +737,6 @@ def _force_leftover_mill(mill: Dict[str, Any]) -> Tuple[str, int]:
             mill["kind"] = "stay-code66"
             mill["hang_off"] = None
             return "stay-code66", 0
-        off = next_skip_68k_off(mill, mill.get("tested"), mill.get("reverted_kinds"))
-        if off is not None:
-            mill["hang_off"] = off
-            mill["kind"] = "skip-68k"
-            return "skip-68k", int(off)
         kind = next_leftover(
             mill.get("tested"),
             mill.get("reverted_kinds"),
@@ -749,6 +744,24 @@ def _force_leftover_mill(mill: Dict[str, Any]) -> Tuple[str, int]:
             saw_68k=True,
             mill=mill,
         )
+        if kind and str(kind).startswith("pef-"):
+            mill["kind"] = kind
+            mill["hang_off"] = None
+            return kind, 0
+        off = next_skip_68k_off(mill, mill.get("tested"), mill.get("reverted_kinds"))
+        if off is not None:
+            if os.environ.get("G3_NO_SKIP68K", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            ):
+                mill["kind"] = "grok-escalate"
+                mill["hang_off"] = None
+                mill["stuck"] = "grok-escalate"
+                return "grok-escalate", 0
+            mill["hang_off"] = off
+            mill["kind"] = "skip-68k"
+            return "skip-68k", int(off)
         if kind == "skip-68k":
             mill["kind"] = "grok-escalate"
             mill["hang_off"] = None
@@ -786,6 +799,25 @@ def _force_leftover_mill(mill: Dict[str, Any]) -> Tuple[str, int]:
             "pef-modal",
             "pef-no519",
             "pef-show",
+            "pef-gncw",
+            "pef-call798c",
+            "pef-nospljmp",
+            "pef-gncwlr",
+            "pef-showw128",
+            "pef-winrec",
+            "pef-docres",
+            "pef-toc604",
+            "pef-toc604b",
+            "pef-callb7",
+            "pef-call5c38",
+            "pef-call2738",
+            "pef-indstr",
+            "pef-getstr",
+            "pef-callalert",
+            "pef-nocap",
+            "pef-fsprf",
+            "pef-fmt1",
+            "pef-pfmtw",
             "pef-forcesplash",
             "pef-skipwait",
             "pef-callsplash",
@@ -797,7 +829,26 @@ def _force_leftover_mill(mill: Dict[str, Any]) -> Tuple[str, int]:
             "pef-blitoff",
             "pef-callgnd",
             "pef-skipae",
-        ):
+            "pef-skipheap",
+            "pef-skipb7",
+            "pef-skip20ec",
+            "pef-skip21bc",
+            "pef-skip2fb8",
+            "pef-skipglue",
+            "pef-alert",
+            "pef-glue0",
+            "pef-tocpict",
+            "pef-maindev",
+            "pef-skipgmd",
+            "pef-newptrc",
+            "pef-nrd",
+            "pef-nourf",
+            "pef-cup",
+            "pef-tick",
+            "pef-drawdlg",
+            "pef-sizewin",
+            "pef-setditm",
+        ) or (kind and kind.startswith("pef-")):
             mill["kind"] = kind
             mill["hang_off"] = None
             return kind, 0
@@ -1170,12 +1221,21 @@ def cmd_run(args: argparse.Namespace) -> int:
                         if hang_off is None:
                             kind = None
                     elif kind == "skip-68k":
-                        hang_off = next_skip_68k_off(
-                            mill, mill.get("tested"), mill.get("reverted_kinds")
-                        )
-                        mill["hang_off"] = hang_off
-                        if hang_off is None:
-                            kind = None
+                        if os.environ.get("G3_NO_SKIP68K", "").strip().lower() in (
+                            "1",
+                            "true",
+                            "yes",
+                        ):
+                            kind = "grok-escalate"
+                            mill["hang_off"] = None
+                            hang_off = None
+                        else:
+                            hang_off = next_skip_68k_off(
+                                mill, mill.get("tested"), mill.get("reverted_kinds")
+                            )
+                            mill["hang_off"] = hang_off
+                            if hang_off is None:
+                                kind = None
                     elif kind in (
                         "cfm-aa5a",
                         "trap-68k",
@@ -1204,6 +1264,25 @@ def cmd_run(args: argparse.Namespace) -> int:
                         "pef-modal",
                         "pef-no519",
                         "pef-show",
+                        "pef-gncw",
+                        "pef-call798c",
+                        "pef-nospljmp",
+                        "pef-gncwlr",
+                        "pef-showw128",
+                        "pef-winrec",
+                        "pef-docres",
+                        "pef-toc604",
+                        "pef-toc604b",
+                        "pef-callb7",
+                        "pef-call5c38",
+                        "pef-call2738",
+                        "pef-indstr",
+                        "pef-getstr",
+                        "pef-callalert",
+                        "pef-nocap",
+                        "pef-fsprf",
+                        "pef-fmt1",
+                        "pef-pfmtw",
                         "pef-forcesplash",
                         "pef-skipwait",
                         "pef-callsplash",
@@ -1215,6 +1294,26 @@ def cmd_run(args: argparse.Namespace) -> int:
                         "pef-blitoff",
                         "pef-callgnd",
                         "pef-skipae",
+                        "pef-skipheap",
+                        "pef-skipb7",
+                        "pef-skip20ec",
+                        "pef-skip21bc",
+                        "pef-skip2fb8",
+                        "pef-skipglue",
+                        "pef-alert",
+                        "pef-glue0",
+                        "pef-tocpict",
+                        "pef-maindev",
+                        "pef-skipgmd",
+                        "pef-newptrc",
+                        "pef-nrd",
+                        "pef-nourf",
+                        "pef-cup",
+                        "pef-tick",
+                        "pef-drawdlg",
+                        "pef-sizewin",
+                        "pef-setditm",
+                    ) or (kind and kind.startswith("pef-")) or kind in (
                         "getresource-a9a0",
                         "getnewdialog-dlog",
                         "code66-syserr99",
@@ -1278,6 +1377,25 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "pef-modal",
                 "pef-no519",
                 "pef-show",
+                "pef-gncw",
+                "pef-call798c",
+                "pef-nospljmp",
+                "pef-gncwlr",
+                "pef-showw128",
+                "pef-winrec",
+                "pef-docres",
+                "pef-toc604",
+                "pef-toc604b",
+                "pef-callb7",
+                "pef-call5c38",
+                "pef-call2738",
+                "pef-indstr",
+                "pef-getstr",
+                "pef-callalert",
+                "pef-nocap",
+                "pef-fsprf",
+                "pef-fmt1",
+                "pef-pfmtw",
                 "pef-forcesplash",
                 "pef-skipwait",
                 "pef-callsplash",
@@ -1289,6 +1407,26 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "pef-blitoff",
                 "pef-callgnd",
                 "pef-skipae",
+                "pef-skipheap",
+                "pef-skipb7",
+                "pef-skip20ec",
+                "pef-skip21bc",
+                "pef-skip2fb8",
+                "pef-skipglue",
+                "pef-alert",
+                "pef-glue0",
+                "pef-tocpict",
+                "pef-maindev",
+                "pef-skipgmd",
+                "pef-newptrc",
+                "pef-nrd",
+                "pef-nourf",
+                "pef-cup",
+                "pef-tick",
+                "pef-drawdlg",
+                "pef-sizewin",
+                "pef-setditm",
+            ) or (kind and kind.startswith("pef-")) or kind in (
                 "getresource-a9a0",
                 "getnewdialog-dlog",
                 "code66-syserr99",

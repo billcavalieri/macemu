@@ -809,6 +809,46 @@ def mill_binary_match(
         return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF no519")
     if k == "pef-show":
         return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF ShowWindow")
+    if k == "pef-gncw":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF GetNewCWindow id=")
+    if k == "pef-call798c":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF call798c")
+    if k == "pef-nospljmp":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF noSplJmp")
+    if k == "pef-gncwlr":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF GetNewCWindow lr id=")
+    if k == "pef-showw128":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF ShowWindow wind128 w=")
+    if k == "pef-winrec":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF WindowRecord id=")
+    if k == "pef-docres":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF Get1Resource ty=")
+    if k == "pef-toc604":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF toc604 h=")
+    if k == "pef-toc604b":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF toc604b h=")
+    if k == "pef-callb7":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF callB7")
+    if k == "pef-call5c38":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF call5c38")
+    if k == "pef-call2738":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF call2738")
+    if k == "pef-indstr":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF GetIndString id=")
+    if k == "pef-getstr":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF GetString id=")
+    if k == "pef-callalert":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF callAlert")
+    if k == "pef-nocap":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF noCap")
+    if k == "pef-fsprf":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF FSpOpenResFile r3=")
+    if k == "pef-fmt1":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF fmt1")
+    if k == "pef-pfmtw":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF pfmtw")
+    if k == "pef-unfspl":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF unfSpl")
     if k == "pef-forcesplash":
         return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF forceSplash")
     if k == "pef-skipwait":
@@ -831,6 +871,129 @@ def mill_binary_match(
         return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF callGnd")
     if k == "pef-skipae":
         return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF skipAE")
+    if k == "pef-skipheap":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF skipHeap")
+    if k == "pef-skipb7":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF skipB7")
+    if k == "pef-skip20ec":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF skip20ec")
+    if k == "pef-skip21bc":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF skip21bc")
+    if k == "pef-skip2fb8":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF skip2fb8")
+    if k == "pef-skipglue":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF skipGlue")
+    if k == "pef-alert":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF Alert")
+    if k == "pef-glue0":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF glue")
+    if k == "pef-tocpict":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF tocPict")
+    if k == "pef-maindev":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF MainDevice")
+    if k == "pef-skipgmd":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF skipGmd")
+    if k == "pef-newptrc":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF NewPtrClear")
+    if k == "pef-nrd":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF NewRoutineDescriptor")
+    if k == "pef-nourf":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF noUrF")
+    if k == "pef-cup":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF CallUniversalProc")
+    if k == "pef-tick":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF TickCount")
+    if k == "pef-drawdlg":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF DrawDialog")
+    if k == "pef-sizewin":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF SizeWindow")
+    if k == "pef-setditm":
+        return binary_has_stamp(app, "G3: 68k Launch A9F2 CFM Upgrader PEF SetDialogItem")
+    from mill_pef_fmt import mill_binary_match_pef_fmt
+
+    fmt = mill_binary_match_pef_fmt(k, lambda s: binary_has_stamp(app, s))
+    if fmt is not None:
+        return fmt
+    from mill_pef_fmt2 import mill_binary_match_pef_fmt2
+
+    fmt2 = mill_binary_match_pef_fmt2(k, lambda s: binary_has_stamp(app, s))
+    if fmt2 is not None:
+        return fmt2
+    from mill_pef_fmt3 import mill_binary_match_pef_fmt3
+
+    fmt3 = mill_binary_match_pef_fmt3(k, lambda s: binary_has_stamp(app, s))
+    if fmt3 is not None:
+        return fmt3
+    from mill_pef_fmt4 import mill_binary_match_pef_fmt4
+
+    fmt4 = mill_binary_match_pef_fmt4(k, lambda s: binary_has_stamp(app, s))
+    if fmt4 is not None:
+        return fmt4
+    from mill_pef_doc import mill_binary_match_pef_doc
+
+    doc = mill_binary_match_pef_doc(k, lambda s: binary_has_stamp(app, s))
+    if doc is not None:
+        return doc
+    from mill_pef_open import mill_binary_match_pef_open
+
+    op = mill_binary_match_pef_open(k, lambda s: binary_has_stamp(app, s))
+    if op is not None:
+        return op
+    from mill_pef_rest import mill_binary_match_pef_rest
+
+    rest = mill_binary_match_pef_rest(k, lambda s: binary_has_stamp(app, s))
+    if rest is not None:
+        return rest
+    from mill_pef_sw import mill_binary_match_pef_sw
+
+    sw = mill_binary_match_pef_sw(k, lambda s: binary_has_stamp(app, s))
+    if sw is not None:
+        return sw
+    from mill_pef_gnd import mill_binary_match_pef_gnd
+
+    gnd = mill_binary_match_pef_gnd(k, lambda s: binary_has_stamp(app, s))
+    if gnd is not None:
+        return gnd
+    from mill_pef_nrd import mill_binary_match_pef_nrd
+
+    nrd = mill_binary_match_pef_nrd(k, lambda s: binary_has_stamp(app, s))
+    if nrd is not None:
+        return nrd
+    from mill_pef_h2h import mill_binary_match_pef_h2h
+
+    h2h = mill_binary_match_pef_h2h(k, lambda s: binary_has_stamp(app, s))
+    if h2h is not None:
+        return h2h
+    from mill_pef_urf import mill_binary_match_pef_urf
+
+    urf = mill_binary_match_pef_urf(k, lambda s: binary_has_stamp(app, s))
+    if urf is not None:
+        return urf
+    from mill_pef_disp import mill_binary_match_pef_disp
+
+    disp = mill_binary_match_pef_disp(k, lambda s: binary_has_stamp(app, s))
+    if disp is not None:
+        return disp
+    from mill_pef_next import mill_binary_match_pef_next
+
+    nxtm = mill_binary_match_pef_next(k, lambda s: binary_has_stamp(app, s))
+    if nxtm is not None:
+        return nxtm
+    from mill_pef_more import mill_binary_match_pef_more
+
+    more = mill_binary_match_pef_more(k, lambda s: binary_has_stamp(app, s))
+    if more is not None:
+        return more
+    from mill_pef_splash import mill_binary_match_pef_splash
+
+    splash = mill_binary_match_pef_splash(k, lambda s: binary_has_stamp(app, s))
+    if splash is not None:
+        return splash
+    from mill_pef_batch import mill_binary_match_pef_batch
+
+    batch = mill_binary_match_pef_batch(k, lambda s: binary_has_stamp(app, s))
+    if batch is not None:
+        return batch
     return True
 
 
@@ -1038,8 +1201,9 @@ def hangcap_working_tree(
                 out["early_fail"] = "g0_only"
                 break
             if hangcap_keep_stable(live) and G2_FB.is_file() and G2_FB.stat().st_size > 64:
-                out["early_stop"] = "keep_stable"
-                break
+                if not str(kind or "").startswith("pef-"):
+                    out["early_stop"] = "keep_stable"
+                    break
     out["ss_alive_sec"] = time.time() - t0
     media = hangcap_media_paths(log_path)
     out["screenshot"] = None
