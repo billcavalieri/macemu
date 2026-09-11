@@ -993,6 +993,102 @@ static void g3_fb_text(uint32 fb, int x, int y, const uint8 *s,
 		cx += 6;
 	}
 }
+static int g3_host_copybits_sp(uint32 sp)
+{
+	uint32 src_bm = 0, dst_bm = 0;
+	int16 sr_t = 0, sr_l = 0, sr_b = 0, sr_r = 0;
+	int16 dr_t = 0, dr_l = 0, dr_b = 0, dr_r = 0;
+	int cb_w = 0, cb_h = 0;
+	uint32 dbase = 0;
+	if (!g3_ea_data(sp + 29u))
+		return 0;
+	src_bm = vm_read_memory_4(sp + 0u);
+	dst_bm = vm_read_memory_4(sp + 4u);
+	sr_t = (int16)vm_read_memory_2(sp + 8u);
+	sr_l = (int16)vm_read_memory_2(sp + 10u);
+	sr_b = (int16)vm_read_memory_2(sp + 12u);
+	sr_r = (int16)vm_read_memory_2(sp + 14u);
+	dr_t = (int16)vm_read_memory_2(sp + 16u);
+	dr_l = (int16)vm_read_memory_2(sp + 18u);
+	dr_b = (int16)vm_read_memory_2(sp + 20u);
+	dr_r = (int16)vm_read_memory_2(sp + 22u);
+	if (!src_bm || !dst_bm || !g3_ea_data(src_bm + 5u) ||
+	    !g3_ea_data(dst_bm + 5u))
+		return 0;
+	{
+		const uint32 fb = g3_qd_fb();
+		uint32 sbase = vm_read_memory_4(src_bm);
+		dbase = vm_read_memory_4(dst_bm);
+		uint32 srow = (uint32)(vm_read_memory_2(src_bm + 4u) & 0x3fffu);
+		uint32 drow = (uint32)(vm_read_memory_2(dst_bm + 4u) & 0x3fffu);
+		if (dbase != fb && drow >= 2560u && dbase >= RAMBase + 0xa100u &&
+		    dbase < RAMBase + 0xa200u)
+			dbase = fb;
+		if (dr_r < dr_l) {
+			int16 t = dr_l;
+			dr_l = dr_r;
+			dr_r = t;
+		}
+		if (dr_b < dr_t) {
+			int16 t = dr_t;
+			dr_t = dr_b;
+			dr_b = t;
+		}
+		if (sr_r < sr_l) {
+			int16 t = sr_l;
+			sr_l = sr_r;
+			sr_r = t;
+		}
+		if (sr_b < sr_t) {
+			int16 t = sr_t;
+			sr_t = sr_b;
+			sr_b = t;
+		}
+		cb_w = (int)dr_r - (int)dr_l;
+		cb_h = (int)dr_b - (int)dr_t;
+		{
+			int sw = (int)sr_r - (int)sr_l;
+			int sh = (int)sr_b - (int)sr_t;
+			if (sw > 0 && (cb_w <= 0 || sw < cb_w)) cb_w = sw;
+			if (sh > 0 && (cb_h <= 0 || sh < cb_h)) cb_h = sh;
+		}
+		if (cb_w > 640) cb_w = 640;
+		if (cb_h > 480) cb_h = 480;
+		if (cb_w > 0 && cb_h > 0 && srow >= 2560u && drow >= 2560u &&
+		    sbase && dbase && (dbase == fb || drow >= 2560u)) {
+			unsigned y, x;
+			for (y = 0; y < (unsigned)cb_h; y++) {
+				uint32 s = sbase + (uint32)((int)sr_t + (int)y) * srow +
+				    (uint32)sr_l * 4u;
+				uint32 d = dbase + (uint32)((int)dr_t + (int)y) * drow +
+				    (uint32)dr_l * 4u;
+				if (!g3_ea_data(s + (uint32)cb_w * 4u - 1u) ||
+				    !g3_ea_data(d + (uint32)cb_w * 4u - 1u))
+					continue;
+				for (x = 0; x < (unsigned)cb_w; x++) {
+					vm_write_memory_4(d, vm_read_memory_4(s));
+					s += 4u;
+					d += 4u;
+				}
+			}
+		}
+	}
+#if NW_BOOT_LOG
+	{
+		static unsigned ncb32e;
+		if (ncb32e < 8) {
+			char buf[192];
+			ncb32e++;
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k Launch A9F2 CFM Upgrader PEF cb32f s=%08x d=%08x w=%d h=%d db=%08x",
+				 (unsigned)src_bm, (unsigned)dst_bm, cb_w, cb_h,
+				 (unsigned)dbase);
+			nw_boot_log(buf);
+		}
+	}
+#endif
+	return cb_w > 0 && cb_h > 0;
+}
 static void g3_draw_ditl3500(void)
 {
 	static int did;
@@ -1131,7 +1227,16 @@ static void g3_pict1000_blit(void)
 	if (rid == 3500) {
 		g3_draw_welcome_str();
 		video_set_dirty_area(0, 80, 640, 49);
-		VideoPresent();
+#if NW_BOOT_LOG
+		{
+			static unsigned nnpv;
+			if (nnpv < 8) {
+				nnpv++;
+				nw_boot_log(
+					"G3: 68k Launch A9F2 CFM Upgrader PEF npicv");
+			}
+		}
+#endif
 	}
 	g3_pict_rid = 1000;
 #if NW_BOOT_LOG
@@ -2609,6 +2714,2016 @@ static int g3_pef_enter(uint32 plant, uint32 *ent_out, uint32 *toc_out,
 	}
 #endif
 	g3_did_pef_enter = 1;
+#if NW_BOOT_LOG
+	{
+		static unsigned nframeroundrm;
+		if (nframeroundrm < 8) {
+			nframeroundrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF frameroundrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nwplug802;
+		if (nwplug802 < 8) {
+			nwplug802++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF wplug802");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nskipditl;
+		if (nskipditl < 8) {
+			nskipditl++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF skipditl");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsaversm;
+		if (nsaversm < 8) {
+			nsaversm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF saversm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetwvarrm;
+		if (ngetwvarrm < 8) {
+			ngetwvarrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getwvarrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nnewrgnrm;
+		if (nnewrgnrm < 8) {
+			nnewrgnrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF newrgnrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntextwrm;
+		if (ntextwrm < 8) {
+			ntextwrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF textwrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncb32f;
+		if (ncb32f < 8) {
+			ncb32f++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cb32f");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nunionrm;
+		if (nunionrm < 8) {
+			nunionrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF unionrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncb32e;
+		if (ncb32e < 8) {
+			ncb32e++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cb32e");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nrestore430;
+		if (nrestore430 < 8) {
+			nrestore430++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF restore430");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nmenubarst;
+		if (nmenubarst < 8) {
+			nmenubarst++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF menubarst");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetemptyrst;
+		if (nsetemptyrst < 8) {
+			nsetemptyrst++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setemptyrst");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntickcountrm;
+		if (ntickcountrm < 8) {
+			ntickcountrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF tickcountrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ndrawmenurm;
+		if (ndrawmenurm < 8) {
+			ndrawmenurm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF drawmenurm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nrgbfgh;
+		if (nrgbfgh < 8) {
+			nrgbfgh++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF rgbfgh");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetemptyrm;
+		if (nsetemptyrm < 8) {
+			nsetemptyrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setemptyrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetpenrm;
+		if (nsetpenrm < 8) {
+			nsetpenrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setpenrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetpenrm;
+		if (ngetpenrm < 8) {
+			ngetpenrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getpenrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ninvalrm;
+		if (ninvalrm < 8) {
+			ninvalrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF invalrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nemptyrgnrm;
+		if (nemptyrgnrm < 8) {
+			nemptyrgnrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF emptyrgnrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nclosergnrm;
+		if (nclosergnrm < 8) {
+			nclosergnrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF closergnrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nopenrgnrm;
+		if (nopenrgnrm < 8) {
+			nopenrgnrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF openrgnrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncopyrgnrm;
+		if (ncopyrgnrm < 8) {
+			ncopyrgnrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF copyrgnrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned noffsetrm;
+		if (noffsetrm < 8) {
+			noffsetrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF offsetrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nfillcrm;
+		if (nfillcrm < 8) {
+			nfillcrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF fillcrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncwmgrprm;
+		if (ncwmgrprm < 8) {
+			ncwmgrprm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cwmgrprm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nmovetrm;
+		if (nmovetrm < 8) {
+			nmovetrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF movetrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncb32d;
+		if (ncb32d < 8) {
+			ncb32d++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cb32d");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngportrm;
+		if (ngportrm < 8) {
+			ngportrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF gportrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncb32c;
+		if (ncb32c < 8) {
+			ncb32c++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cb32c");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncb32b;
+		if (ncb32b < 8) {
+			ncb32b++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cb32b");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetcrm;
+		if (nsetcrm < 8) {
+			nsetcrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setcrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nltglo;
+		if (nltglo < 8) {
+			nltglo++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF ltglo");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nbgcol;
+		if (nbgcol < 8) {
+			nbgcol++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF bgcol");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nfgcol;
+		if (nfgcol < 8) {
+			nfgcol++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF fgcol");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncb32;
+		if (ncb32 < 8) {
+			ncb32++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cb32");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned npaintrm;
+		if (npaintrm < 8) {
+			npaintrm++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF paintrm");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned na8ecp;
+		if (na8ecp < 8) {
+			na8ecp++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF a8ecp");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nmixedmod;
+		if (nmixedmod < 8) {
+			nmixedmod++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF mixedmodem");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned naa03b;
+		if (naa03b < 8) {
+			naa03b++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF aa03b");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned naa015;
+		if (naa015 < 8) {
+			naa015++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF aa015");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nloadscra;
+		if (nloadscra < 8) {
+			nloadscra++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF loadscrap");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetgrowz;
+		if (nsetgrowz < 8) {
+			nsetgrowz++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setgrowzon");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa098;
+		if (ntrapa098 < 8) {
+			ntrapa098++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa098");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsizersrc;
+		if (nsizersrc < 8) {
+			nsizersrc++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF sizersrc");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nnewgesta;
+		if (nnewgesta < 8) {
+			nnewgesta++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF newgestalt");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nwelqd;
+		if (nwelqd < 8) {
+			nwelqd++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF welqd");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetgdevi;
+		if (ngetgdevi < 8) {
+			ngetgdevi++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getgdevice");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ninsxtime;
+		if (ninsxtime < 8) {
+			ninsxtime++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF insxtime");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetindad;
+		if (ngetindad < 8) {
+			ngetindad++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getindadb");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nrgbforec;
+		if (nrgbforec < 8) {
+			nrgbforec++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF rgbforecol");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned npoweroff;
+		if (npoweroff < 8) {
+			npoweroff++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF poweroff");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nclosergn;
+		if (nclosergn < 8) {
+			nclosergn++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF closergn");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nframerou;
+		if (nframerou < 8) {
+			nframerou++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF frameround");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nopenrgn;
+		if (nopenrgn < 8) {
+			nopenrgn++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF openrgn");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa190;
+		if (ntrapa190 < 8) {
+			ntrapa190++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa190");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nrmvtime;
+		if (nrmvtime < 8) {
+			nrmvtime++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF rmvtime");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nprimetim;
+		if (nprimetim < 8) {
+			nprimetim++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF primetime");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetadbin;
+		if (nsetadbin < 8) {
+			nsetadbin++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setadbinfo");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nwritexpr;
+		if (nwritexpr < 8) {
+			nwritexpr++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF writexpram");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ninternal;
+		if (ninternal < 8) {
+			ninternal++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF internalwa");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nnmremove;
+		if (nnmremove < 8) {
+			nnmremove++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF nmremove");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nnminstal;
+		if (nnminstal < 8) {
+			nnminstal++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF nminstall");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nwritepar;
+		if (nwritepar < 8) {
+			nwritepar++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF writeparam");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nreleaser;
+		if (nreleaser < 8) {
+			nreleaser++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF releaseres");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nloadreso;
+		if (nloadreso < 8) {
+			nloadreso++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF loadresour");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nget1reso;
+		if (nget1reso < 8) {
+			nget1reso++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF get1resour");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nuseresfi;
+		if (nuseresfi < 8) {
+			nuseresfi++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF useresfile");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncurresfi;
+		if (ncurresfi < 8) {
+			ncurresfi++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF curresfile");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncompares;
+		if (ncompares < 8) {
+			ncompares++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF comparestr");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ndrvrinst;
+		if (ndrvrinst < 8) {
+			ndrvrinst++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF drvrinstal");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ndetachre;
+		if (ndetachre < 8) {
+			ndetachre++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF detachreso");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned natamgr;
+		if (natamgr < 8) {
+			natamgr++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF atamgr");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ndevicemg;
+		if (ndevicemg < 8) {
+			ndevicemg++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF devicemgr");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntickcoun;
+		if (ntickcoun < 8) {
+			ntickcoun++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF tickcount");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ndrawmenu;
+		if (ndrawmenu < 8) {
+			ndrawmenu++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF drawmenuba");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetempty;
+		if (nsetempty < 8) {
+			nsetempty++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setemptyrg");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nemptyrgn;
+		if (nemptyrgn < 8) {
+			nemptyrgn++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF emptyrgn");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetwvari;
+		if (ngetwvari < 8) {
+			ngetwvari++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getwvarian");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetpenst;
+		if (nsetpenst < 8) {
+			nsetpenst++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setpenstat");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntestdevi;
+		if (ntestdevi < 8) {
+			ntestdevi++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF testdevice");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetpenst;
+		if (ngetpenst < 8) {
+			ngetpenst++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getpenstat");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned npaintone;
+		if (npaintone < 8) {
+			npaintone++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF paintone");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ninvalrgn;
+		if (ninvalrgn < 8) {
+			ninvalrgn++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF invalrgn");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nputscrap;
+		if (nputscrap < 8) {
+			nputscrap++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF putscrap");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetscrap;
+		if (ngetscrap < 8) {
+			ngetscrap++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getscrap");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nptrtohan;
+		if (nptrtohan < 8) {
+			nptrtohan++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF ptrtohand");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapaa7f;
+		if (ntrapaa7f < 8) {
+			ntrapaa7f++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapaa7f");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ndecstr68;
+		if (ndecstr68 < 8) {
+			ndecstr68++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF decstr68k");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa250;
+		if (ntrapa250 < 8) {
+			ntrapa250++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa250");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa23c;
+		if (ntrapa23c < 8) {
+			ntrapa23c++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa23c");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa413;
+		if (ntrapa413 < 8) {
+			ntrapa413++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa413");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned naa013;
+		if (naa013 < 8) {
+			naa013++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF aa013");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa411;
+		if (ntrapa411 < 8) {
+			ntrapa411++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa411");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa412;
+		if (ntrapa412 < 8) {
+			ntrapa412++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa412");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa607;
+		if (ntrapa607 < 8) {
+			ntrapa607++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa607");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhgetvinf;
+		if (nhgetvinf < 8) {
+			nhgetvinf++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hgetvinfo");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa660;
+		if (ntrapa660 < 8) {
+			ntrapa660++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa660");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa401;
+		if (ntrapa401 < 8) {
+			ntrapa401++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa401");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa609;
+		if (ntrapa609 < 8) {
+			ntrapa609++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa609");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa600;
+		if (ntrapa600 < 8) {
+			ntrapa600++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa600");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetvolin;
+		if (ngetvolin < 8) {
+			ngetvolin++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getvolinfo");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhcreater;
+		if (nhcreater < 8) {
+			nhcreater++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hcreateres");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhopenres;
+		if (nhopenres < 8) {
+			nhopenres++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hopenresfi");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhrename;
+		if (nhrename < 8) {
+			nhrename++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hrename");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhrstfloc;
+		if (nhrstfloc < 8) {
+			nhrstfloc++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hrstflock");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhsetfloc;
+		if (nhsetfloc < 8) {
+			nhsetfloc++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hsetflock");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhgetfile;
+		if (nhgetfile < 8) {
+			nhgetfile++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hgetfilein");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhdelete;
+		if (nhdelete < 8) {
+			nhdelete++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hdelete");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhcreate;
+		if (nhcreate < 8) {
+			nhcreate++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hcreate");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhopenrf;
+		if (nhopenrf < 8) {
+			nhopenrf++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hopenrf");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhfsdispa;
+		if (nhfsdispa < 8) {
+			nhfsdispa++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hfsdispatc");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nuprstrin;
+		if (nuprstrin < 8) {
+			nuprstrin++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF uprstring");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned naa893;
+		if (naa893 < 8) {
+			naa893++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF aa893");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntextwidt;
+		if (ntextwidt < 8) {
+			ntextwidt++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF textwidth");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned naa8dc;
+		if (naa8dc < 8) {
+			naa8dc++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF aa8dc");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetcwmgr;
+		if (ngetcwmgr < 8) {
+			ngetcwmgr++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getcwmgrpo");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetdevic;
+		if (nsetdevic < 8) {
+			nsetdevic++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setdevicea");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nnewgdevi;
+		if (nnewgdevi < 8) {
+			nnewgdevi++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF newgdevice");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsyserror;
+		if (nsyserror < 8) {
+			nsyserror++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF syserror");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa403;
+		if (ntrapa403 < 8) {
+			ntrapa403++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa403");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapa402;
+		if (ntrapa402 < 8) {
+			ntrapa402++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapa402");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned naa15c;
+		if (naa15c < 8) {
+			naa15c++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF aa15c");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nmemorydi;
+		if (nmemorydi < 8) {
+			nmemorydi++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF memorydisp");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetptrsi;
+		if (nsetptrsi < 8) {
+			nsetptrsi++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setptrsize");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncontrol;
+		if (ncontrol < 8) {
+			ncontrol++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF control");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nnewhandl;
+		if (nnewhandl < 8) {
+			nnewhandl++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF newhandle");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsethandl;
+		if (nsethandl < 8) {
+			nsethandl++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF sethandles");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nblockmov;
+		if (nblockmov < 8) {
+			nblockmov++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF blockmoved");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ninitutil;
+		if (ninitutil < 8) {
+			ninitutil++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF initutil");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nmoremast;
+		if (nmoremast < 8) {
+			nmoremast++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF moremaster");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nstatus;
+		if (nstatus < 8) {
+			nstatus++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF status");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned npowerdis;
+		if (npowerdis < 8) {
+			npowerdis++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF powerdispa");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngettoolt;
+		if (ngettoolt < 8) {
+			ngettoolt++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF gettooltra");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetostra;
+		if (ngetostra < 8) {
+			ngetostra++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getostrapa");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ntrapabe9;
+		if (ntrapabe9 < 8) {
+			ntrapabe9++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF trapabe9");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned naa8ec;
+		if (naa8ec < 8) {
+			naa8ec++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF aa8ec");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetpbits;
+		if (nsetpbits < 8) {
+			nsetpbits++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setpbits");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nlocaltog;
+		if (nlocaltog < 8) {
+			nlocaltog++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF localtoglo");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngetzone;
+		if (ngetzone < 8) {
+			ngetzone++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF getzone");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ndisposeh;
+		if (ndisposeh < 8) {
+			ndisposeh++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF disposehan");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned naa874;
+		if (naa874 < 8) {
+			naa874++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF aa874");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsaverest;
+		if (nsaverest < 8) {
+			nsaverest++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF saverestor");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetappll;
+		if (nsetappll < 8) {
+			nsetappll++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setappllim");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nbackcolo;
+		if (nbackcolo < 8) {
+			nbackcolo++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF backcolor");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nforecolo;
+		if (nforecolo < 8) {
+			nforecolo++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF forecolor");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ndebugger;
+		if (ndebugger < 8) {
+			ndebugger++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF debugger");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ndisposep;
+		if (ndisposep < 8) {
+			ndisposep++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF disposeptr");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nreadxpra;
+		if (nreadxpra < 8) {
+			nreadxpra++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF readxpram");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nopen;
+		if (nopen < 8) {
+			nopen++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF open");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned naa8d8;
+		if (naa8d8 < 8) {
+			naa8d8++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF aa8d8");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nunionrgn;
+		if (nunionrgn < 8) {
+			nunionrgn++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF unionrgn");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned na8e0;
+		if (na8e0 < 8) {
+			na8e0++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF a8e0");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nlayer;
+		if (nlayer < 8) {
+			nlayer++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF layer");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nfillc;
+		if (nfillc < 8) {
+			nfillc++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF fillc");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsetc;
+		if (nsetc < 8) {
+			nsetc++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF setc");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nwmgp;
+		if (nwmgp < 8) {
+			nwmgp++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF wmgp");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nqdext;
+		if (nqdext < 8) {
+			nqdext++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF qdext");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned na029;
+		if (na029 < 8) {
+			na029++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF a029");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nnhc;
+		if (nnhc < 8) {
+			nnhc++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF nhc");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nmnud;
+		if (nmnud < 8) {
+			nmnud++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF mnud");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncmsz;
+		if (ncmsz < 8) {
+			ncmsz++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cmsz");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncntres;
+		if (ncntres < 8) {
+			ncntres++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cntres");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncntmi;
+		if (ncntmi < 8) {
+			ncntmi++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cntmi");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsutil;
+		if (nsutil < 8) {
+			nsutil++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF sutil");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nhunl;
+		if (nhunl < 8) {
+			nhunl++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF hunl");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsrl;
+		if (nsrl < 8) {
+			nsrl++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF srl");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned na991c;
+		if (na991c < 8) {
+			na991c++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF a991c");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nmdtoc;
+		if (nmdtoc < 8) {
+			nmdtoc++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF mdtoc");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nmdret;
+		if (nmdret < 8) {
+			nmdret++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF mdret");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nmdloop;
+		if (nmdloop < 8) {
+			nmdloop++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF mdloop");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nwelmd;
+		if (nwelmd < 8) {
+			nwelmd++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF welmd");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nb0alrt;
+		if (nb0alrt < 8) {
+			nb0alrt++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF b0alrt");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nb0ptxt;
+		if (nb0ptxt < 8) {
+			nb0ptxt++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF b0ptxt");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nb0ptr;
+		if (nb0ptr < 8) {
+			nb0ptr++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF b0ptr");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nb0host;
+		if (nb0host < 8) {
+			nb0host++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF b0host");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngdzero;
+		if (ngdzero < 8) {
+			ngdzero++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF gdzero");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngdtbl;
+		if (ngdtbl < 8) {
+			ngdtbl++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF gdtbl");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ngdblr;
+		if (ngdblr < 8) {
+			ngdblr++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF gdblr");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nlowoff;
+		if (nlowoff < 8) {
+			nlowoff++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF lowoff");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nlowdata;
+		if (nlowdata < 8) {
+			nlowdata++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF lowdata");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nlowblr;
+		if (nlowblr < 8) {
+			nlowblr++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF lowblr");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nlow68k;
+		if (nlow68k < 8) {
+			nlow68k++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF low68k");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nlowisi;
+		if (nlowisi < 8) {
+			nlowisi++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF lowisi");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ng520a3;
+		if (ng520a3 < 8) {
+			ng520a3++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF g520a3");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nalrt1;
+		if (nalrt1 < 8) {
+			nalrt1++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF alrt1");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsubfit;
+		if (nsubfit < 8) {
+			nsubfit++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF subfit");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsdit2050;
+		if (nsdit2050 < 8) {
+			nsdit2050++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF sdit2050");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nnpicv;
+		if (nnpicv < 8) {
+			nnpicv++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF npicv");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nnovid;
+		if (nnovid < 8) {
+			nnovid++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF novid");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nsub2050;
+		if (nsub2050 < 8) {
+			nsub2050++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF sub2050");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ns520b;
+		if (ns520b < 8) {
+			ns520b++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF s520b");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nstr520;
+		if (nstr520 < 8) {
+			nstr520++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF str520");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nswtitle;
+		if (nswtitle < 8) {
+			nswtitle++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF swtitle");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nimpwel;
+		if (nimpwel < 8) {
+			nimpwel++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF impwel");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nimpcap;
+		if (nimpcap < 8) {
+			nimpcap++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF impcap");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nstr1050;
+		if (nstr1050 < 8) {
+			nstr1050++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF str1050");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nctllst;
+		if (nctllst < 8) {
+			nctllst++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF ctllst");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned nctlown;
+		if (nctlown < 8) {
+			nctlown++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF ctlown");
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	{
+		static unsigned ncupnctl;
+		if (ncupnctl < 8) {
+			ncupnctl++;
+			nw_boot_log(
+				"G3: 68k Launch A9F2 CFM Upgrader PEF cupnctl");
+		}
+	}
+#endif
 #if NW_BOOT_LOG
 	{
 		static unsigned ncupaff;
@@ -4238,6 +6353,35 @@ static int g3_pef_enter(uint32 plant, uint32 *ent_out, uint32 *toc_out,
 /* CFM glue bctr to stub; TVector+4 is import index.
  * Host InterfaceLib inits + GetNewDialog 510. KEEP 16533. */
 static uint32 g3_pef_heap;
+static uint32 g3_pef_ctlh;
+static uint32 g3_pef_wtitle;
+static char g3_n2s_txt[16];
+static unsigned g3_n2s_n;
+static void g3_pef_link_ctl(uint32 h, uint32 c)
+{
+	uint32 own = 0, prev = 0;
+	if (!h || !c || !g3_ea_data(c + 3u))
+		return;
+	own = vm_read_memory_4(c + 4u);
+	if (own && g3_ea_data(own + 143u)) {
+		prev = vm_read_memory_4(own + 140u);
+		vm_write_memory_4(own + 140u, h);
+	}
+	vm_write_memory_4(c, prev);
+#if NW_BOOT_LOG
+	{
+		static unsigned nlst;
+		if (nlst < 8) {
+			char buf[96];
+			nlst++;
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k Launch A9F2 CFM Upgrader PEF ctllst h=%08x o=%08x p=%08x",
+				 (unsigned)h, (unsigned)own, (unsigned)prev);
+			nw_boot_log(buf);
+		}
+	}
+#endif
+}
 static uint32 g3_pef_newptr(uint32 n)
 {
 	uint32 p, i;
@@ -4255,6 +6399,7 @@ static uint32 g3_pef_newptr(uint32 n)
 	return p;
 }
 static uint32 g3_did_welpef;
+static uint32 g3_wel_gdh;
 static uint32 g3_pef_load_welcome(void)
 {
 	const uint32 plant = RAMBase + 0x240000u;
@@ -4379,6 +6524,28 @@ static uint32 g3_pef_load_welcome(void)
 	g3_did_welpef = tv;
 	return tv;
 }
+static uint32 g3_wplug_node;
+static uint32 g3_wplug_dev;
+static unsigned g3_wplug_dev_pass;
+static uint32 g3_wplug_make(void)
+{
+	uint32 wel, p;
+	if (g3_wplug_node)
+		return g3_wplug_node;
+	wel = g3_pef_load_welcome();
+	if (!wel)
+		return 0;
+	p = g3_pef_newptr(24u);
+	if (!p || !g3_ea_data(p + 0x17u))
+		return 0;
+	vm_write_memory_4(p, wel);
+	vm_write_memory_4(p + 6u, wel);
+	vm_write_memory_4(p + 0xau, 0x10242000u);
+	vm_write_memory_4(p + 0x10u, wel);
+	vm_write_memory_4(p + 0x14u, 0);
+	g3_wplug_node = p;
+	return p;
+}
 /* GetDCtlEntry must return a Handle to a DCE whose
  * dCtlDriver is a live DRVR, not zeros (DSI DAR=15000). */
 static uint32 g3_pef_dce_h;
@@ -4424,12 +6591,26 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 #if NW_BOOT_LOG
 	{
 		static unsigned nimp;
-		if (nimp < 24) {
+		if (nimp < 64) {
 			char buf[96];
 			nimp++;
 			snprintf(buf, sizeof(buf),
-				 "G3: 68k Launch A9F2 CFM Upgrader PEF import idx=%u r3=%08x",
-				 (unsigned)idx, (unsigned)a3);
+				 "G3: 68k Launch A9F2 CFM Upgrader PEF import idx=%u r3=%08x r4=%08x",
+				 (unsigned)idx, (unsigned)a3, (unsigned)a4);
+			nw_boot_log(buf);
+		}
+	}
+#endif
+#if NW_BOOT_LOG
+	if (g3_did_welpef) {
+		static unsigned nwelimp;
+		if (nwelimp < 64) {
+			char buf[112];
+			nwelimp++;
+			snprintf(buf, sizeof(buf),
+				 "G3: 68k Launch A9F2 CFM Upgrader PEF impwel idx=%u r3=%08x r4=%08x r5=%08x",
+				 (unsigned)idx, (unsigned)a3, (unsigned)a4,
+				 (unsigned)a5);
 			nw_boot_log(buf);
 		}
 	}
@@ -5537,7 +7718,27 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		return r3;
 	}
 	if (idx == 63u) {
+		uint32 c = g3_pef_newptr(256u);
+		uint32 h = g3_pef_newptr(8u);
 		r3 = 0;
+		if (c && h && g3_ea_data(h + 7u) && g3_ea_data(c + 16u)) {
+			vm_write_memory_4(h, c);
+			{
+				uint32 own = RAMBase + 0x4e000u;
+				if (a3 && a3 != 0x803u && g3_ea_data(a3))
+					own = a3;
+				vm_write_memory_4(c + 4u, own);
+			}
+			if (a4 && g3_ea_data(a4 + 7u)) {
+				vm_write_memory_4(c + 8u, vm_read_memory_4(a4));
+				vm_write_memory_4(c + 12u, vm_read_memory_4(a4 + 4u));
+			}
+			vm_write_memory_1(c + 16u, 0xff);
+			r3 = h;
+			g3_pef_ctlh = h;
+			g3_pef_link_ctl(h, c);
+		} else
+			r3 = 1;
 #if NW_BOOT_LOG
 		{
 			static unsigned n;
@@ -5928,14 +8129,17 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		return r3;
 	}
 	if (idx == 60u) {
-		r3 = 0;
+		r3 = g3_pef_load_welcome() ? 6u : 0u;
 #if NW_BOOT_LOG
 		{
 			static unsigned n;
 			if (n < 8) {
+				char buf[96];
 				n++;
-				nw_boot_log(
-					"G3: 68k Launch A9F2 CFM Upgrader PEF FSpOpenDF");
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF FSpOpenDF r3=%08x",
+					 (unsigned)r3);
+				nw_boot_log(buf);
 			}
 		}
 #endif
@@ -6502,28 +8706,44 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		return r3;
 	}
 	if (idx == 118u) {
-		r3 = 0;
+		if (!g3_wplug_dev) {
+			g3_wplug_dev = g3_pef_newptr(16u);
+			if (g3_wplug_dev && g3_ea_data(g3_wplug_dev + 7u))
+				vm_write_memory_1(g3_wplug_dev + 4u, 1);
+		}
+		g3_wplug_dev_pass = 0;
+		r3 = g3_wplug_dev;
 #if NW_BOOT_LOG
 		{
 			static unsigned n;
 			if (n < 8) {
+				char buf[96];
 				n++;
-				nw_boot_log(
-					"G3: 68k Launch A9F2 CFM Upgrader PEF GetDeviceList");
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF GetDeviceList r3=%08x",
+					 (unsigned)r3);
+				nw_boot_log(buf);
 			}
 		}
 #endif
 		return r3;
 	}
 	if (idx == 57u) {
-		r3 = 0;
+		if (g3_wplug_dev && g3_wplug_dev_pass == 0) {
+			g3_wplug_dev_pass = 1;
+			r3 = g3_wplug_dev;
+		} else
+			r3 = 0;
 #if NW_BOOT_LOG
 		{
 			static unsigned n;
 			if (n < 8) {
+				char buf[96];
 				n++;
-				nw_boot_log(
-					"G3: 68k Launch A9F2 CFM Upgrader PEF GetNextDevice");
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF GetNextDevice r3=%08x",
+					 (unsigned)r3);
+				nw_boot_log(buf);
 			}
 		}
 #endif
@@ -7011,6 +9231,47 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		r3 = 0;
 		if (g3_res_lookup(0x53545220u, sid, &doff, &ln) && ln)
 			r3 = g3_res_plant(doff, ln);
+		if (sid == 1050) {
+			uint32 p = 0, plen = 0;
+			if (r3 && g3_ea_data(r3 + 3u))
+				p = vm_read_memory_4(r3);
+			if (p && g3_ea_data(p))
+				plen = vm_read_memory_1(p);
+			if (!r3 || !p || plen == 0) {
+				const char *s = "Install Mac OS 9.2.1";
+				unsigned sl = 20, i;
+				uint32 d = g3_pef_newptr(32u);
+				uint32 h = g3_pef_newptr(8u);
+				if (d && h && g3_ea_data(d + sl) &&
+				    g3_ea_data(h + 3u)) {
+					vm_write_memory_1(d, (uint8)sl);
+					for (i = 0; i < sl; i++)
+						vm_write_memory_1(d + 1u + i,
+								 (uint8)s[i]);
+					vm_write_memory_4(h, d);
+					r3 = h;
+					p = d;
+					plen = sl;
+				}
+			}
+#if NW_BOOT_LOG
+			{
+				static unsigned ns1050;
+				if (ns1050 < 8) {
+					char buf[96];
+					uint32 b0 = 0;
+					ns1050++;
+					if (p && g3_ea_data(p + 4u))
+						b0 = vm_read_memory_4(p);
+					snprintf(buf, sizeof(buf),
+						 "G3: 68k Launch A9F2 CFM Upgrader PEF str1050 h=%08x n=%u b=%08x",
+						 (unsigned)r3, (unsigned)plen,
+						 (unsigned)b0);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+		}
 #if NW_BOOT_LOG
 		{
 			static unsigned n;
@@ -7027,7 +9288,23 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		return r3;
 	}
 	if (idx == 147u) {
+		uint32 t = a5 ? a5 : a4, plen = 0;
+		if (t && g3_ea_data(t))
+			plen = vm_read_memory_1(t);
 		r3 = 0;
+#if NW_BOOT_LOG
+		{
+			static unsigned nsd;
+			if (nsd < 8) {
+				char buf[96];
+				nsd++;
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF sdit2050 d=%08x i=%08x n=%u",
+					 (unsigned)a3, (unsigned)a4, (unsigned)plen);
+				nw_boot_log(buf);
+			}
+		}
+#endif
 #if NW_BOOT_LOG
 		{
 			static unsigned n;
@@ -7055,7 +9332,42 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		return r3;
 	}
 	if (idx == 127u) {
+		uint32 p = a4, plen = 0;
+		if (p && g3_ea_data(p))
+			plen = vm_read_memory_1(p);
+		if (plen > 255u)
+			plen = 255u;
+		if (p && plen && g3_ea_data(p + plen)) {
+			uint32 d = g3_pef_newptr(plen + 16u);
+			uint32 h = g3_pef_newptr(8u);
+			if (d && h && g3_ea_data(d + plen) &&
+			    g3_ea_data(h + 3u)) {
+				unsigned i;
+				for (i = 0; i <= plen; i++)
+					vm_write_memory_1(d + i,
+							 vm_read_memory_1(p + i));
+				vm_write_memory_4(h, d);
+				g3_pef_wtitle = h;
+			}
+		}
 		r3 = 0;
+#if NW_BOOT_LOG
+		{
+			static unsigned nswt;
+			if (nswt < 8) {
+				char buf[96];
+				uint32 b0 = 0;
+				nswt++;
+				if (p && g3_ea_data(p + 3u))
+					b0 = vm_read_memory_4(p);
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF swtitle w=%08x n=%u b=%08x",
+					 (unsigned)a3, (unsigned)plen,
+					 (unsigned)b0);
+				nw_boot_log(buf);
+			}
+		}
+#endif
 #if NW_BOOT_LOG
 		{
 			static unsigned n;
@@ -7969,7 +10281,6 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		vm_write_memory_4(0x824u, fb);
 		r3 = 0;
 	} else if (idx == 43u) {
-		static uint32 g3_wel_gdh;
 		if (g3_did_welpef && !g3_wel_gdh) {
 			uint32 fb = g3_qd_fb();
 			uint32 pm = g3_pef_newptr(64u);
@@ -7981,14 +10292,42 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 				vm_write_memory_2(pm + 4u, 0x8a00u);
 				vm_write_memory_2(pm + 10u, 480);
 				vm_write_memory_2(pm + 12u, 640);
+				vm_write_memory_2(pm + 30u, 16);
 				vm_write_memory_2(pm + 32u, 32);
+				vm_write_memory_2(pm + 34u, 3);
+				vm_write_memory_2(pm + 36u, 8);
+				{
+					uint32 ct = g3_pef_newptr(16u);
+					uint32 cth = g3_pef_newptr(8u);
+					if (ct && cth) {
+						vm_write_memory_4(ct, 0x12345678u);
+						vm_write_memory_2(ct + 4u, 0);
+						vm_write_memory_2(ct + 6u, 0);
+						vm_write_memory_4(cth, ct);
+						vm_write_memory_4(pm + 42u, cth);
+					}
+				}
 				vm_write_memory_4(pmh, pm);
 				vm_write_memory_2(gd + 4u, 2);
+				vm_write_memory_2(gd + 20u, 1);
 				vm_write_memory_4(gd + 22u, pmh);
 				vm_write_memory_2(gd + 38u, 480);
 				vm_write_memory_2(gd + 40u, 640);
 				vm_write_memory_4(h, gd);
 				g3_wel_gdh = h;
+#if NW_BOOT_LOG
+				{
+					static unsigned ngdt;
+					if (ngdt < 8) {
+						char buf[96];
+						ngdt++;
+						snprintf(buf, sizeof(buf),
+							 "G3: 68k Launch A9F2 CFM Upgrader PEF gdtbl h=%08x",
+							 (unsigned)h);
+						nw_boot_log(buf);
+					}
+				}
+#endif
 			}
 		}
 		r3 = g3_did_welpef ? g3_wel_gdh : 0;
@@ -8036,6 +10375,11 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 			g3_res_src_off = g3_doc_rf_off;
 			if (g3_res_lookup(a3, rid, &doff, &ln) && ln)
 				r3 = g3_res_plant(doff, ln);
+		} else if (a3 == 0x77707072u && rid == 3500) {
+			g3_res_src_off = g3_doc_rf_off;
+			if (g3_res_lookup(a3, rid, &doff, &ln) && ln)
+				r3 = g3_res_plant(doff, ln);
+			(void)g3_pef_load_welcome();
 		} else if (a3 == 0x53545223u && rid == 3500) {
 			g3_res_src_off = g3_doc_rf_off;
 			if (g3_res_lookup(a3, rid, &doff, &ln) && ln)
@@ -8084,7 +10428,38 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		}
 #endif
 	} else if (idx == 53u) {
-		/* ModalDialog(filter, itemHit). DITL 519 #1 OK. */
+		/* leftover:pef-mdloop: Welcome 3500 DrawDialog then item 1. */
+		extern uint32 RAMBase;
+		if (g3_did_welpef) {
+			uint32 w = a3 ? a3 : (RAMBase + 0x4e000u);
+			/* leftover:pef-skipditl: mdloop skips host DITL. */
+			video_set_dirty_area(0, 0, 640, 480);
+#if NW_BOOT_LOG
+			{
+				static unsigned nskipmd;
+				if (nskipmd < 8) {
+					nskipmd++;
+					nw_boot_log(
+						"G3: 68k Launch A9F2 CFM Upgrader PEF skipditl mdloop");
+				}
+			}
+#endif
+			if (w && g3_ea_data(w + 10u))
+				vm_write_memory_1(w + 10u, 1);
+#if NW_BOOT_LOG
+			{
+				static unsigned nmdl;
+				if (nmdl < 8) {
+					char buf[96];
+					nmdl++;
+					snprintf(buf, sizeof(buf),
+						 "G3: 68k Launch A9F2 CFM Upgrader PEF mdloop w=%08x",
+						 (unsigned)w);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+		}
 		if (a4 && g3_ea_data(a4 + 1u))
 			vm_write_memory_2(a4, 1);
 		r3 = 0;
@@ -8157,18 +10532,36 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		if (idx == 170u && g3_ea_data(a3))
 			vm_write_memory_4(0x2aau, a3);
 		if (g3_did_welpef) {
-			g3_pict_rid = 3500;
-			g3_pict1000_blit();
-			g3_draw_ditl3500();
-			video_set_dirty_area(0, 80, 640, 298);
-			VideoPresent();
+			/* leftover:pef-skipditl: no host DITL3500; QD paints CWindow. */
+			video_set_dirty_area(0, 0, 640, 480);
+#if NW_BOOT_LOG
+			{
+				static unsigned nskipditl;
+				if (nskipditl < 8) {
+					nskipditl++;
+					nw_boot_log(
+						"G3: 68k Launch A9F2 CFM Upgrader PEF skipditl DrawDialog");
+				}
+			}
+#endif
+			/* leftover:pef-novid: CPU-thread present crashes. */
+#if NW_BOOT_LOG
+			{
+				static unsigned nnov;
+				if (nnov < 8) {
+					nnov++;
+					nw_boot_log(
+						"G3: 68k Launch A9F2 CFM Upgrader PEF novid");
+				}
+			}
+#endif
 #if NW_BOOT_LOG
 			{
 				static unsigned ndd35;
 				if (ndd35 < 8) {
 					ndd35++;
 					nw_boot_log(
-						"G3: 68k Launch A9F2 CFM Upgrader PEF DrawDialog ditl3500");
+						"G3: 68k Launch A9F2 CFM Upgrader PEF skipditl (was ditl3500)");
 				}
 			}
 #endif
@@ -8287,8 +10680,21 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		}
 #endif
 	} else if (idx == 125u) {
-		/* Alert: r3=0 so main 1010140c proceeds to splash. */
-		r3 = 0;
+		/* leftover:pef-alrt1: item 1 after System Error 2050. */
+		r3 = 1;
+#if NW_BOOT_LOG
+		{
+			static unsigned na1;
+			if (na1 < 8) {
+				char buf[96];
+				na1++;
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF alrt1 id=%08x",
+					 (unsigned)a3);
+				nw_boot_log(buf);
+			}
+		}
+#endif
 #if NW_BOOT_LOG
 		{
 			static unsigned nal;
@@ -8401,6 +10807,15 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 		n = snprintf(buf, sizeof(buf), "%d", (int)a3);
 		if (n < 0)
 			n = 0;
+		if (n > 15)
+			n = 15;
+		g3_n2s_n = (unsigned)n;
+		{
+			int i;
+			for (i = 0; i < n; i++)
+				g3_n2s_txt[i] = buf[i];
+			g3_n2s_txt[n] = 0;
+		}
 		if (n > 255)
 			n = 255;
 		if (s && n >= 0 && g3_ea_data(s + (uint32)n)) {
@@ -8458,6 +10873,84 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 					off += 1u + sl;
 				}
 			}
+		}
+		if (sid == 520) {
+			uint32 plen = 0, b0 = 0;
+#if NW_BOOT_LOG
+			{
+				static unsigned ng3a;
+				if (ng3a < 8) {
+					char buf[96];
+					ng3a++;
+					snprintf(buf, sizeof(buf),
+						 "G3: 68k Launch A9F2 CFM Upgrader PEF g520a3 d=%08x id=%d ix=%d",
+						 (unsigned)a3, (int)sid, (int)six);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+			if (a3 && g3_ea_data(a3))
+				plen = vm_read_memory_1(a3);
+			if (!plen && a3 && g3_ea_data(a3 + 16u)) {
+				const char *s = "Help";
+				unsigned sl = 4, i;
+				vm_write_memory_1(a3, (uint8)sl);
+				for (i = 0; i < sl; i++)
+					vm_write_memory_1(a3 + 1u + i,
+							 (uint8)s[i]);
+				plen = sl;
+			}
+			if (a3 && plen && g3_n2s_n && g3_ea_data(a3 + 255u)) {
+				unsigned i, j, k, np = 0;
+				uint8 tmp[256];
+				for (i = 1; i + 1u <= plen; i++) {
+					if (vm_read_memory_1(a3 + i) == (uint8)'^' &&
+					    vm_read_memory_1(a3 + i + 1u) == (uint8)'0') {
+						for (j = 1; j < i; j++)
+							tmp[np++] = vm_read_memory_1(a3 + j);
+						for (k = 0; k < g3_n2s_n && np < 255u; k++)
+							tmp[np++] = (uint8)g3_n2s_txt[k];
+						for (j = i + 2u; j <= plen && np < 255u; j++)
+							tmp[np++] = vm_read_memory_1(a3 + j);
+						if (np > plen)
+							np = plen;
+						vm_write_memory_1(a3, (uint8)np);
+						for (j = 0; j < np; j++)
+							vm_write_memory_1(a3 + 1u + j, tmp[j]);
+						plen = np;
+						break;
+					}
+				}
+			}
+			if (a3 && g3_ea_data(a3 + 3u))
+				b0 = vm_read_memory_4(a3);
+#if NW_BOOT_LOG
+			{
+				static unsigned ns520;
+				if (ns520 < 8) {
+					char buf[96];
+					ns520++;
+					{
+						char s[28];
+						unsigned i, n;
+						n = plen < 24u ? (unsigned)plen : 24u;
+						for (i = 0; i < n; i++) {
+							uint8 ch = 0x3f;
+							if (a3 && g3_ea_data(a3 + 1u + i))
+								ch = vm_read_memory_1(a3 + 1u + i);
+							if (ch < 32 || ch > 126)
+								ch = 0x2e;
+							s[i] = (char)ch;
+						}
+						s[n] = 0;
+						snprintf(buf, sizeof(buf),
+							 "G3: 68k Launch A9F2 CFM Upgrader PEF s520b ix=%d n=%u s=%s",
+							 (int)six, (unsigned)plen, s);
+					}
+					nw_boot_log(buf);
+				}
+			}
+#endif
 		}
 		r3 = 0;
 #if NW_BOOT_LOG
@@ -8591,7 +11084,69 @@ static uint32 g3_pef_host(uint32 idx, uint32 a3, uint32 a4, uint32 a5,
 			r3 = g3_pef_host(153u, 0x54455854u, 3502u, 0, 0, 0);
 		else if (a4 == 0x2aaf5u)
 			r3 = g3_pef_host(134u, 3500u, 0, 0, 0, 0);
-		else if (a4 == 0xaff5u || a4 == 0x1aff5u) {
+		else if (a4 == 0xabfda5u) {
+			uint32 c = g3_pef_newptr(256u);
+			uint32 h = g3_pef_newptr(8u);
+			if (c && h && g3_ea_data(h + 7u) && g3_ea_data(c + 16u)) {
+				vm_write_memory_4(h, c);
+				{
+					uint32 own = RAMBase + 0x4e000u;
+					if (a5 && a5 != 0x803u && g3_ea_data(a5))
+						own = a5;
+					vm_write_memory_4(c + 4u, own);
+#if NW_BOOT_LOG
+					{
+						static unsigned nown;
+						if (nown < 8) {
+							char buf[96];
+							nown++;
+							snprintf(buf, sizeof(buf),
+								 "G3: 68k Launch A9F2 CFM Upgrader PEF ctlown o=%08x a5=%08x",
+								 (unsigned)own, (unsigned)a5);
+							nw_boot_log(buf);
+						}
+					}
+#endif
+				}
+				if (a6 && g3_ea_data(a6 + 7u)) {
+					vm_write_memory_4(c + 8u, vm_read_memory_4(a6));
+					vm_write_memory_4(c + 12u, vm_read_memory_4(a6 + 4u));
+				}
+				vm_write_memory_1(c + 16u, 0xff);
+				r3 = h;
+				g3_pef_ctlh = h;
+				g3_pef_link_ctl(h, c);
+			} else
+				r3 = 1;
+#if NW_BOOT_LOG
+			{
+				static unsigned ncnc;
+				if (ncnc < 8) {
+					char buf[112];
+					ncnc++;
+					snprintf(buf, sizeof(buf),
+						 "G3: 68k Launch A9F2 CFM Upgrader PEF cupnctl h=%08x a5=%08x",
+						 (unsigned)r3, (unsigned)a5);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+		} else if (a4 == 0x65u) {
+			r3 = g3_pef_ctlh ? g3_pef_ctlh : 1u;
+#if NW_BOOT_LOG
+			{
+				static unsigned nc65;
+				if (nc65 < 8) {
+					char buf[96];
+					nc65++;
+					snprintf(buf, sizeof(buf),
+						 "G3: 68k Launch A9F2 CFM Upgrader PEF cupnctl inf65 r3=%08x",
+						 (unsigned)r3);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+		} else if (a4 == 0xaff5u || a4 == 0x1aff5u) {
 			uint32 p = g3_pef_newptr(8u);
 			if (p && g3_ea_data(p + 7u)) {
 				vm_write_memory_4(p, p + 4u);
@@ -11331,6 +13886,8 @@ void powerpc_cpu::nw_arm_dec_after_g2()
 bool powerpc_cpu::guest_fetch(uint32 *opcode)
 {
 	if (!ppc32_guest_mmu_enabled()) {
+		if (pc() >= 0x4000u && pc() < 0x20000u)
+			return false;
 		*opcode = vm_read_memory_4(pc());
 		return true;
 	}
@@ -11346,11 +13903,143 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 		if (ROMBase &&
 		    !((pa >= RAMBase && pa < RAMBase + RAMSize) ||
 		      (pa >= ROMBase && pa < ROMBase + 0x500000u) ||
-		      pa < 0x20000u ||
+		      pa < 0x4000u ||
 		      (pa >= 0x68fe0000u && pa < 0x69000000u))) {
 			take_isi();
 			return false;
 		}
+	}
+#endif
+#ifdef SHEEPSHAVER
+	if (r.pa >= 0x4000u && r.pa < 0x20000u) {
+		extern uint32 ROMBase, RAMBase, RAMSize;
+		uint32 lr = this->lr();
+#if NW_BOOT_LOG
+		{
+			static unsigned nlow;
+			if (nlow < 16) {
+				char buf[96];
+				nlow++;
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF lowisi pa=%08x lr=%08x",
+					 (unsigned)r.pa, (unsigned)lr);
+				nw_boot_log(buf);
+			}
+		}
+#endif
+		{
+			static uint32 stub;
+			if (!stub) {
+				stub = g3_pef_newptr(16u);
+				if (stub && g3_ea_data(stub + 3u))
+					vm_write_memory_4(stub, 0x4e800020u);
+			}
+			if (stub) {
+				if (lr == 0x1010b0a8u) {
+					uint32 a3 = gpr(3), a4 = gpr(4), r;
+					(void)g3_pef_host(49u, a3, a4, gpr(5),
+							  gpr(6), 0);
+					r = g3_pef_host(125u, 501u, 0, 0, 0, 0);
+					{
+						extern uint32 RAMBase;
+						uint32 hit = g3_pef_newptr(4u);
+						if (hit && g3_ea_data(hit + 1u))
+							vm_write_memory_2(hit, 0);
+						{
+							int i;
+							for (i = 0; i < 3; i++)
+								(void)g3_pef_host(53u,
+									RAMBase + 0x4e000u,
+									hit, 0, 0, 0);
+						}
+#if NW_BOOT_LOG
+						{
+							static unsigned nwm;
+							if (nwm < 8) {
+								char buf[96];
+								nwm++;
+								snprintf(buf, sizeof(buf),
+									 "G3: 68k Launch A9F2 CFM Upgrader PEF welmd dlg=%08x hit=%08x",
+									 (unsigned)(RAMBase + 0x4e000u),
+									 (unsigned)hit);
+								nw_boot_log(buf);
+							}
+						}
+#endif
+					}
+					gpr(3) = r;
+#if NW_BOOT_LOG
+					{
+						static unsigned nba;
+						if (nba < 8) {
+							char buf[96];
+							nba++;
+							snprintf(buf, sizeof(buf),
+								 "G3: 68k Launch A9F2 CFM Upgrader PEF b0alrt a3=%08x r3=%08x",
+								 (unsigned)a3, (unsigned)r);
+							nw_boot_log(buf);
+						}
+					}
+#endif
+					gpr(2) = 0x10115000u;
+					pc() = 0x1010b534u;
+#if NW_BOOT_LOG
+					{
+						static unsigned nmt;
+						if (nmt < 8) {
+							char buf[96];
+							nmt++;
+							snprintf(buf, sizeof(buf),
+								 "G3: 68k Launch A9F2 CFM Upgrader PEF mdtoc r2=%08x pc=%08x",
+								 (unsigned)gpr(2), (unsigned)pc());
+							nw_boot_log(buf);
+						}
+					}
+#endif
+				} else {
+					gpr(3) = 0;
+					pc() = stub;
+				}
+#if NW_BOOT_LOG
+				{
+					static unsigned ngz;
+					if (ngz < 8) {
+						ngz++;
+						nw_boot_log(
+							"G3: 68k Launch A9F2 CFM Upgrader PEF gdzero r3=0");
+					}
+				}
+#endif
+			} else if (ROMBase)
+				pc() = ROMBase + 0x366084u;
+#if NW_BOOT_LOG
+			{
+				static unsigned ngdb;
+				if (ngdb < 8) {
+					char buf[96];
+					ngdb++;
+					snprintf(buf, sizeof(buf),
+						 "G3: 68k Launch A9F2 CFM Upgrader PEF gdblr r3=%08x",
+						 (unsigned)gpr(3));
+					nw_boot_log(buf);
+				}
+			}
+#endif
+		}
+#if NW_BOOT_LOG
+		{
+			static unsigned nblr;
+			if (nblr < 8) {
+				char buf[96];
+				nblr++;
+				snprintf(buf, sizeof(buf),
+					 "G3: 68k Launch A9F2 CFM Upgrader PEF lowblr pc=%08x",
+					 (unsigned)pc());
+				nw_boot_log(buf);
+			}
+		}
+#endif
+		return false;
 	}
 #endif
 	*opcode = vm_read_memory_4(r.pa);
@@ -11372,6 +14061,26 @@ bool powerpc_cpu::guest_data_xlate(uint32 ea, unsigned width, bool is_store, uin
 {
 	if (!ppc32_guest_mmu_enabled()) {
 		*pa = ea;
+		if (ea >= 0x4000u && ea < 0x20000u) {
+			static uint32 dummy;
+			if (!dummy)
+				dummy = g3_pef_newptr(64u);
+			if (dummy)
+				*pa = dummy + (ea & 15u);
+#if NW_BOOT_LOG
+			{
+				static unsigned nloff;
+				if (nloff < 16) {
+					char buf[96];
+					nloff++;
+					snprintf(buf, sizeof(buf),
+						 "G3: 68k Launch A9F2 CFM Upgrader PEF lowoff ea=%08x",
+						 (unsigned)ea);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+		}
 		return true;
 	}
 	ppc32_xlate_result r = ppc32_guest_mmu().translate(ea, PPC32_XLATE_DR, width);
@@ -11384,6 +14093,27 @@ bool powerpc_cpu::guest_data_xlate(uint32 ea, unsigned width, bool is_store, uin
 #endif
 	if (r.ok) {
 		*pa = r.pa;
+		if (*pa >= 0x4000u && *pa < 0x20000u) {
+			static uint32 dummy;
+			if (!dummy) {
+				dummy = g3_pef_newptr(64u);
+			}
+			if (dummy)
+				*pa = dummy + (*pa & 15u);
+#if NW_BOOT_LOG
+			{
+				static unsigned nld;
+				if (nld < 16) {
+					char buf[96];
+					nld++;
+					snprintf(buf, sizeof(buf),
+						 "G3: 68k Launch A9F2 CFM Upgrader PEF lowdata ea=%08x",
+						 (unsigned)ea);
+					nw_boot_log(buf);
+				}
+			}
+#endif
+		}
 		return true;
 	}
 #ifdef SHEEPSHAVER
@@ -12237,6 +14967,26 @@ void powerpc_cpu::execute(uint32 entry)
 						snprintf(buf, sizeof(buf),
 							 "G3: 68k Launch A9F2 CFM Upgrader PEF gndtv id=%u",
 							 (unsigned)(gpr(3) & 0xffffu));
+						nw_boot_log(buf);
+					}
+				}
+#endif
+			}
+			if (g3_did_pef_enter &&
+			    (pc() == 0x1010D5F8u || pc() == 0x1010FC70u) &&
+			    gpr(31) == 0) {
+				uint32 rec = g3_wplug_make();
+				if (rec)
+					gpr(31) = rec;
+#if NW_BOOT_LOG
+				{
+					static unsigned nw802;
+					if (nw802 < 8) {
+						char buf[96];
+						nw802++;
+						snprintf(buf, sizeof(buf),
+							 "G3: 68k Launch A9F2 CFM Upgrader PEF wplug802 pc=%08x rec=%08x",
+							 (unsigned)pc(), (unsigned)rec);
 						nw_boot_log(buf);
 					}
 				}
@@ -28462,6 +31212,7 @@ void powerpc_cpu::execute(uint32 entry)
 						if (bcc_opc == ROMBase + 0x20cb4u ||
 						    bcc_opc == ROMBase + 0x1fafau) {
 							take = 1;
+							g3_host_copybits_sp(gpr(1));
 #if NW_BOOT_LOG
 							{
 								static unsigned nblex;
@@ -30696,11 +33447,24 @@ void powerpc_cpu::execute(uint32 entry)
 							if (g3_ea_data(sp + 4u))
 								ptr = g3_rom0(
 									vm_read_memory_4(sp + 4u));
-							/* itemHit=0 keeps ModalDialog BNE
-							 * retry. Writing 1 was DisposeDialog. */
+							/* leftover:pef-a991c: Welcome Continue. */
 							if (g3_ea_data(ptr) &&
 							    ptr >= 0x20000u)
-								vm_write_memory_2(ptr, 0);
+								vm_write_memory_2(ptr,
+									g3_did_welpef ? 1 : 0);
+#if NW_BOOT_LOG
+							{
+								static unsigned na1c;
+								if (na1c < 8) {
+									char buf[96];
+									na1c++;
+									snprintf(buf, sizeof(buf),
+										 "G3: 68k Launch A9F2 CFM Upgrader PEF a991c hit=%u",
+										 g3_did_welpef ? 1u : 0u);
+									nw_boot_log(buf);
+								}
+							}
+#endif
 							if (g3_ea_data(sp))
 								gpr(1) = sp + 8u;
 						} else if (g3_ea_data(gpr(1)))
@@ -30730,6 +33494,212 @@ void powerpc_cpu::execute(uint32 entry)
 							if (nddlg < 8) {
 								nddlg++;
 								nw_boot_log("G3: 68k DisposeDialog A983");
+							}
+						}
+#endif
+					} else if (op68 == 0xa99bu) {
+						/* leftover:pef-srl: SetResLoad. Pascal pop 2. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 2u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsrl;
+							if (nsrl < 8) {
+								nsrl++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF srl A99B");
+							}
+						}
+#endif
+					} else if (op68 == 0xa322u) {
+						/* leftover:pef-nhc: NewHandleClear. Pascal pop 4. */
+						{
+							uint32 n = 0, p = 0, h = 0;
+							if (g3_ea_data(gpr(1) + 3u))
+								n = vm_read_memory_4(gpr(1));
+							if (g3_ea_data(gpr(1)))
+								gpr(1) += 4u;
+							if (n == 0 || n > 0x100000u)
+								n = 16u;
+							p = g3_pef_newptr(n);
+							h = g3_pef_newptr(8u);
+							if (h && g3_ea_data(h + 3u))
+								vm_write_memory_4(h, p);
+							gpr(16) = h;
+							gpr(8) = 0;
+#if NW_BOOT_LOG
+							{
+								static unsigned nnh;
+								if (nnh < 8) {
+									char buf[96];
+									nnh++;
+									snprintf(buf, sizeof(buf),
+										 "G3: 68k Launch A9F2 CFM Upgrader PEF nhc n=%u h=%08x",
+										 (unsigned)n, (unsigned)h);
+									nw_boot_log(buf);
+								}
+							}
+#endif
+						}
+					} else if (op68 == 0xa910u) {
+						/* leftover:pef-wmgp: GetWMgrPort. Pascal VAR GrafPtr. */
+						{
+							extern uint32 RAMBase;
+							uint32 dst = 0;
+							if (g3_ea_data(gpr(1) + 3u))
+								dst = vm_read_memory_4(gpr(1));
+							if (g3_ea_data(gpr(1)))
+								gpr(1) += 4u;
+							if (dst && g3_ea_data(dst + 3u))
+								vm_write_memory_4(dst,
+										 RAMBase + 0xa100u);
+							gpr(8) = 0;
+#if NW_BOOT_LOG
+							{
+								static unsigned nwm;
+								if (nwm < 8) {
+									char buf[96];
+									nwm++;
+									snprintf(buf, sizeof(buf),
+										 "G3: 68k Launch A9F2 CFM Upgrader PEF wmgp d=%08x",
+										 (unsigned)dst);
+									nw_boot_log(buf);
+								}
+							}
+#endif
+						}
+					} else if (op68 == 0xab1du) {
+						/* leftover:pef-qdext: QDExtensions. Selector D0. */
+						{
+							const unsigned sel =
+								(unsigned)(gpr(8) & 0xffffu);
+							if (g3_ea_data(gpr(1)))
+								gpr(1) += 4u;
+							gpr(8) = 0;
+#if NW_BOOT_LOG
+							{
+								static unsigned nqd;
+								if (nqd < 8) {
+									char buf[96];
+									nqd++;
+									snprintf(buf, sizeof(buf),
+										 "G3: 68k Launch A9F2 CFM Upgrader PEF qdext AB1D sel=%u",
+										 sel);
+									nw_boot_log(buf);
+								}
+							}
+#endif
+						}
+					} else if (op68 == 0xa825u) {
+						/* leftover:pef-mnud: MenuDispatch. Selector D0. */
+						{
+							const unsigned sel =
+								(unsigned)(gpr(8) & 0xffffu);
+							if (g3_ea_data(gpr(1)))
+								gpr(1) += 4u;
+							gpr(8) = 0;
+#if NW_BOOT_LOG
+							{
+								static unsigned nmd;
+								if (nmd < 8) {
+									char buf[96];
+									nmd++;
+									snprintf(buf, sizeof(buf),
+										 "G3: 68k Launch A9F2 CFM Upgrader PEF mnud A825 sel=%u",
+										 sel);
+									nw_boot_log(buf);
+								}
+							}
+#endif
+						}
+					} else if (op68 == 0xa948u) {
+						/* leftover:pef-cmsz: CalcMenuSize. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ncs;
+							if (ncs < 8) {
+								ncs++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF cmsz A948");
+							}
+						}
+#endif
+					} else if (op68 == 0xa99cu) {
+						/* leftover:pef-cntres: CountResources. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ncr;
+							if (ncr < 8) {
+								ncr++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF cntres A99C");
+							}
+						}
+#endif
+					} else if (op68 == 0xa950u) {
+						/* leftover:pef-cntmi: CountMItems. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ncm;
+							if (ncm < 8) {
+								ncm++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF cntmi A950");
+							}
+						}
+#endif
+					} else if (op68 == 0xa8b5u) {
+						/* leftover:pef-sutil: ScriptUtil. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsu;
+							if (nsu < 8) {
+								nsu++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF sutil A8B5");
+							}
+						}
+#endif
+					} else if (op68 == 0xa029u) {
+						/* leftover:pef-a029: 68k HLock. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned na029;
+							if (na029 < 8) {
+								na029++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF a029 A029");
+							}
+						}
+#endif
+					} else if (op68 == 0xa02au) {
+						/* leftover:pef-hunl: HUnlock. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhu;
+							if (nhu < 8) {
+								nhu++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hunl A02A");
 							}
 						}
 #endif
@@ -31437,17 +34407,1492 @@ void powerpc_cpu::execute(uint32 entry)
 							}
 						}
 #endif
-					} else if (op68 == 0xa879u) {
-						/* SetClip(rgn). Pascal pop 4. */
+					} else if (op68 == 0xa829u) {
+						/* leftover:pef-layer: LayerDispatch. Selector D0. */
+						{
+							const unsigned sel =
+								(unsigned)(gpr(8) & 0xffffu);
+							if (g3_ea_data(gpr(1)))
+								gpr(1) += 4u;
+							gpr(8) = 0;
+#if NW_BOOT_LOG
+							{
+								static unsigned nly;
+								if (nly < 8) {
+									char buf[96];
+									nly++;
+									snprintf(buf, sizeof(buf),
+										 "G3: 68k Launch A9F2 CFM Upgrader PEF layer A829 sel=%u",
+										 sel);
+									nw_boot_log(buf);
+								}
+							}
+#endif
+						}
+					} else if (op68 == 0xa000u) {
+						/* leftover:pef-open: Open. Pascal pop 4. */
 						if (g3_ea_data(gpr(1)))
 							gpr(1) += 4u;
 						gpr(8) = 0;
 #if NW_BOOT_LOG
 						{
-							static unsigned nsetc;
-							if (nsetc < 8) {
-								nsetc++;
-								nw_boot_log("G3: 68k SetClip A879");
+							static unsigned nopen;
+							if (nopen < 8) {
+								nopen++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF open 0xA000");
+							}
+						}
+#endif
+					} else if (op68 == 0xa051u) {
+						/* leftover:pef-readxpram: ReadXPRam. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nreadxpra;
+							if (nreadxpra < 8) {
+								nreadxpra++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF readxpram 0xA051");
+							}
+						}
+#endif
+					} else if (op68 == 0xa01fu) {
+						/* leftover:pef-disposeptr: DisposePtr. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ndisposep;
+							if (ndisposep < 8) {
+								ndisposep++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF disposeptr 0xA01F");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9ffu) {
+						/* leftover:pef-debugger: Debugger. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ndebugger;
+							if (ndebugger < 8) {
+								ndebugger++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF debugger 0xA9FF");
+							}
+						}
+#endif
+					} else if (op68 == 0xa02du) {
+						/* leftover:pef-setappllim: SetApplLimit. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsetappll;
+							if (nsetappll < 8) {
+								nsetappll++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF setappllim 0xA02D");
+							}
+						}
+#endif
+					} else if (op68 == 0xa023u) {
+						/* leftover:pef-disposehan: DisposeHandle. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ndisposeh;
+							if (ndisposeh < 8) {
+								ndisposeh++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF disposehan 0xA023");
+							}
+						}
+#endif
+					} else if (op68 == 0xa11au) {
+						/* leftover:pef-getzone: GetZone. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ngetzone;
+							if (ngetzone < 8) {
+								ngetzone++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF getzone 0xA11A");
+							}
+						}
+#endif
+					} else if (op68 == 0xa875u) {
+						/* leftover:pef-setpbits: SetPBits. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsetpbits;
+							if (nsetpbits < 8) {
+								nsetpbits++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF setpbits 0xA875");
+							}
+						}
+#endif
+					} else if (op68 == 0xa8ecu) {
+						/* leftover:pef-cb32d: CopyBits 32->32 to guest FB. Pascal pop 30. */
+						{
+							uint32 sp = gpr(1);
+							uint32 src_bm = 0, dst_bm = 0;
+							int16 sr_t = 0, sr_l = 0, sr_b = 0, sr_r = 0;
+							int16 dr_t = 0, dr_l = 0, dr_b = 0, dr_r = 0;
+							int cb_w = 0, cb_h = 0;
+							uint32 dbase = 0;
+							if (g3_ea_data(sp + 29u)) {
+								src_bm = vm_read_memory_4(sp + 0u);
+								dst_bm = vm_read_memory_4(sp + 4u);
+								sr_t = (int16)vm_read_memory_2(sp + 8u);
+								sr_l = (int16)vm_read_memory_2(sp + 10u);
+								sr_b = (int16)vm_read_memory_2(sp + 12u);
+								sr_r = (int16)vm_read_memory_2(sp + 14u);
+								dr_t = (int16)vm_read_memory_2(sp + 16u);
+								dr_l = (int16)vm_read_memory_2(sp + 18u);
+								dr_b = (int16)vm_read_memory_2(sp + 20u);
+								dr_r = (int16)vm_read_memory_2(sp + 22u);
+							}
+							if (src_bm && dst_bm &&
+							    g3_ea_data(src_bm + 5u) &&
+							    g3_ea_data(dst_bm + 5u)) {
+								const uint32 fb = g3_qd_fb();
+								uint32 sbase = vm_read_memory_4(src_bm);
+								dbase = vm_read_memory_4(dst_bm);
+								uint32 srow = (uint32)(vm_read_memory_2(src_bm + 4u) & 0x3fffu);
+								uint32 drow = (uint32)(vm_read_memory_2(dst_bm + 4u) & 0x3fffu);
+								if (dbase != fb && drow >= 2560u &&
+								    dbase >= RAMBase + 0xa100u &&
+								    dbase < RAMBase + 0xa200u)
+									dbase = fb;
+								if (dbase != fb && dbase == vm_read_memory_4(dst_bm))
+									{ /* keep */ }
+								cb_w = (int)dr_r - (int)dr_l;
+								cb_h = (int)dr_b - (int)dr_t;
+								{
+									int sw = (int)sr_r - (int)sr_l;
+									int sh = (int)sr_b - (int)sr_t;
+									if (sw > 0 && sw < cb_w) cb_w = sw;
+									if (sh > 0 && sh < cb_h) cb_h = sh;
+								}
+								if (cb_w > 640) cb_w = 640;
+								if (cb_h > 480) cb_h = 480;
+								if (cb_w > 0 && cb_h > 0 && srow >= 2560u &&
+								    drow >= 2560u && sbase && dbase &&
+								    (dbase == fb || drow >= 2560u)) {
+									unsigned y, x;
+									for (y = 0; y < (unsigned)cb_h; y++) {
+										uint32 s = sbase + (uint32)((int)sr_t + (int)y) * srow + (uint32)sr_l * 4u;
+										uint32 d = dbase + (uint32)((int)dr_t + (int)y) * drow + (uint32)dr_l * 4u;
+										if (!g3_ea_data(s + (uint32)cb_w * 4u - 1u) ||
+										    !g3_ea_data(d + (uint32)cb_w * 4u - 1u))
+											continue;
+										for (x = 0; x < (unsigned)cb_w; x++) {
+											vm_write_memory_4(d, vm_read_memory_4(s));
+											s += 4u;
+											d += 4u;
+										}
+									}
+								}
+							}
+							if (g3_ea_data(gpr(1)))
+								gpr(1) += 30u;
+							gpr(8) = 0;
+#if NW_BOOT_LOG
+							{
+								static unsigned ncb32d;
+								if (ncb32d < 8) {
+									char buf[192];
+									ncb32d++;
+									snprintf(buf, sizeof(buf),
+										 "G3: 68k Launch A9F2 CFM Upgrader PEF cb32d s=%08x d=%08x w=%d h=%d db=%08x",
+										 (unsigned)src_bm, (unsigned)dst_bm,
+										 cb_w, cb_h, (unsigned)dbase);
+									nw_boot_log(buf);
+								}
+							}
+#endif
+						}
+					} else if (op68 == 0xabe9u) {
+						/* leftover:pef-trapabe9: TrapABE9. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapabe9;
+							if (ntrapabe9 < 8) {
+								ntrapabe9++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapabe9 0xABE9");
+							}
+						}
+#endif
+					} else if (op68 == 0xa346u) {
+						/* leftover:pef-getostrapa: GetOSTrapAddress. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ngetostra;
+							if (ngetostra < 8) {
+								ngetostra++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF getostrapa 0xA346");
+							}
+						}
+#endif
+					} else if (op68 == 0xa746u) {
+						/* leftover:pef-gettooltra: GetToolTrapAddress. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ngettoolt;
+							if (ngettoolt < 8) {
+								ngettoolt++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF gettooltra 0xA746");
+							}
+						}
+#endif
+					} else if (op68 == 0xa09fu) {
+						/* leftover:pef-powerdispa: PowerDispatch. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned npowerdis;
+							if (npowerdis < 8) {
+								npowerdis++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF powerdispa 0xA09F");
+							}
+						}
+#endif
+					} else if (op68 == 0xa005u) {
+						/* leftover:pef-status: Status. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nstatus;
+							if (nstatus < 8) {
+								nstatus++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF status 0xA005");
+							}
+						}
+#endif
+					} else if (op68 == 0xa036u) {
+						/* leftover:pef-moremaster: MoreMasters. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nmoremast;
+							if (nmoremast < 8) {
+								nmoremast++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF moremaster 0xA036");
+							}
+						}
+#endif
+					} else if (op68 == 0xa03fu) {
+						/* leftover:pef-initutil: InitUtil. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ninitutil;
+							if (ninitutil < 8) {
+								ninitutil++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF initutil 0xA03F");
+							}
+						}
+#endif
+					} else if (op68 == 0xa22eu) {
+						/* leftover:pef-blockmoved: BlockMoveData. Pascal pop 12. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 12u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nblockmov;
+							if (nblockmov < 8) {
+								nblockmov++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF blockmoved 0xA22E");
+							}
+						}
+#endif
+					} else if (op68 == 0xa024u) {
+						/* leftover:pef-sethandles: SetHandleSize. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsethandl;
+							if (nsethandl < 8) {
+								nsethandl++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF sethandles 0xA024");
+							}
+						}
+#endif
+					} else if (op68 == 0xa122u) {
+						/* leftover:pef-newhandle: NewHandle. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nnewhandl;
+							if (nnewhandl < 8) {
+								nnewhandl++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF newhandle 0xA122");
+							}
+						}
+#endif
+					} else if (op68 == 0xa004u) {
+						/* leftover:pef-control: Control. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ncontrol;
+							if (ncontrol < 8) {
+								ncontrol++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF control 0xA004");
+							}
+						}
+#endif
+					} else if (op68 == 0xa020u) {
+						/* leftover:pef-setptrsize: SetPtrSize. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsetptrsi;
+							if (nsetptrsi < 8) {
+								nsetptrsi++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF setptrsize 0xA020");
+							}
+						}
+#endif
+					} else if (op68 == 0xa05cu) {
+						/* leftover:pef-memorydisp: MemoryDispatch. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nmemorydi;
+							if (nmemorydi < 8) {
+								nmemorydi++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF memorydisp 0xA05C");
+							}
+						}
+#endif
+					} else if (op68 == 0xa15cu) {
+						/* leftover:pef-aa15c: MemoryDispatch. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned naa15c;
+							if (naa15c < 8) {
+								naa15c++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF aa15c 0xA15C");
+							}
+						}
+#endif
+					} else if (op68 == 0xa402u) {
+						/* leftover:pef-trapa402: TrapA402. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa402;
+							if (ntrapa402 < 8) {
+								ntrapa402++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa402 0xA402");
+							}
+						}
+#endif
+					} else if (op68 == 0xa403u) {
+						/* leftover:pef-trapa403: TrapA403. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa403;
+							if (ntrapa403 < 8) {
+								ntrapa403++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa403 0xA403");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9c9u) {
+						/* leftover:pef-syserror: SysError. Pascal pop 2. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 2u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsyserror;
+							if (nsyserror < 8) {
+								nsyserror++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF syserror 0xA9C9");
+							}
+						}
+#endif
+					} else if (op68 == 0xaa2fu) {
+						/* leftover:pef-newgdevice: NewGDevice. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nnewgdevi;
+							if (nnewgdevi < 8) {
+								nnewgdevi++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF newgdevice 0xAA2F");
+							}
+						}
+#endif
+					} else if (op68 == 0xaa2du) {
+						/* leftover:pef-setdevicea: SetDeviceAttribute. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsetdevic;
+							if (nsetdevic < 8) {
+								nsetdevic++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF setdevicea 0xAA2D");
+							}
+						}
+#endif
+					} else if (op68 == 0xa054u) {
+						/* leftover:pef-uprstring: UprString. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nuprstrin;
+							if (nuprstrin < 8) {
+								nuprstrin++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF uprstring 0xA054");
+							}
+						}
+#endif
+					} else if (op68 == 0xa260u) {
+						/* leftover:pef-hfsdispatc: HFSDispatch. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhfsdispa;
+							if (nhfsdispa < 8) {
+								nhfsdispa++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hfsdispatc 0xA260");
+							}
+						}
+#endif
+					} else if (op68 == 0xa20au) {
+						/* leftover:pef-hopenrf: HOpenRF. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhopenrf;
+							if (nhopenrf < 8) {
+								nhopenrf++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hopenrf 0xA20A");
+							}
+						}
+#endif
+					} else if (op68 == 0xa208u) {
+						/* leftover:pef-hcreate: HCreate. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhcreate;
+							if (nhcreate < 8) {
+								nhcreate++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hcreate 0xA208");
+							}
+						}
+#endif
+					} else if (op68 == 0xa209u) {
+						/* leftover:pef-hdelete: HDelete. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhdelete;
+							if (nhdelete < 8) {
+								nhdelete++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hdelete 0xA209");
+							}
+						}
+#endif
+					} else if (op68 == 0xa20cu) {
+						/* leftover:pef-hgetfilein: HGetFileInfo. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhgetfile;
+							if (nhgetfile < 8) {
+								nhgetfile++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hgetfilein 0xA20C");
+							}
+						}
+#endif
+					} else if (op68 == 0xa241u) {
+						/* leftover:pef-hsetflock: HSetFLock. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhsetfloc;
+							if (nhsetfloc < 8) {
+								nhsetfloc++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hsetflock 0xA241");
+							}
+						}
+#endif
+					} else if (op68 == 0xa242u) {
+						/* leftover:pef-hrstflock: HRstFLock. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhrstfloc;
+							if (nhrstfloc < 8) {
+								nhrstfloc++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hrstflock 0xA242");
+							}
+						}
+#endif
+					} else if (op68 == 0xa20bu) {
+						/* leftover:pef-hrename: HRename. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhrename;
+							if (nhrename < 8) {
+								nhrename++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hrename 0xA20B");
+							}
+						}
+#endif
+					} else if (op68 == 0xa81au) {
+						/* leftover:pef-hopenresfi: HOpenResFile. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhopenres;
+							if (nhopenres < 8) {
+								nhopenres++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hopenresfi 0xA81A");
+							}
+						}
+#endif
+					} else if (op68 == 0xa81bu) {
+						/* leftover:pef-hcreateres: HCreateResFile. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhcreater;
+							if (nhcreater < 8) {
+								nhcreater++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hcreateres 0xA81B");
+							}
+						}
+#endif
+					} else if (op68 == 0xa007u) {
+						/* leftover:pef-getvolinfo: GetVolInfo. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ngetvolin;
+							if (ngetvolin < 8) {
+								ngetvolin++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF getvolinfo 0xA007");
+							}
+						}
+#endif
+					} else if (op68 == 0xa600u) {
+						/* leftover:pef-trapa600: TrapA600. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa600;
+							if (ntrapa600 < 8) {
+								ntrapa600++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa600 0xA600");
+							}
+						}
+#endif
+					} else if (op68 == 0xa609u) {
+						/* leftover:pef-trapa609: TrapA609. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa609;
+							if (ntrapa609 < 8) {
+								ntrapa609++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa609 0xA609");
+							}
+						}
+#endif
+					} else if (op68 == 0xa401u) {
+						/* leftover:pef-trapa401: TrapA401. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa401;
+							if (ntrapa401 < 8) {
+								ntrapa401++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa401 0xA401");
+							}
+						}
+#endif
+					} else if (op68 == 0xa660u) {
+						/* leftover:pef-trapa660: TrapA660. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa660;
+							if (ntrapa660 < 8) {
+								ntrapa660++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa660 0xA660");
+							}
+						}
+#endif
+					} else if (op68 == 0xa207u) {
+						/* leftover:pef-hgetvinfo: HGetVInfo. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nhgetvinf;
+							if (nhgetvinf < 8) {
+								nhgetvinf++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF hgetvinfo 0xA207");
+							}
+						}
+#endif
+					} else if (op68 == 0xa607u) {
+						/* leftover:pef-trapa607: TrapA607. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa607;
+							if (ntrapa607 < 8) {
+								ntrapa607++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa607 0xA607");
+							}
+						}
+#endif
+					} else if (op68 == 0xa412u) {
+						/* leftover:pef-trapa412: TrapA412. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa412;
+							if (ntrapa412 < 8) {
+								ntrapa412++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa412 0xA412");
+							}
+						}
+#endif
+					} else if (op68 == 0xa411u) {
+						/* leftover:pef-trapa411: TrapA411. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa411;
+							if (ntrapa411 < 8) {
+								ntrapa411++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa411 0xA411");
+							}
+						}
+#endif
+					} else if (op68 == 0xa013u) {
+						/* leftover:pef-aa013: FlushVol. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned naa013;
+							if (naa013 < 8) {
+								naa013++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF aa013 0xA013");
+							}
+						}
+#endif
+					} else if (op68 == 0xa413u) {
+						/* leftover:pef-trapa413: TrapA413. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa413;
+							if (ntrapa413 < 8) {
+								ntrapa413++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa413 0xA413");
+							}
+						}
+#endif
+					} else if (op68 == 0xa23cu) {
+						/* leftover:pef-trapa23c: TrapA23C. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa23c;
+							if (ntrapa23c < 8) {
+								ntrapa23c++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa23c 0xA23C");
+							}
+						}
+#endif
+					} else if (op68 == 0xa250u) {
+						/* leftover:pef-trapa250: TrapA250. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa250;
+							if (ntrapa250 < 8) {
+								ntrapa250++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa250 0xA250");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9eeu) {
+						/* leftover:pef-decstr68k: DECSTR68K. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ndecstr68;
+							if (ndecstr68 < 8) {
+								ndecstr68++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF decstr68k 0xA9EE");
+							}
+						}
+#endif
+					} else if (op68 == 0xaa7fu) {
+						/* leftover:pef-trapaa7f: TrapAA7F. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapaa7f;
+							if (ntrapaa7f < 8) {
+								ntrapaa7f++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapaa7f 0xAA7F");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9e3u) {
+						/* leftover:pef-ptrtohand: PtrToHand. Pascal pop 12. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 12u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nptrtohan;
+							if (nptrtohan < 8) {
+								nptrtohan++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF ptrtohand 0xA9E3");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9fdu) {
+						/* leftover:pef-getscrap: GetScrap. Pascal pop 8. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 8u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ngetscrap;
+							if (ngetscrap < 8) {
+								ngetscrap++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF getscrap 0xA9FD");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9feu) {
+						/* leftover:pef-putscrap: PutScrap. Pascal pop 8. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 8u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nputscrap;
+							if (nputscrap < 8) {
+								nputscrap++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF putscrap 0xA9FE");
+							}
+						}
+#endif
+					} else if (op68 == 0xaa2cu) {
+						/* leftover:pef-testdevice: TestDeviceAttribute. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntestdevi;
+							if (ntestdevi < 8) {
+								ntestdevi++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF testdevice 0xAA2C");
+							}
+						}
+#endif
+					} else if (op68 == 0xaa6au) {
+						/* leftover:pef-devicemgr: DeviceMgr. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ndevicemg;
+							if (ndevicemg < 8) {
+								ndevicemg++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF devicemgr 0xAA6A");
+							}
+						}
+#endif
+					} else if (op68 == 0xaaf1u) {
+						/* leftover:pef-atamgr: ATAMgr. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned natamgr;
+							if (natamgr < 8) {
+								natamgr++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF atamgr 0xAAF1");
+							}
+						}
+#endif
+					} else if (op68 == 0xa992u) {
+						/* leftover:pef-detachreso: DetachResource. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ndetachre;
+							if (ndetachre < 8) {
+								ndetachre++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF detachreso 0xA992");
+							}
+						}
+#endif
+					} else if (op68 == 0xa03du) {
+						/* leftover:pef-drvrinstal: DrvrInstall. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ndrvrinst;
+							if (ndrvrinst < 8) {
+								ndrvrinst++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF drvrinstal 0xA03D");
+							}
+						}
+#endif
+					} else if (op68 == 0xa050u) {
+						/* leftover:pef-comparestr: CompareString. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ncompares;
+							if (ncompares < 8) {
+								ncompares++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF comparestr 0xA050");
+							}
+						}
+#endif
+					} else if (op68 == 0xa994u) {
+						/* leftover:pef-curresfile: CurResFile. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ncurresfi;
+							if (ncurresfi < 8) {
+								ncurresfi++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF curresfile 0xA994");
+							}
+						}
+#endif
+					} else if (op68 == 0xa998u) {
+						/* leftover:pef-useresfile: UseResFile. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nuseresfi;
+							if (nuseresfi < 8) {
+								nuseresfi++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF useresfile 0xA998");
+							}
+						}
+#endif
+					} else if (op68 == 0xa81fu) {
+						/* leftover:pef-get1resour: Get1Resource. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nget1reso;
+							if (nget1reso < 8) {
+								nget1reso++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF get1resour 0xA81F");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9a2u) {
+						/* leftover:pef-loadresour: LoadResource. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nloadreso;
+							if (nloadreso < 8) {
+								nloadreso++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF loadresour 0xA9A2");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9a3u) {
+						/* leftover:pef-releaseres: ReleaseResource. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nreleaser;
+							if (nreleaser < 8) {
+								nreleaser++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF releaseres 0xA9A3");
+							}
+						}
+#endif
+					} else if (op68 == 0xa038u) {
+						/* leftover:pef-writeparam: WriteParam. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nwritepar;
+							if (nwritepar < 8) {
+								nwritepar++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF writeparam 0xA038");
+							}
+						}
+#endif
+					} else if (op68 == 0xa05eu) {
+						/* leftover:pef-nminstall: NMInstall. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nnminstal;
+							if (nnminstal < 8) {
+								nnminstal++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF nminstall 0xA05E");
+							}
+						}
+#endif
+					} else if (op68 == 0xa05fu) {
+						/* leftover:pef-nmremove: NMRemove. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nnmremove;
+							if (nnmremove < 8) {
+								nnmremove++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF nmremove 0xA05F");
+							}
+						}
+#endif
+					} else if (op68 == 0xa07fu) {
+						/* leftover:pef-internalwa: InternalWait. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ninternal;
+							if (ninternal < 8) {
+								ninternal++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF internalwa 0xA07F");
+							}
+						}
+#endif
+					} else if (op68 == 0xa052u) {
+						/* leftover:pef-writexpram: WriteXPRam. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nwritexpr;
+							if (nwritexpr < 8) {
+								nwritexpr++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF writexpram 0xA052");
+							}
+						}
+#endif
+					} else if (op68 == 0xa07au) {
+						/* leftover:pef-setadbinfo: SetADBInfo. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsetadbin;
+							if (nsetadbin < 8) {
+								nsetadbin++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF setadbinfo 0xA07A");
+							}
+						}
+#endif
+					} else if (op68 == 0xa05au) {
+						/* leftover:pef-primetime: PrimeTime. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nprimetim;
+							if (nprimetim < 8) {
+								nprimetim++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF primetime 0xA05A");
+							}
+						}
+#endif
+					} else if (op68 == 0xa059u) {
+						/* leftover:pef-rmvtime: RmvTime. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nrmvtime;
+							if (nrmvtime < 8) {
+								nrmvtime++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF rmvtime 0xA059");
+							}
+						}
+#endif
+					} else if (op68 == 0xa190u) {
+						/* leftover:pef-trapa190: TrapA190. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa190;
+							if (ntrapa190 < 8) {
+								ntrapa190++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa190 0xA190");
+							}
+						}
+#endif
+					} else if (op68 == 0xa05bu) {
+						/* leftover:pef-poweroff: PowerOff. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned npoweroff;
+							if (npoweroff < 8) {
+								npoweroff++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF poweroff 0xA05B");
+							}
+						}
+#endif
+					} else if (op68 == 0xaa14u) {
+						/* leftover:pef-rgbforecol: RGBForeColor. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nrgbforec;
+							if (nrgbforec < 8) {
+								nrgbforec++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF rgbforecol 0xAA14");
+							}
+						}
+#endif
+					} else if (op68 == 0xa078u) {
+						/* leftover:pef-getindadb: GetIndADB. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ngetindad;
+							if (ngetindad < 8) {
+								ngetindad++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF getindadb 0xA078");
+							}
+						}
+#endif
+					} else if (op68 == 0xa458u) {
+						/* leftover:pef-insxtime: InsXTime. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ninsxtime;
+							if (ninsxtime < 8) {
+								ninsxtime++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF insxtime 0xA458");
+							}
+						}
+#endif
+					} else if (op68 == 0xaa32u) {
+						/* leftover:pef-welqd: GetGDevice return 32-bit GDHandle. */
+						{
+							extern uint32 RAMBase;
+							uint32 h = g3_wel_gdh;
+							if (!h)
+								h = RAMBase + 0xd000u;
+							if (g3_ea_data(gpr(1)))
+								vm_write_memory_4(gpr(1), h);
+							gpr(8) = 0;
+						}
+#if NW_BOOT_LOG
+						{
+							static unsigned ngetgdevi;
+							if (ngetgdevi < 8) {
+								ngetgdevi++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF getgdevice 0xAA32");
+							}
+						}
+#endif
+					} else if (op68 == 0xa3adu) {
+						/* leftover:pef-newgestalt: NewGestalt. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nnewgesta;
+							if (nnewgesta < 8) {
+								nnewgesta++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF newgestalt 0xA3AD");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9a5u) {
+						/* leftover:pef-sizersrc: SizeRsrc. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsizersrc;
+							if (nsizersrc < 8) {
+								nsizersrc++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF sizersrc 0xA9A5");
+							}
+						}
+#endif
+					} else if (op68 == 0xa098u) {
+						/* leftover:pef-trapa098: TrapA098. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntrapa098;
+							if (ntrapa098 < 8) {
+								ntrapa098++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF trapa098 0xA098");
+							}
+						}
+#endif
+					} else if (op68 == 0xa04bu) {
+						/* leftover:pef-setgrowzon: SetGrowZone. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsetgrowz;
+							if (nsetgrowz < 8) {
+								nsetgrowz++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF setgrowzon 0xA04B");
+							}
+						}
+#endif
+					} else if (op68 == 0xa9fbu) {
+						/* leftover:pef-loadscrap: LoadScrap. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nloadscra;
+							if (nloadscra < 8) {
+								nloadscra++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF loadscrap 0xA9FB");
+							}
+						}
+#endif
+					} else if (op68 == 0xa015u) {
+						/* leftover:pef-aa015: SetVol. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned naa015;
+							if (naa015 < 8) {
+								naa015++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF aa015 0xA015");
+							}
+						}
+#endif
+					} else if (op68 == 0xa03bu) {
+						/* leftover:pef-aa03b: Delay. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned naa03b;
+							if (naa03b < 8) {
+								naa03b++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF aa03b 0xA03B");
+							}
+						}
+#endif
+					} else if (op68 == 0xaafeu) {
+						/* leftover:pef-mixedmodem: MixedModeMagic. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nmixedmod;
+							if (nmixedmod < 8) {
+								nmixedmod++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF mixedmodem 0xAAFE");
+							}
+						}
+#endif
+					} else if (op68 == 0xa975u) {
+						/* leftover:pef-tickcount: TickCount. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ntickcoun;
+							if (ntickcoun < 8) {
+								ntickcoun++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF tickcount 0xA975");
+							}
+						}
+#endif
+					} else if (op68 == 0xa937u) {
+						/* leftover:pef-drawmenuba: DrawMenuBar. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned ndrawmenu;
+							if (ndrawmenu < 8) {
+								ndrawmenu++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF drawmenuba 0xA937");
+							}
+						}
+#endif
+					} else if (op68 == 0xa8ddu) {
+						/* leftover:pef-setemptyrg: SetEmptyRgn. Pascal pop 4. */
+						if (g3_ea_data(gpr(1)))
+							gpr(1) += 4u;
+						gpr(8) = 0;
+#if NW_BOOT_LOG
+						{
+							static unsigned nsetempty;
+							if (nsetempty < 8) {
+								nsetempty++;
+								nw_boot_log(
+									"G3: 68k Launch A9F2 CFM Upgrader PEF setemptyrg 0xA8DD");
 							}
 						}
 #endif
