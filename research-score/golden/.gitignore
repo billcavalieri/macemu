@@ -1,0 +1,20 @@
+# Built plugin
+libnwgolden.dylib
+*.dylib
+*.o
+
+# Capture output (derived from ROM/toast bytes — never commit)
+out/
+run*/
+events*.txt
+serial.log
+shot-*.png
+shot-*.ppm
+*.ppm
+markers.tsv
+phases.json
+qemu-stderr.log
+qemu-cmd.txt
+trace.log
+MacROM.bin
+__pycache__/

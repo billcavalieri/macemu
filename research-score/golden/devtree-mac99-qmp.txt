@@ -1,0 +1,672 @@
+### info qtree
+bus: main-system-bus
+  type System
+  dev: fw_cfg_mem, id ""
+    data_width = 1 (0x1)
+    dma_enabled = false
+    x-file-slots = 32 (0x20)
+    acpi-mr-restore = true
+    mmio 00000000f0000510/0000000000000002
+    mmio 00000000f0000512/0000000000000001
+  dev: macio-nvram, id ""
+    size = 8192 (0x2000)
+    it_shift = 1 (0x1)
+    drive = ""
+    mmio 00000000fff04000/0000000000004000
+  dev: mos6522-pmu, id ""
+    gpio-in "" 5
+    frequency = 0 (0x0)
+    mmio ffffffffffffffff/0000000000000010
+  dev: openpic, id ""
+    gpio-in "" 68
+    gpio-out "sysbus-irq" 5
+    model = 3 (0x3)
+    nb_cpus = 1 (0x1)
+    mmio ffffffffffffffff/0000000000040000
+  dev: uni-north-pci-pcihost, id ""
+    gpio-out "" 4
+    ofw-addr = 4060086272 (0xf2000000)
+    x-config-reg-migration-enabled = true
+    bypass-iommu = false
+    mmio 00000000f2800000/0000000000001000
+    mmio 00000000f2c00000/0000000000001000
+    mmio ffffffffffffffff/0000000010000000
+    mmio ffffffffffffffff/0000000000800000
+    bus: pci.2
+      type PCI
+      dev: sungem, id ""
+        mac = "52:54:00:12:34:56"
+        netdev = "hub0port0"
+        phy_addr = 0 (0x0)
+        addr = 0f.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class Ethernet controller, addr 00:0f.0, pci id 106b:0021 (sub 0000:0000)
+        bar 0: mem at 0x82200000 [0x823fffff]
+      dev: VGA, id ""
+        vgamem_mb = 16 (0x10)
+        mmio = true
+        qemu-extended-regs = true
+        edid = true
+        xres = 1280 (0x500)
+        yres = 800 (0x320)
+        xmax = 0 (0x0)
+        ymax = 0 (0x0)
+        refresh_rate = 0 (0x0)
+        addr = 0e.0
+        romfile = "vgabios-stdvga.bin"
+        romsize = 65536 (0x10000)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class VGA controller, addr 00:0e.0, pci id 1234:1111 (sub 1af4:1100)
+        bar 0: mem at 0x81000000 [0x81ffffff]
+        bar 2: mem at 0x82000000 [0x82000fff]
+        bar 6: mem at 0x82010000 [0x8201ffff]
+      dev: pci-ohci, id ""
+        masterbus = ""
+        num-ports = 3 (0x3)
+        firstport = 0 (0x0)
+        addr = 0d.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class USB controller, addr 00:0d.0, pci id 106b:003f (sub 1af4:1100)
+        bar 0: mem at 0x80080000 [0x800800ff]
+        bus: usb-bus.0
+          type usb-bus
+          dev: usb-mouse, id ""
+            usb_version = 2 (0x2)
+            port = ""
+            serial = ""
+            msos-desc = true
+            pcap = ""
+            addr 0.2, port 2, speed 12, name QEMU USB Mouse, attached
+          dev: usb-kbd, id ""
+            usb_version = 2 (0x2)
+            display = ""
+            port = ""
+            serial = ""
+            msos-desc = true
+            pcap = ""
+            addr 0.1, port 1, speed 12, name QEMU USB Keyboard, attached
+      dev: macio-newworld, id ""
+        has-pmu = true
+        has-adb = false
+        frequency = 25000000 (0x17d7840)
+        addr = 0c.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class Class ff00, addr 00:0c.0, pci id 106b:0022 (sub 1af4:1100)
+        bar 0: mem at 0x80000000 [0x8007ffff]
+        bus: macio.0
+          type macio-bus
+          dev: via-pmu, id ""
+            gpio-out "sysbus-irq" 1
+            has-adb = false
+            mmio ffffffffffffffff/0000000000002000
+          dev: macio-gpio, id ""
+            gpio-out "sysbus-irq" 10
+            mmio ffffffffffffffff/0000000000000030
+          dev: macio-ide, id ""
+            gpio-in "" 2
+            gpio-out "sysbus-irq" 2
+            channel = 26 (0x1a)
+            addr = 135168 (0x21000)
+            mmio ffffffffffffffff/0000000000001000
+            bus: ide.1
+              type IDE
+              dev: ide-cd, id ""
+                drive = "ide1-cd0"
+                backend_defaults = "auto"
+                logical_block_size = 512 (512 B)
+                physical_block_size = 512 (512 B)
+                min_io_size = 0 (0 B)
+                opt_io_size = 0 (0 B)
+                discard_granularity = 512 (512 B)
+                write-cache = "auto"
+                share-rw = false
+                account-invalid = "auto"
+                account-failed = "auto"
+                stats-intervals = <null>
+                rerror = "auto"
+                werror = "auto"
+                ver = "2.5+"
+                wwn = 0 (0x0)
+                serial = "QM00003"
+                model = ""
+                unit = 0 (0x0)
+                win2k-install-hack = false
+          dev: macio-ide, id ""
+            gpio-in "" 2
+            gpio-out "sysbus-irq" 2
+            channel = 22 (0x16)
+            addr = 131072 (0x20000)
+            mmio ffffffffffffffff/0000000000001000
+            bus: ide.0
+              type IDE
+              dev: ide-cd, id ""
+                drive = "ide0-cd1"
+                backend_defaults = "auto"
+                logical_block_size = 512 (512 B)
+                physical_block_size = 512 (512 B)
+                min_io_size = 0 (0 B)
+                opt_io_size = 0 (0 B)
+                discard_granularity = 512 (512 B)
+                write-cache = "auto"
+                share-rw = false
+                account-invalid = "auto"
+                account-failed = "auto"
+                stats-intervals = <null>
+                rerror = "auto"
+                werror = "auto"
+                ver = "2.5+"
+                wwn = 0 (0x0)
+                serial = "QM00002"
+                model = ""
+                unit = 1 (0x1)
+                win2k-install-hack = false
+          dev: escc, id ""
+            gpio-out "sysbus-irq" 2
+            frequency = 3686400 (0x384000)
+            it_shift = 4 (0x4)
+            bit_swap = false
+            disabled = 0 (0x0)
+            chnBtype = 0 (0x0)
+            chnAtype = 0 (0x0)
+            chrB = ""
+            chrA = "serial0"
+            chnA-sunkbd-layout = ""
+            mmio ffffffffffffffff/0000000000000040
+          dev: mac-dbdma, id ""
+            mmio ffffffffffffffff/0000000000001000
+      dev: uni-north-pci, id ""
+        addr = 0b.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class Host bridge, addr 00:0b.0, pci id 106b:001f (sub 1af4:1100)
+  dev: uni-north-internal-pci-pcihost, id ""
+    gpio-out "" 4
+    x-config-reg-migration-enabled = true
+    bypass-iommu = false
+    mmio 00000000f4800000/0000000000001000
+    mmio 00000000f4c00000/0000000000001000
+    bus: pci.1
+      type PCI
+      dev: uni-north-internal-pci, id ""
+        addr = 0e.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class Host bridge, addr 00:0e.0, pci id 106b:001e (sub 1af4:1100)
+  dev: uni-north-agp-pcihost, id ""
+    gpio-out "" 4
+    x-config-reg-migration-enabled = true
+    bypass-iommu = false
+    mmio 00000000f0800000/0000000000001000
+    mmio 00000000f0c00000/0000000000001000
+    bus: pci.0
+      type PCI
+      dev: uni-north-agp, id ""
+        addr = 0b.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class Host bridge, addr 00:0b.0, pci id 106b:0020 (sub 1af4:1100)
+  dev: uni-north, id ""
+    mmio ffffffffffffffff/0000000000001000
+
+
+### info mtree
+address-space: uni-north-agp
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+
+address-space: uni-north-internal-pci
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+
+address-space: pci-ohci
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+    0000000000000000-ffffffffffffffff (prio 0, container): alias bus master @system 0000000000000000-ffffffffffffffff
+
+address-space: VGA
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+
+address-space: macio-newworld
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+
+address-space: uni-north-pci
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+
+address-space: sungem
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+
+address-space: I/O
+  0000000000000000-000000000000ffff (prio 0, container): io
+
+address-space: cpu-memory-0
+address-space: memory
+  0000000000000000-ffffffffffffffff (prio 0, container): system
+    0000000000000000-000000001fffffff (prio 0, ram): ppc_core99.ram
+    0000000080000000-000000008fffffff (prio 0, container): alias unin-pci-hole @unin-pci-mmio 0000000080000000-000000008fffffff
+    00000000f0000510-00000000f0000511 (prio 0, i/o): fwcfg.ctl
+    00000000f0000512-00000000f0000512 (prio 0, i/o): fwcfg.data
+    00000000f0800000-00000000f0800fff (prio 0, i/o): unin-agp-conf-idx
+    00000000f0c00000-00000000f0c00fff (prio 0, i/o): unin-agp-conf-data
+    00000000f2000000-00000000f27fffff (prio 0, i/o): unin-pci-isa-mmio
+      00000000f20001ce-00000000f20001d1 (prio 0, i/o): vbe
+      00000000f20003b4-00000000f20003b5 (prio 0, i/o): vga
+      00000000f20003ba-00000000f20003ba (prio 0, i/o): vga
+      00000000f20003c0-00000000f20003cf (prio 0, i/o): vga
+      00000000f20003d4-00000000f20003d5 (prio 0, i/o): vga
+      00000000f20003da-00000000f20003da (prio 0, i/o): vga
+    00000000f2800000-00000000f2800fff (prio 0, i/o): unin-pci-conf-idx
+    00000000f2c00000-00000000f2c00fff (prio 0, i/o): unin-pci-conf-data
+    00000000f4800000-00000000f4800fff (prio 0, i/o): unin-pci-conf-idx
+    00000000f4c00000-00000000f4c00fff (prio 0, i/o): unin-pci-conf-data
+    00000000f8000000-00000000f8000fff (prio 0, i/o): unin
+    00000000fff00000-00000000ffffffff (prio 0, rom): ppc_core99.bios
+    00000000fff04000-00000000fff07fff (prio 0, i/o): macio-nvram
+
+memory-region: system
+  0000000000000000-ffffffffffffffff (prio 0, container): system
+    0000000000000000-000000001fffffff (prio 0, ram): ppc_core99.ram
+    0000000080000000-000000008fffffff (prio 0, container): alias unin-pci-hole @unin-pci-mmio 0000000080000000-000000008fffffff
+    00000000f0000510-00000000f0000511 (prio 0, i/o): fwcfg.ctl
+    00000000f0000512-00000000f0000512 (prio 0, i/o): fwcfg.data
+    00000000f0800000-00000000f0800fff (prio 0, i/o): unin-agp-conf-idx
+    00000000f0c00000-00000000f0c00fff (prio 0, i/o): unin-agp-conf-data
+    00000000f2000000-00000000f27fffff (prio 0, i/o): unin-pci-isa-mmio
+      00000000f20001ce-00000000f20001d1 (prio 0, i/o): vbe
+      00000000f20003b4-00000000f20003b5 (prio 0, i/o): vga
+      00000000f20003ba-00000000f20003ba (prio 0, i/o): vga
+      00000000f20003c0-00000000f20003cf (prio 0, i/o): vga
+      00000000f20003d4-00000000f20003d5 (prio 0, i/o): vga
+      00000000f20003da-00000000f20003da (prio 0, i/o): vga
+    00000000f2800000-00000000f2800fff (prio 0, i/o): unin-pci-conf-idx
+    00000000f2c00000-00000000f2c00fff (prio 0, i/o): unin-pci-conf-data
+    00000000f4800000-00000000f4800fff (prio 0, i/o): unin-pci-conf-idx
+    00000000f4c00000-00000000f4c00fff (prio 0, i/o): unin-pci-conf-data
+    00000000f8000000-00000000f8000fff (prio 0, i/o): unin
+    00000000fff00000-00000000ffffffff (prio 0, rom): ppc_core99.bios
+    00000000fff04000-00000000fff07fff (prio 0, i/o): macio-nvram
+
+memory-region: unin-pci-mmio
+  0000000000000000-00000000ffffffff (prio 0, container): unin-pci-mmio
+    00000000000a0000-00000000000affff (prio 2, ram): alias vga.chain4 @vga.vram 0000000000000000-000000000000ffff
+    00000000000a0000-00000000000bffff (prio 1, i/o): vga-lowmem
+    0000000080000000-000000008007ffff (prio 1, i/o): macio
+      0000000080000050-000000008000007f (prio 0, i/o): gpio
+      0000000080008000-0000000080008fff (prio 0, i/o): dbdma
+      0000000080012000-00000000800120ff (prio 0, i/o): escc-legacy
+        0000000080012000-0000000080012001 (prio 0, i/o): alias escc-legacy-port @escc 0000000000000000-0000000000000001
+        0000000080012002-0000000080012003 (prio 0, i/o): alias escc-legacy-port @escc 0000000000000020-0000000000000021
+        0000000080012004-0000000080012005 (prio 0, i/o): alias escc-legacy-port @escc 0000000000000010-0000000000000011
+        0000000080012006-0000000080012007 (prio 0, i/o): alias escc-legacy-port @escc 0000000000000030-0000000000000031
+        0000000080012008-0000000080012009 (prio 0, i/o): alias escc-legacy-port @escc 0000000000000040-0000000000000041
+        000000008001200a-000000008001200b (prio 0, i/o): alias escc-legacy-port @escc 0000000000000050-0000000000000051
+        0000000080012080-0000000080012081 (prio 0, i/o): alias escc-legacy-port @escc 0000000000000080-0000000000000081
+        0000000080012090-0000000080012091 (prio 0, i/o): alias escc-legacy-port @escc 0000000000000090-0000000000000091
+        00000000800120a0-00000000800120a1 (prio 0, i/o): alias escc-legacy-port @escc 00000000000000a0-00000000000000a1
+        00000000800120b0-00000000800120b1 (prio 0, i/o): alias escc-legacy-port @escc 00000000000000b0-00000000000000b1
+      0000000080013000-000000008001303f (prio 0, i/o): escc
+      0000000080015000-0000000080015fff (prio 0, i/o): timer
+      0000000080016000-0000000080017fff (prio 0, i/o): via-pmu
+      0000000080020000-0000000080020fff (prio 0, i/o): pmac-ide
+      0000000080021000-0000000080021fff (prio 0, i/o): pmac-ide
+      0000000080040000-000000008007ffff (prio 0, i/o): openpic
+        0000000080040000-00000000800410ef (prio 0, i/o): glb
+        00000000800410f0-000000008004130f (prio 0, i/o): tmr
+        0000000080050000-0000000080051fff (prio 0, i/o): src
+        0000000080060000-000000008007f0ff (prio 0, i/o): cpu
+    0000000080080000-00000000800800ff (prio 1, i/o): ohci
+    0000000081000000-0000000081ffffff (prio 1, ram): vga.vram
+    0000000082000000-0000000082000fff (prio 1, i/o): vga.mmio
+      0000000082000000-000000008200017f (prio 0, i/o): edid
+      0000000082000400-000000008200041f (prio 0, i/o): vga ioports remapped
+      0000000082000500-0000000082000515 (prio 0, i/o): bochs dispi interface
+      0000000082000600-0000000082000607 (prio 0, i/o): qemu extended regs
+    0000000082010000-000000008201ffff (prio 1, rom): vga.rom
+    0000000082200000-00000000823fffff (prio 1, i/o): sungem
+      0000000082200000-0000000082201fff (prio 0, i/o): sungem.greg
+      0000000082202000-0000000082202fff (prio 0, i/o): sungem.txdma
+      0000000082203000-0000000082203013 (prio 0, i/o): sungem.wol
+      0000000082204000-0000000082205fff (prio 0, i/o): sungem.rxdma
+      0000000082206000-00000000822061ff (prio 0, i/o): sungem.mac
+      0000000082206200-000000008220621f (prio 0, i/o): sungem.mif
+      0000000082209000-000000008220905f (prio 0, i/o): sungem.pcs
+
+memory-region: vga.vram
+  0000000081000000-0000000081ffffff (prio 1, ram): vga.vram
+
+memory-region: escc
+  0000000000013000-000000000001303f (prio 0, i/o): escc
+
+
+
+### info pci
+  Bus  0, device  11, function 0:
+    Host bridge: PCI device 106b:001f
+      PCI subsystem 1af4:1100
+      id ""
+  Bus  0, device  12, function 0:
+    Class 65280: PCI device 106b:0022
+      PCI subsystem 1af4:1100
+      BAR0: 32 bit memory at 0x80000000 [0x8007ffff]
+      id ""
+  Bus  0, device  13, function 0:
+    USB controller: PCI device 106b:003f
+      PCI subsystem 1af4:1100
+      IRQ 28, pin A
+      BAR0: 32 bit memory at 0x80080000 [0x800800ff]
+      id ""
+  Bus  0, device  14, function 0:
+    VGA controller: PCI device 1234:1111
+      PCI subsystem 1af4:1100
+      BAR0: 32 bit prefetchable memory at 0x81000000 [0x81ffffff]
+      BAR2: 32 bit memory at 0x82000000 [0x82000fff]
+      BAR6: 32 bit memory at 0x82010000 [0x8201ffff]
+      id ""
+  Bus  0, device  15, function 0:
+    Ethernet controller: PCI device 106b:0021
+      PCI subsystem 0000:0000
+      IRQ 30, pin A
+      BAR0: 32 bit memory at 0x82200000 [0x823fffff]
+      id ""
+  Bus  0, device  14, function 0:
+    Host bridge: PCI device 106b:001e
+      PCI subsystem 1af4:1100
+      id ""
+  Bus  0, device  11, function 0:
+    Host bridge: PCI device 106b:0020
+      PCI subsystem 1af4:1100
+      id ""
+
+
+### info qom-tree
+/machine (mac99-machine)
+  /fw_cfg (fw_cfg_mem)
+    /fwcfg.ctl[0] (memory-region)
+    /fwcfg.data[0] (memory-region)
+  /peripheral (container)
+  /peripheral-anon (container)
+  /unattached (container)
+    /device[0] (7400_v2.9-powerpc-cpu)
+      /unnamed-gpio-in[0] (irq)
+      /unnamed-gpio-in[1] (irq)
+      /unnamed-gpio-in[2] (irq)
+      /unnamed-gpio-in[3] (irq)
+      /unnamed-gpio-in[4] (irq)
+      /unnamed-gpio-in[5] (irq)
+      /unnamed-gpio-in[6] (irq)
+      /unnamed-gpio-in[7] (irq)
+    /device[10] (ide-cd)
+    /device[11] (pci-ohci)
+      /bus master container[0] (memory-region)
+      /bus master[0] (memory-region)
+      /ohci[0] (memory-region)
+      /usb-bus.0 (usb-bus)
+    /device[12] (usb-kbd)
+    /device[13] (usb-mouse)
+    /device[14] (VGA)
+      /bochs dispi interface[0] (memory-region)
+      /bus master container[0] (memory-region)
+      /bus master[0] (memory-region)
+      /edid[0] (memory-region)
+      /qemu extended regs[0] (memory-region)
+      /vbe[0] (memory-region)
+      /vga ioports remapped[0] (memory-region)
+      /vga-lowmem[0] (memory-region)
+      /vga.chain4[0] (memory-region)
+      /vga.mmio[0] (memory-region)
+      /vga.rom[0] (memory-region)
+      /vga.vram[0] (memory-region)
+      /vga[0] (memory-region)
+      /vga[1] (memory-region)
+      /vga[2] (memory-region)
+      /vga[3] (memory-region)
+      /vga[4] (memory-region)
+    /device[15] (sungem)
+      /bus master container[0] (memory-region)
+      /bus master[0] (memory-region)
+      /sungem.greg[0] (memory-region)
+      /sungem.mac[0] (memory-region)
+      /sungem.mif[0] (memory-region)
+      /sungem.pcs[0] (memory-region)
+      /sungem.rxdma[0] (memory-region)
+      /sungem.txdma[0] (memory-region)
+      /sungem.wol[0] (memory-region)
+      /sungem[0] (memory-region)
+    /device[16] (macio-nvram)
+      /macio-nvram[0] (memory-region)
+    /device[1] (uni-north)
+      /unin[0] (memory-region)
+    /device[2] (uni-north-agp-pcihost)
+      /pci.0 (PCI)
+      /unin-agp-conf-data[0] (memory-region)
+      /unin-agp-conf-idx[0] (memory-region)
+    /device[3] (uni-north-agp)
+      /bus master container[0] (memory-region)
+      /bus master[0] (memory-region)
+    /device[4] (uni-north-internal-pci-pcihost)
+      /pci.1 (PCI)
+      /unin-pci-conf-data[0] (memory-region)
+      /unin-pci-conf-idx[0] (memory-region)
+    /device[5] (uni-north-internal-pci)
+      /bus master container[0] (memory-region)
+      /bus master[0] (memory-region)
+    /device[6] (uni-north-pci-pcihost)
+      /pci.2 (PCI)
+      /unin-pci-conf-data[0] (memory-region)
+      /unin-pci-conf-idx[0] (memory-region)
+      /unin-pci-hole[0] (memory-region)
+      /unin-pci-isa-mmio[0] (memory-region)
+      /unin-pci-mmio[0] (memory-region)
+    /device[7] (uni-north-pci)
+      /bus master container[0] (memory-region)
+      /bus master[0] (memory-region)
+    /device[8] (macio-newworld)
+      /bus master container[0] (memory-region)
+      /bus master[0] (memory-region)
+      /dbdma (mac-dbdma)
+        /dbdma[0] (memory-region)
+      /escc (escc)
+        /escc[0] (memory-region)
+      /escc-legacy-port[0] (memory-region)
+      /escc-legacy-port[1] (memory-region)
+      /escc-legacy-port[2] (memory-region)
+      /escc-legacy-port[3] (memory-region)
+      /escc-legacy-port[4] (memory-region)
+      /escc-legacy-port[5] (memory-region)
+      /escc-legacy-port[6] (memory-region)
+      /escc-legacy-port[7] (memory-region)
+      /escc-legacy-port[8] (memory-region)
+      /escc-legacy-port[9] (memory-region)
+      /escc-legacy[0] (memory-region)
+      /gpio (macio-gpio)
+        /gpio[0] (memory-region)
+      /ide[0] (macio-ide)
+        /ide.0 (IDE)
+        /pmac-ide[0] (memory-region)
+        /unnamed-gpio-in[0] (irq)
+        /unnamed-gpio-in[1] (irq)
+      /ide[1] (macio-ide)
+        /ide.1 (IDE)
+        /pmac-ide[0] (memory-region)
+        /unnamed-gpio-in[0] (irq)
+        /unnamed-gpio-in[1] (irq)
+      /macio.0 (macio-bus)
+      /macio[0] (memory-region)
+      /pic (openpic)
+        /cpu[0] (memory-region)
+        /glb[0] (memory-region)
+        /openpic[0] (memory-region)
+        /src[0] (memory-region)
+        /tmr[0] (memory-region)
+        /unnamed-gpio-in[0] (irq)
+        /unnamed-gpio-in[10] (irq)
+        /unnamed-gpio-in[11] (irq)
+        /unnamed-gpio-in[12] (irq)
+        /unnamed-gpio-in[13] (irq)
+        /unnamed-gpio-in[14] (irq)
+        /unnamed-gpio-in[15] (irq)
+        /unnamed-gpio-in[16] (irq)
+        /unnamed-gpio-in[17] (irq)
+        /unnamed-gpio-in[18] (irq)
+        /unnamed-gpio-in[19] (irq)
+        /unnamed-gpio-in[1] (irq)
+        /unnamed-gpio-in[20] (irq)
+        /unnamed-gpio-in[21] (irq)
+        /unnamed-gpio-in[22] (irq)
+        /unnamed-gpio-in[23] (irq)
+        /unnamed-gpio-in[24] (irq)
+        /unnamed-gpio-in[25] (irq)
+        /unnamed-gpio-in[26] (irq)
+        /unnamed-gpio-in[27] (irq)
+        /unnamed-gpio-in[28] (irq)
+        /unnamed-gpio-in[29] (irq)
+        /unnamed-gpio-in[2] (irq)
+        /unnamed-gpio-in[30] (irq)
+        /unnamed-gpio-in[31] (irq)
+        /unnamed-gpio-in[32] (irq)
+        /unnamed-gpio-in[33] (irq)
+        /unnamed-gpio-in[34] (irq)
+        /unnamed-gpio-in[35] (irq)
+        /unnamed-gpio-in[36] (irq)
+        /unnamed-gpio-in[37] (irq)
+        /unnamed-gpio-in[38] (irq)
+        /unnamed-gpio-in[39] (irq)
+        /unnamed-gpio-in[3] (irq)
+        /unnamed-gpio-in[40] (irq)
+        /unnamed-gpio-in[41] (irq)
+        /unnamed-gpio-in[42] (irq)
+        /unnamed-gpio-in[43] (irq)
+        /unnamed-gpio-in[44] (irq)
+        /unnamed-gpio-in[45] (irq)
+        /unnamed-gpio-in[46] (irq)
+        /unnamed-gpio-in[47] (irq)
+        /unnamed-gpio-in[48] (irq)
+        /unnamed-gpio-in[49] (irq)
+        /unnamed-gpio-in[4] (irq)
+        /unnamed-gpio-in[50] (irq)
+        /unnamed-gpio-in[51] (irq)
+        /unnamed-gpio-in[52] (irq)
+        /unnamed-gpio-in[53] (irq)
+        /unnamed-gpio-in[54] (irq)
+        /unnamed-gpio-in[55] (irq)
+        /unnamed-gpio-in[56] (irq)
+        /unnamed-gpio-in[57] (irq)
+        /unnamed-gpio-in[58] (irq)
+        /unnamed-gpio-in[59] (irq)
+        /unnamed-gpio-in[5] (irq)
+        /unnamed-gpio-in[60] (irq)
+        /unnamed-gpio-in[61] (irq)
+        /unnamed-gpio-in[62] (irq)
+        /unnamed-gpio-in[63] (irq)
+        /unnamed-gpio-in[64] (irq)
+        /unnamed-gpio-in[65] (irq)
+        /unnamed-gpio-in[66] (irq)
+        /unnamed-gpio-in[67] (irq)
+        /unnamed-gpio-in[6] (irq)
+        /unnamed-gpio-in[7] (irq)
+        /unnamed-gpio-in[8] (irq)
+        /unnamed-gpio-in[9] (irq)
+      /pmu (via-pmu)
+        /mos6522-pmu (mos6522-pmu)
+          /mos6522[0] (memory-region)
+          /unnamed-gpio-in[0] (irq)
+          /unnamed-gpio-in[1] (irq)
+          /unnamed-gpio-in[2] (irq)
+          /unnamed-gpio-in[3] (irq)
+          /unnamed-gpio-in[4] (irq)
+        /via-pmu[0] (memory-region)
+      /timer[0] (memory-region)
+    /device[9] (ide-cd)
+    /io[0] (memory-region)
+    /ppc_core99.bios[0] (memory-region)
+    /sysbus (System)
+    /system[0] (memory-region)
+
+
+### info irq
+IRQ statistics for 7400_v2.9-powerpc-cpu:
+ 2: 615
+ 3: 33
+
+
+### info roms
+addr=0000000000000000 size=0x000001 mem=ram name="cmdline"
+addr=00000000fff00000 size=0x0b1708 mem=rom name="/opt/homebrew/Cellar/qemu/11.1.1/bin/../share/qemu/openbios-ppc ELF program header segment 0"
+addr=00000000fffffffc size=0x000004 mem=rom name="/opt/homebrew/Cellar/qemu/11.1.1/bin/../share/qemu/openbios-ppc ELF program header segment 1"
+
+

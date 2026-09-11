@@ -95,6 +95,89 @@ Tooling (newworldview):
 Done: `newworldview diff --qemu <trace> --nwboot <log>` prints the first
 divergent event with both contexts.
 
+#### S3 status: done
+
+**Capture (QEMU 11.1.1, `-M mac99,via=pmu -m 512 -cpu g4`, toast as IDE CD).**
+`-d int` / `-d in_asm` were too slow and too lossy (500 MB for a partial
+boot); replaced with a TCG plugin, `research-score/golden/nwgolden.c`
+(build line in its header). It logs every exception/interrupt
+(`qemu_plugin_register_vcpu_discon_cb`) and every 68k A-line dispatch,
+found by matching the emulator's four A-line handler entry words
+(`80bc0028` at `ROM+0x3695E0/0x369660/0x369720/0x369780`), reading
+`op=(r29>>3)&0xffff` and the 68k PC from `r24-2`. Full boot to Welcome in
+99 s at native speed.
+
+`research-score/golden/capture.py` drives the run: QMP screenshots every
+5 s, detects the Finder desktop by frame stability, types `Mac OS Install`
++ Cmd+O, detects the Welcome window the same way, and writes `phases.json`
+(byte offsets into `events.txt` for `desktop`, `launch`, `welcome`).
+`ofwalk.py` + `qmp.py` dump the OF device tree over the serial console
+(`devtree-mac99.txt`, checked in).
+
+Event grammar (one line per event; the same grammar is the S4 contract for
+SheepShaver's `NW-BOOT X …` / `NW-BOOT A …` lines):
+
+    # nwgolden 1 target=ppc
+    X <E|I|H> <from-pc> <vector> [<dar>|<srr1>]   DAR for 0x300/0x600, SRR1 for 0x700
+    A <op> <68k-pc> <handler 0..3>                 0/1 OS, 2 Toolbox, 3 Toolbox autopop
+    T <epoch-ms> <nX> <nA>                         ≤ 1 tick/s
+
+Address layouts (both emulators compared in MacROM file-offset space):
+
+| | QEMU mac99 | SheepShaver |
+|---|---|---|
+| 68k ROM (MacROM+0) | `0xFFC00000` | `0x50000000` |
+| PPC part (MacROM+0x300000…) | `0x68000000` | `0x50400000` (copy) |
+| NanoKernel RAM copy (MacROM+0x310000…) | `0x00F10000` | runs in place |
+| Firmware | OpenBIOS `0xFFF00000` | — |
+
+Golden run `~/nw-golden/run1/` (never in git: derived from ROM/toast):
+`events.txt` 103.6 MB, 3,756,605 events from NK handoff; desktop at 70.7 s,
+Welcome at 99.0 s (`shot-0019.png`). Exceptions by vector: PROGRAM 2.69 M
+(all `twi` kernel calls at `ROM+0x36E8C0` plus NK priv traps), SC 112 k,
+FPU 45 k, DEC 20 k, EXTERNAL 12.8 k, DSI 9.6 k, VPU 3.8 k, **ISI 0**.
+A-lines: 860,499 across 318 distinct traps; first ten after handoff:
+`_SetOSTrapAddress _InitZone _SetApplLimit _MoreMasters _NewPtrSysClear
+_BlockMoveData _NewHandleSysClear _MoveHHi _HLock _DisposeHandle`.
+
+**Tooling (newworldview, all built and unit-tested in `BootTraceTests`).**
+
+- `GoldenTraceImporter` (streaming, 100 MB in ~10 s), `NWBootLogImporter`
+  (canonical `NW-BOOT X/A` plus the legacy `G3: DSI/ISI/sc/DEC/68k A-line`
+  lines), `BootLayout.qemuMac99` / `.sheepShaver`, `BootTraceDiff`.
+- `diff --qemu <events.txt> --nwboot <log> [--rom] [--phases] [--ignore]
+  [--context N] [--compare-dar] [--strict-async]`: per-channel n-th
+  occurrence comparison on ROM offsets, async vectors (0x500/0x900)
+  matched by presence only, prints the first divergence with SheepShaver
+  log context and golden stream context plus golden phase.
+- `golden-stats`, `golden-atraps [--unique] [--phase]`, `trap-table
+  [--trap A9F2] [--at off]`, `drivers <rom> [--devtree] [--json]`.
+- `SuperMarioTrapTable` decodes the 9.2.1 long-form dispatch table (1024
+  Toolbox + 256 OS longs ending at `RomRsrc`; packed form kept for older
+  ROMs). `AnalysisEngine` seeds one `.function` symbol per implemented trap
+  (`68k:2c010 → _Launch`, `68k:4b500 → _WaitNextEvent`). `ATrapTable.names`
+  now comes from cxmon's 1177-entry table via `ATrapNames`; lookup is
+  flag-insensitive (`A148 → _PtrZone`, `AD7C → _GetNewDialog`);
+  `A97C = _GetNewDialog`, `A97D = _NewDialog` (swap fixed).
+- `ROMDriverInventory` + `OpenFirmwareTreeDump`: 24 `prop` parcels, 2
+  `node` parcels (CodePrepare/CodeRegister libs), 3 68k `DRVR`s (`.ATALoad`,
+  `.EDisk`, `.ATADisk`). Cross-referenced with `devtree-mac99.txt`: ROM
+  ndrvs match `nvram,flash`, `uni-north/pci`, `via-pmu/rtc` (via parent),
+  `via-pmu-99/power-mgt`, `keylargo-ata/ata` ×2, `gmac/network`; the
+  display is driven by OpenBIOS's own `driver,AAPL,MacOS,PowerPC` on
+  `QEMU,VGA@e` (no ROM `cofb` match); `escc`, `usb`, `open-pic`, `mac-io`
+  have no ROM native driver.
+
+**Done-test result** (`diff --qemu ~/nw-golden/run1/events.txt --nwboot
+ss-pr10-0b9c914c.log --rom "Mac OS ROM"`): first divergence is
+SheepShaver's `ISI (0x400)` at `ROM+0x36E8C0` (the emulator's `twi`
+kernel-call, first instruction after `rfi` into the 68k emulator). The
+golden run raises **zero** ISIs after handoff; at that same PC it takes
+`DEC (0x900)` then `PROGRAM (0x700) srr1=0002D032 trap`, i.e. the `twi`
+executes and traps into the NK. So the first gate is instruction
+translation for the PPC part at `0x5046E8C0` with `MSR[IR]=1`, not a
+device probe. That is the S4 starting point.
+
 ### S4 — Gate model at the 68k boundary (open-ended, measured per device)
 
 1. Revert `skip-68k`, the 293 A-trap stubs, and the host `_Launch` /

@@ -1,0 +1,687 @@
+### show-devs
+show-devs 
+fff54d28 / (bootrom)
+fff54e44 /aliases
+fff54ee8 /openprom (BootROM)
+fff5b110 /openprom/client-services
+fff55090 /options
+fff55108 /chosen
+fff551b8 /builtin
+fff5525c /builtin/console
+fff5ae1c /packages
+fff5c000 /packages/cmdline
+fff5c140 /packages/disk-label
+fff5de64 /packages/terminal-emulator
+fff5eed0 /packages/deblocker
+fff5f224 /packages/hfsplus-files
+fff5f5b0 /packages/hfs-files
+fff5f938 /packages/ext2-files
+fff5fc5c /packages/iso9660-files
+fff5ff80 /packages/grubfs-files
+fff602a4 /packages/mac-parts
+fff60608 /packages/pc-parts
+fff60928 /packages/xcoff-loader
+fff609f4 /packages/elf-loader
+fff60abc /packages/bootinfo-loader
+fff5db8c /cpus
+fff6a27c /cpus/PowerPC,G4@0 (cpu)
+fff5dc8c /memory@0 (memory)
+fff5dd54 /rom@ff800000
+fff60bf0 /nvram@fff04000 (nvram)
+fff60e88 /pci@f2000000 (pci)
+fff613b0 /pci@f2000000/mac-io@c (mac-io)
+fff61870 /pci@f2000000/mac-io@c/gpio@50 (gpio)
+fff61994 /pci@f2000000/mac-io@c/gpio@50/extint-gpio1@9
+fff61a80 /pci@f2000000/mac-io@c/gpio@50/programmer-switch (programmer-switch)
+fff61b58 /pci@f2000000/mac-io@c/via-pmu@16000 (via-pmu)
+fff61d60 /pci@f2000000/mac-io@c/via-pmu@16000/rtc (rtc)
+fff61f24 /pci@f2000000/mac-io@c/via-pmu@16000/power-mgt (power-mgt)
+fff62170 /pci@f2000000/mac-io@c/escc@13000 (escc)
+fff62290 /pci@f2000000/mac-io@c/escc@13000/ch-a@13020 (serial)
+fff624e8 /pci@f2000000/mac-io@c/escc@13000/ch-b@13000 (serial)
+fff627b0 /pci@f2000000/mac-io@c/escc-legacy@12000 (escc-legacy)
+fff628d4 /pci@f2000000/mac-io@c/escc-legacy@12000/ch-a@12002 (serial)
+fff62af0 /pci@f2000000/mac-io@c/escc-legacy@12000/ch-b@12000 (serial)
+fff62d7c /pci@f2000000/mac-io@c/ata-3@20000 (ata)
+fff6314c /pci@f2000000/mac-io@c/ata-3@20000/cdrom@1 (block)
+fff635e8 /pci@f2000000/mac-io@c/ata-3@21000 (ata)
+fff639b8 /pci@f2000000/mac-io@c/ata-3@21000/cdrom@0 (block)
+fff63dd0 /pci@f2000000/mac-io@c/interrupt-controller@40000 (open-pic)
+fff64020 /pci@f2000000/usb@d (usb)
+fff642f8 /pci@f2000000/usb@d/keyboard (keyboard)
+fff644e8 /pci@f2000000/QEMU,VGA@e (display)
+fff69abc /pci@f2000000/ethernet@f (network)
+fff6a090 /uni-n@f8000000 (memory-controller)
+ ok
+0 > 
+
+### /
+.properties 
+name                      "device-tree"
+#address-cells            1 
+#size-cells               1 
+clock-frequency           5f5e100 
+model                     "PowerMac3,1"
+compatible                {"PowerMac3,1", "MacRISC", "MacRISC2", "Power Macintosh"}
+device_type               "bootrom"
+system-id                 "0000000000000"
+ ok
+0 > 
+
+### /aliases
+.properties 
+name                      "aliases"
+nvram                     "/nvram@fff04000"
+via-pmu                   "/pci@f2000000/mac-io@c/via-pmu"
+rtc                       "/pci@f2000000/mac-io@c/via-pmu/rtc"
+scca                      "/pci@f2000000/mac-io@c/escc/ch-a"
+sccb                      "/pci@f2000000/mac-io@c/escc/ch-b"
+ide0                      "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1"
+cd                        "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1"
+cdrom                     "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1"
+ide1                      "/pci@f2000000/mac-io@c/ata-3@21000/cdrom@0"
+mac-io                    "/pci@f2000000/mac-io@c"
+keyboard                  "/pci@f2000000/usb@d/keyboard"
+screen                    "/pci@f2000000/mac-io@c/escc/ch-a"
+kbd                       "/pci@f2000000/usb@d/keyboard"
+ ok
+0 > 
+
+### /openprom
+.properties 
+name                      "openprom"
+device_type               "BootROM"
+model                     "OpenFirmware 3"
+relative-addressing       <empty>
+supports-bootinfo         <empty>
+boot-syntax               1 
+ ok
+0 > 
+
+### /openprom/client-services
+.properties 
+name                      "client-services"
+ ok
+0 > 
+
+### /options
+.properties 
+name                      "options"
+boot-args                 ""
+boot-device               "cd:,\\:tbxi cd:,\ppc\bootinfo.txt cd:,%BOOT"
+use-generic?              "false"
+boot-script               ""
+boot-screen               ""
+vga-ndrv?                 "true"
+virt-size                 "-1"
+virt-base                 "-1"
+load-base                 "4000000"
+real-size                 "-1"
+real-base                 "-1"
+real-mode?                "false"
+little-endian?            "false"
+scroll-lock               "true"
+skip-netboot?             "false"
+default-mac-address       "false"
+pci-probe-mask            "-1"
+selftest-#megs            "0"
+screen-#rows              "75"
+screen-#columns           "100"
+output-device             "/pci@f2000000/mac-io@c/escc/ch-a"
+input-device              "/pci@f2000000/mac-io@c/escc/ch-a"
+use-nvramrc?              "false"
+oem-logo?                 "false"
+oem-banner                ""
+oem-banner?               "false"
+nvramrc                   ""
+fcode-debug?              "false"
+diag-switch?              "false"
+boot-file                 ""
+boot-command              "boot"
+auto-boot?                "false"
+ ok
+0 > 
+
+### /chosen
+.properties 
+name                      "chosen"
+stdin                     1fc5ab70 
+stdout                    1fc5aa64 
+nvram                     1fc5a6b8 
+mmu                       1fc5a750 
+rtc                       1fc5a8f8 
+memory                    1fc5a95c 
+ ok
+0 > 
+
+### /builtin
+.properties 
+name                      "builtin"
+ ok
+0 > 
+
+### /builtin/console
+.properties 
+name                      "console"
+ ok
+0 > 
+
+### /packages
+.properties 
+name                      "packages"
+ ok
+0 > 
+
+### /packages/cmdline
+.properties 
+name                      "cmdline"
+ ok
+0 > 
+
+### /packages/disk-label
+.properties 
+name                      "disk-label"
+ ok
+0 > 
+
+### /packages/terminal-emulator
+.properties 
+name                      "terminal-emulator"
+ ok
+0 > 
+
+### /packages/deblocker
+.properties 
+name                      "deblocker"
+ ok
+0 > 
+
+### /packages/hfsplus-files
+.properties 
+name                      "hfsplus-files"
+ ok
+0 > 
+
+### /packages/hfs-files
+.properties 
+name                      "hfs-files"
+ ok
+0 > 
+
+### /packages/ext2-files
+.properties 
+name                      "ext2-files"
+ ok
+0 > 
+
+### /packages/iso9660-files
+.properties 
+name                      "iso9660-files"
+ ok
+0 > 
+
+### /packages/grubfs-files
+.properties 
+name                      "grubfs-files"
+ ok
+0 > 
+
+### /packages/mac-parts
+.properties 
+name                      "mac-parts"
+ ok
+0 > 
+
+### /packages/pc-parts
+.properties 
+name                      "pc-parts"
+ ok
+0 > 
+
+### /packages/xcoff-loader
+.properties 
+name                      "xcoff-loader"
+ ok
+0 > 
+
+### /packages/elf-loader
+.properties 
+name                      "elf-loader"
+ ok
+0 > 
+
+### /packages/bootinfo-loader
+.properties 
+name                      "bootinfo-loader"
+ ok
+0 > 
+
+### /cpus
+.properties 
+name                      "cpus"
+#address-cells            1 
+#size-cells               0 
+ ok
+0 > 
+
+### /cpus/PowerPC,G4@0
+.properties 
+name                      "PowerPC,G4"
+device_type               "cpu"
+cpu-version               c0209 
+d-cache-size              8000 
+i-cache-size              8000 
+d-cache-sets              80 
+i-cache-sets              80 
+d-cache-block-size        20 
+i-cache-block-size        20 
+tlb-sets                  40 
+tlb-size                  80 
+timebase-frequency        17d7840 
+clock-frequency           35a4e900 
+bus-frequency             5f5e100 
+state                     "running"
+reservation-granule-size  20 
+reg                       00000000
+available                 00004000   03ffc000
+                          04800000   1b458000
+                          1fe10000   601f0000
+translations              04000000   00800000   04000000   00000000
+                          1fc58000   001b8000   1fc58000   00000000
+                          fff00000   00100000   1ff00000   00000000
+ ok
+0 > 
+
+### /memory@0
+.properties 
+name                      "memory"
+device_type               "memory"
+reg                       00000000   20000000
+available                 00004000   03ffc000
+                          04800000   1b458000
+                          1fe10000   000f0000
+ ok
+0 > 
+
+### /rom@ff800000
+.properties 
+name                      "rom"
+reg                       ff800000   00000000
+#address-cells            1 
+ranges                    -- c : ff 80 00 00 00 80 00 00 ff 80 00 00 
+ ok
+0 > 
+
+### /nvram@fff04000
+.properties 
+name                      "nvram"
+#bytes                    2000 
+reg                       fff04000   00004000
+device_type               "nvram"
+compatible                "nvram,flash"
+ ok
+0 > 
+
+### /pci@f2000000
+.properties 
+name                      "pci"
+vendor-id                 106b 
+device-id                 1f 
+revision-id               0 
+class-code                60000 
+min-grant                 0 
+max-latency               0 
+devsel-speed              0 
+subsystem-vendor-id       1af4 
+subsystem-id              1100 
+cache-line-size           1000 
+device_type               "pci"
+model                     "AAPL,UniNorth"
+compatible                "uni-north"
+#address-cells            3 
+#size-cells               2 
+#interrupt-cells          1 
+reg                       f2000000   02000000
+ranges                    -- 30 : 01 00 00 00 00 00 00 00 00 00 00 00 f2 00 00 00 00 00 00 00 00 80 00 00 02 00 00 00 00 00 00 00 80 00 00 00 80 00 00 00 00 00 00 00 10 00 00 00 
+bus-range                 -- 8 : 00 00 00 00 00 00 00 00 
+available                 -- 28 : 02 00 00 00 00 00 00 00 82 40 00 00 00 00 00 00 8d c0 00 00 01 00 00 00 00 00 00 00 00 00 10 00 00 00 00 00 00 7f f0 00 
+interrupt-parent          fff63dd0 
+interrupt-map             -- 38 : 00 00 68 00 00 00 00 00 00 00 00 00 00 00 00 01 ff f6 3d d0 00 00 00 1c 00 00 00 01 00 00 78 00 00 00 00 00 00 00 00 00 00 00 00 01 ff f6 3d d0 00 00 00 1e 00 00 00 01 
+interrupt-map-mask        -- 10 : 00 ff f8 00 00 00 00 00 00 00 00 00 00 00 00 07 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c
+.properties 
+name                      "mac-io"
+vendor-id                 106b 
+device-id                 22 
+revision-id               0 
+class-code                ff0000 
+min-grant                 0 
+max-latency               0 
+devsel-speed              0 
+subsystem-vendor-id       1af4 
+subsystem-id              1100 
+cache-line-size           0 
+device_type               "mac-io"
+model                     "AAPL,Keylargo"
+compatible                "Keylargo"
+#address-cells            1 
+#size-cells               1 
+#interrupt-cells          1 
+assigned-addresses        02006010 00000000 80000000   00000000 00080000
+reg                       00006000 00000000 00000000   00000000 00000000
+                          02006010 00000000 00000000   00000000 00080000
+ranges                    -- 14 : 00 00 00 00 02 00 60 10 00 00 00 00 80 00 00 00 00 08 00 00 
+interrupt-parent          fff63dd0 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/gpio@50
+.properties 
+name                      "gpio"
+device_type               "gpio"
+#address-cells            1 
+#size-cells               0 
+compatible                "mac-io-gpio"
+reg                       00000050   00000030
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/gpio@50/extint-gpio1@9
+.properties 
+name                      "extint-gpio1"
+interrupts                -- 8 : 00 00 00 2f 00 00 00 01 
+reg                       00000009
+compatible                {"keywest-gpio1", "gpio"}
+interrupt-parent          fff63dd0 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/gpio@50/programmer-switch
+.properties 
+name                      "programmer-switch"
+device_type               "programmer-switch"
+interrupts                -- 8 : 00 00 00 37 00 00 00 00 
+interrupt-parent          fff63dd0 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/via-pmu@16000
+.properties 
+name                      "via-pmu"
+device_type               "via-pmu"
+compatible                "pmu"
+#address-cells            1 
+#size-cells               0 
+reg                       00016000   00002000
+interrupts                -- 8 : 00 00 00 19 00 00 00 01 
+pmu-version               d0330c 
+interrupt-parent          fff63dd0 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/via-pmu@16000/rtc
+.properties 
+name                      "rtc"
+device_type               "rtc"
+compatible                "rtc,via-pmu"
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/via-pmu@16000/power-mgt
+.properties 
+name                      "power-mgt"
+device_type               "power-mgt"
+compatible                "via-pmu-99"
+registry-name             "extint-gpio1"
+prim-info                 -- 23 : 00 00 00 ff 00 00 00 2c 00 03 0d 40 00 01 e7 05 00 00 34 00 00 00 00 00 00 00 26 0d 46 00 02 78 78 3c 00 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/escc@13000
+.properties 
+name                      "escc"
+#address-cells            1 
+reg                       00013000   00001000
+device_type               "escc"
+compatible                {"escc", "CHRP,es0"}
+ranges                    <empty>
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/escc@13000/ch-a@13020
+.properties 
+name                      "ch-a"
+device_type               "serial"
+compatible                "chrp,es2"
+reg                       00013020   00000001
+                          00013030   00000001
+                          00013050   00000001
+                          00008400   00000100
+                          00008500   00000100
+interrupts                -- 18 : 00 00 00 25 00 00 00 01 00 00 00 04 00 00 00 00 00 00 00 05 00 00 00 00 
+slot-names                0 
+interrupt-parent          fff63dd0 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/escc@13000/ch-b@13000
+.properties 
+name                      "ch-b"
+device_type               "serial"
+compatible                "chrp,es3"
+reg                       00013000   00000001
+                          00013010   00000001
+                          00013040   00000001
+                          00008600   00000100
+                          00008700   00000100
+interrupts                -- 18 : 00 00 00 24 00 00 00 01 00 00 00 06 00 00 00 00 00 00 00 07 00 00 00 00 
+slot-names                0 
+interrupt-parent          fff63dd0 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/escc-legacy@12000
+.properties 
+name                      "escc-legacy"
+#address-cells            1 
+reg                       00012000   00001000
+device_type               "escc-legacy"
+compatible                "chrp,es1"
+ranges                    <empty>
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/escc-legacy@12000/ch-a@12002
+.properties 
+name                      "ch-a"
+device_type               "serial"
+compatible                "chrp,es4"
+reg                       00012002   00000001
+                          00012006   00000001
+                          0001200a   00000001
+                          00008400   00000100
+                          00008500   00000100
+interrupts                -- 18 : 00 00 00 25 00 00 00 01 00 00 00 04 00 00 00 00 00 00 00 05 00 00 00 00 
+slot-names                0 
+interrupt-parent          fff63dd0 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/escc-legacy@12000/ch-b@12000
+.properties 
+name                      "ch-b"
+device_type               "serial"
+compatible                "chrp,es5"
+reg                       00012000   00000001
+                          00012004   00000001
+                          00012008   00000001
+                          00008600   00000100
+                          00008700   00000100
+interrupts                -- 18 : 00 00 00 24 00 00 00 01 00 00 00 06 00 00 00 00 00 00 00 07 00 00 00 00 
+slot-names                0 
+interrupt-parent          fff63dd0 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/ata-3@20000
+.properties 
+name                      "ata-3"
+device_type               "ata"
+#address-cells            1 
+#size-cells               0 
+compatible                "keylargo-ata"
+model                     "ata-3"
+AAPL,connector            "ata"
+AAPL,pio-timing           -- 20 : 00 00 05 26 00 00 00 85 00 00 00 25 00 00 00 25 00 00 00 25 00 00 00 00 00 00 00 00 00 00 00 00 
+interrupts                -- 10 : 00 00 00 0d 00 00 00 01 00 00 00 02 00 00 00 00 
+#interrupt-cells          2 
+reg                       00020000   00001000
+                          00008b00   00000200
+AAPL,bus-id               0 
+interrupt-parent          fff63dd0 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/ata-3@20000/cdrom@1
+.properties 
+reg                       00000001
+name                      "cdrom"
+device_type               "block"
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/ata-3@21000
+.properties 
+name                      "ata-3"
+device_type               "ata"
+#address-cells            1 
+#size-cells               0 
+compatible                "keylargo-ata"
+model                     "ata-3"
+AAPL,connector            "ata"
+AAPL,pio-timing           -- 20 : 00 00 05 26 00 00 00 85 00 00 00 25 00 00 00 25 00 00 00 25 00 00 00 00 00 00 00 00 00 00 00 00 
+interrupts                -- 10 : 00 00 00 0e 00 00 00 01 00 00 00 03 00 00 00 00 
+#interrupt-cells          2 
+reg                       00021000   00001000
+                          00008d00   00000200
+AAPL,bus-id               1 
+interrupt-parent          fff63dd0 
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/ata-3@21000/cdrom@0
+.properties 
+reg                       00000000
+name                      "cdrom"
+device_type               "block"
+ ok
+0 > 
+
+### /pci@f2000000/mac-io@c/interrupt-controller@40000
+.properties 
+name                      "interrupt-controller"
+device_type               "open-pic"
+compatible                "chrp,open-pic"
+built-in                  <empty>
+reg                       00040000   00040000
+#interrupt-cells          2 
+#address-cells            0 
+interrupt-controller      <empty>
+clock-frequency           3f940a 
+ ok
+0 > 
+
+### /pci@f2000000/usb@d
+.properties 
+name                      "usb"
+vendor-id                 106b 
+device-id                 3f 
+revision-id               0 
+class-code                c0310 
+interrupts                1 
+min-grant                 0 
+max-latency               0 
+devsel-speed              0 
+subsystem-vendor-id       1af4 
+subsystem-id              1100 
+cache-line-size           0 
+device_type               "usb"
+compatible                {"pci106b,3f", "pciclass,0c0310"}
+#address-cells            1 
+assigned-addresses        02006810 00000000 80080000   00000000 00000100
+reg                       00006800 00000000 00000000   00000000 00000000
+                          02006810 00000000 00000000   00000000 00000100
+ ok
+0 > 
+
+### /pci@f2000000/usb@d/keyboard
+.properties 
+name                      "keyboard"
+device_type               "keyboard"
+ ok
+0 > 
+
+### /pci@f2000000/QEMU,VGA@e
+.properties 
+name                      "QEMU,VGA"
+vendor-id                 1234 
+device-id                 1111 
+revision-id               2 
+class-code                30000 
+min-grant                 0 
+max-latency               0 
+devsel-speed              0 
+subsystem-vendor-id       1af4 
+subsystem-id              1100 
+cache-line-size           0 
+device_type               "display"
+model                     "QEMU VGA"
+compatible                "VGA"
+assigned-addresses        42007010 00000000 81000000   00000000 01000000
+                          02007018 00000000 82000000   00000000 00001000
+reg                       00007000 00000000 00000000   00000000 00000000
+                          42007010 00000000 00000000   00000000 01000000
+                          02007018 00000000 00000000   00000000 00001000
+width                     320 
+height                    258 
+depth                     20 
+linebytes                 c80 
+driver,AAPL,MacOS,PowerPC -- 4941 : 4a 6f 79 21 70 65 66 66 70 77 70 63 00 00 00 01 d8 53 d9 08 00 00 00 00 00 00 00 00 00 00 00 00 00 03 00 02 00 00 00 00 ff ff ff ff 00 00 00 00 00 00 30 e8 00 00 30 e8 00 00 30 e8 00 00 03 90 00 04 04 00 ff ff ff ff 00 00 00 00 00 00 14 c0 00 00 14 c0 00 00 14 c0 00 00 34 80 01 01 04 00 ff ff ff ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 03 08 00 00 00 80 04 04 04 00 00 00 00 00 00 00 00 01 00 00 02 0c ff ff ff ff 00 00 00 00 ff ff ff ff 00 00 00 00 00 00 00 04 00 00 00 14 00 00 00 01 00 00 00 f4 00 00 01 0c 00 00 02 e4 00 00 00 01 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 08 00 00 00 00 00 00 00 00 00 00 00 12 00 00 00 00 00 00 00 00 00 00 00 05 00 00 00 08 00 00 00 00 00 00 00 22 00 00 00 00 00 00 00 00 00 00 00 04 00 00 00 0d 00 00 00 00 ...
+ ok
+0 > 
+
+### /pci@f2000000/ethernet@f
+.properties 
+name                      "ethernet"
+vendor-id                 106b 
+device-id                 21 
+revision-id               1 
+class-code                20000 
+interrupts                1 
+min-grant                 40 
+max-latency               40 
+devsel-speed              0 
+fast-back-to-back         <empty>
+66mhz-capable             <empty>
+cache-line-size           0 
+device_type               "network"
+compatible                "gmac"
+assigned-addresses        02007810 00000000 82200000   00000000 00200000
+reg                       00007800 00000000 00000000   00000000 00000000
+                          02007810 00000000 00000000   00000000 00200000
+local-mac-address         -- 6 : 52 54 00 12 34 56 
+ ok
+0 > 
+
+### /uni-n@f8000000
+.properties 
+name                      "uni-n"
+device_type               "memory-controller"
+compatible                "uni-north"
+device-rev                7 
+reg                       f8000000   01000000
+ ok
+0 > 
