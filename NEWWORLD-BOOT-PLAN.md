@@ -141,6 +141,9 @@ A-lines: 860,499 across 318 distinct traps; first ten after handoff:
 _BlockMoveData _NewHandleSysClear _MoveHHi _HLock _DisposeHandle`.
 
 **Tooling (newworldview, all built and unit-tested in `BootTraceTests`).**
+Source snapshot of every S3 file (new and modified) is mirrored under
+`research-score/golden/newworldview/` with the same relative paths; the
+sibling repo `~/Documents/GitHub/newworldview` is where they build.
 
 - `GoldenTraceImporter` (streaming, 100 MB in ~10 s), `NWBootLogImporter`
   (canonical `NW-BOOT X/A` plus the legacy `G3: DSI/ISI/sc/DEC/68k A-line`
