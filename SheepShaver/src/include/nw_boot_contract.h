@@ -329,6 +329,7 @@ uint32_t nw_be32_load(const uint8_t *mem, uint32_t off);
 void nw_be32_store(uint8_t *mem, uint32_t off, uint32_t value);
 
 /* Debug-only live boot log (NW_BOOT_LOG=1 on Xcode SheepShaver Debug). */
+const char *nw_boot_line_credits(void);
 const char *nw_boot_line_g0_newworld(void);
 const char *nw_boot_line_g1_tree(void);
 const char *nw_boot_line_g1_kdp(void);

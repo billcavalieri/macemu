@@ -841,6 +841,11 @@ int nw_htab_gate_pass(const struct nw_htab_gate *gate)
 	return gate->hnfo_valid_htab || gate->spr_log_mtsdr1;
 }
 
+const char *nw_boot_line_credits(void)
+{
+	return "NewWorld boot by Bill Cavalieri";
+}
+
 const char *nw_boot_line_g0_newworld(void)
 {
 	return "G0: DecodeROM 4 MiB NewWorld +0x30d064 NK +0x310000";
@@ -868,7 +873,7 @@ const char *nw_boot_line_g1_hwinit(void)
 
 const char *nw_boot_line_g1_patch_skip(void)
 {
-	return "G1: New World patch skip";
+	return "G1: NewWorld patch skip";
 }
 
 const char *nw_boot_line_g2_first_dsi(void)
@@ -901,8 +906,10 @@ void nw_boot_log(const char *line)
 
 void nw_log_g0_decode(const uint8_t *rom, size_t size)
 {
-	if (nw_detect_decoded_rom(rom, size) == NW_DECODED_NEWWORLD)
+	if (nw_detect_decoded_rom(rom, size) == NW_DECODED_NEWWORLD) {
+		nw_boot_log(nw_boot_line_credits());
 		nw_boot_log(nw_boot_line_g0_newworld());
+	}
 }
 
 void nw_log_g1_tree(void)
