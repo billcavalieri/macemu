@@ -440,8 +440,83 @@ WP3 ARM64 JIT on the MMU, WP4 memory banks, WP5 video damage. Not before G3.
 
 - `nw_boot_log` and the G0/G1/G2 log lines and accept criteria.
 - resviewer as the resource / PEF inspection tool (no changes needed).
+- QEMU 11.1.1, `newworldview`, resviewer, the local ROM/toast, and
+  `~/nw-golden` dumps: see **Tools and files (operator reference)**.
 - `ROM-milling-brief.md`, `OS921-BOOT-PLAN.md` as history and as the
   WP0–WP6 architecture. This file governs sequencing.
+
+## Tools and files (operator reference)
+
+Live paths on the operator host. ROM, toast, and golden capture bytes never
+land in git. Recapture a QEMU dump only when a gate needs a new slice.
+
+### Guest images
+
+| what | path | notes |
+|---|---|---|
+| Mac OS ROM (CHRP / tbxi) | `~/Downloads/Mac OS ROM` | 2.4 MB; 9.2.1 New World |
+| Mac OS 9.2.1 CD | `~/Downloads/Mac OS 9.2.1 copy.toast` | 641 MB toast / ISO |
+
+### QEMU (golden gatherer)
+
+Homebrew QEMU 11.1.1. Binary: `/opt/homebrew/bin/qemu-system-ppc`.
+
+Typical machine: `-M mac99,via=pmu -m 512 -cpu g4`, toast as IDE CD.
+
+Plugins and drivers (in-tree, under `research-score/golden/`):
+
+- `nwgolden.c` / `libnwgolden.dylib`: exception and A-line event stream
+- `nwdump.c` / `libnwdump.dylib`: NK-entry and hardware-info dumps
+- `capture.py`, `ofwalk.py`, `qmp.py`
+
+Golden captures (never in git):
+
+| dir | useful files |
+|---|---|
+| `~/nw-golden/run1/` | `events.txt`, `phases.json`, `markers.tsv` |
+| `~/nw-golden/dump2/` | `nkentry-r9.bin`, `hwinfo-hnfo.bin`, `nkentry-r5.bin`, `hwinfo-kdp.bin`, `hwinfo-configinfo-pa.bin`, `hwinfo-lowmem-pa.bin`, `hwinfo-bootinfo-pa.bin` |
+| `research-score/golden/` | `devtree-mac99.txt` (checked in) |
+
+Default pack source is `~/nw-golden`. Do not recapture `run1` or `dump2`
+unless the next gate needs a register or Hnfo slice that is not already there.
+
+### newworldview
+
+Sibling repo: `~/Documents/GitHub/newworldview`.
+CLI: `NewWorldViewCLI`. S3 sources are also mirrored under
+`research-score/golden/newworldview/`.
+
+Live on this branch:
+
+- `decode-rom`
+- `trap-table` (example: `A9F2` is `_Launch` at ROM+`0x02C010`)
+- `drivers`
+- `diff` / `golden-stats` / `golden-atraps`
+- `lookup`
+- `toast-ls` / `toast-get`
+
+Unused on this branch (mill lane): `analyze-logs`, `build-grok-pack`,
+`build-grok-pack-from-log`, `export-histogram`, `export-pipeline`,
+`export-annotations`.
+
+### resviewer
+
+Sibling repo: `~/Documents/GitHub/resviewer`.
+CLI: `ResViewerCLI`. Resource and PEF inspection of the toast (System file,
+installer PEF, DITL, CODE). No changes needed in that repo for this branch.
+
+Live: `ls`, `find`, `find-imm`, `resources`, `get`, `derez`.
+
+### How they are used on a gate
+
+1. Name the first divergence with `NewWorldViewCLI diff` against
+   `~/nw-golden/run1/events.txt`.
+2. If the probe is ROM or OF: `decode-rom`, `trap-table`, `drivers`, plus
+   `dump2` / a new `nwdump` slice.
+3. If the probe is a guest file or PEF: `ResViewerCLI` / `toast-ls` /
+   `toast-get` on the 9.2.1 toast.
+4. Land one SheepShaver-side fix. Re-diff. The first divergence must move
+   later.
 
 ## Non-negotiables carried over
 
