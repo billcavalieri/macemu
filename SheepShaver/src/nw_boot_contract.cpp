@@ -609,6 +609,7 @@ const struct nw_irq_source nw_trampoline_irqs[NW_TRAMPOLINE_NIRQ] = {
 	{ 0x02, 4, 0 },	/*   dma */
 	{ 0x0e, 2, 1 },	/* ata-3 bus 1 */
 	{ 0x03, 4, 0 },
+	{ 0x1d, 2, 1 },	/* display VBL (pci slot e), SheepShaver's; level, 68k level 2 */
 	{ 0x1c, 2, 1 },	/* usb (golden machine has one; harmless without) */
 	{ 0x1e, 3, 1 },
 };
@@ -718,6 +719,7 @@ void nw_lzss_decode(const uint8_t *src, size_t src_size, uint8_t *dst, size_t ds
 }
 
 uint32_t nw_la_ram_base, nw_la_ram_size, nw_la_rom_base, nw_la_kdp_pa;
+uint32_t nw_thunk_area_base, nw_thunk_area_size;
 
 void nw_la_enable(uint32_t ram_base, uint32_t ram_size, uint32_t rom_base)
 {

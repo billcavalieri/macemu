@@ -40,6 +40,13 @@ struct nw_bootinfo_params {
 	const uint8_t *parcels;		/* 'prcl' blob, may be NULL */
 	size_t parcels_size;
 	/*
+	 * SheepShaver's video ndrv for the display node
+	 * ("driver,AAPL,MacOS,PowerPC"), may be NULL. With it present the
+	 * ROM's cofb parcel driver (add-if-absent) stays off the node.
+	 */
+	const uint8_t *display_driver;
+	size_t display_driver_size;
+	/*
 	 * Boot device (StartLib's GetStartupDevice): it resolves /chosen
 	 * "bootpath" to a node and, for every drive queue entry, looks for a
 	 * child of that node whose "AAPL,boot-cookie" (4 bytes) equals the

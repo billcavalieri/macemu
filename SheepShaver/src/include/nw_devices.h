@@ -84,6 +84,15 @@
  *   is the PMU interrupt (level low), pin 9 the NMI (edge), wired to
  *   OpenPIC 0x2f / 0x37.
  *
+ *   Display VBL: the display node (pci slot e) has a vertical-blank
+ *   interrupt, OpenPIC 0x1d (uni-north's line for that slot in the mac99
+ *   layout), level-sensitive: asserted every 1/60 s of timebase while
+ *   the device's VBL interrupt is enabled (nw_display_vbl_enable(), the
+ *   driver's cscSetInterrupt), cleared by the driver's handler
+ *   (nw_display_vbl_clear()). SheepShaver's video ndrv installs its handler
+ *   through the Interrupt Manager (driver-ist, InstallInterruptFunctions,
+ *   the member's enabler) like any PCI ndrv.
+ *
  * All clocks derive from one timebase so guest measurements agree with
  * mftb/DEC.
  */
@@ -97,6 +106,10 @@ struct nw_devices_clock {
 void nw_devices_init(const struct nw_devices_clock *tb);
 /* Periodic work (OpenPIC timers); call from the CPU's coarse tick. */
 void nw_devices_tick(void);
+/* Display VBL interrupt enable (the video driver's cscSetInterrupt) and
+ * status clear (its interrupt handler). */
+void nw_display_vbl_enable(int on);
+void nw_display_vbl_clear(void);
 
 /* OpenPIC external source n (0..63): level 1 asserts, 0 deasserts. Edge
  * sources (IVPR sense = 0) latch on the rising edge. */
@@ -189,6 +202,7 @@ enum {
 	NW_PMU_RTC_OFFSET = (int)2082844800u,	/* 1904 -> 1970 */
 	NW_PMU_IRQ = 0x19,			/* OpenPIC sources */
 	NW_GPIO1_IRQ = 0x2f, NW_GPIO9_IRQ = 0x37,
+	NW_VBL_IRQ = 0x1d, NW_VBL_HZ = 60,
 	NW_GPIO_OUT_DATA = 1, NW_GPIO_IN_DATA = 2, NW_GPIO_OUT_ENABLE = 4,
 	NW_GPIO_NPINS = 36
 };

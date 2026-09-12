@@ -479,14 +479,23 @@ Node *build_machine(const nw_bootinfo_params *p)
 	pic->u32("clock-frequency", 0x003f940a);
 
 	/* Display: SheepShaver's frame buffer, presented as a PCI device at
-	 * slot e with its aperture at fb_la. The ROM's cofb ndrv (parcel
-	 * cofb/display) drives it through address/width/height/depth/linebytes. */
+	 * slot e with its aperture at fb_la. The ROM's early display code uses
+	 * address/width/height/depth/linebytes; the driver is SheepShaver's
+	 * video ndrv when given (Display Manager aware: modes, gamma, VSL),
+	 * otherwise the ROM's fixed-mode cofb ndrv attaches from the parcels. */
 	Node *disp = pci->add("display");
 	add_pci_ids(disp, 0x106b, 0x0010, 0, 0x00030000);
 	disp->u32("cache-line-size", 0);
 	disp->str("device_type", "display");
 	disp->str("model", "SheepShaver Video");
 	disp->str("compatible", "cofb");
+	if (p->display_driver && p->display_driver_size) {
+		disp->set("driver,AAPL,MacOS,PowerPC", p->display_driver, p->display_driver_size);
+		/* vertical blank, OpenPIC 0x1d level, Trampoline list position 7
+		 * (nw_trampoline_irqs); the driver installs its VSL handler on it */
+		add_interrupts(disp, "0000001d00000001", "0000001d", "00000002", "00000007", "00000007");
+		disp->u32("interrupt-parent", NW_PHANDLE_PIC);
+	}
 	{
 		uint32_t fb_size = (p->fb_linebytes * p->fb_height + 0xfffu) & ~0xfffu;
 		uint8_t aa[20] = { 0x82, 0x00, 0x70, 0x10, 0, 0, 0, 0 };

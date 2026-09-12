@@ -35,6 +35,8 @@
 #include "user_strings.h"
 #include "version.h"
 #include "thunks.h"
+#include "rom_patches.h"
+#include "nw_devices.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -101,6 +103,75 @@ static uint32 nqdmisc_tvect = 0;
 void NQDMisc(uint32 arg1, uintptr arg2)
 {
 	CallMacOS2(nqdmisc_ptr, nqdmisc_tvect, arg1, (void *)arg2);
+}
+
+/*
+ *  New World: the VBL is a real interrupt of the display node (OpenPIC
+ *  source NW_VBL_IRQ, see nw_devices.h). The driver installs its handler
+ *  the way a PCI ndrv does: the node's "driver-ist" property names the
+ *  interrupt set member, GetInterruptFunctions() yields the member's
+ *  enabler, InstallInterruptFunctions() hooks the handler (a NativeOp
+ *  thunk for NATIVE_VIDEO_VBL, which runs VideoDriverVBL() and answers
+ *  kIsrIsComplete), the enabler unmasks the source. Old World keeps its
+ *  host-side VBL.
+ */
+typedef int32 (*rpg_ptr)(void *, const char *, void *, uint32 *);
+static uint32 rpg_tvect = 0;
+typedef int32 (*iif_ptr)(uint32, int32, void *, void *, void *, void *);
+static uint32 iif_tvect = 0;
+typedef int32 (*gif_ptr)(uint32, int32, void *, void *, void *, void *);
+static uint32 gif_tvect = 0;
+typedef void (*ien_ptr)(uint32, int32, void *);	/* InterruptSetMember by value: r3 setID, r4 member */
+static bool nw_vbl_installed = false;
+
+static void nw_install_vbl_handler(VidLocals *csSave)
+{
+	if (rpg_tvect == 0 || iif_tvect == 0 || gif_tvect == 0)
+		return;
+	enum { IST_MEMBER_COUNT = 3, IST_CHIP_SOURCE = 0 };
+	SheepArray<IST_MEMBER_COUNT * 8> ist;	/* {setID, member} x 3 */
+	SheepVar32 size = IST_MEMBER_COUNT * 8;
+	SheepString name("driver-ist");
+	int32 err = (int32)CallMacOS4(rpg_ptr, rpg_tvect, (void *)csSave->regEntryID, (const char *)name.addr(),
+	                              (void *)ist.addr(), (uint32 *)size.addr());
+	if (err != 0 || size.value() < 8) {
+		printf("NW-BOOT G1: video ndrv: no driver-ist on the display node (err %d); no VBL\n", (int)err);
+		return;
+	}
+	const uint32 set_id = ReadMacInt32(ist.addr() + IST_CHIP_SOURCE * 8);
+	const int32 member = (int32)ReadMacInt32(ist.addr() + IST_CHIP_SOURCE * 8 + 4);
+	/* the member's own enabler/disabler (the chip's mask bit); kept, and
+	 * the enabler run once the handler is in place, as an ndrv does */
+	SheepVar32 refcon = 0, handler = 0, enabler = 0, disabler = 0;
+	err = (int32)CallMacOS6(gif_ptr, gif_tvect, set_id, member, (void *)refcon.addr(),
+	                        (void *)handler.addr(), (void *)enabler.addr(), (void *)disabler.addr());
+	if (err != 0 || enabler.value() == 0) {
+		printf("NW-BOOT G1: video ndrv: GetInterruptFunctions -> %d enabler %08x; no VBL\n", (int)err, (unsigned)enabler.value());
+		return;
+	}
+	/* The handler's TVector and code live in the system heap, Mac memory
+	 * the Interrupt Manager and Mixed Mode see, rather than in SheepShaver's
+	 * thunk area. The code is the NativeOp for NATIVE_VIDEO_VBL followed by
+	 * blr, like the driver stub's. */
+	const uint32 blk = Mac_sysalloc(16);
+	if (blk == 0) {
+		printf("NW-BOOT G1: video ndrv: no memory for the VBL handler; no VBL\n");
+		return;
+	}
+	WriteMacInt32(blk + 0, NativeOpcode(NATIVE_VIDEO_VBL));
+	WriteMacInt32(blk + 4, 0x4e800020);		/* blr */
+	WriteMacInt32(blk + 8, blk);			/* TVector: code, TOC */
+	WriteMacInt32(blk + 12, 0);
+	err = (int32)CallMacOS6(iif_ptr, iif_tvect, set_id, member, (void *)0,
+	                        (void *)(blk + 8), (void *)0, (void *)0);
+	if (err != 0) {
+		printf("NW-BOOT G1: video ndrv: InstallInterruptFunctions -> %d; no VBL\n", (int)err);
+		return;
+	}
+	CallMacOS3(ien_ptr, enabler.value(), set_id, member, (void *)0);
+	nw_vbl_installed = true;
+	nw_display_vbl_enable(1);
+	printf("NW-BOOT G1: video ndrv: VBL handler on interrupt set %08x member %d, enabled\n", (unsigned)set_id, (int)member);
 }
 
 
@@ -188,6 +259,8 @@ static int16 VideoOpen(uint32 pb, VidLocals *csSave)
 	csSave->vslServiceID = theServiceID.value();
 	D(bug(" Interrupt ServiceID %08lx\n", csSave->vslServiceID));
 	csSave->interruptsEnabled = true;
+	if (ROMType == ROMTYPE_NEWWORLD)
+		nw_install_vbl_handler(csSave);
 
 	return noErr;
 }
@@ -446,6 +519,8 @@ static int16 VideoControl(uint32 pb, VidLocals *csSave)
 		case cscSetInterrupt:						// SetInterrupt
 			D(bug("SetInterrupt\n"));
 			csSave->interruptsEnabled = !ReadMacInt8(param);
+			if (ROMType == ROMTYPE_NEWWORLD && nw_vbl_installed)
+				nw_display_vbl_enable(csSave->interruptsEnabled);
 			return noErr;
 
 		case cscDirectSetEntries:					// DirectSetEntries
@@ -1077,6 +1152,14 @@ int16 VideoDoDriverIO(uint32 spaceID, uint32 commandID, uint32 commandContents, 
 				printf("FATAL: VideoDoDriverIO(): Can't find NQDMisc()\n");
 				err = -1;
 				break;
+			}
+			if (ROMType == ROMTYPE_NEWWORLD) {
+				rpg_tvect = FindLibSymbol("\017NameRegistryLib", "\023RegistryPropertyGet");
+				iif_tvect = FindLibSymbol("\021DriverServicesLib", "\031InstallInterruptFunctions");
+				gif_tvect = FindLibSymbol("\021DriverServicesLib", "\025GetInterruptFunctions");
+				if (rpg_tvect == 0 || iif_tvect == 0 || gif_tvect == 0)
+					printf("NW-BOOT G1: video ndrv: RegistryPropertyGet %08x InstallInterruptFunctions %08x GetInterruptFunctions %08x; no VBL\n",
+					       (unsigned)rpg_tvect, (unsigned)iif_tvect, (unsigned)gif_tvect);
 			}
 
 			private_data = new VidLocals;

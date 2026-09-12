@@ -868,14 +868,17 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 	}
 #ifdef SHEEPSHAVER
 	{
-		/* Fetch outside guest RAM/ROM would read host memory. Report
-		 * it as a machine check so the log names the PA; do not guess. */
+		/* Fetch outside guest RAM/ROM (and SheepShaver's thunk area, which
+		 * the guest is handed by identity mapping) would read host memory.
+		 * Report it as a machine check so the log names the PA; do not
+		 * guess. */
 		extern uint32 ROMBase, RAMBase, RAMSize;
 		const uint32 pa = r.pa;
 		const bool in_ram = pa >= RAMBase && pa < RAMBase + RAMSize;
 		const bool in_rom = pa >= ROMBase && pa < ROMBase + 0x500000u;
 		const bool in_low = pa < 0x4000u;
-		if (!(in_ram || in_rom || in_low)) {
+		const bool in_thunks = pa - nw_thunk_area_base < nw_thunk_area_size;
+		if (!(in_ram || in_rom || in_low || in_thunks)) {
 			dar_ = pa;
 			take_exception(NW_VEC_MACHINE_CHECK, pc(), 0);
 			return false;

@@ -70,6 +70,9 @@
 #include "video_blit.h"
 #include "vm_alloc.h"
 #include "cdrom.h"
+#ifdef SHEEPSHAVER
+#include "nw_devices.h"
+#endif
 
 #define DEBUG 0
 #include "debug.h"
@@ -1810,6 +1813,18 @@ void VideoHostPresent(void)
 		do_toggle_fullscreen();
 
 	present_sdl_video();
+}
+
+/*
+ *  The driver half of the VBL alone: New World's video ndrv runs this from
+ *  its interrupt handler (the display node's VBL source); presentation is
+ *  VideoHostPresent()'s.
+ */
+void VideoDriverVBL(void)
+{
+	nw_display_vbl_clear();
+	if (private_data != NULL && private_data->interruptsEnabled)
+		VSLDoInterruptService(private_data->vslServiceID);
 }
 #else
 void VideoInterrupt(void)

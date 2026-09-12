@@ -260,6 +260,12 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 				 * start of the ROM's own driver-install routine, which
 				 * continues after us (nw_patch_68k_drivers). */
 				nw_install_drivers();
+				/* CFM is up here (the ROM has been through CFMDispatch
+				 * before the unit table). Resolve the InterfaceLib TVECTs
+				 * host-side calls into the guest use from native mode
+				 * (GetSharedLibrary/FindSymbol/NewPtrSys/CallUniversalProc):
+				 * the video ndrv's DoDriverIO needs them. */
+				InitCallUniversalProc();
 				r->a[7] -= 0x32;
 				break;
 			}

@@ -139,6 +139,7 @@ extern bool VideoInit(void);
 extern void VideoExit(void);
 extern void VideoVBL(void);
 extern void VideoHostPresent(void);	// New World: present the frame buffer without the driver VBL
+extern void VideoDriverVBL(void);	// New World: VSL interrupt service alone (the ndrv's VBL handler)
 extern void VideoInstallAccel(void);
 extern void VideoQuitFullScreen(void);
 

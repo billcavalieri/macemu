@@ -95,6 +95,48 @@ const uint32 NW_DRIVER_SPACE_SIZE = 0x1000;
 const uint32 NW_ROM68K_LA = 0xffc00000u;
 static inline uint32 nw_rom_la(uint32 off) { return NW_ROM68K_LA + off; }
 
+/*
+ * New World hybrid: SheepShaver's video ndrv for the tree's display node.
+ * The Old World stub's DoDriverIO fetches the native DoDriverIO address
+ * from SheepShaver low memory (XLM_TOC / XLM_VIDEO_DOIO) and bctr's to a
+ * SheepMem thunk; here the body is the NativeOp itself in its returning
+ * form (pc = lr after the host call), so the driver depends on nothing
+ * outside its own container. Returns the size, 0 if the stub's sequence
+ * is not where expected.
+ */
+static const uint8 nw_video_driver_stub[] = {
+#include "VideoDriverStub.i"
+};
+static uint8 nw_video_driver[sizeof(nw_video_driver_stub)];
+
+static size_t nw_build_video_driver(void)
+{
+	static const uint8 old_world_body[] = {
+		0x80, 0x40, 0x28, 0x08,		/* lwz   r2,XLM_TOC */
+		0x80, 0x00, 0x28, 0xd8,		/* lwz   r0,XLM_VIDEO_DOIO */
+		0x7c, 0x09, 0x03, 0xa6,		/* mtctr r0 */
+		0x4e, 0x80, 0x04, 0x20		/* bctr */
+	};
+	memcpy(nw_video_driver, nw_video_driver_stub, sizeof(nw_video_driver));
+	for (size_t i = 0; i + sizeof(old_world_body) <= sizeof(nw_video_driver); i += 4) {
+		if (memcmp(nw_video_driver + i, old_world_body, sizeof(old_world_body)) != 0)
+			continue;
+		const uint32 op = NativeOpcode(NATIVE_VIDEO_DO_DRIVER_IO);
+		nw_video_driver[i + 0] = (uint8)(op >> 24);
+		nw_video_driver[i + 1] = (uint8)(op >> 16);
+		nw_video_driver[i + 2] = (uint8)(op >> 8);
+		nw_video_driver[i + 3] = (uint8)op;
+		for (size_t k = 4; k < sizeof(old_world_body); k += 4) {
+			nw_video_driver[i + k + 0] = 0x4e;	/* blr (not reached) */
+			nw_video_driver[i + k + 1] = 0x80;
+			nw_video_driver[i + k + 2] = 0x00;
+			nw_video_driver[i + k + 3] = 0x20;
+		}
+		return sizeof(nw_video_driver);
+	}
+	return 0;
+}
+
 
 /*
  *  Decode ROM image, 4 MB plain images or NewWorld CHRP (lzss or parcels/prcl)
@@ -722,6 +764,8 @@ static bool patch_nanokernel_boot(void)
 		extra[n_extra].la = extra[n_extra].pa = SheepMem::Base();
 		extra[n_extra].size = SheepMem::Size();
 		n_extra++;
+		nw_thunk_area_base = SheepMem::Base();
+		nw_thunk_area_size = SheepMem::Size();
 		/* (No DR cache range: this build does not map DR_CACHE_BASE, and
 		 * under New World the NK owns the DR emulator.) */
 		uint32 fb_size = 0;
@@ -785,6 +829,10 @@ static bool patch_nanokernel_boot(void)
 			bp.bus_hz = (uint32)BusClockSpeed;
 			bp.tb_hz = (uint32)TimebaseSpeed;
 			bp.parcels = nw_parcels_get(&bp.parcels_size);
+			bp.display_driver_size = nw_build_video_driver();
+			bp.display_driver = bp.display_driver_size ? nw_video_driver : NULL;
+			if (bp.display_driver_size == 0)
+				printf("NW-BOOT G1: video driver stub sequence not found; display keeps the ROM's cofb ndrv\n");
 			bp.cd_refnum = PrefsFindBool("nocdrom") ? 0 : (int16_t)CDROMRefNum;
 			bp.disk_refnum = (int16_t)DiskRefNum;
 			bp.boot_from_cd = (PrefsFindInt32("bootdriver") == CDROMRefNum);

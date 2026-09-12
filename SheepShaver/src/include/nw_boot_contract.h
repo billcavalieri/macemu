@@ -244,7 +244,7 @@ struct nw_irq_source {
 	uint8_t prio;
 	uint8_t level;
 };
-enum { NW_TRAMPOLINE_NIRQ = 9 };
+enum { NW_TRAMPOLINE_NIRQ = 10 };
 extern const struct nw_irq_source nw_trampoline_irqs[NW_TRAMPOLINE_NIRQ];
 /* Writes the table into the OpenPIC model (nw_devices.h); call after
  * nw_devices_init(), before the guest runs. */
@@ -280,6 +280,11 @@ void nw_lzss_decode(const uint8_t *src, size_t src_size, uint8_t *dst, size_t ds
  */
 extern uint32_t nw_la_ram_base, nw_la_ram_size, nw_la_rom_base, nw_la_kdp_pa;
 void nw_la_enable(uint32_t ram_base, uint32_t ram_size, uint32_t rom_base);
+/* Host area the guest executes from besides RAM and ROM: SheepMem, where
+ * SheepShaver's guest-callable thunks (NativeOp TVECTs, the CallMacOS
+ * return trampoline, 68k procedures) live. Identity mapped for the NK
+ * (rom_patches.cpp) and accepted by the CPU's fetch guard. */
+extern uint32_t nw_thunk_area_base, nw_thunk_area_size;
 
 static inline uint32_t nw_la_to_pa(uint32_t la)
 {

@@ -229,9 +229,45 @@ static void timer_write_tbcr(int t, uint32_t v)
 
 static void via_tick(void);
 
+/* Display vertical blank: asserted (level) every 1/NW_VBL_HZ s of timebase
+ * while the device's VBL interrupt is enabled (the driver's cscSetInterrupt);
+ * the driver's handler clears it (nw_display_vbl_clear). */
+static uint64_t vbl_next;
+static int vbl_enabled;
+
+void nw_display_vbl_enable(int on)
+{
+	vbl_enabled = on != 0;
+	if (!vbl_enabled)
+		pic_set_irq(NW_VBL_IRQ, 0);
+}
+
+void nw_display_vbl_clear(void)
+{
+	pic_set_irq(NW_VBL_IRQ, 0);
+}
+
+static void vbl_tick(void)
+{
+	if (g_tb.hz == 0)
+		return;
+	const uint64_t period = g_tb.hz / NW_VBL_HZ;
+	const uint64_t now = tb_now();
+	if (vbl_next != 0 && now < vbl_next)
+		return;
+	if (vbl_next == 0 || now - vbl_next > 4 * period) {	/* first call or fell behind: re-arm */
+		vbl_next = now + period;
+		return;
+	}
+	vbl_next += period;
+	if (vbl_enabled)
+		pic_set_irq(NW_VBL_IRQ, 1);
+}
+
 void nw_devices_tick(void)
 {
 	via_tick();
+	vbl_tick();
 	for (int t = 0; t < NW_OPENPIC_NTMR; t++) {
 		struct pic_timer *tm = &pic.tmr[t];
 		if (!tm->running)
@@ -1441,6 +1477,8 @@ static void via_tick(void)
 void nw_devices_init(const struct nw_devices_clock *tb)
 {
 	g_tb = *tb;
+	vbl_next = 0;
+	vbl_enabled = 0;
 	pic_reset();
 	memset(unin_regs, 0, sizeof(unin_regs));
 	memset(pci_addr, 0, sizeof(pci_addr));

@@ -246,13 +246,15 @@ int main()
 		CHECK(nw_be32_load(&ci[0], 0x3a0) == 4 && nw_be32_load(&ci[0], 0x3a4) == 0xffc0002au &&
 		      nw_be32_load(&ci[0], 0x3a8) == 0);
 		CHECK(nw_be32_load(&ci[0], 0xff4) == 0xffffffffu);
-		CHECK(nw_be32_load(&ci[0], 0xf80) == 0x002f0037u && nw_be32_load(&ci[0], 0xf90) == 0x001effffu);
+		/* ... 0x03 0x1d (display VBL) | 0x1c 0x1e | end */
+		CHECK(nw_be32_load(&ci[0], 0xf80) == 0x002f0037u && nw_be32_load(&ci[0], 0xf8c) == 0x0003001du &&
+		      nw_be32_load(&ci[0], 0xf90) == 0x001c001eu && nw_be32_load(&ci[0], 0xf94) == 0xffffffffu);
 		CHECK(nw_be32_load(&ci[0], 0xd00) == 0xffffffffu && nw_be32_load(&ci[0], 0xd40) == 0x02070102u);
 		CHECK(nw_be32_load(&ci[0], 0xf00) == 0x02070102u);
-		/* level masks follow the list: level 1 = via-pmu (2); level 2 = gpio1, ata, usb 0x1c
-		 * (0, 3, 5, 7); level 3 = 0x1e (8); level 4 = ata dma (4, 6); level 7 = pswitch (1) */
-		CHECK(nw_be32_load(&ci[0], 0xf44) == 0x20000000u && nw_be32_load(&ci[0], 0xf48) == 0x95000000u);
-		CHECK(nw_be32_load(&ci[0], 0xf4c) == 0x00800000u && nw_be32_load(&ci[0], 0xf50) == 0x0a000000u);
+		/* level masks follow the list: level 1 = via-pmu (2); level 2 = gpio1, ata, display, usb 0x1c
+		 * (0, 3, 5, 7, 8); level 3 = 0x1e (9); level 4 = ata dma (4, 6); level 7 = pswitch (1) */
+		CHECK(nw_be32_load(&ci[0], 0xf44) == 0x20000000u && nw_be32_load(&ci[0], 0xf48) == 0x95800000u);
+		CHECK(nw_be32_load(&ci[0], 0xf4c) == 0x00400000u && nw_be32_load(&ci[0], 0xf50) == 0x0a000000u);
 		CHECK(nw_be32_load(&ci[0], 0xf5c) == 0x40000000u && nw_be32_load(&ci[0], 0xf40) == 0 && nw_be32_load(&ci[0], 0xf60) == 0);
 		CHECK(nw_be32_load(&ci[0], 0) == 0 && nw_be32_load(&ci[0], 0x70) == 0x30202020u);
 		CHECK(nw_be32_load(&ci[0], 0x378) == 0x01010000u);
@@ -877,6 +879,38 @@ int main()
 		CHECK(nw_openpic_read(NW_OPENPIC_TIMER0) & NW_OPENPIC_TCCR_TOG);	/* toggled, reloaded */
 		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);
 		nw_openpic_write(NW_OPENPIC_TIMER0 + 0x10, 1000 | NW_OPENPIC_TBCR_CI);	/* inhibit */
+		/* display VBL: source NW_VBL_IRQ asserted every 1/60 s once enabled and unmasked (level, prio 3, vector 0x60) */
+		nw_openpic_write(NW_OPENPIC_SRC0 + NW_VBL_IRQ * 0x20, 0x00c30060u);
+		nw_openpic_write(NW_OPENPIC_SRC0 + NW_VBL_IRQ * 0x20 + 0x10, 1);
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0x80, 0);
+		g_fake_tb += 25000000u / 60u;
+		nw_devices_tick();						/* not enabled by the driver: no VBL */
+		CHECK(nw_io_ext_irq == 0);
+		nw_display_vbl_enable(1);
+		nw_devices_tick();
+		CHECK(nw_io_ext_irq == 0);
+		g_fake_tb += 25000000u / 60u / 2u;
+		nw_devices_tick();
+		CHECK(nw_io_ext_irq == 0);					/* half a frame: nothing */
+		g_fake_tb += 25000000u / 60u / 2u;
+		nw_devices_tick();
+		CHECK(nw_io_ext_irq == 1);					/* one frame: VBL */
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0x60);
+		CHECK(nw_io_ext_irq == 0);					/* in service */
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);
+		CHECK(nw_io_ext_irq == 1);					/* level: still asserted until the handler clears it */
+		nw_display_vbl_clear();
+		CHECK(nw_io_ext_irq == 0);
+		g_fake_tb += 25000000u;						/* a second without ticks: no burst, re-arms */
+		nw_devices_tick();
+		CHECK(nw_io_ext_irq == 0);
+		g_fake_tb += 25000000u / 60u;
+		nw_devices_tick();
+		CHECK(nw_io_ext_irq == 1);
+		nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0);
+		nw_display_vbl_clear();
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);
+		nw_display_vbl_enable(0);
 		/* GCR reset returns everything to the reset state */
 		nw_openpic_write(NW_OPENPIC_GCR, NW_OPENPIC_GCR_RESET);
 		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0x80) == 15);
@@ -1196,6 +1230,7 @@ int main()
 		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + NW_GPIO9_IRQ * 0x20) == 0x80870001u);	/* edge, prio 7 */
 		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 0x2f * 0x20) == 0x80c20000u);
 		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 0x0d * 0x20) == 0x80c20003u);	/* ata-3 bus 0: list position 3 */
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + NW_VBL_IRQ * 0x20) == 0x80c20007u);	/* display VBL: level, prio 2, position 7 */
 		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 0x08 * 0x20) == 0xa0000000u);		/* not in the list: reset value */
 		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0x80) == 0);
 		/* ConfigInfo tail agrees with the programmed table: +0xf80[i] == src, +0xf00[i] == prio */
