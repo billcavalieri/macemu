@@ -756,7 +756,7 @@ static bool patch_nanokernel_boot(void)
 		ci.rom_area_size = ROM_AREA_SIZE;
 		ci.ram_base = RAMBase;
 		ci.ram_size = RAMSize;
-		ci.ci_pa = ROMBase + 0x30d000;
+		ci.ci_pa = NW_CI_PA;		/* init_emul_ppc copies the filled page there */
 		ci.bootinfo_pa = NW_BOOTINFO_LA;
 		ci.extra = extra;
 		ci.n_extra = n_extra;

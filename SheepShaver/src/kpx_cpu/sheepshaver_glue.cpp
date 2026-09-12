@@ -34,6 +34,7 @@
 #include "cpu/ppc/ppc-instructions.hpp"
 #include "thunks.h"
 #include "nw_boot_contract.h"
+#include "nw_devices.h"
 
 // Used for NativeOp trampolines
 #include "video.h"
@@ -885,6 +886,11 @@ static bool guest_phys_write32(void *, uint32_t pa, uint32_t value)
 	return true;
 }
 
+static uint64_t glue_tb_ticks(void *)
+{
+	return ppc_cpu->tb_host_ticks();
+}
+
 void init_emul_ppc(void)
 {
 	// Get pointer to KernelData in host address space
@@ -900,6 +906,18 @@ void init_emul_ppc(void)
 		ppc32_guest_mmu().set_phys_read32(guest_phys_read32, NULL);
 		ppc32_guest_mmu().set_phys_write32(guest_phys_write32, NULL);
 		ppc_cpu->enable_guest_mmu(true);
+		/* Device models (OpenPIC, Keylargo timer, uni-n, VIA-PMU) clocked at
+		 * the timebase rate so guest measurements against them are exact,
+		 * from the host side of it so a guest mttb does not move them. */
+		struct nw_devices_clock clk;
+		clk.ticks = glue_tb_ticks;
+		clk.ctx = NULL;
+		clk.hz = (uint32)TimebaseSpeed;
+		nw_devices_init(&clk);
+		/* The Trampoline programs the OpenPIC sources (priority, vector,
+		 * sense, destination) before the NK runs; the 68k StartInit only
+		 * toggles their mask bits afterwards. */
+		nw_trampoline_program_pic();
 		/*
 		 * G1 handoff: NK v2 (0x3104a8) walks NKSystemInfo in r5 for the
 		 * physical RAM banks (bank size at +52). The Trampoline fills this
@@ -912,7 +930,7 @@ void init_emul_ppc(void)
 		layout.rom_area_size = ROM_AREA_SIZE;
 		layout.ram_base = RAMBase;
 		layout.ram_size = RAMSize;
-		layout.ci_pa = ROMBase + 0x30d000;
+		layout.ci_pa = NW_CI_PA;
 		layout.bootinfo_pa = NW_BOOTINFO_LA;
 		layout.extra = NULL;
 		layout.n_extra = 0;
@@ -949,8 +967,14 @@ void init_emul_ppc(void)
 		 * 0..0x2fff == ROM+0x300000). Only the first 0x2800 bytes are real
 		 * vectors. This is a physical address (the guest's LA 0 is RAM at
 		 * PA RAMBase, see nw_la_to_pa), so bypass the Mac accessors.
+		 * The filled ConfigInfo goes in the page after them (PA 0x3000,
+		 * golden hardware-info +0xc): the NK's external interrupt handler
+		 * reads its vector -> 68k level table there by absolute address.
+		 * r3 (ConfigInfo) points at that copy.
 		 */
 		memcpy(vm_do_get_real_address(0), ROMBaseHost + NW_NK_EXC_TABLE_ROM_OFF, NW_NK_EXC_TABLE_COPY_LEN);
+		memcpy(vm_do_get_real_address(NW_CI_PA), ROMBaseHost + NW_CONFIGINFO_OFFSET, NW_CI_SIZE);
+		ppc_cpu->set_register(powerpc_registers::GPR(3), any_register((uint32)NW_CI_PA));
 		nw_log_g1_hwinit();
 #if NW_BOOT_LOG
 		{

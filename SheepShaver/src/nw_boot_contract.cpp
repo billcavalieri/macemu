@@ -3,6 +3,7 @@
  */
 
 #include "nw_boot_contract.h"
+#include "nw_devices.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -570,10 +571,11 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
 	 */
 	for (uint32_t o = CI_TAIL_D00; o < CI_TAIL_D00 + 0x40; o += 4)
 		nw_be32_store(ci, o, 0xffffffffu);
-	static const uint32_t desc16[4] = { 0x02070104u, 0x04040404u, 0x04020402u, 0x04020300u };
-	for (int i = 0; i < 4; i++) {
-		nw_be32_store(ci, CI_TAIL_D00 + 0x40 + (uint32_t)i * 4u, desc16[i]);
-		nw_be32_store(ci, CI_TAIL_F00 + (uint32_t)i * 4u, desc16[i]);
+	/* per-source priorities, one byte each in list order, zero padded */
+	for (uint32_t i = 0; i < 16; i++) {
+		const uint8_t p = i < NW_TRAMPOLINE_NIRQ ? nw_trampoline_irqs[i].prio : 0;
+		ci[CI_TAIL_D00 + 0x40 + i] = p;
+		ci[CI_TAIL_F00 + i] = p;
 	}
 	for (uint32_t o = CI_TAIL_F40; o < CI_TAIL_F80; o += 4)
 		nw_be32_store(ci, o, 0);
@@ -582,13 +584,49 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
 	nw_be32_store(ci, CI_TAIL_F40 + 0x0c, 0x00020000u);
 	nw_be32_store(ci, CI_TAIL_F40 + 0x10, 0x1fa80000u);
 	nw_be32_store(ci, CI_TAIL_F40 + 0x1c, 0x40000000u);
-	static const uint32_t irq_list[8] = { 0x002f0037u, 0x00190025u, 0x00040005u, 0x00240006u,
-					      0x0007000du, 0x0002000eu, 0x0003001cu, 0x001effffu };
+	/* 16-bit source list, 0xffff terminated */
 	for (uint32_t o = CI_TAIL_F80; o < NW_CI_SIZE; o += 4)
 		nw_be32_store(ci, o, 0xffffffffu);
-	for (int i = 0; i < 8; i++)
-		nw_be32_store(ci, CI_TAIL_F80 + (uint32_t)i * 4u, irq_list[i]);
+	for (uint32_t i = 0; i < NW_TRAMPOLINE_NIRQ; i++) {
+		ci[CI_TAIL_F80 + 2 * i] = 0;
+		ci[CI_TAIL_F80 + 2 * i + 1] = nw_trampoline_irqs[i].src;
+	}
 	return n;
+}
+
+const struct nw_irq_source nw_trampoline_irqs[NW_TRAMPOLINE_NIRQ] = {
+	{ 0x2f, 2, 1 },	/* extint-gpio1: PMU interrupt */
+	{ 0x37, 7, 0 },	/* programmer-switch NMI */
+	{ 0x19, 1, 1 },	/* via-pmu */
+	{ 0x25, 4, 1 },	/* escc ch-a */
+	{ 0x04, 4, 0 },	/*   dma tx */
+	{ 0x05, 4, 0 },	/*   dma rx */
+	{ 0x24, 4, 1 },	/* escc ch-b */
+	{ 0x06, 4, 0 },
+	{ 0x07, 4, 0 },
+	{ 0x0d, 2, 1 },	/* ata-3 bus 0 */
+	{ 0x02, 4, 0 },	/*   dma */
+	{ 0x0e, 2, 1 },	/* ata-3 bus 1 */
+	{ 0x03, 4, 0 },
+	{ 0x1c, 2, 1 },	/* usb (golden machine has one; harmless without) */
+	{ 0x1e, 3, 1 },
+};
+
+void nw_trampoline_program_pic(void)
+{
+	for (int i = 0; i < NW_TRAMPOLINE_NIRQ; i++) {
+		const struct nw_irq_source *s = &nw_trampoline_irqs[i];
+		/* vector = list index: the NK maps IACK vectors to 68k levels
+		 * through ConfigInfo+0xf00[vector] (PA 0x3f00 on the golden
+		 * machine), the byte table written in list order above. */
+		uint32_t ivpr = (uint32_t)NW_OPENPIC_IVPR_MASK | NW_OPENPIC_IVPR_POLARITY |
+				((uint32_t)s->prio << 16) | (uint32_t)i;
+		if (s->level)
+			ivpr |= NW_OPENPIC_IVPR_SENSE;
+		nw_openpic_write(NW_OPENPIC_SRC0 + (uint32_t)s->src * 0x20u, ivpr);
+		nw_openpic_write(NW_OPENPIC_SRC0 + (uint32_t)s->src * 0x20u + 0x10u, 1);	/* IDR: CPU 0 */
+	}
+	nw_openpic_write(NW_OPENPIC_CPU0 + 0x80, 0);					/* CTPR */
 }
 
 void nw_fill_hwinfo_be(uint8_t *hw, const struct nw_config_info_layout *l)

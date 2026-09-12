@@ -155,6 +155,8 @@ void nw_fill_kdp_be(uint8_t *page, size_t page_len, const struct nw_kdp_params *
  *
  * Layout the fill describes (SheepShaver: logical == physical for ROM):
  *   PA 0x0000..0x2fff   exception vector stubs (copy of ROM+0x300000)
+ *   PA 0x3000..0x3fff   the filled ConfigInfo (copy of ROM+0x30d000 after
+ *                       nw_fill_config_info_be), NW_CI_PA
  *   PA ram_base         RAM bank 0; Mac low memory (LA 0) is its first
  *                       pages (PA_RelocatedLowMemInit == ram_base), so
  *                       logical RAM is LA x -> PA ram_base + x
@@ -175,6 +177,13 @@ enum {
 	NW_NK_EXC_TABLE_COPY_LEN = 0x2800,	/* vectors 0x100..0x27ff; 0x2800.. is XLM */
 	NW_NK_LOWMEM_ZEROED = 0x2000,	/* NK clears this much low memory */
 	NW_CI_LA = 0x68fef000u,		/* ConfigInfo page as the 68k/NK see it (RO) */
+	/* Where the Trampoline leaves the filled ConfigInfo: the page after
+	 * the exception vectors (golden hardware-info +0xc == 0x3000). The NK
+	 * hard-codes this PA when it turns an IACK vector into a 68k interrupt
+	 * level (`lbz level, 0x3f00(vector)` in its external interrupt
+	 * handler), so the page must really be there, not only mapped at
+	 * NW_CI_LA. r3 at NK entry points here too. */
+	NW_CI_PA = 0x3000,
 	/* Trampoline boot-info area: LA 0x64000000, 384 pages. Holds the
 	 * 'PMR&' header, the flattened device tree ('BGsTree'), the driver
 	 * parcels (nw_bootinfo.h), and the ProductInfo/DecoderInfo record the
@@ -206,11 +215,38 @@ struct nw_config_info_layout {
 	uint32_t rom_area_size;	/* ROM_AREA_SIZE (5 MiB) */
 	uint32_t ram_base;		/* PA of the RAM bank; also relocated low-memory PA */
 	uint32_t ram_size;
-	uint32_t ci_pa;			/* PA of the ConfigInfo page (rom_base + 0x30d000); mapped RO at NW_CI_LA */
+	uint32_t ci_pa;			/* PA of the filled ConfigInfo page (NW_CI_PA); mapped RO at NW_CI_LA */
 	uint32_t bootinfo_pa;	/* PA of the NW_BOOTINFO_SIZE boot-info area (0 = none) */
 	const struct nw_pmdt_range *extra;
 	int n_extra;
 };
+
+/*
+ * OpenPIC sources the Trampoline collects from the device tree
+ * (AAPL,interrupt-vectors / -priorities), in the order it lists them in the
+ * ConfigInfo tail (+0xf80 source list, +0xd40/+0xf00 priorities) and
+ * programs them into the controller: IVPR = masked | priority | vector ==
+ * position in that list (the tree's AAPL,interrupt-index), level sense per
+ * the interrupt specifier, IDR = CPU 0, CTPR 0. The NK's external
+ * interrupt handler turns the IACK vector into a 68k interrupt level with
+ * `lbz level, 0xf00(vector)` on the ConfigInfo page, i.e. the priority
+ * byte table in list order, and only levels 1..7 are signalled to the
+ * emulator; a vector equal to the source number reads level 0 and the
+ * interrupt is queued forever. The 68k StartInit then only toggles the mask
+ * bits (bset/bclr #7 on the low-address byte of the little-endian
+ * register), so without this programming every source keeps priority 0 and
+ * nothing is ever delivered. Golden mac99 order and priorities.
+ */
+struct nw_irq_source {
+	uint8_t src;
+	uint8_t prio;
+	uint8_t level;
+};
+enum { NW_TRAMPOLINE_NIRQ = 15 };
+extern const struct nw_irq_source nw_trampoline_irqs[NW_TRAMPOLINE_NIRQ];
+/* Writes the table into the OpenPIC model (nw_devices.h); call after
+ * nw_devices_init(), before the guest runs. */
+void nw_trampoline_program_pic(void);
 
 /* ci: the 4 KiB ROM ConfigInfo (ROM+0x30d000), big-endian, patched in place.
  * Returns the number of page-map entries written, or -1 on bad layout. */

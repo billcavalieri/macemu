@@ -1055,8 +1055,10 @@ int main(int argc, char **argv)
 #endif
 	if (!memory_mapped_from_zero) {
 #if !defined(PAGEZERO_HACK) && !defined(MEM_BULK)
-		// Create Low Memory area (0x0000..0x3000)
-		if (vm_mac_acquire_fixed(0, 0x3000) < 0) {
+		// Create Low Memory area (0x0000..0x4000: Mac low memory and XLM
+		// globals up to 0x3000; New World keeps the NK's exception vector
+		// stubs at PA 0 and the Trampoline's ConfigInfo page at PA 0x3000)
+		if (vm_mac_acquire_fixed(0, 0x4000) < 0) {
 			sprintf(str, GetString(STR_LOW_MEM_MMAP_ERR), strerror(errno));
 			ErrorAlert(str);
 			goto quit;
@@ -1272,7 +1274,7 @@ static void Quit(void)
 
 	// Delete Low Memory area
 	if (lm_area_mapped)
-		vm_mac_release(0, 0x3000);
+		vm_mac_release(0, 0x4000);
 
 	// Close /dev/zero
 	if (zero_fd > 0)
