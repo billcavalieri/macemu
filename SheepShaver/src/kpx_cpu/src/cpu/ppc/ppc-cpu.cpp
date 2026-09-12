@@ -826,6 +826,7 @@ void powerpc_cpu::tick_decrementer()
 		dec_pending_ = true;
 #ifdef SHEEPSHAVER
 	nw_devices_tick();
+	nw_host_tick();
 #if NW_BOOT_LOG
 	nw_script_tick();
 #endif

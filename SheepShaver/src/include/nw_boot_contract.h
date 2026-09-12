@@ -362,6 +362,12 @@ void nw_event_aline(uint32_t op, uint32_t pc68k, int handler);
  * silent spin still names where the CPU is. */
 void nw_event_tick(uint32_t pc, uint32_t msr);
 
+/* Host-side periodic work on the CPU thread for New World (window
+ * presentation at 60 Hz; the classic path hangs this off the video driver's
+ * VBL, which needs the Old World interrupt injection). sheepshaver_glue.cpp;
+ * cheap to call from the coarse CPU tick, does nothing on Old World. */
+void nw_host_tick(void);
+
 #ifdef __cplusplus
 }
 #endif

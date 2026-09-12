@@ -892,6 +892,18 @@ static uint64_t glue_tb_ticks(void *)
 	return ppc_cpu->tb_host_ticks();
 }
 
+void nw_host_tick(void)
+{
+	if (ROMType != ROMTYPE_NEWWORLD)
+		return;
+	static uint64 next_present_us;
+	const uint64 now = GetTicks_usec();
+	if (now < next_present_us)
+		return;
+	next_present_us = now + 1000000 / 60;
+	VideoHostPresent();
+}
+
 void init_emul_ppc(void)
 {
 	// Get pointer to KernelData in host address space

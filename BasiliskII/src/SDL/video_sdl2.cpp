@@ -1792,6 +1792,25 @@ void VideoVBL(void)
 	if (private_data != NULL && private_data->interruptsEnabled)
 		VSLDoInterruptService(private_data->vslServiceID);
 }
+
+/*
+ *  Present without the driver VBL. New World has no host interrupt
+ *  injection and (yet) no SheepShaver display driver: the guest draws
+ *  into the linear frame buffer through the ROM's own display path, the
+ *  redraw thread copies the dirty rows into the texture, and this pushes
+ *  the texture to the window. Called at 60 Hz from the CPU thread, which
+ *  is the renderer's thread.
+ */
+void VideoHostPresent(void)
+{
+	if (emerg_quit)
+		QuitEmulator();
+
+	if (toggle_fullscreen)
+		do_toggle_fullscreen();
+
+	present_sdl_video();
+}
 #else
 void VideoInterrupt(void)
 {
