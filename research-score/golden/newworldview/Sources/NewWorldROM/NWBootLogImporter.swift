@@ -86,10 +86,15 @@ public enum NWBootLogImporter {
             )
         }
         if text.hasPrefix("68k A-line ") {
+            // `68k A-line a01f pc=… d0=… a0=…`; the op token is exactly four
+            // hex digits (guards against `68k A-line default native`).
             let rest = text.dropFirst("68k A-line ".count)
-            let opText = rest.prefix { $0.isHexDigit }
-            guard let op = UInt16(opText, radix: 16) else { return nil }
-            return BootEvent(kind: .aline(op: op), pc: hexField("pc", in: text), line: lineNumber)
+            let opText = rest.prefix { $0 != " " }
+            guard opText.count == 4, opText.allSatisfy(\.isHexDigit),
+                  let op = UInt16(opText, radix: 16), op & 0xF000 == 0xA000,
+                  let pc = hexField("pc", in: text)
+            else { return nil }
+            return BootEvent(kind: .aline(op: op), pc: pc, line: lineNumber)
         }
         return nil
     }
