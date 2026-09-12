@@ -1302,10 +1302,17 @@ void powerpc_cpu::execute_mfspr(uint32 opcode)
 {
 	const uint32 spr = SPR::get(this, opcode);
 	uint32 d;
-	if (ppc32_guest_mmu_enabled() && mfspr_oea(spr, &d)) {
-		operand_RD::set(this, opcode, d);
-		increment_pc(4);
-		return;
+	if (ppc32_guest_mmu_enabled()) {
+		switch (mfspr_guest(spr, &d)) {
+		case SPR_ACCESS_OK:
+			operand_RD::set(this, opcode, d);
+			/* fall through */
+		case SPR_ACCESS_NOP:
+			increment_pc(4);
+			return;
+		case SPR_ACCESS_EXC:
+			return;
+		}
 	}
 	switch (spr) {
 	case powerpc_registers::SPR_XER:	d = xer().get();break;
@@ -1334,8 +1341,9 @@ void powerpc_cpu::execute_mtspr(uint32 opcode)
 	const uint32 spr = SPR::get(this, opcode);
 	const uint32 s = operand_RS::get(this, opcode);
 
-	if (ppc32_guest_mmu_enabled() && mtspr_oea(spr, s)) {
-		increment_pc(4);
+	if (ppc32_guest_mmu_enabled()) {
+		if (mtspr_guest(spr, s) != SPR_ACCESS_EXC)
+			increment_pc(4);
 		return;
 	}
 
@@ -1393,10 +1401,12 @@ void powerpc_cpu::execute_mftbr(uint32 opcode)
 {
 	uint32 tbr = TBR::get(this, opcode);
 	uint32 d = 0;
+	/* Under the guest MMU the timebase honours mtspr TBL/TBU (tb_offset_). */
+	const uint64 tb = ppc32_guest_mmu_enabled() ? tb_ticks() : get_tb_ticks();
 	switch (tbr) {
-	case 268: d = (uint32)get_tb_ticks(); break;
-	case 269: d = (get_tb_ticks() >> 32); break;
-	default: execute_illegal(opcode);
+	case 268: d = (uint32)tb; break;
+	case 269: d = (uint32)(tb >> 32); break;
+	default: execute_illegal(opcode); return;
 	}
 	operand_RD::set(this, opcode, d);
 	increment_pc(4);

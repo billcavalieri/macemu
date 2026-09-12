@@ -281,9 +281,13 @@ void powerpc_cpu::initialize()
 	execute_depth = 0;
 	srr0_ = srr1_ = dar_ = dsisr_ = 0;
 	dec_ = 0xffffffffu;
+	tb_offset_ = 0;
+	dec_tb_base_ = tb_ticks();
 	dec_pending_ = false;
 	for (int i = 0; i < 4; i++)
 		sprg_[i] = 0;
+	for (int i = 0; i < SPR_IMPL_COUNT; i++)
+		spr_impl_[i] = 0;
 
 	// Initialize block lookup table
 #if PPC_DECODE_CACHE || PPC_ENABLE_JIT
@@ -416,9 +420,11 @@ uint32 powerpc_cpu::exception_vector(uint32 vec) const
 	return (srr1_ & ppc32_mmu::MSR_IP) ? (0xfff00000u | vec) : vec;
 }
 
-void powerpc_cpu::take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra)
+void powerpc_cpu::take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra, uint32 event_pc)
 {
 	ppc32_mmu &mmu = ppc32_guest_mmu();
+	if (event_pc == 0xffffffffu)
+		event_pc = srr0;
 	srr0_ = srr0;
 	srr1_ = (mmu.msr() & 0x0000ffffu) | srr1_extra;
 	mmu.set_msr(mmu.msr() & ~ppc32_mmu::MSR_EXC_CLEAR);
@@ -433,7 +439,7 @@ void powerpc_cpu::take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra)
 		extra = srr1_;
 		extra_valid = 1;
 	}
-	nw_event_exception(srr0_, vec, extra, extra_valid);
+	nw_event_exception(event_pc, vec, extra, extra_valid);
 #endif
 }
 
@@ -470,7 +476,10 @@ void powerpc_cpu::take_isi()
 
 void powerpc_cpu::take_sc()
 {
-	take_exception(NW_VEC_SYSCALL, pc() + 4, 0);
+	/* SRR0 is the instruction after sc; the boot event names the sc itself
+	 * (golden grammar: from = PC of the discontinuity). */
+	const uint32 sc_pc = pc();
+	take_exception(NW_VEC_SYSCALL, sc_pc + 4, 0, sc_pc);
 }
 
 void powerpc_cpu::take_dec()
@@ -509,18 +518,242 @@ void powerpc_cpu::execute_trap(uint32 opcode)
 	increment_pc(4);
 }
 
+uint64 powerpc_cpu::tb_ticks() const
+{
+#ifdef SHEEPSHAVER
+	extern int64 TimebaseSpeed;
+	const uint64 us = GetTicks_usec();
+	const uint64 raw = (us / 1000000u) * (uint64)TimebaseSpeed + ((us % 1000000u) * (uint64)TimebaseSpeed) / 1000000u;
+#else
+	const uint64 raw = ((uint64)clock() * 25000000u) / CLOCKS_PER_SEC;
+#endif
+	return raw + (uint64)tb_offset_;
+}
+
+/*
+ *  Guest-mode SPR model: an MPC7400 as QEMU's `-cpu g4` presents it, so the
+ *  NK's CPU-feature probes (mtspr/mfspr read-back, MQ, AltiVec) take the same
+ *  path as in the golden trace:
+ *    - invalid SPR: user mode -> privileged program exception; supervisor
+ *      mode -> no-op (mfspr leaves rD), except SPR 0 (and 4/5/6 for mfspr)
+ *      which raise the privileged exception;
+ *    - SIAR is read-only (write -> privileged exception), L2CR writes are
+ *      ignored, PIR keeps its low 4 bits;
+ *    - user-mode read aliases (UMMCRx, UPMCx, USIAR, UBAMR) read spr+0x10.
+ */
+
+int powerpc_cpu::spr_impl_index(uint32 spr)
+{
+	switch (spr) {
+	case powerpc_registers::SPR_HID0:	return 0;
+	case powerpc_registers::SPR_HID1:	return 1;
+	case powerpc_registers::SPR_IABR:	return 2;
+	case powerpc_registers::SPR_DABR:	return 3;
+	case powerpc_registers::SPR_MSSCR0:	return 4;
+	case powerpc_registers::SPR_MSSCR1:	return 5;
+	case powerpc_registers::SPR_L2CR:	return 6;
+	case powerpc_registers::SPR_ICTC:	return 7;
+	case powerpc_registers::SPR_THRM1:	return 8;
+	case powerpc_registers::SPR_THRM2:	return 9;
+	case powerpc_registers::SPR_THRM3:	return 10;
+	case powerpc_registers::SPR_PIR:	return 11;
+	case powerpc_registers::SPR_EAR:	return 12;
+	case powerpc_registers::SPR_BAMR:	return 13;
+	case powerpc_registers::SPR_MMCR0:	return 14;
+	case powerpc_registers::SPR_MMCR1:	return 15;
+	case powerpc_registers::SPR_MMCR2:	return 16;
+	case powerpc_registers::SPR_PMC1:	return 17;
+	case powerpc_registers::SPR_PMC2:	return 18;
+	case powerpc_registers::SPR_PMC3:	return 19;
+	case powerpc_registers::SPR_PMC4:	return 20;
+	case powerpc_registers::SPR_SIAR:	return 21;
+	default:							return -1;
+	}
+}
+
+bool powerpc_cpu::spr_user_readable(uint32 spr) const
+{
+	switch (spr) {
+	case powerpc_registers::SPR_XER:
+	case powerpc_registers::SPR_LR:
+	case powerpc_registers::SPR_CTR:
+	case powerpc_registers::SPR_VRSAVE:
+	case powerpc_registers::SPR_TBL_R:
+	case powerpc_registers::SPR_TBU_R:
+	case powerpc_registers::SPR_UMMCR2:
+	case powerpc_registers::SPR_UBAMR:
+	case powerpc_registers::SPR_UMMCR0:
+	case powerpc_registers::SPR_UPMC1:
+	case powerpc_registers::SPR_UPMC2:
+	case powerpc_registers::SPR_USIAR:
+	case powerpc_registers::SPR_UMMCR1:
+	case powerpc_registers::SPR_UPMC3:
+	case powerpc_registers::SPR_UPMC4:
+		return true;
+	default:
+		return false;
+	}
+}
+
+powerpc_cpu::spr_access_result powerpc_cpu::mfspr_guest(uint32 spr, uint32 *value)
+{
+	const bool user = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0;
+	if (user && !spr_user_readable(spr)) {
+		take_program(0x00040000u);
+		return SPR_ACCESS_EXC;
+	}
+	switch (spr) {
+	case powerpc_registers::SPR_XER:	*value = xer().get();	return SPR_ACCESS_OK;
+	case powerpc_registers::SPR_LR:		*value = lr();			return SPR_ACCESS_OK;
+	case powerpc_registers::SPR_CTR:	*value = ctr();			return SPR_ACCESS_OK;
+	case powerpc_registers::SPR_VRSAVE:	*value = vrsave();		return SPR_ACCESS_OK;
+	case powerpc_registers::SPR_TBL_R:	*value = (uint32)tb_ticks();			return SPR_ACCESS_OK;
+	case powerpc_registers::SPR_TBU_R:	*value = (uint32)(tb_ticks() >> 32);	return SPR_ACCESS_OK;
+	case powerpc_registers::SPR_PVR: {
+#ifdef SHEEPSHAVER
+		extern uint32 PVR;
+		*value = PVR;
+#else
+		*value = 0x000c0000u;
+#endif
+		return SPR_ACCESS_OK;
+	}
+	default:
+		break;
+	}
+	if (mfspr_oea(spr, value))
+		return SPR_ACCESS_OK;
+	/* User-mode read aliases of the performance-monitor SPRs. */
+	if (spr >= powerpc_registers::SPR_UMMCR2 && spr <= powerpc_registers::SPR_UPMC4) {
+		const int idx = spr_impl_index(spr + 0x10);
+		if (idx >= 0) {
+			*value = spr_impl_[idx];
+			return SPR_ACCESS_OK;
+		}
+	}
+	const int idx = spr_impl_index(spr);
+	if (idx >= 0) {
+		*value = spr_impl_[idx];
+		return SPR_ACCESS_OK;
+	}
+	if (spr == 0 || spr == 4 || spr == 5 || spr == 6) {
+		take_program(0x00040000u);
+		return SPR_ACCESS_EXC;
+	}
+	return SPR_ACCESS_NOP;
+}
+
+powerpc_cpu::spr_access_result powerpc_cpu::mtspr_guest(uint32 spr, uint32 value)
+{
+	const bool user = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0;
+	switch (spr) {
+	case powerpc_registers::SPR_XER:	xer().set(value);	return SPR_ACCESS_OK;
+	case powerpc_registers::SPR_LR:		lr() = value;		return SPR_ACCESS_OK;
+	case powerpc_registers::SPR_CTR:	ctr() = value;		return SPR_ACCESS_OK;
+	case powerpc_registers::SPR_VRSAVE:	vrsave() = value;	return SPR_ACCESS_OK;
+	default:
+		break;
+	}
+	if (user) {
+		take_program(0x00040000u);
+		return SPR_ACCESS_EXC;
+	}
+	if (mtspr_oea(spr, value))
+		return SPR_ACCESS_OK;
+	switch (spr) {
+	case powerpc_registers::SPR_TBL_W: {
+		const uint64 now = tb_ticks();
+		const uint64 want = (now & 0xffffffff00000000ull) | value;
+		tb_offset_ += (int64)(want - now);
+		return SPR_ACCESS_OK;
+	}
+	case powerpc_registers::SPR_TBU_W: {
+		const uint64 now = tb_ticks();
+		const uint64 want = ((uint64)value << 32) | (now & 0xffffffffu);
+		tb_offset_ += (int64)(want - now);
+		return SPR_ACCESS_OK;
+	}
+	case powerpc_registers::SPR_SIAR:		/* read-only */
+	case powerpc_registers::SPR_PVR:
+	case powerpc_registers::SPR_UMMCR2:
+	case powerpc_registers::SPR_UBAMR:
+	case powerpc_registers::SPR_UMMCR0:
+	case powerpc_registers::SPR_UPMC1:
+	case powerpc_registers::SPR_UPMC2:
+	case powerpc_registers::SPR_USIAR:
+	case powerpc_registers::SPR_UMMCR1:
+	case powerpc_registers::SPR_UPMC3:
+	case powerpc_registers::SPR_UPMC4:
+		take_program(0x00040000u);
+		return SPR_ACCESS_EXC;
+	case powerpc_registers::SPR_L2CR:		/* write ignored */
+		return SPR_ACCESS_OK;
+	case powerpc_registers::SPR_PIR:
+		spr_impl_[spr_impl_index(spr)] = value & 0xfu;
+		return SPR_ACCESS_OK;
+	default:
+		break;
+	}
+	const int idx = spr_impl_index(spr);
+	if (idx >= 0) {
+		spr_impl_[idx] = value;
+		return SPR_ACCESS_OK;
+	}
+	if (spr == 0) {
+		take_program(0x00040000u);
+		return SPR_ACCESS_EXC;
+	}
+	return SPR_ACCESS_NOP;
+}
+
+bool powerpc_cpu::is_altivec_insn(uint32 opcode)
+{
+	const uint32 opcd = opcode >> 26;
+	if (opcd == 4)
+		return true;
+	if (opcd != 31)
+		return false;
+	switch ((opcode >> 1) & 0x3ffu) {
+	case 6:		/* lvsl */
+	case 38:	/* lvsr */
+	case 7:		/* lvebx */
+	case 39:	/* lvehx */
+	case 71:	/* lvewx */
+	case 103:	/* lvx */
+	case 359:	/* lvxl */
+	case 135:	/* stvebx */
+	case 167:	/* stvehx */
+	case 199:	/* stvewx */
+	case 231:	/* stvx */
+	case 487:	/* stvxl */
+		return true;
+	default:
+		return false;
+	}
+}
+
+void powerpc_cpu::take_vpu()
+{
+	take_exception(NW_VEC_VPU, pc(), 0);
+}
+
 void powerpc_cpu::tick_decrementer()
 {
-	/* Real DEC runs at timebase rate. 1 tick per 256 interpreted
-	 * instructions keeps the ratio in the same order of magnitude as
-	 * QEMU mac99 (DEC 0x900 ~= 1/130 of PROGRAM traps in the golden run). */
+	/* DEC decrements at the timebase rate (mftb and DEC share a clock).
+	 * Sampled every 256 interpreted instructions; a 0->1 transition of the
+	 * MSB raises the decrementer interrupt, once, as on hardware. The NK
+	 * programs DEC from TB deltas, so a DEC that ran at instruction rate
+	 * made every deadline look expired (DEC storm after the first fire). */
 	static unsigned div;
 	if (++div < 256u)
 		return;
 	div = 0;
+	const uint64 now = tb_ticks();
+	const uint32 elapsed = (uint32)(now - dec_tb_base_);
+	dec_tb_base_ = now;
 	const uint32 old_dec = dec_;
-	dec_ -= 1;
-	if ((old_dec & 0x80000000u) == 0 && (dec_ & 0x80000000u))
+	dec_ = old_dec - elapsed;
+	if ((old_dec & 0x80000000u) == 0 && ((dec_ & 0x80000000u) || elapsed > old_dec))
 		dec_pending_ = true;
 #ifdef SHEEPSHAVER
 	nw_event_tick(pc(), ppc32_guest_mmu().msr());
@@ -633,6 +866,7 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		if ((dec_ & 0x80000000u) == 0 && (value & 0x80000000u))
 			dec_pending_ = true;
 		dec_ = value;
+		dec_tb_base_ = tb_ticks();
 		return true;
 	case powerpc_registers::SPR_SPRG0:	sprg_[0] = value; return true;
 	case powerpc_registers::SPR_SPRG1:	sprg_[1] = value; return true;
@@ -1086,6 +1320,11 @@ void powerpc_cpu::execute(uint32 entry)
 		if (ppc32_guest_mmu_enabled())
 			nw_trace_pc(*this, pc());
 #endif
+		if (ppc32_guest_mmu_enabled() &&
+		    !(ppc32_guest_mmu().msr() & NW_MSR_VEC) && is_altivec_insn(opcode)) {
+			take_vpu();
+			continue;
+		}
 		const instr_info_t *ii = decode(opcode);
 #if PPC_EXECUTE_DUMP_STATE
 		if (dump_state)

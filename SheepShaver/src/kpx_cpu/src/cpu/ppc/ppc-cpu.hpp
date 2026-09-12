@@ -257,18 +257,38 @@ private:
 	uint32 dsisr_;
 	uint32 sprg_[4];
 	uint32 dec_;
+	uint64 dec_tb_base_;	/* timebase when dec_ was last sampled */
 	bool dec_pending_;
+	int64 tb_offset_;		/* mtspr TBL/TBU: guest TB = host ticks + offset */
+
+	/* MPC7400 (G4) implementation SPRs modelled as plain storage
+	 * (HID0/1, IABR, DABR, MSSCRx, L2CR, ICTC, THRMx, PIR, EAR, BAMR and the
+	 * performance-monitor set). Index via spr_impl_index(). */
+	enum { SPR_IMPL_COUNT = 24 };
+	uint32 spr_impl_[SPR_IMPL_COUNT];
+	static int spr_impl_index(uint32 spr);
+
+	/* Result of a guest-mode SPR access: value produced / register written,
+	 * architecturally a no-op (rD unchanged), or an exception was taken
+	 * (PC already redirected, caller must not advance). */
+	enum spr_access_result { SPR_ACCESS_OK, SPR_ACCESS_NOP, SPR_ACCESS_EXC };
+	spr_access_result mfspr_guest(uint32 spr, uint32 *value);
+	spr_access_result mtspr_guest(uint32 spr, uint32 value);
+	static bool is_altivec_insn(uint32 opcode);
+	void take_vpu();
 
 	uint32 exception_vector(uint32 vec) const;
-	void take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra);
+	void take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra, uint32 event_pc = 0xffffffffu);
 	void take_data_dsi(uint32 ea, bool is_store);
 	void take_isi();
 	void take_sc();
 	void take_dec();
 	void take_program(uint32 srr1_bits);
 	void tick_decrementer();
+	uint64 tb_ticks() const;	/* timebase (DEC decrements at this rate) */
 	bool mfspr_oea(uint32 spr, uint32 *value) const;
 	bool mtspr_oea(uint32 spr, uint32 value);
+	bool spr_user_readable(uint32 spr) const;
 
 public:
 
