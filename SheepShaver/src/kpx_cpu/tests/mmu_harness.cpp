@@ -11,14 +11,56 @@
 #include "cpu/ppc/ppc-mmu.hpp"
 #include "nw_boot_contract.h"
 #include "nw_bootinfo.h"
+#include "nw_io.h"
+#include "nw_devices.h"
 
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 #include <vector>
 
 static int g_pass;
 static int g_fail;
+
+static uint64_t g_fake_tb;
+static uint64_t fake_tb_ticks(void *)
+{
+	return g_fake_tb;
+}
+
+/* PMU handshake as the ROM's driver runs it, through the byte bus. */
+static uint32_t via_rd(uint32_t reg) { return nw_io_read(NW_IO_VIA_PMU_BASE + (reg << NW_VIA_REG_SHIFT), 1, 0); }
+static void via_wr(uint32_t reg, uint32_t v) { nw_io_write(NW_IO_VIA_PMU_BASE + (reg << NW_VIA_REG_SHIFT), 1, v, 0); }
+static int pmu_xfer_ok;
+static void pmu_handshake(void)
+{
+	via_wr(NW_VIA_B, via_rd(NW_VIA_B) & ~NW_PMU_TREQ);		/* request */
+	if (via_rd(NW_VIA_B) & NW_PMU_TACK) pmu_xfer_ok = 0;		/* PMU acknowledges at once */
+	if (!(via_rd(NW_VIA_IFR) & NW_VIA_IFR_SR)) pmu_xfer_ok = 0;	/* byte shifted */
+}
+static void pmu_release(void)
+{
+	via_wr(NW_VIA_B, via_rd(NW_VIA_B) | NW_PMU_TREQ);
+	if (!(via_rd(NW_VIA_B) & NW_PMU_TACK)) pmu_xfer_ok = 0;
+}
+static void pmu_send(uint8_t b)
+{
+	via_wr(NW_VIA_ACR, via_rd(NW_VIA_ACR) | NW_VIA_ACR_SR_OUT);
+	via_wr(NW_VIA_SR, b);
+	pmu_handshake();
+	via_rd(NW_VIA_SR);							/* clears SR_INT */
+	pmu_release();
+}
+static uint8_t pmu_recv(void)
+{
+	via_wr(NW_VIA_ACR, via_rd(NW_VIA_ACR) & ~NW_VIA_ACR_SR_OUT);
+	via_rd(NW_VIA_SR);
+	pmu_handshake();
+	const uint8_t b = (uint8_t)via_rd(NW_VIA_SR);
+	pmu_release();
+	return b;
+}
 
 #define CHECK(cond) do { \
 	if (cond) { \
@@ -229,6 +271,11 @@ int main()
 		CHECK(nw_be32_load(&bi[0], rec + 0x98 + 0x2c) == 0);		/* VIA2 absent */
 		CHECK(nw_be32_load(&bi[0], rec + 0x98 + 0xf4) == 0x80040000u);	/* OpenPIC */
 		CHECK(nw_be32_load(&bi[0], rec - 0x28 + 0x1c) == 8);
+		/* UnivROMFlags: bit 2 = ADB behind the PMU (68k table select
+		 * `& 0xe` == 0xc -> PMU-99 ADB routines), not bit 1 (USB-only). */
+		CHECK(nw_be32_load(&bi[0], rec + 0x24) == 0xc003bf1cu);
+		CHECK(nw_be32_load(&bi[0], rec + 0x7c) == 0xc003bf1cu);
+		CHECK((nw_be32_load(&bi[0], rec + 0x24) & 0xe) == 0xc);
 
 		/*
 		 * Boot-info device tree (BGsTree) with a synthetic parcel blob:
@@ -335,6 +382,16 @@ int main()
 			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "AAPL,address", &v, &vl) &&
 			      nw_be32_load(v, 0) == 0x80040000u);
 			CHECK(!nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/pci/usb", &node));
+			/* ADB behind the PMU, as OpenBIOS declares it for via=pmu-adb */
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/pci/mac-io/via-pmu/adb", &node) &&
+			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "compatible", &v, &vl) &&
+			      vl == 7 && memcmp(v, "pmu-99", 7) == 0);
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/pci/mac-io/via-pmu/adb/keyboard", &node) &&
+			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "reg", &v, &vl) &&
+			      vl == 4 && nw_be32_load(v, 0) == 8);
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/pci/mac-io/via-pmu/adb/mouse", &node) &&
+			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "#buttons", &v, &vl) &&
+			      vl == 4 && nw_be32_load(v, 0) == 3);
 			/* every property record: next == its own size, last has 0 */
 			{
 				uint32_t p = NW_BOOTINFO_ROOT + nw_be32_load(&bi[0], 0x14);
@@ -731,6 +788,455 @@ int main()
 		/* Vs-only BAT is invisible in user mode. */
 		mmu.set_msr(ppc32_mmu::MSR_DR | ppc32_mmu::MSR_IR | ppc32_mmu::MSR_PR);
 		CHECK(mmu.translate(0x30000100u, PPC32_XLATE_DR, 4).fault == PPC32_FAULT_NOTRANS);
+	}
+
+	/* S4 step 6: device models behind nw_io (OpenPIC, Keylargo timer, uni-n). */
+	{
+		struct nw_devices_clock clk;
+		clk.ticks = fake_tb_ticks;
+		clk.ctx = NULL;
+		clk.hz = 25000000u;
+		g_fake_tb = 0;
+		nw_io_reset();
+		nw_devices_init(&clk);
+		const uint32_t P = NW_IO_OPENPIC_BASE;
+		/* little-endian bus: a plain lwz of FRR sees the bytes reversed */
+		CHECK(nw_io_read(P + NW_OPENPIC_FRR, 4, 0) == 0x02003f00u);
+		CHECK(nw_openpic_read(NW_OPENPIC_FRR) == (uint32_t)NW_OPENPIC_FRR_VALUE);
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 5 * 0x20) == 0xa0000000u);	/* reset: masked */
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0x80) == 15);			/* CTPR */
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0x90) == 0);			/* WHOAMI */
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0xff);			/* IACK idle: spurious */
+		/* Program source 5: level, priority 8, vector 0x25, routed to CPU 0. */
+		nw_openpic_write(NW_OPENPIC_SRC0 + 5 * 0x20, 0x00480025u | NW_OPENPIC_IVPR_SENSE);
+		nw_openpic_write(NW_OPENPIC_SRC0 + 5 * 0x20 + 0x10, 1);
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0x80, 0);
+		CHECK(nw_io_ext_irq == 0);
+		nw_openpic_set_irq(5, 1);
+		CHECK(nw_io_ext_irq == 1);
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 5 * 0x20) & NW_OPENPIC_IVPR_ACTIVITY);
+		/* CTPR at or above the priority hides it; lowering it re-raises. */
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0x80, 8);
+		CHECK(nw_io_ext_irq == 0);
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0x80, 0);
+		CHECK(nw_io_ext_irq == 1);
+		/* IACK: vector, line drops; same-priority stays hidden until EOI. */
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0x25);
+		CHECK(nw_io_ext_irq == 0);
+		nw_openpic_set_irq(5, 0);					/* handler clears the device */
+		nw_openpic_write(NW_OPENPIC_SRC0 + 6 * 0x20, 0x00480026u | NW_OPENPIC_IVPR_SENSE);
+		nw_openpic_write(NW_OPENPIC_SRC0 + 6 * 0x20 + 0x10, 1);
+		nw_openpic_set_irq(6, 1);
+		CHECK(nw_io_ext_irq == 0);
+		/* a higher priority source interrupts the one in service */
+		nw_openpic_write(NW_OPENPIC_SRC0 + 7 * 0x20, 0x00090027u);	/* edge, priority 9 */
+		nw_openpic_write(NW_OPENPIC_SRC0 + 7 * 0x20 + 0x10, 1);
+		nw_openpic_set_irq(7, 1);
+		nw_openpic_set_irq(7, 0);
+		CHECK(nw_io_ext_irq == 1);
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0x27);
+		CHECK(nw_io_ext_irq == 0);
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);			/* EOI 7 */
+		CHECK(nw_io_ext_irq == 0);					/* 5 still in service, 6 same prio */
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);			/* EOI 5 */
+		CHECK(nw_io_ext_irq == 1);					/* 6 pending */
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0x26);
+		nw_openpic_set_irq(6, 0);
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);
+		CHECK(nw_io_ext_irq == 0);
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0xff);
+		/* masked source never raises the line */
+		nw_openpic_write(NW_OPENPIC_SRC0 + 5 * 0x20, 0x80480025u | NW_OPENPIC_IVPR_SENSE);
+		nw_openpic_set_irq(5, 1);
+		CHECK(nw_io_ext_irq == 0);
+		nw_openpic_set_irq(5, 0);
+		/* IPI dispatch to self, edge */
+		nw_openpic_write(NW_OPENPIC_IPIVPR0, 0x000a0040u);
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0x40, 1);
+		CHECK(nw_io_ext_irq == 0);					/* IDR 0: no destination */
+		/* timer 0: 1000 ticks of the 4.16 MHz clock; expires after 1000/4.16e6 s = 6009 TB ticks */
+		nw_openpic_write(NW_OPENPIC_TIMER0 + 0x20, 0x000b0070u);
+		nw_openpic_write(NW_OPENPIC_TIMER0 + 0x30, 1);
+		nw_openpic_write(NW_OPENPIC_TIMER0 + 0x10, 1000);
+		CHECK(nw_openpic_read(NW_OPENPIC_TIMER0) == 1000);
+		g_fake_tb += 3000;
+		CHECK(nw_openpic_read(NW_OPENPIC_TIMER0) == 1000 - 499);
+		nw_devices_tick();
+		CHECK(nw_io_ext_irq == 0);
+		g_fake_tb += 3100;
+		nw_devices_tick();
+		CHECK(nw_io_ext_irq == 1);
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0x70);
+		CHECK(nw_openpic_read(NW_OPENPIC_TIMER0) & NW_OPENPIC_TCCR_TOG);	/* toggled, reloaded */
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);
+		nw_openpic_write(NW_OPENPIC_TIMER0 + 0x10, 1000 | NW_OPENPIC_TBCR_CI);	/* inhibit */
+		/* GCR reset returns everything to the reset state */
+		nw_openpic_write(NW_OPENPIC_GCR, NW_OPENPIC_GCR_RESET);
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0x80) == 15);
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 5 * 0x20) == 0xa0000000u);
+		CHECK(nw_io_ext_irq == 0);
+		/* Keylargo timer: 18.432 MHz from the 25 MHz timebase, LE at +0x38/+0x3c */
+		g_fake_tb = 25000000u * 3u;				/* 3 s */
+		CHECK(nw_keylargo_timer_read(0x38) == 18432000u * 3u);
+		CHECK(nw_keylargo_timer_read(0x3c) == 0);
+		CHECK(nw_io_read(NW_IO_KEYLARGO_TIMER_BASE + 0x38, 4, 0) == 0x00c04b03u);	/* 0x034bc000 reversed */
+		g_fake_tb = 0x100000000ull * 25u / 18u;			/* past 2^32 counter ticks */
+		CHECK(nw_keylargo_timer_read(0x3c) == 1);
+		/* uni-n: version at +0, other registers read back */
+		CHECK(nw_io_read(NW_IO_UNIN_BASE, 4, 0) == (uint32_t)NW_UNIN_VERSION);
+		nw_io_write(NW_IO_UNIN_BASE + 0x40, 4, 0x12345678u, 0);
+		CHECK(nw_io_read(NW_IO_UNIN_BASE + 0x40, 4, 0) == 0x12345678u);
+		CHECK(nw_io_read(NW_IO_UNIN_BASE + 0x41, 1, 0) == 0x34u);
+		nw_io_write(NW_IO_UNIN_BASE, 4, 0xffffffffu, 0);
+		CHECK(nw_io_read(NW_IO_UNIN_BASE, 4, 0) == (uint32_t)NW_UNIN_VERSION);
+		/* uni-north PCI: CONFIG_ADDR latches and reads back (WaitForZeroPCI spins on this) */
+		CHECK(nw_io_read(NW_IO_PCI_CONFIG_ADDR, 4, 0) == 0);
+		nw_io_write(NW_IO_PCI_CONFIG_ADDR, 4, 0x56656761u, 0);		/* 'Vega', a plain stw */
+		CHECK(nw_io_read(NW_IO_PCI_CONFIG_ADDR, 4, 0) == 0x56656761u);
+		CHECK(nw_pci_config_addr() == 0x61676556u);			/* little-endian view */
+		/* CFA0: IDSEL = AD[slot]. A stwbrx puts the LSB first, so the value
+		 * a plain 4-byte write carries is the little-endian word reversed. */
+		nw_io_write(NW_IO_PCI_CONFIG_ADDR, 4, 0x00080000u, 0);		/* LE 0x00000800: slot 0xb (host bridge), reg 0 */
+		CHECK(nw_pci_config_addr() == 0x00000800u);
+		CHECK(nw_pci_config_read(0, 0xb << 3, 0, 4) == 0x001f106bu);
+		CHECK(nw_io_read(NW_IO_PCI_CONFIG_DATA, 4, 0) == 0x6b101f00u);	/* bytes 6b 10 1f 00 as lwz sees them */
+		CHECK(nw_io_read(NW_IO_PCI_CONFIG_DATA, 2, 0) == 0x6b10u);
+		CHECK(nw_io_read(NW_IO_PCI_CONFIG_DATA + 2, 2, 0) == 0x1f00u);
+		nw_io_write(NW_IO_PCI_CONFIG_ADDR, 4, 0x00100000u, 0);		/* LE 0x00001000: slot 0xc (mac-io) */
+		CHECK(nw_pci_config_read(0, 0xc << 3, 0, 4) == 0x0022106bu);
+		CHECK(nw_pci_config_read(0, 0xc << 3, 8, 4) == 0xff000000u);	/* class */
+		CHECK(nw_pci_config_read(0, 0xc << 3, 0x10, 4) == 0x80000000u);	/* BAR0: register aperture */
+		nw_io_write(NW_IO_PCI_CONFIG_ADDR, 4, 0x10100000u, 0);		/* LE 0x00001010: reg 0x10 */
+		CHECK(nw_io_read(NW_IO_PCI_CONFIG_DATA, 4, 0) == 0x00000080u);	/* 00 00 00 80 -> lwz 0x00000080 */
+		nw_io_write(NW_IO_PCI_CONFIG_ADDR, 4, 0x00000100u, 0);		/* LE 0x00010000: slot 16, empty */
+		CHECK(nw_io_read(NW_IO_PCI_CONFIG_DATA, 4, 0) == 0xffffffffu);
+		CHECK(nw_io_read(NW_IO_PCI_CONFIG_DATA, 1, 0) == 0xffu);
+		CHECK(nw_pci_config_read(0, 0xe << 3, 0, 4) == 0x0010106bu);	/* display */
+		/* CFA1: bus 0, devfn 0x60, reg 8 */
+		nw_io_write(NW_IO_PCI_CONFIG_ADDR, 4, 0x09600000u, 0);		/* LE 0x00006009 */
+		CHECK(nw_io_read(NW_IO_PCI_CONFIG_DATA, 4, 0) == 0x000000ffu);	/* class ff000000 LE: 00 00 00 ff */
+		nw_io_write(NW_IO_PCI_CONFIG_ADDR, 4, 0x09600100u, 0);		/* LE 0x00016009: bus 1, nothing there */
+		CHECK(nw_io_read(NW_IO_PCI_CONFIG_DATA, 4, 0) == 0xffffffffu);
+	}
+
+	/* S4 step 6: VIA-PMU and Keylargo GPIO. */
+	{
+		struct nw_devices_clock clk;
+		clk.ticks = fake_tb_ticks;
+		clk.ctx = NULL;
+		clk.hz = 25000000u;
+		g_fake_tb = 0;
+		const time_t t0 = time(NULL);
+		nw_io_reset();
+		nw_devices_init(&clk);
+		/* 6522 reset state */
+		CHECK(via_rd(NW_VIA_B) == (NW_PMU_TACK | NW_PMU_TREQ));
+		CHECK(via_rd(NW_VIA_DIRB) == 0xff);
+		CHECK(via_rd(NW_VIA_DIRA) == 0);
+		CHECK(via_rd(NW_VIA_IER) == 0x80);
+		CHECK(via_rd(NW_VIA_IFR) == 0);
+		CHECK(via_rd(NW_VIA_T1CH) == 0xff);
+		CHECK(nw_io_read(NW_IO_VIA_PMU_BASE + (NW_VIA_DIRB << NW_VIA_REG_SHIFT), 4, 0) == 0xff000000u);
+		/* IER: bit 7 selects set/clear */
+		via_wr(NW_VIA_IER, 0x84);
+		CHECK(via_rd(NW_VIA_IER) == 0x84);
+		via_wr(NW_VIA_IER, 0x04);
+		CHECK(via_rd(NW_VIA_IER) == 0x80);
+		/* the ROM driver's setup sequence */
+		via_wr(NW_VIA_IER, 0x7f);
+		via_wr(NW_VIA_DIRB, 0x30);
+		via_wr(NW_VIA_ACR, 0x1c);
+		via_wr(NW_VIA_PCR, 0);
+		via_wr(NW_VIA_B, 0x38);
+		CHECK(via_rd(NW_VIA_B) == 0x38);
+		CHECK(nw_pmu_state() == 0);
+		/* GET_VERSION: no arguments, one response byte */
+		pmu_xfer_ok = 1;
+		pmu_send(NW_PMU_GET_VERSION);
+		CHECK(nw_pmu_state() == 2);
+		CHECK(pmu_recv() == 1);
+		CHECK(nw_pmu_state() == 0);
+		CHECK(pmu_xfer_ok);
+		CHECK(via_rd(NW_VIA_IFR) == 0);				/* SR reads cleared SR_INT */
+		/* READ_RTC: seconds since 1904 from the host clock */
+		pmu_send(NW_PMU_READ_RTC);
+		uint32_t rtc = 0;
+		for (int i = 0; i < 4; i++)
+			rtc = (rtc << 8) | pmu_recv();
+		CHECK(nw_pmu_state() == 0);
+		const uint32_t want = (uint32_t)t0 + (uint32_t)NW_PMU_RTC_OFFSET;
+		CHECK(rtc - want <= 2);
+		/* SET_RTC then READ_RTC a minute later */
+		pmu_send(NW_PMU_SET_RTC);
+		pmu_send(0x12); pmu_send(0x34); pmu_send(0x56); pmu_send(0x78);
+		CHECK(nw_pmu_state() == 0);
+		g_fake_tb = 60ull * 25000000u;
+		pmu_send(NW_PMU_READ_RTC);
+		rtc = 0;
+		for (int i = 0; i < 4; i++)
+			rtc = (rtc << 8) | pmu_recv();
+		CHECK(rtc == 0x12345678u + 60);
+		/* variable-length command with a length byte: a malformed autopoll
+		 * packet (2 bytes, needs 4) is dropped without a reply or interrupt */
+		pmu_send(NW_PMU_ADB_CMD);
+		pmu_send(2); pmu_send(0x00); pmu_send(0x86);
+		CHECK(nw_pmu_state() == 0);
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);
+		/* unknown command with a fixed response length answers zeros */
+		pmu_send(0x68);						/* {0, 3} */
+		CHECK(pmu_recv() == 0);
+		CHECK(pmu_recv() == 0);
+		CHECK(pmu_recv() == 0);
+		CHECK(nw_pmu_state() == 0);
+		/* POWER_EVENTS get-wakeup: variable length both ways, two bytes back */
+		pmu_send(NW_PMU_POWER_EVENTS);
+		pmu_send(1); pmu_send(0x03);
+		CHECK(nw_pmu_state() == 2);
+		CHECK(pmu_recv() == 2);
+		CHECK(pmu_recv() == 0);
+		CHECK(pmu_recv() == 0);
+		CHECK(nw_pmu_state() == 0);
+		CHECK(pmu_xfer_ok);
+		/* VIA IRQ -> OpenPIC 0x19 when an enabled IFR bit is set */
+		nw_openpic_write(NW_OPENPIC_SRC0 + NW_PMU_IRQ * 0x20, 0x00480019u | NW_OPENPIC_IVPR_SENSE);
+		nw_openpic_write(NW_OPENPIC_SRC0 + NW_PMU_IRQ * 0x20 + 0x10, 1);
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0x80, 0);
+		via_wr(NW_VIA_IER, 0x84);					/* enable SR */
+		via_wr(NW_VIA_ACR, 0x1c);
+		via_wr(NW_VIA_SR, NW_PMU_GET_COVER);
+		pmu_handshake();						/* SR_INT raised, not yet read */
+		/* (T1/T2 have been free-running since reset; their IFR bits are set too) */
+		CHECK((via_rd(NW_VIA_IFR) & 0x84) == 0x84);
+		CHECK(nw_io_ext_irq == 1);
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0x19);
+		via_rd(NW_VIA_SR);
+		CHECK(nw_io_ext_irq == 0);
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);
+		pmu_release();
+		CHECK(pmu_recv() == 0);						/* GET_COVER: one byte, lid open */
+		CHECK(nw_pmu_state() == 0);
+		via_wr(NW_VIA_IER, 0x04);
+		/* one-second tick -> PMU interrupt on GPIO 1 (low) -> OpenPIC 0x2f.
+		 * The timebase sits at 60 s and no tick has run yet: one tick, not sixty. */
+		nw_openpic_write(NW_OPENPIC_SRC0 + NW_GPIO1_IRQ * 0x20, 0x0048002fu | NW_OPENPIC_IVPR_SENSE);
+		nw_openpic_write(NW_OPENPIC_SRC0 + NW_GPIO1_IRQ * 0x20 + 0x10, 1);
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);
+		nw_devices_tick();
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == 0);
+		CHECK(nw_io_ext_irq == 1);
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0x2f);
+		pmu_send(NW_PMU_INT_ACK);					/* variable-length reply: count, then the bits */
+		CHECK(pmu_recv() == 1);
+		CHECK(pmu_recv() == NW_PMU_INT_TICK);
+		CHECK(nw_pmu_state() == 0);
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);
+		CHECK(nw_io_ext_irq == 0);
+		g_fake_tb += 25000000u / 2;
+		nw_devices_tick();
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);	/* not yet */
+		/* masking the tick keeps the line idle */
+		pmu_send(NW_PMU_SET_INTR_MASK);
+		pmu_send(NW_PMU_INT_ADB);
+		g_fake_tb += 25000000u;
+		nw_devices_tick();
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);
+		CHECK(nw_io_ext_irq == 0);
+		CHECK(pmu_xfer_ok);
+		/* T2: one-shot from the latch, fires at zero at 1276 Hz */
+		via_wr(NW_VIA_T2CL, 0x0c);
+		via_wr(NW_VIA_T2CH, 0x03);
+		CHECK(via_rd(NW_VIA_T2CH) == 0x03);
+		CHECK(via_rd(NW_VIA_T2CL) == 0x0c);
+		via_wr(NW_VIA_IER, 0x80 | NW_VIA_IFR_T2);
+		g_fake_tb += (uint64_t)0x100 * 25000000u / NW_VIA_T2_HZ;
+		nw_devices_tick();
+		CHECK((via_rd(NW_VIA_IFR) & (0x80 | NW_VIA_IFR_T2)) == 0);
+		CHECK(via_rd(NW_VIA_T2CH) == 0x02);
+		g_fake_tb += (uint64_t)0x210 * 25000000u / NW_VIA_T2_HZ;
+		nw_devices_tick();
+		CHECK((via_rd(NW_VIA_IFR) & ~NW_VIA_IFR_T1) == (0x80 | NW_VIA_IFR_T2));
+		CHECK(nw_io_ext_irq == 1);
+		via_rd(NW_VIA_T2CL);						/* clears T2 */
+		CHECK((via_rd(NW_VIA_IFR) & ~NW_VIA_IFR_T1) == 0);
+		CHECK(nw_io_ext_irq == 0);
+		via_wr(NW_VIA_IER, NW_VIA_IFR_T2);
+		/* GPIO pin registers: output enable mirrors out data into the input bit; levels read-only */
+		nw_io_write(NW_IO_MACIO_GPIO_BASE + 8 + 5, 1, NW_GPIO_OUT_ENABLE | NW_GPIO_OUT_DATA, 0);
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 5, 1, 0) == 0x07);
+		nw_io_write(NW_IO_MACIO_GPIO_BASE + 8 + 5, 1, NW_GPIO_IN_DATA, 0);	/* input again: level keeps, in bit not writable */
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 5, 1, 0) == NW_GPIO_IN_DATA);
+		nw_gpio_set(5, 0);
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 5, 1, 0) == 0);
+		nw_io_write(NW_IO_MACIO_GPIO_BASE + 2, 1, 0xff, 0);
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 2, 1, 0) == 0);
+
+		/* ADB behind the PMU (interrupt mask is ADB only here). Packets are
+		 * {cmd, flags, len, data...}; every packet answers through the PMU
+		 * interrupt: INT_ACK -> {0x10, 0x01, len, data...} or {0x10, 0x00}. */
+		pmu_send(NW_PMU_ADB_CMD); pmu_send(3); pmu_send(0x00); pmu_send(0x00); pmu_send(0);	/* bus reset */
+		CHECK(nw_pmu_state() == 0);
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == 0);			/* reply pending */
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 2);
+		CHECK(pmu_recv() == NW_PMU_INT_ADB);
+		CHECK(pmu_recv() == 0x00);							/* no data */
+		CHECK(nw_pmu_state() == 0);
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);
+		/* Talk R3 at 2: the keyboard, handler 1 */
+		pmu_send(NW_PMU_ADB_CMD); pmu_send(3); pmu_send(0x2f); pmu_send(0x00); pmu_send(0);
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 5);
+		CHECK(pmu_recv() == NW_PMU_INT_ADB);
+		CHECK(pmu_recv() == 0x01);
+		CHECK(pmu_recv() == 2);
+		CHECK(pmu_recv() == NW_ADB_KBD_ADDR);
+		CHECK(pmu_recv() == 1);
+		/* Listen R3 at 3: move the mouse to address 7, handler 2 */
+		pmu_send(NW_PMU_ADB_CMD); pmu_send(5); pmu_send(0x3b); pmu_send(0x00); pmu_send(2); pmu_send(0x07); pmu_send(0x02);
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 2);
+		CHECK(pmu_recv() == NW_PMU_INT_ADB);
+		CHECK(pmu_recv() == 0x00);
+		pmu_send(NW_PMU_ADB_CMD); pmu_send(3); pmu_send(0x7f); pmu_send(0x00); pmu_send(0);
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 5);
+		CHECK(pmu_recv() == NW_PMU_INT_ADB);
+		CHECK(pmu_recv() == 0x01);
+		CHECK(pmu_recv() == 2);
+		CHECK(pmu_recv() == 7);
+		CHECK(pmu_recv() == 2);
+		pmu_send(NW_PMU_ADB_CMD); pmu_send(3); pmu_send(0x3f); pmu_send(0x00); pmu_send(0);	/* 3 is empty now */
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 2);
+		CHECK(pmu_recv() == NW_PMU_INT_ADB);
+		CHECK(pmu_recv() == 0x00);
+		/* autopoll 2 and 7; nothing queued: quiet after a period */
+		pmu_send(NW_PMU_ADB_CMD); pmu_send(4); pmu_send(0x00); pmu_send(0x86); pmu_send(0x00); pmu_send(0x84);
+		CHECK(nw_pmu_state() == 0);
+		g_fake_tb += 25000000u / 40;
+		nw_devices_tick();
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);
+		/* host key press and release: one per poll, the keyboard polled again while it has data */
+		nw_adb_key(0x1f, 1);
+		nw_adb_key(0x1f, 0);
+		nw_devices_tick();
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);	/* not before the period */
+		g_fake_tb += 25000000u / 40;
+		nw_devices_tick();
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == 0);
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 4);
+		CHECK(pmu_recv() == (NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO));
+		CHECK(pmu_recv() == 0x2c);							/* Talk R0, keyboard */
+		CHECK(pmu_recv() == 0x1f);
+		CHECK(pmu_recv() == 0xff);
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);
+		g_fake_tb += 25000000u / 40;
+		nw_devices_tick();
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 4);
+		CHECK(pmu_recv() == (NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO));
+		CHECK(pmu_recv() == 0x2c);
+		CHECK(pmu_recv() == 0x9f);
+		CHECK(pmu_recv() == 0xff);
+		/* mouse: a move with the primary button down */
+		nw_adb_mouse_move(5, -3);
+		nw_adb_mouse_button(0, 1);
+		g_fake_tb += 25000000u / 40;
+		nw_devices_tick();
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 4);
+		CHECK(pmu_recv() == (NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO));
+		CHECK(pmu_recv() == 0x7c);							/* Talk R0, mouse at 7 */
+		CHECK(pmu_recv() == 0x7d);							/* dy -3, button down */
+		CHECK(pmu_recv() == 0x85);							/* dx 5, secondary up */
+		/* poll off: queued input waits for an explicit Talk R0 */
+		pmu_send(NW_PMU_ADB_POLL_OFF);
+		nw_adb_key(0x00, 1);
+		g_fake_tb += 25000000u / 40;
+		nw_devices_tick();
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);
+		pmu_send(NW_PMU_ADB_CMD); pmu_send(3); pmu_send(0x2c); pmu_send(0x00); pmu_send(0);
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 5);
+		CHECK(pmu_recv() == NW_PMU_INT_ADB);
+		CHECK(pmu_recv() == 0x01);
+		CHECK(pmu_recv() == 2);
+		CHECK(pmu_recv() == 0x00);
+		CHECK(pmu_recv() == 0xff);
+		CHECK(nw_pmu_state() == 0);
+		CHECK(pmu_xfer_ok);
+	}
+
+	/* S4 step 6: the Trampoline's OpenPIC programming, then the 68k
+	 * StartInit's mask/unmask (bset/bclr #7 on the first byte of the LE
+	 * register through a big-endian move.l), then a VIA interrupt. */
+	{
+		struct nw_devices_clock clk;
+		clk.ticks = fake_tb_ticks;
+		clk.ctx = NULL;
+		clk.hz = 25000000u;
+		g_fake_tb = 0;
+		nw_io_reset();
+		nw_devices_init(&clk);
+		nw_trampoline_program_pic();
+		const uint32_t via_ivpr = NW_IO_OPENPIC_BASE + NW_OPENPIC_SRC0 + NW_PMU_IRQ * 0x20;
+		/* vector = position in the ConfigInfo source list (AAPL,interrupt-index),
+		 * which the NK uses to index the +0xf00 level table: 0x2f -> 0, 0x37 -> 1, 0x19 -> 2 */
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + NW_PMU_IRQ * 0x20) == 0x80c10002u);	/* masked, level, prio 1, vector 2 */
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + NW_PMU_IRQ * 0x20 + 0x10) == 1);
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + NW_GPIO9_IRQ * 0x20) == 0x80870001u);	/* edge, prio 7 */
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 0x2f * 0x20) == 0x80c20000u);
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 0x0d * 0x20) == 0x80c20009u);
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 0x08 * 0x20) == 0xa0000000u);		/* not in the list: reset value */
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0x80) == 0);
+		/* ConfigInfo tail agrees with the programmed table: +0xf80[i] == src, +0xf00[i] == prio */
+		CHECK(nw_trampoline_irqs[0].src == 0x2f && nw_trampoline_irqs[2].src == 0x19 && nw_trampoline_irqs[2].prio == 1);
+		{
+			uint8_t ci[NW_CI_SIZE];
+			struct nw_config_info_layout lay;
+			memset(&lay, 0, sizeof(lay));
+			lay.rom_base = 0x50000000u; lay.rom_area_size = 0x500000u;
+			lay.ram_base = 0x10000000u; lay.ram_size = 0x10000000u;
+			lay.ci_pa = 0x5030d000u;
+			memset(ci, 0, sizeof(ci));
+			nw_be32_store(ci, 0x9c, 0x5fffe000u);	/* LA_InfoRecord */
+			nw_be32_store(ci, 0xa0, 0x68ffe000u);	/* LA_KernelData */
+			nw_be32_store(ci, 0xa4, 0x68fff000u);	/* LA_EmulatorData */
+			nw_be32_store(ci, 0xa8, 0x68080000u);	/* LA_DispatchTable */
+			nw_be32_store(ci, 0xac, 0x68060000u);	/* LA_EmulatorCode */
+			CHECK(nw_fill_config_info_be(ci, &lay) > 0);
+			int ok = 1;
+			for (int i = 0; i < NW_TRAMPOLINE_NIRQ; i++) {
+				const uint32_t ivpr = nw_openpic_read(NW_OPENPIC_SRC0 + nw_trampoline_irqs[i].src * 0x20);
+				if ((ivpr & 0xff) != (uint32_t)i || ci[0xf80 + 2 * i + 1] != nw_trampoline_irqs[i].src ||
+				    ci[0xf00 + (ivpr & 0xff)] != nw_trampoline_irqs[i].prio || ci[0xf00 + i] == 0)
+					ok = 0;
+			}
+			CHECK(ok);
+			CHECK(ci[0xf00 + NW_TRAMPOLINE_NIRQ] == 0 && ci[0xf80 + 2 * NW_TRAMPOLINE_NIRQ] == 0xff);
+		}
+		/* 68k: move.l (a0,d1.w),d2 ; bset.b #7,d2 ; move.l d2,(a0,d1.w) */
+		uint32_t v = nw_io_read(via_ivpr, 4, 0);
+		CHECK(v == 0x0200c180u);
+		nw_io_write(via_ivpr, 4, v | 0x80, 0);
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + NW_PMU_IRQ * 0x20) == 0x80c10002u);
+		nw_io_write(via_ivpr, 4, v & ~0x80u, 0);						/* bclr.b #7 */
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + NW_PMU_IRQ * 0x20) == 0x00c10002u);
+		/* VIA T2 expiry now reaches the CPU with vector 2 */
+		via_wr(NW_VIA_T2CL, 0x10);
+		via_wr(NW_VIA_T2CH, 0x00);
+		via_wr(NW_VIA_IER, 0x80 | NW_VIA_IFR_T2);
+		CHECK(nw_io_ext_irq == 0);
+		g_fake_tb += (uint64_t)0x20 * 25000000u / NW_VIA_T2_HZ;
+		nw_devices_tick();
+		CHECK(nw_io_ext_irq == 1);
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 2);
+		via_rd(NW_VIA_T2CL);
+		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);
+		CHECK(nw_io_ext_irq == 0);
+		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0xff);
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);
