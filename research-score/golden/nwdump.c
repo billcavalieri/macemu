@@ -1,7 +1,7 @@
 /*
  * nwdump.c - QEMU TCG plugin: dump the New World NK handoff data (golden).
  *
- * Two triggers, matched by low 20 PC bits + instruction bytes (so the NK may
+ * Three triggers, matched by low 20 PC bits + instruction bytes (so the NK may
  * run from ROM 0x68310000 or its RAM copy 0x00F10000):
  *
  *   1. NK entry     (+0x10000, `b 0x31000c` 4800000c)
@@ -10,12 +10,19 @@
  *   2. "Converting PMDTs to areas" (+0x1e618, `mflr r16` 7e0802a6)
  *      r1 = KDP. Dumps regs + [KDP-0x4000, KDP+0x4000) so the NK-built segment
  *      map (KDP+0x80) and the PMDTs it points at are on disk.
+ *   3. 68k hardware-info consumed (+0x61c14, emulator `stb` 7c92d9ae): the
+ *      68k StartInit has read the 'Hnfo' record through KDP+0xfd0 and is
+ *      writing its first VIA register. Dumps regs, the record and the
+ *      records it points at (+0x8 DecoderInfo copy, +0x10/+0x14 tables,
+ *      +0xa8), LA->PA translations (hwinfo-xlate.txt), low memory 0..0x3000,
+ *      the ConfigInfo page, KDP and IRP as the 68k sees them.
  *
  * Files land in `dir=`: nkentry-regs.txt nkentry-r3.bin nkentry-r4.bin
  * nkentry-r5.bin nkentry-r6.bin nkentry-r9.bin (hardware-info block when
  * r7 == 'RTAS') pmdt-regs.txt pmdt-kdp.bin pmdt-pa0.bin
- * (physical 0..0xffff: exception vectors + relocated low memory). The plugin exits
- * QEMU after the second dump (`exit=0` to keep running).
+ * (physical 0..0xffff: exception vectors + relocated low memory)
+ * hwinfo-*.bin hwinfo-xlate.txt. The plugin exits QEMU after the third dump
+ * (`exit=0` to keep running).
  *
  * Build:
  *   cc -O2 -shared -fPIC -Wall -undefined dynamic_lookup \
@@ -96,6 +103,24 @@ static void dump_mem(const char *name, uint64_t addr, size_t len)
     fclose(f);
 }
 
+static void dump_mem_pa(const char *name, uint64_t pa, size_t len)
+{
+    g_byte_array_set_size(buf, 0);
+    enum qemu_plugin_hwaddr_operation_result r = qemu_plugin_read_memory_hwaddr(pa, buf, len);
+    if (r != QEMU_PLUGIN_HWADDR_OPERATION_OK) {
+        fprintf(stderr, "nwdump: read PA %08" PRIx64 "+%zx failed (%s, %d)\n", pa, len, name, (int)r);
+        return;
+    }
+    char *path = g_strdup_printf("%s/%s.bin", dir, name);
+    FILE *f = fopen(path, "wb");
+    g_free(path);
+    if (!f) {
+        return;
+    }
+    fwrite(buf->data, 1, buf->len, f);
+    fclose(f);
+}
+
 static void on_nk_entry(uint64_t pc)
 {
     if (done_entry) {
@@ -128,6 +153,86 @@ static void on_pmdt(uint64_t pc)
     uint64_t kdp = read_reg(gpr[1]);
     dump_mem("pmdt-kdp", kdp - 0x4000, 0x8000);
     dump_mem("pmdt-pa0", 0, 0x10000);
+}
+
+static uint32_t rd32(uint64_t addr)
+{
+    g_byte_array_set_size(buf, 0);
+    if (!qemu_plugin_read_memory_vaddr(addr, buf, 4) || buf->len < 4) {
+        return 0;
+    }
+    return ((uint32_t)buf->data[0] << 24) | ((uint32_t)buf->data[1] << 16) |
+           ((uint32_t)buf->data[2] << 8) | buf->data[3];
+}
+
+static void xlate_note(FILE *f, const char *what, uint64_t la)
+{
+    uint64_t pa = 0;
+    bool ok = qemu_plugin_translate_vaddr(la, &pa);
+    fprintf(f, "%s la=%08" PRIx64 " pa=%s%08" PRIx64 "\n", what, la, ok ? "" : "(unmapped) ", pa);
+}
+
+/* Third dump: the 68k has consumed the hardware-info record and touches its
+ * first VIA register (emulator stb at ROM+0x361c14; golden DAR 0x80017e00).
+ * By now the NK has mapped the record's pointees, so they can be read by LA. */
+static void on_68k_hwinfo(uint64_t pc)
+{
+    static bool done;
+    if (done) {
+        return;
+    }
+    done = true;
+    fprintf(stderr, "nwdump: 68k hardware-info consumed at %08" PRIx64 "\n", pc);
+    dump_regs("hwinfo", pc);
+    /* KDP = SPRG0 is not exposed; the NK keeps KDP+0xfd0 = LA_InfoRecord+0xf00. */
+    const uint64_t kdp_la = 0x68ffe000u, hnfo_la = rd32(kdp_la + 0xfd0);
+    char *path = g_strdup_printf("%s/hwinfo-xlate.txt", dir);
+    FILE *f = fopen(path, "w");
+    g_free(path);
+    if (!f) {
+        return;
+    }
+    fprintf(f, "hnfo=%08" PRIx64 "\n", hnfo_la);
+    dump_mem("hwinfo-hnfo", hnfo_la, 0x100);
+    static const struct { const char *name; uint32_t off; uint32_t len; } ptrs[] = {
+        { "hwinfo-p08", 0x08, 0x400 },
+        { "hwinfo-p10", 0x10, 0x100 },
+        { "hwinfo-p14", 0x14, 0x100 },
+        { "hwinfo-pa8", 0xa8, 0x400 },
+    };
+    for (size_t i = 0; i < G_N_ELEMENTS(ptrs); i++) {
+        uint64_t la = rd32(hnfo_la + ptrs[i].off);
+        xlate_note(f, ptrs[i].name, la);
+        if (la) {
+            dump_mem(ptrs[i].name, la & ~0xffull, ptrs[i].len);
+        }
+    }
+    xlate_note(f, "lowmem0", 0);
+    xlate_note(f, "lowmem2000", 0x2000);
+    xlate_note(f, "kdp", kdp_la);
+    xlate_note(f, "edp", 0x68fff000u);
+    xlate_note(f, "irp", 0x5fffe000u);
+    xlate_note(f, "configinfo", 0x68fef000u);
+    xlate_note(f, "via", 0x80016000u);
+    xlate_note(f, "rom68k", 0xffc00000u);
+    fclose(f);
+    dump_mem("hwinfo-kdp", kdp_la, 0x1000);
+    dump_mem("hwinfo-irp", 0x5fffe000u, 0x1000);
+    /* By physical address (the vaddr translate only sees the current TLB):
+     * relocated low memory (ConfigInfo+0x360 = PA 0x4000 on mac99), the
+     * ConfigInfo page, and the Trampoline's boot-info area behind the
+     * record's pointers (ConfigInfo PMDT seg 6: LA 0x64000000, 384 pages ->
+     * PA 0x15600000 on mac99; derived here from the +0x8 translation). */
+    dump_mem_pa("hwinfo-lowmem-pa", 0x4000, 0x3000);
+    dump_mem_pa("hwinfo-configinfo-pa", 0x3000, 0x1000);
+    {
+        uint64_t la = rd32(hnfo_la + 0x08), pa = 0;
+        if (la && qemu_plugin_translate_vaddr(la, &pa)) {
+            const uint64_t base = pa - (la - 0x64000000u);
+            fprintf(stderr, "nwdump: boot-info area PA %08" PRIx64 "\n", base);
+            dump_mem_pa("hwinfo-bootinfo-pa", base, 0x180000);
+        }
+    }
     if (do_exit) {
         fflush(stderr);
         exit(0);
@@ -137,6 +242,7 @@ static void on_pmdt(uint64_t pc)
 static const struct trigger triggers[] = {
     { 0x10000u, 0x4800000cu, on_nk_entry },
     { 0x1e618u, 0x7e0802a6u, on_pmdt },
+    { 0x61c14u, 0x7c92d9aeu, on_68k_hwinfo },
 };
 
 static void on_exec(unsigned int vcpu_index, void *userdata)
