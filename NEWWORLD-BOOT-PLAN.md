@@ -214,7 +214,7 @@ NewWorldViewCLI diff --qemu ~/nw-golden/run1/events.txt --nwboot /tmp/ss-s4.log 
   --rom "$HOME/Downloads/Mac OS ROM"
 ```
 
-`SheepShaver-MMUTests` (70 host tests) builds and passes on the same tree.
+`SheepShaver-MMUTests` (107 host checks) builds and passes on the same tree.
 
 **Redo (undo the revert):** `git revert 48222634 03773224 91306bc0`, or
 restore the whole mill with `git checkout g3-mill-frozen -- SheepShaver/src`
@@ -222,7 +222,7 @@ restore the whole mill with `git checkout g3-mill-frozen -- SheepShaver/src`
 project's `video_sdl2.cpp` reference to `path = video_sdl2.cpp;
 sourceTree = SOURCE_ROOT;`).
 
-#### S4 step 2 — first divergence (open)
+#### S4 step 2 — first divergence (closed by step 4a; kept as the record)
 
 100 s run: **0 exceptions, 0 A-lines**. The diff reports no comparable
 events; the `T` lines put the CPU in ROM+0x325xxx–0x326xxx with MSR=0x2000.
@@ -247,6 +247,62 @@ SystemInfo banks handed to NK v2 are out of order or overlapping for the
 newworldview `BootInfoParser`) and the QEMU `mac99` ConfigInfo after the
 Trampoline, and make SheepShaver's handoff data consistent. This is data,
 not code, and not a skip (the mill's answer was to rewrite the `bltl`).
+
+#### S4 step 4a — handoff-data gates fixed (commits `263565b1`, `d78ccec6`, `59a10dab`, `55d7f2ab`)
+
+Golden reference data, captured by the QEMU plugin
+`research-score/golden/nwdump.c` (build: `cc -O2 -shared -fPIC -Wall
+-undefined dynamic_lookup -I/opt/homebrew/include $(pkg-config --cflags
+--libs glib-2.0) -o libnwdump.dylib nwdump.c`; run the S3 QEMU command with
+`-plugin libnwdump.dylib,dir=$HOME/nw-golden/dump2`): registers and the
+r3/r4/r5/r9 records at NK entry (PC 0x10000), KDP±0x4000 and PA 0..0xffff
+when the NK reads the PMDT. `~/nw-golden/dump2/` (never in git). What it
+established, in the order the gates were fixed:
+
+| gate | golden fact | SheepShaver fix (data, Trampoline's job) |
+|---|---|---|
+| PMDT panic 0x31e878 | 9.2.1 ROM ships an **empty** page map; the Trampoline fills ConfigInfo: per-segment PMDT (ascending areas, `(0,0xffff,0xa00)` terminators), 4 segment maps, BATRangeInit, BatMap nibbles, `PA_RelocatedLowMem`, v1.01 | `nw_fill_config_info_be` (ROM identity, NK 1 MiB → ROM+0x300000, IRP/KDP/EDP one page each with PA 0, SheepMem, DR cache, frame buffer); `nw_config_info_pagemap_ok` |
+| NK SystemInfo | bank list at +0x30, RAM size at +0/+4 | `nw_fill_system_info_be`, bank 0 = whole RAM, low memory at its start (`PA_RelocatedLowMem` = RAMBase) |
+| DEC storm | NK timeslice comes from `NKProcessorInfo` (+0xc TB Hz); zero → `mtdec 0` forever | `nw_fill_processor_info_be` (PVR, CPU/bus/TB Hz, cache geometry); DEC decrements at TB rate |
+| vectors at PA 0 | Trampoline copies ROM+0x300000 (0x2800 B) to PA 0 | `Host2Mac_memcpy(0, ROM+0x300000, 0x2800)` in `init_emul_ppc` |
+| emulator kernel calls | `twi r31,n` table at ROM+0x36e8c0 → 0x700 to the NK | Old World rewrote it to host routines; New World leaves it (and the DR emulator entry) to the NK |
+| CPU feature probes | NK probes MQ (`mtspr 0`), AltiVec (`lvewx` with MSR[VEC]=0 → 0xf20), SIAR (read-only in QEMU) and expects the exceptions | `kpx_cpu` G4 SPR model (7400 as QEMU `-cpu g4`), MSR[VEC] gating, TB write offset |
+| 68k ROM location | ROM's own MacLowMemInit says reset PC `0xffc0002a`; Trampoline BAT range 1 maps LA 0xffc00000 (4 MiB, RO) to the ROM copy | BAT range 2 → ROM area, BatMap slot 1; the ROM's table is no longer overridden (we had pointed it at the ROM area identity, which sent the 68k into 0xffffaa00) |
+
+Result: the exception stream matches the golden exactly for the first 22
+non-timer events after the NK probe (`X E …3113c0 0700`, `…3113c8 0700`,
+`…3113dc 0f20`, `…3164b8 0700`, kernel calls 2 and 0, first KDP/EDP/IRP/CI
+page faults), the 68k runs ROM code at 0xffc0aeec…; **107** harness checks.
+Stream comparison: `NewWorldViewCLI diff` stops at the first NK-internal
+0x700 (it treats SheepShaver's 0x68xxxxxx PCs as outside the ROM); until
+that is fixed in newworldview, `/tmp/xdiff.py`-style normalisation (NK
+0x00f1xxxx / 0x5031xxxx → ROM offset, drop 0x900) is the comparison.
+
+#### S4 step 4b — next divergence (open): the hardware-info block
+
+Golden line 3457 `X E 6806c9e8 0300 68fffa18` … then `68061c14 0300
+80017e00` / `80016600` (VIA at mac-io 0x80016000). Ours: `6806d7cc 0300
+000025f8`, `6806d7e0 0300 2e4d4ed6`, `6808b150 0300 00001e00`, `68061c14
+0300 00000600`, then a 68k bus-error loop (0 A-lines, 10 M events/60 s).
+The 68k (`ffc0aa4a movea.l $2c(a0),a2; move.b $1e00(a2),d3`) reads its I/O
+base addresses from a record it finds through `KDP+0xfd0`; the NK sets
+`KDP+0xfd0 = LA_InfoRecord+0xf00` (0x3108c0) and fills IRP+0xf00 with the
+0xc0-byte block the Trampoline passes in **r9 when r7 == 'RTAS'**
+(0x310690), checking `'Hnfo'` at +0x70 (0x3109f0; present → skips the CPU
+probe table). We pass r7 = 0, so the block is zero: VIA base 0, and the
+"garbage" DSI addresses in the golden (0x64051de2) are pointers from this
+block (+0x8 = 0x64051dd0). Golden block (`dump2/nkentry-r9.bin`): +0 ROM
+PA 0xc00000, +4 0x6400000c, +8 0x64051dd0, +0xc 0x3000 (ConfigInfo PA),
++0x10 0x68feff80, +0x14 0x68feff40, +0x18 0x80040000, +0x3c 0x1400,
++0x70 'Hnfo', +0x74 0x00403035, +0x78 0x00250024, +0x7c 0x08000800,
++0x80 0x00190002, +0x84 0x08000037, +0x88 0x00010000, +0x94 4,
++0x9c 0x00410000, +0xa0 0x63173569, +0xa8 0x68fefcfc; r23 = 0x80012000 is
+the NK debug SCC (KDP-0x8e0). Next: decode the 68k's use of each field
+(`ffc0aa40`, `ffc0aee4`), build the block for SheepShaver's layout, pass
+r7/r8/r9. After that the host side: SheepShaver's own accessors still speak
+the Old World map (lowmem host page at 0, `KernelData` at 0x68ffe000) while
+the NK owns LA→PA (Mac LA x ↔ PA RAMBase+x, KDP at the NK's PA); that is
+the gate after this one.
 
 G3 is reached when the ROM mounts the CD, loads the System, and the
 System's own `_Launch` starts `Mac OS Install`, which draws its window
