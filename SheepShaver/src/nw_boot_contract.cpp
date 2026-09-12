@@ -648,14 +648,22 @@ void nw_fill_bootinfo_be(uint8_t *area, uint32_t size, const struct nw_config_in
 	if (area == NULL || l == NULL || size < (uint32_t)NW_BOOTINFO_SIZE)
 		return;
 	memset(area, 0, NW_BOOTINFO_SIZE);
-	/* 'PMR&' 'BGsT' 'ree\0': boot-globals header; the entry list at +0xc
-	 * (device tree, parcels) is a later gate and stays empty. */
+	/* 'PMR&' 'BGsT' 'ree\0': boot-globals header. The device tree that
+	 * follows at +0xc is written by nw_bootinfo_build_tree() into the
+	 * NW_BOOTINFO_TREE_MAX bytes below the hardware record. */
 	nw_be32_store(area, 0x0, 0x504d5226u);
 	nw_be32_store(area, 0x4, 0x42477354u);
 	nw_be32_store(area, 0x8, 0x72656500u);
 	const uint32_t base = NW_BOOTINFO_HWREC_OFF - NW_BOOTINFO_HWREC_PRE;
 	for (size_t i = 0; i < sizeof(hwrec) / sizeof(hwrec[0]); i++)
 		nw_be32_store(area, base + hwrec[i].off, hwrec[i].val);
+}
+
+void nw_lzss_decode(const uint8_t *src, size_t src_size, uint8_t *dst, size_t dst_size)
+{
+	if (src == NULL || dst == NULL)
+		return;
+	nw_decode_lzss(src, dst, (int)src_size, dst + dst_size);
 }
 
 void nw_fill_system_info_be(uint8_t *si, const struct nw_config_info_layout *l)

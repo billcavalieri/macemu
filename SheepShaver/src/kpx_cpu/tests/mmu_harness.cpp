@@ -10,6 +10,7 @@
 
 #include "cpu/ppc/ppc-mmu.hpp"
 #include "nw_boot_contract.h"
+#include "nw_bootinfo.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -214,7 +215,7 @@ int main()
 		nw_fill_hwinfo_be(hw, &l);
 		CHECK(nw_be32_load(hw, 0x70) == 0x486e666fu);		/* 'Hnfo' */
 		CHECK(nw_be32_load(hw, 0x00) == 0x50000000u && nw_be32_load(hw, 0x0c) == 0x5030d000u);
-		CHECK(nw_be32_load(hw, 0x08) == 0x64051dd0u && nw_be32_load(hw, 0x04) == 0x6400000cu);
+		CHECK(nw_be32_load(hw, 0x08) == NW_BOOTINFO_LA + NW_BOOTINFO_HWREC_OFF && nw_be32_load(hw, 0x04) == 0x6400000cu);
 		CHECK(nw_be32_load(hw, 0x10) == 0x68feff80u && nw_be32_load(hw, 0x14) == 0x68feff40u &&
 		      nw_be32_load(hw, 0xa8) == 0x68fefcfcu);
 		CHECK(((hw[0x76] << 8) | hw[0x77]) == 0x3035);	/* 68k: machine id */
@@ -228,6 +229,132 @@ int main()
 		CHECK(nw_be32_load(&bi[0], rec + 0x98 + 0x2c) == 0);		/* VIA2 absent */
 		CHECK(nw_be32_load(&bi[0], rec + 0x98 + 0xf4) == 0x80040000u);	/* OpenPIC */
 		CHECK(nw_be32_load(&bi[0], rec - 0x28 + 0x1c) == 8);
+
+		/*
+		 * Boot-info device tree (BGsTree) with a synthetic parcel blob:
+		 * a 'node' parcel (AAPL,CodePrepare + one stored library), a 'prop'
+		 * parcel matched by parent name + device_type (via-pmu/rtc) and one
+		 * matched by node name ('macos'). Read back through the same
+		 * record walk the 68k importer (ROM 0x44420) performs.
+		 */
+		{
+			std::vector<uint8_t> pb(0x400, 0);
+			memcpy(&pb[0], "prcl", 4);
+			be32_store(&pb[0], 4, 1);
+			be32_store(&pb[0], 12, 0x14);
+			uint32_t data = 0x300;	/* payload area */
+			memcpy(&pb[data], "AAPL,CodePrepare", 17);
+			memcpy(&pb[data + 0x20], "LIBRARY!", 8);
+			memcpy(&pb[data + 0x40], "RTCDRV", 6);
+			memcpy(&pb[data + 0x50], "9.2.1", 6);
+			/* parcel 1: node, two children */
+			uint32_t p1 = 0x14, p2 = p1 + 88 + 2 * 60, p3 = p2 + 88 + 60;
+			be32_store(&pb[0], p1, p2);
+			memcpy(&pb[p1 + 4], "node", 4);
+			be32_store(&pb[0], p1 + 8, 88 + 2 * 60);
+			be32_store(&pb[0], p1 + 12, 0x20000);
+			be32_store(&pb[0], p1 + 20, 60);
+			memcpy(&pb[p1 + 24], "CodePrepare Node Parcel", 23);
+			uint32_t c = p1 + 88;
+			memcpy(&pb[c], "cstr", 4); be32_store(&pb[0], c + 12, 17); be32_store(&pb[0], c + 20, 17);
+			be32_store(&pb[0], c + 24, data); memcpy(&pb[c + 28], "name", 4);
+			c += 60;
+			memcpy(&pb[c], "nlib", 4); be32_store(&pb[0], c + 4, 0x20094); be32_store(&pb[0], c + 12, 8);
+			be32_store(&pb[0], c + 20, 8); be32_store(&pb[0], c + 24, data + 0x20); memcpy(&pb[c + 28], "TestLib", 7);
+			/* parcel 2: prop, parent 'via-pmu' && device_type 'rtc' */
+			be32_store(&pb[0], p2, p3);
+			memcpy(&pb[p2 + 4], "prop", 4);
+			be32_store(&pb[0], p2 + 8, 88 + 60);
+			be32_store(&pb[0], p2 + 12, 0xa);
+			be32_store(&pb[0], p2 + 20, 60);
+			memcpy(&pb[p2 + 24], "via-pmu", 7);
+			memcpy(&pb[p2 + 56], "rtc", 3);
+			c = p2 + 88;
+			memcpy(&pb[c], "ndrv", 4); be32_store(&pb[0], c + 4, 4); be32_store(&pb[0], c + 12, 6);
+			be32_store(&pb[0], c + 20, 6); be32_store(&pb[0], c + 24, data + 0x40);
+			memcpy(&pb[c + 28], "driver,AAPL,MacOS,PowerPC", 25);
+			/* parcel 3: prop, name == 'macos' (last: link 0) */
+			be32_store(&pb[0], p3, 0);
+			memcpy(&pb[p3 + 4], "prop", 4);
+			be32_store(&pb[0], p3 + 8, 88 + 60);
+			be32_store(&pb[0], p3 + 12, 0x1);
+			be32_store(&pb[0], p3 + 20, 60);
+			memcpy(&pb[p3 + 24], "macos", 5);
+			c = p3 + 88;
+			memcpy(&pb[c], "cstr", 4); be32_store(&pb[0], c + 12, 6); be32_store(&pb[0], c + 20, 6);
+			be32_store(&pb[0], c + 24, data + 0x50); memcpy(&pb[c + 28], "MacOSROMFile-version", 20);
+
+			nw_bootinfo_params bp;
+			memset(&bp, 0, sizeof(bp));
+			bp.ram_size = 0x08000000u;
+			bp.fb_la = 0x81000000u;
+			bp.fb_width = 640; bp.fb_height = 480; bp.fb_depth = 8; bp.fb_linebytes = 640;
+			bp.pvr = 0x000c0000u; bp.cpu_hz = 400000000u; bp.bus_hz = 100000000u; bp.tb_hz = 25000000u;
+			bp.parcels = &pb[0]; bp.parcels_size = pb.size();
+			const uint32_t end = nw_bootinfo_build_tree(&bi[0], NW_BOOTINFO_TREE_MAX, &bp);
+			CHECK(end > 0x1000 && end <= NW_BOOTINFO_TREE_MAX);
+			CHECK(nw_be32_load(&bi[0], 0) == 0x504d5226u && nw_be32_load(&bi[0], 4) == 0x42477354u);
+			CHECK(nw_be32_load(&bi[0], rec) == 0x98u);			/* hwrec untouched */
+			const int nn = nw_bootinfo_count_nodes(&bi[0], NW_BOOTINFO_TREE_MAX);
+			CHECK(nn > 40 && nw_be32_load(&bi[0], 0xc) == 0);		/* root: no sibling */
+			CHECK(nw_be32_load(&bi[0], 0x10) == 12 * 1);			/* first child right after root */
+			CHECK(nw_be32_load(&bi[0], 0x14) == 12u * (uint32_t)nn);	/* props follow the node records */
+			const uint8_t *v; uint32_t vl, node;
+			CHECK(nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, NW_BOOTINFO_ROOT, "name", &v, &vl) &&
+			      vl == 12 && memcmp(v, "device-tree", 12) == 0);
+			CHECK(nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, NW_BOOTINFO_ROOT, "model", &v, &vl) &&
+			      memcmp(v, "PowerMac3,1", 12) == 0);
+			/* parcel 'node' becomes the first root child, its library a property */
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/AAPL,CodePrepare", &node) &&
+			      node == NW_BOOTINFO_ROOT + 12);
+			CHECK(nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "TestLib", &v, &vl) &&
+			      vl == 8 && memcmp(v, "LIBRARY!", 8) == 0);
+			CHECK(!nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "name-not-here", &v, &vl));
+			/* prop parcel matched by parent + device_type */
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/pci/mac-io/via-pmu/rtc", &node) &&
+			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "driver,AAPL,MacOS,PowerPC", &v, &vl) &&
+			      vl == 6 && memcmp(v, "RTCDRV", 6) == 0);
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/pci/mac-io/via-pmu", &node) &&
+			      !nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "driver,AAPL,MacOS,PowerPC", &v, &vl));
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/rom/macos", &node) &&
+			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "MacOSROMFile-version", &v, &vl) &&
+			      vl == 6 && memcmp(v, "9.2.1", 6) == 0);
+			/* machine data */
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/memory", &node) &&
+			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "reg", &v, &vl) &&
+			      vl == 8 && nw_be32_load(v, 0) == 0 && nw_be32_load(v, 4) == 0x08000000u);
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/pci/display", &node) &&
+			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "address", &v, &vl) &&
+			      nw_be32_load(v, 0) == 0x81000000u &&
+			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "linebytes", &v, &vl) &&
+			      nw_be32_load(v, 0) == 640);
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/cpus/PowerPC,G4", &node) &&
+			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "cpu-version", &v, &vl) &&
+			      nw_be32_load(v, 0) == 0x000c0000u);
+			CHECK(nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/pci/mac-io/interrupt-controller", &node) &&
+			      nw_bootinfo_get_prop(&bi[0], NW_BOOTINFO_TREE_MAX, node, "AAPL,address", &v, &vl) &&
+			      nw_be32_load(v, 0) == 0x80040000u);
+			CHECK(!nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/pci/usb", &node));
+			/* every property record: next == its own size, last has 0 */
+			{
+				uint32_t p = NW_BOOTINFO_ROOT + nw_be32_load(&bi[0], 0x14);
+				int ok = 1, n = 0;
+				for (;;) {
+					const uint32_t next = nw_be32_load(&bi[0], p);
+					const uint32_t sz = NW_BOOTINFO_PROP_HDR + ((nw_be32_load(&bi[0], p + 0x24) + 3u) & ~3u);
+					if (next == 0) break;
+					if (next != sz) { ok = 0; break; }
+					p += next; n++;
+				}
+				CHECK(ok && n >= 7);
+			}
+			/* bad parcels fail the build; no parcels still yields a tree */
+			pb[0] = 'x';
+			CHECK(nw_bootinfo_build_tree(&bi[0], NW_BOOTINFO_TREE_MAX, &bp) == 0);
+			bp.parcels = NULL; bp.parcels_size = 0;
+			CHECK(nw_bootinfo_build_tree(&bi[0], NW_BOOTINFO_TREE_MAX, &bp) > 0 &&
+			      !nw_bootinfo_find_node(&bi[0], NW_BOOTINFO_TREE_MAX, "/AAPL,CodePrepare", &node));
+		}
 
 		/* Overlapping extra range is rejected; a bad table fails the check. */
 		nw_pmdt_range bad;

@@ -177,13 +177,15 @@ enum {
 	NW_CI_LA = 0x68fef000u,		/* ConfigInfo page as the 68k/NK see it (RO) */
 	/* Trampoline boot-info area: LA 0x64000000, 384 pages. Holds the
 	 * 'PMR&' header, the flattened device tree ('BGsTree'), the driver
-	 * parcels, and the ProductInfo/DecoderInfo record at +0x51dd0 that the
-	 * 68k StartInit reaches through hardware-info +0x8. */
+	 * parcels (nw_bootinfo.h), and the ProductInfo/DecoderInfo record the
+	 * 68k StartInit reaches through hardware-info +0x8 (golden: right after
+	 * the tree at +0x51dd0; here at a fixed 1 MiB so the tree may grow). */
 	NW_BOOTINFO_LA = 0x64000000u,
 	NW_BOOTINFO_SIZE = 0x180000,
-	NW_BOOTINFO_HWREC_OFF = 0x51dd0,
+	NW_BOOTINFO_HWREC_OFF = 0x100000,
 	NW_BOOTINFO_HWREC_PRE = 0x28,	/* bytes before the record the 68k indexes negatively */
 	NW_BOOTINFO_HWREC_LEN = 0x1c0,
+	NW_BOOTINFO_TREE_MAX = NW_BOOTINFO_HWREC_OFF - NW_BOOTINFO_HWREC_PRE,
 	/* Hardware-info block: r9 at NK entry when r7 == 'RTAS'; the NK copies
 	 * 0xc0 bytes to IRP+0xf00 and publishes it at KDP+0xfd0; the 68k checks
 	 * 'Hnfo' at +0x70. */
@@ -218,9 +220,12 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l);
 void nw_fill_hwinfo_be(uint8_t *hw, const struct nw_config_info_layout *l);
 /* area: NW_BOOTINFO_SIZE bytes, zeroed; writes the 'PMR&' header and the
  * ProductInfo/DecoderInfo record (I/O bases as on mac99: VIA 0x80016000,
- * SCC 0x80012000, OpenPIC 0x80040000). The device tree and parcels are not
- * generated yet. */
+ * SCC 0x80012000, OpenPIC 0x80040000). The device tree and parcels are
+ * added by nw_bootinfo_build_tree() (nw_bootinfo.h) afterwards. */
 void nw_fill_bootinfo_be(uint8_t *area, uint32_t size, const struct nw_config_info_layout *l);
+/* Apple ROM-file LZSS (parcel payloads, ROM image). Stops at src_size input
+ * bytes or dst_size output bytes. */
+void nw_lzss_decode(const uint8_t *src, size_t src_size, uint8_t *dst, size_t dst_size);
 /* si: NW_SI_SIZE bytes, zeroed and filled. */
 void nw_fill_system_info_be(uint8_t *si, const struct nw_config_info_layout *l);
 /*

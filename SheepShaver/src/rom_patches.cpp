@@ -43,6 +43,7 @@
 #include "thunks.h"
 #include "video.h"
 #include "nw_boot_contract.h"
+#include "nw_bootinfo.h"
 #include "vm_alloc.h"
 
 #define DEBUG 0
@@ -90,6 +91,9 @@ bool DecodeROM(uint8 *data, uint32 size)
 {
 	if (!nw_decode_rom_image(data, size, ROMBaseHost, ROM_SIZE))
 		return false;
+	/* New World ROM files carry the driver/library parcels ('prcl') after
+	 * the ROM image; keep them for the boot-info device tree (PatchROM). */
+	nw_parcels_keep(data, size);
 	nw_log_g0_decode(ROMBaseHost, ROM_SIZE);
 	return true;
 }
@@ -744,6 +748,43 @@ static bool patch_nanokernel_boot(void)
 		ci.extra = extra;
 		ci.n_extra = n_extra;
 		nw_fill_bootinfo_be(Mac2HostAddr(NW_BOOTINFO_LA), NW_BOOTINFO_SIZE, &ci);
+		/*
+		 * Tree gate: the 68k StartInit imports the flattened device tree
+		 * at boot-info +0xc into the Name Registry (ROM 0x44420 reads
+		 * root +0x14, the first property offset). Describe the mac99-like
+		 * machine SheepShaver presents, with its own frame buffer as the
+		 * display node, and merge the ROM file's parcels (ndrvs, libraries)
+		 * as properties the way the Trampoline does.
+		 */
+		{
+			nw_bootinfo_params bp;
+			memset(&bp, 0, sizeof(bp));
+			bp.ram_size = RAMSize;
+			bp.fb_la = screen_base;
+			if (cur_mode >= 0) {
+				bp.fb_width = VModes[cur_mode].viXsize;
+				bp.fb_height = VModes[cur_mode].viYsize;
+				bp.fb_linebytes = VModes[cur_mode].viRowBytes;
+				bp.fb_depth = 1u << (VModes[cur_mode].viAppleMode - APPLE_1_BIT);
+			}
+			bp.pvr = PVR;
+			bp.cpu_hz = (uint32)CPUClockSpeed;
+			bp.bus_hz = (uint32)BusClockSpeed;
+			bp.tb_hz = (uint32)TimebaseSpeed;
+			bp.parcels = nw_parcels_get(&bp.parcels_size);
+			uint32 tree_end = nw_bootinfo_build_tree(Mac2HostAddr(NW_BOOTINFO_LA), NW_BOOTINFO_TREE_MAX, &bp);
+			if (tree_end == 0) {
+				printf("NW-BOOT G1: boot-info device tree build failed (parcels %s, %u bytes)\n",
+				       bp.parcels ? "present" : "missing", (unsigned)bp.parcels_size);
+				return false;
+			}
+#if NW_BOOT_LOG
+			printf("NW-BOOT G1: boot-info tree %d nodes, %#x bytes, parcels %u bytes, display %ux%ux%u lb %u @%08x\n",
+			       nw_bootinfo_count_nodes(Mac2HostAddr(NW_BOOTINFO_LA), NW_BOOTINFO_TREE_MAX), (unsigned)tree_end,
+			       (unsigned)bp.parcels_size, bp.fb_width, bp.fb_height, bp.fb_depth, bp.fb_linebytes,
+			       (unsigned)bp.fb_la);
+#endif
+		}
 		int n = nw_fill_config_info_be(ROMBaseHost + 0x30d000, &ci);
 #if NW_BOOT_LOG
 		printf("NW-BOOT G1: ConfigInfo page map %d entries rom=%08x ram=%08x+%08x sheep=%08x+%x fb=%08x+%x\n",
