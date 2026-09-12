@@ -1,10 +1,16 @@
 /*
- *  nw_boot_contract.h - New World / nanokernel v2 boot contract (G1)
+ *  nw_boot_contract.h - New World / nanokernel v2 boot contract (G0–G2)
  *
  *  Host-checkable. No guest ROM is required to assert the layout.
  *  Locked G1: root compatible MacRISC2, Gestalt 406, /memory /cpus /chosen,
  *  Hnfo-or-mtsdr1 HTAB gate, BATRangeInit at KDP+0x2cc, saveKernelDataPtr
  *  immediately after saveReturnAddr. Do not require mfsdr1.
+ *
+ *  S4 (branch newworld-boot): this header carries no mill. No skip lists,
+ *  no planted code, no host 68k dispatch, no A-trap stubs. The CPU raises
+ *  exceptions architecturally and logs them in the golden event grammar
+ *  (see research-score/golden/nwgolden.c) so newworldview `diff` can name
+ *  the first divergence against QEMU mac99.
  */
 
 #ifndef NW_BOOT_CONTRACT_H
@@ -23,18 +29,6 @@ enum {
 	NW_NEWWORLD_SIG_OFFSET = 0x30d064,
 	NW_CONFIGINFO_OFFSET = 0x30d000,
 	NW_NK_V2_OFFSET = 0x310000,
-	/* 9.2.1 NK HotInts DataStorageInt: mfsprg r1,0; stmw r2,8(r1). */
-	NW_NK_DATA_STORAGE_INT = 0x3132a0,
-	NW_NK_DATA_STORAGE_INT_OP = 0x7c3042a6, /* mfsprg r1, SPRG0 */
-	/* Exception vector page copied to EA 0 (SPRG3 = VecTbl). */
-	NW_NK_VEC_TEMPLATE = 0x300000,
-	NW_NK_VEC_TEMPLATE_SIZE = 0x1000,
-	NW_DSI_VECTOR_EA = 0x300,
-	NW_DSI_VECTOR_SLOT = 0x100,		/* 0x300..0x3ff */
-	NW_DSI_VEC_MTSPRG1 = 0x7c3143a6,	/* mtsprg 1,r1 */
-	NW_DSI_VEC_MTSPRG2 = 0x7c3243a6,	/* mtsprg 2,lr */
-	NW_DSI_VEC_MTLR = 0x7c2803a6,		/* mtlr r1 */
-	NW_DSI_VEC_BLR = 0x4e800020,
 	NW_KDP_PAGE_SIZE = 0x1000,
 
 	/* NKProcessorState trampoline (elliotnunn/NanoKernel). DO NOT reorder. */
@@ -59,6 +53,44 @@ enum {
 	NW_DEFAULT_PTEGMASK = 0x0000ffff,	/* 64 KiB HTAB */
 	NW_DEFAULT_SDR1 = 0x00100000
 };
+
+/* PowerPC MSR bits used by the boot log. */
+enum {
+	NW_MSR_EE = 0x00008000,
+	NW_MSR_IR = 0x00000020,
+	NW_MSR_DR = 0x00000010,
+	NW_MSR_ME = 0x00001000,
+	NW_MSR_IP = 0x00000040
+};
+
+/* Exception vectors (OEA). */
+enum {
+	NW_VEC_MACHINE_CHECK = 0x200,
+	NW_VEC_DSI = 0x300,
+	NW_VEC_ISI = 0x400,
+	NW_VEC_EXTERNAL = 0x500,
+	NW_VEC_ALIGNMENT = 0x600,
+	NW_VEC_PROGRAM = 0x700,
+	NW_VEC_FPU = 0x800,
+	NW_VEC_DECREMENTER = 0x900,
+	NW_VEC_SYSCALL = 0xc00,
+	NW_VEC_TRACE = 0xd00
+};
+
+/*
+ * 68k emulator inside the ROM (PPC part). The four A-line handlers all
+ * start with `lwz r5,0x28(r28)`; at entry op = (r29 >> 3) & 0xffff and
+ * the A-line word is at r24 - 2. Same constants as nwgolden.c.
+ */
+enum {
+	NW_EMU_ALINE_OS_FLAG = 0x3695e0,	/* OS trap, bit 8 set */
+	NW_EMU_ALINE_OS = 0x369660,
+	NW_EMU_ALINE_TOOL = 0x369720,
+	NW_EMU_ALINE_TOOL_AUTOPOP = 0x369780,
+	NW_EMU_ALINE_ENTRY_OP = 0x80bc0028
+};
+/* 0..3 handler index for a PC at ROM offset `off`, -1 if not an A-line entry. */
+int nw_emu_aline_handler(uint32_t off);
 
 enum nw_decoded_rom_kind {
 	NW_DECODED_UNKNOWN = 0,
@@ -119,9 +151,6 @@ int nw_htab_gate_pass(const struct nw_htab_gate *gate);
 uint32_t nw_be32_load(const uint8_t *mem, uint32_t off);
 void nw_be32_store(uint8_t *mem, uint32_t off, uint32_t value);
 
-/* G3 mill: env G3_SKIP_68K_OFF=0xNN (or --g3-skip-68k). 0 = use compiled mill. */
-uint32_t nw_g3_skip_68k_runtime_off(void);
-
 /* Debug-only live boot log (NW_BOOT_LOG=1 on Xcode SheepShaver Debug). */
 const char *nw_boot_line_g0_newworld(void);
 const char *nw_boot_line_g1_tree(void);
@@ -131,150 +160,8 @@ const char *nw_boot_line_g1_hwinit(void);
 const char *nw_boot_line_g1_patch_skip(void);
 const char *nw_boot_line_g2_first_dsi(void);
 const char *nw_boot_line_g2_translator_off(void);
-const char *nw_boot_line_g3_sdl2_window(void);
-const char *nw_boot_line_g3_irq_nk(void);	/* NK native IRQ after G2; not mill */
-const char *nw_boot_line_g3_native_op(void);
-const char *nw_boot_line_g3_dec_arm(void);
-const char *nw_boot_line_g3_walk_dec_ee(void);
-const char *nw_boot_line_g3_dec_take(void);	/* host took 0x900; not G3 */
-const char *nw_boot_line_g3_dec_left(void);	/* handler rfi'd; not G3 */
-const char *nw_boot_line_g3_dec_leave_50326(void); /* post-leave wait; not G3 */
-const char *nw_boot_line_g3_dec_leave_50326_cmp(void); /* live 50326674; not G3 */
-const char *nw_boot_line_g3_fb_guest(void);
-const char *nw_boot_line_g3_fb_none(void);	/* named reason: EE=0, not host n=1 */
-
-/*
- * Clip a dirty rect to the screen. Returns 1 if the result is non-empty.
- * Host-testable helper for SDL2 update_display_static_bbox / video_set_dirty_area.
- */
-int nw_video_clip_dirty(int *x, int *y, int *w, int *h, int sw, int sh);
-
-/*
- * Guest framebuffer vs copy. 1 if any byte differs. Host present of an
- * empty union is not this. Do not mill 68k.
- */
-int nw_video_fb_guest_dirty(const uint8_t *fb, const uint8_t *copy,
-			    size_t nbytes);
-
-/*
- * Guest FB must live in RAM so after G2 the RAM BAT lets NQD /
- * VideoDoDriverIO / QD stores HIT the_buffer. vm_acquire_reserved is
- * outside that BAT. Offset is past HTAB and mill's NuBus 4MiB alias.
- * Live c81f88bd 50325600 is not a skip.
- */
-enum {
-	NW_GUEST_FB_RAM_OFF = 0x800000
-};
-int nw_video_fb_in_ram(uint32_t fb_ea, uint32_t ram_base, uint32_t ram_size,
-			uint32_t fb_bytes);
-
-/*
- * NK v2 is ROM+0x310000 .. ROM+0x360000. Mill 68k (ROM+0x366084) is not
- * in NK and is not G3. Live 50327b54 (ROM+0x327b54) is in NK. Do not mill
- * that walk. After G2, HandleInterrupt uses native 0x312b1c while PC is
- * in NK even if XLM_RUN_MODE is still MODE_68K (New World patch skip).
- */
-int nw_ppc_pc_in_nk(uint32_t pc, uint32_t rom_base);
-/* Live 46577d78: VecTbl 0x900 = ROM+0x326420. Heartbeats 503264xx.
- * Not a skip-list. Host must not picspin-skip or re-take 0x900 here. */
-int nw_ppc_pc_in_dec_handler(uint32_t pc, uint32_t rom_base);
-int nw_handle_interrupt_use_native(int first_dsi, uint32_t pc,
-				     uint32_t rom_base);
-int nw_handle_interrupt_skip_nested(int use_native, uint32_t r1,
-				      uint32_t kdp);
-
-/*
- * After G2, arm a short DEC so the 171-PC walk can take 0x900.
- * Reset DEC is 0x7fffffff and ticks 1/256 insns — that never underflows
- * in a live hang. Do not skip_after_g2 0x327b5x. mill 68k is not G3.
- */
-enum {
-	NW_MSR_EE = 0x00008000,
-	NW_MSR_IR = 0x00000020,
-	NW_MSR_DR = 0x00000010,
-	NW_MSR_ME = 0x00001000,
-	NW_MSR_IP = 0x00000040,
-	NW_DEC_ARM_AFTER_G2 = 0x1000,
-	NW_DEC_VECTOR_EA = 0x900,
-	NW_MSR_LIVE_EE_OFF = 0x00002000	/* live 7b349dc2 at 50325600 */
-};
-uint32_t nw_dec_arm_value(void);
-int nw_dec_take_after_g2(int first_dsi);
-int nw_dec_ee_on(uint32_t msr);
-/* Live c3b5d982: 17efbb80 is r1/KDP, not MSR. Upper 16 bits 0. */
-int nw_ppc_srr1_is_msr(uint32_t srr1);
-uint32_t nw_ppc_srr1_use(uint32_t srr1);	/* 00002000 if not; EE stays off */
-/*
- * Live a4f0c6ce: after leave/hold, guest mtmsr 00001040 (ME+IP,
- * real). Pinning IR+DR back to 00007672 kept the 50326 walk.
- * Collapse-to-0 and !is_msr still pin. RI-only leftover
- * (no ME, no IR/DR) still pins. Do not or-in EE.
- */
-int nw_dec_leave_pin_real(uint32_t live, uint32_t last_real);
-/* cmpi/cmpli/cmp/cmpl. Used to complete a 50326 wait, not skip it. */
-int nw_ppc_is_cmp(uint32_t op);
-int nw_ppc_is_bc(uint32_t op);
-/* Live 3081e072: wait is exactly ROM+0x326674 op=2c08ffff. */
-int nw_dec_leave_50326674_cmp(uint32_t rom_off, uint32_t op);
-/*
- * CR bit to set (1) or clear (0) so bc falls through. Returns
- * -1 if op is not a CR-using bc (BO 4 or 12).
- */
-int nw_ppc_bc_fallthrough_cr_set(uint32_t op);
-/* Signed BD bytes. 50326678 is +8; 503264fc 4082fff0 is -16. */
-int32_t nw_ppc_bc_disp(uint32_t op);
-/*
- * 50325xxx / 50326xxx after leave. Not a skip-list. CLOUD_LO_4
- * (0x900 body) stays out.
- */
-int nw_nk_postleave_walk_off(uint32_t off);
-/* Live 2d295270: 503256f4 cmpwi r30,0 nxt=li r30,0 is not a wait. */
-int nw_ppc_is_li(uint32_t op);
-int nw_dec_leave_cmp_wait(uint32_t nxt); /* following insn is forward beq/bne */
-int nw_dec_leave_503256f4_false(uint32_t off, uint32_t op, uint32_t nxt);
-/* Live 5dd8d481: 503264f8 cmpw r0,r3 nxt=4082fff0 did not unstick 50326480. */
-int nw_dec_leave_503264f8_false(uint32_t off, uint32_t op, uint32_t nxt);
-/* First forward wait-bc index from 50326480; -1 none. Stops at 503264f8. */
-int nw_dec_leave_50326480_arm_idx(uint32_t base_off, const uint32_t *insns,
-				 unsigned n);
-/* Live 2d295270 hang pc=50326480. Not a skip-list. */
-int nw_dec_leave_50326480_off(uint32_t off);
-/* Live 042a7f54 hang pc=50326564 after 50326484 bne +12. */
-int nw_dec_leave_50326564_off(uint32_t off);
-/* Heartbeat wait sites after 50326678. Not a skip-list. */
-int nw_dec_leave_hb_wait_off(uint32_t off);
-/*
- * GPR that makes the following bc fall through. r8: beq-only
- * when already -1. Do not smash r8 on bne.
- */
-uint32_t nw_dec_leave_50326_cmp_use(uint32_t ra, uint32_t was,
-				    uint32_t rb, uint32_t nxt);
-/* Guest MSR has EE+IR. Architectural; live 00002000 is 0. */
-int nw_dec_can_yield(uint32_t msr);
-/*
- * Host take_dec gate. After G2, pending DEC yields even when live
- * msr=00002000 has neither EE nor IR. Guest never wrote EE (no
- * mtmsrd on PPC32; mtmsr/rfi did not set it). Do not or-in EE.
- * Do not mill-skip the 171-PC walk. Pre-G2 still needs EE+IR so
- * DEC=0 at reset does not storm the probe.
- */
-int nw_dec_host_take(int first_dsi, uint32_t msr);
-/*
- * After G2, host takes pending DEC even if guest EE is off, so this
- * is no longer 1 for live 00002000. 1 only if the host still will not
- * take 0x900. NQD / dirty still win.
- */
-int nw_video_guest_paint_blocked(int first_dsi, uint32_t msr,
-				   int nqd, int dirty);
 
 void nw_boot_log(const char *line);
-/* CPU-thread SDL_PumpEvents + present. Keeps Cocoa from Force-Quit. */
-void nw_boot_host_pump(void);
-/* Host click probe: white-screen box. Not G3. */
-void nw_g3_click_bridge_arm(int win_w, int win_h);
-void nw_g3_host_click(int x, int y, int button);
-int nw_g3_click_box(int *x, int *y, int *w, int *h);
-int nw_g3_click_consumed(void);
 void nw_log_g0_decode(const uint8_t *rom, size_t size);
 void nw_log_g1_tree(void);
 void nw_log_g1_kdp(const uint8_t *page);
@@ -285,119 +172,20 @@ void nw_log_msr_dr(uint32_t msr);
 void nw_log_msr_write(const char *how, uint32_t pc, uint32_t msr);
 void nw_log_first_dsi(uint32_t srr0, uint32_t dar, int dr_on_hit);
 void nw_log_translator_off(void);
-void nw_log_pc(uint32_t pc, uint32_t msr);
-void nw_log_dr_xlate(uint32_t pc, uint32_t ea, int ok, uint32_t pa,
-		     uint32_t dbat0u, uint32_t dbat0l);
 
 /*
- * Identity-map ROM pages into a caller-owned HTAB (VSID 0, 1:1 RPN).
- * Used so a later DR-on lwz of the faulting insn at SRR0 can HIT (G2).
+ * S4 event stream, same grammar as the QEMU golden plugin:
+ *   NW-BOOT X E <srr0> <vector> [<dar>|<srr1>]   (DAR for 0x300/0x600, SRR1 for 0x700)
+ *   NW-BOOT A <op> <68k-pc> <handler>
+ * Every event is logged (no caps); newworldview `diff` consumes it.
+ * `extra_valid` selects whether the trailing field is printed.
  */
-void nw_htab_program_rom_ptes(uint8_t *htab, size_t htab_size, uint32_t sdr1,
-			      uint32_t rom_base, uint32_t rom_size, uint32_t vsid);
-void nw_guest_seed_rom_htab(uint32_t sdr1);
-/*
- * NK polls *(KDP-2272) as a PIC pointer; 0x3104a8 never stores one.
- * Live 93eb1588: 50-PC cloud left, then single-PC stick
- * heartbeat 5032582c ×2208 (ROM+0x32582c). Not mill. After first
- * data DSI, leave_npc must not land on 0x32582c or prior waits.
- * OLD_B npc=50325aac. Do not skip +0x325a14 before that DSI.
- * Do not jump PAST 0x326000 or mill +0x366084. PIC idle 0.
- */
-enum {
-	NW_NK_IRQ_KDP_OFF = 2272,
-	NW_NK_IRQ_PIC_RAM_OFF = 0x10000,
-	NW_NK_IRQ_STATUS_OFF = 2,
-	NW_NK_IRQ_SPIN_BIT = 2,
-	NW_NK_PICSPIN_LBZ = 0x325a14,
-	NW_NK_PICSPIN_BEQ = 0x325a20,
-	NW_NK_PICSPIN_LBZ_OP = 0x8bdc0002,	/* lbz r30,2(r28) */
-	NW_NK_PICSPIN_BEQ_OP = 0x4182fc40,	/* beq */
-	NW_NK_PICSPIN_OLD_A = 0x325998,
-	NW_NK_PICSPIN_OLD_B = 0x325a9c,
-	NW_NK_PICSPIN_OLD_C = 0x325c94,
-	NW_NK_PICSPIN_PAST = 0x326000,	/* live b62e7717: went to mill; stay */
-	NW_NK_PICSPIN_LEAVE_INSNS = 32,
-	NW_NK_68K_EMUL = 0x360000,	/* Old World 68k mill; mill 68k is not G3 */
-	NW_NK_IRQ_NATIVE = 0x312b1c,	/* New World NK interrupt entry */
-	NW_NK_MILL_68K = 0x366084,	/* mill inner loop; not G3 / not WINDOW */
-	NW_NK_CYCLE_A = 0x325c7c,	/* live e0df3b4e dominant */
-	NW_NK_CYCLE_B = 0x325c44,
-	NW_NK_CYCLE_C = 0x32570c,
-	NW_NK_CYCLE_D = 0x325690,
-	NW_NK_CYCLE_E = 0x325670,
-	NW_NK_CYCLE_F = 0x325520,	/* NK debug print */
-	NW_NK_CYCLE_G = 0x312728,
-	NW_NK_CYCLE_H = 0x312708,
-	NW_NK_PRINT_A = 0x32572c,
-	NW_NK_PRINT_B = 0x325850,
-	NW_NK_PRINT_C = 0x325874,
-	NW_NK_CYCLE_OLD_PAST = 0x325c98,	/* 108235a0 PAST, in cluster */
-	NW_NK_TAIL_A = 0x3127a8,	/* live b19886d6 3-PC loop */
-	NW_NK_TAIL_B = 0x3127b8,
-	NW_NK_TAIL_C = 0x3127c8,
-	NW_NK_TAIL_LO = 0x3127a8,
-	NW_NK_TAIL_HI = 0x3127c8,
-	/* Live 92beda4a ~50-PC cloud after npc=503127cc. */
-	NW_NK_CLOUD_A = 0x325584,	/* dominant */
-	NW_NK_CLOUD_B = 0x326438,
-	NW_NK_CLOUD_C = 0x3128bc,
-	NW_NK_CLOUD_TAIL = 0x3127cc,	/* skip from 0x312728 landed here */
-	NW_NK_CLOUD_MID = 0x325660,
-	NW_NK_CLOUD_LO_0 = 0x312700,
-	NW_NK_CLOUD_HI_0 = 0x312728,
-	NW_NK_CLOUD_LO_1 = 0x31289c,
-	NW_NK_CLOUD_HI_1 = 0x3128c0,
-	NW_NK_CLOUD_LO_2 = 0x325554,
-	NW_NK_CLOUD_HI_2 = 0x32558c,
-	NW_NK_CLOUD_LO_3 = 0x3256ec,
-	NW_NK_CLOUD_HI_3 = 0x32570c,	/* through CYCLE_C */
-	NW_NK_CLOUD_LO_4 = 0x326420,
-	NW_NK_CLOUD_HI_4 = 0x326448,
-	NW_NK_STICK = 0x32582c,	/* live 93eb1588 heartbeat ×2208 */
-	/*
-	 * Live bedd28a3: 171 unique NK PCs after leaving 5032582c.
-	 * Dominant 50327b54 (ROM+0x327b54)×33. Walk, not a stick.
-	 * Do not skip_after_g2 this off. mill +0x366084 is not a skip.
-	 */
-	NW_NK_WALK_A = 0x327b54,
-	NW_NK_WALK_B = 0x327b50,	/* live dee26adb ×38; not skip */
-	NW_NK_WALK_C = 0x327b60,	/* live dee26adb ×37; not skip */
-	NW_NK_WALK_EE = 0x325600,	/* live c81f88bd; do not skip */
-	NW_NK_WALK_EE_N = 0x325604	/* live heartbeat +4; not skip */
-};
-uint32_t nw_nk_irq_pic_ea(uint32_t ram_base);
-uint8_t nw_nk_irq_status_idle(void);
-int nw_nk_irq_status_spins(uint8_t v);
-int nw_ppc_is_branch(uint32_t op);
-int nw_ppc_rel_branch_target(uint32_t pc, uint32_t op, uint32_t *target);
-int nw_nk_picspin_rom_off(uint32_t off);
-int nw_nk_picspin_cycle_off(uint32_t off);
-int nw_nk_picspin_mill_off(uint32_t off);
-int nw_nk_picspin_is_g2_dsi_off(uint32_t off);
-int nw_nk_picspin_skip_after_g2(uint32_t off, uint32_t op);
-int nw_nk_picspin_npc_stays(uint32_t npc, uint32_t from_pc, uint32_t rom_base);
-uint32_t nw_nk_picspin_leave_npc(uint32_t pc, uint32_t rom_base,
-				 const uint32_t *insns, unsigned n);
-uint32_t nw_nk_picspin_past_npc(uint32_t pc, uint32_t rom_base);
-void nw_nk_irq_fill_pic_be(uint8_t *mem, size_t mem_size, uint32_t pic_ea);
-void nw_guest_plant_nk_irq(uint32_t kdp);
-/* After first DSI: 1:1 BAT RAM+ROM so HotInts MemRetry can HIT under DR.
- * No-op until nw_guest_note_first_data_dsi() — planting at first IR+DR
- * covers KDP-1048 and swallows G2. */
-void nw_guest_note_first_data_dsi(void);
-int nw_guest_first_data_dsi_seen(void);
-void nw_guest_map_ram_rom_identity(void);
-void nw_guest_map_kernel_data(void);
-void nw_log_xlatehow(const char *how, uint32_t ea, uint32_t msr, uint32_t sdr1,
-		     uint32_t sr, uint32_t dbat3u, uint32_t dbat3l);
-/* Write the DSI slot at EA 0x300 (host RAM image, no guest ROM). */
-void nw_fill_dsi_vector_be(uint8_t *mem, size_t mem_size, uint32_t handler);
-/* Guest: copy NK VecTbl DSI slot to PA 0x300; synthesize if template is empty. */
-void nw_guest_plant_dsi_vector(void);
-/* 68k inner loop at ROM+0x366084: table is ROM+0x380000 + opcode*8. */
-int nw_guest_68k_dispatch(uint32_t *pc, uint32_t *r24, uint32_t *r27,
-			  uint32_t *r29);
+void nw_event_exception(uint32_t srr0, uint32_t vector, uint32_t extra, int extra_valid);
+void nw_event_aline(uint32_t op, uint32_t pc68k, int handler);
+/* Periodic `T <epoch_ms> <nX> <nA> <pc> <msr>` tick, at most once per
+ * second. pc/msr are extra fields (the golden importer ignores them) so a
+ * silent spin still names where the CPU is. */
+void nw_event_tick(uint32_t pc, uint32_t msr);
 
 #ifdef __cplusplus
 }

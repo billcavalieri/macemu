@@ -863,7 +863,29 @@ void init_emul_ppc(void)
 	if (ROMType == ROMTYPE_NEWWORLD) {
 		ppc32_guest_mmu().set_phys_read32(guest_phys_read32, NULL);
 		ppc_cpu->enable_guest_mmu(true);
+		/*
+		 * G1 handoff: NK v2 (0x3104a8) walks NKSystemInfo in r5 for the
+		 * physical RAM banks (bank size at +52). The Trampoline fills this
+		 * on real hardware; SheepShaver has no Trampoline, so seed the
+		 * record here. Data only. The NK itself is not modified.
+		 */
+		extern uint32 RAMBase, RAMSize;
+		const uint32 sysinfo = SheepMem::Reserve(0x120);
+		Mac_memset(sysinfo, 0, 0x120);
+		WriteMacInt32(sysinfo + 0, RAMSize);
+		WriteMacInt32(sysinfo + 4, RAMBase);
+		WriteMacInt32(sysinfo + 48, RAMBase);
+		WriteMacInt32(sysinfo + 52, RAMSize);
+		ppc_cpu->set_register(powerpc_registers::GPR(5), any_register(sysinfo));
 		nw_log_g1_hwinit();
+#if NW_BOOT_LOG
+		{
+			char buf[96];
+			snprintf(buf, sizeof(buf), "G1: NKSystemInfo r5=%08x ram=%08x+%08x",
+				 (unsigned)sysinfo, (unsigned)RAMBase, (unsigned)RAMSize);
+			nw_boot_log(buf);
+		}
+#endif
 	} else {
 		nw_log_translator_off();
 	}
