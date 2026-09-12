@@ -278,7 +278,7 @@ Stream comparison: `NewWorldViewCLI diff` stops at the first NK-internal
 that is fixed in newworldview, `/tmp/xdiff.py`-style normalisation (NK
 0x00f1xxxx / 0x5031xxxx → ROM offset, drop 0x900) is the comparison.
 
-#### S4 step 4b — next divergence (open): the hardware-info block
+#### S4 step 4b — the hardware-info block (closed by step 4c; kept as the record)
 
 Golden line 3457 `X E 6806c9e8 0300 68fffa18` … then `68061c14 0300
 80017e00` / `80016600` (VIA at mac-io 0x80016000). Ours: `6806d7cc 0300
@@ -303,6 +303,78 @@ r7/r8/r9. After that the host side: SheepShaver's own accessors still speak
 the Old World map (lowmem host page at 0, `KernelData` at 0x68ffe000) while
 the NK owns LA→PA (Mac LA x ↔ PA RAMBase+x, KDP at the NK's PA); that is
 the gate after this one.
+
+#### S4 step 4c — gates fixed from the hardware-info block to the device tree
+
+Commits `849d07b7`, `075dbfcf`, `6671aad2`, `3a43b423`, `aa560162`,
+`2fff43c7`, `31b507b8`, `ef5258d9`. Golden data: `~/nw-golden/dump2/`
+(nwdump third trigger: `nkentry-r5.bin` SystemInfo, `hwinfo-kdp.bin`,
+`hwinfo-configinfo-pa.bin`, `hwinfo-lowmem-pa.bin`, `hwinfo-bootinfo-pa.bin`
+1.5 MiB boot-info area). Never in git.
+
+| gate | golden fact | SheepShaver fix (data or device model, never a code patch) |
+|---|---|---|
+| hardware-info block | r7 = 'RTAS', r9 → 0xc0-byte block ('Hnfo' at +0x70, machine id 0x3035 at +0x76, pointers to the boot-info entry list, the ProductInfo/DecoderInfo record, ConfigInfo tail tables 0xf80/0xf40/0xcfc, OpenPIC 0x80040000) | `nw_fill_hwinfo_be` (`nw_boot_contract.cpp`); `init_emul_ppc` passes r7/r8/r9; boot-info area at LA 0x64000000 (`NW_BOOTINFO_*`); the 68k-consumed ProductInfo/DecoderInfo record (`hwrec[]`: VIA 0x80016000, SCC 0x80012000, OpenPIC 0x80040000, flags 0x1c) |
+| ConfigInfo tail | Trampoline fills +0xf80 interrupt source list (= union of the tree's `AAPL,interrupt-vectors`), +0xf40, +0xcfc | `nw_fill_config_info_be` tail tables |
+| MMU protection | 68k emulator relies on DSI on RO pages (PP bits, R/C), `tlbie` by class, SR-tagged TLB | `kpx_cpu` `ppc-mmu` OEA protection, R/C update, class-based `tlbie` (`3a43b423`) |
+| I/O access | mac99 devices at PA 0x80000000 (mac-io), 0xf0000000–0xffffffff (uni-north, PCI config, flash) | `nw_io.{h,cpp}` dispatch keyed on **PA** after translation; PMDT segments for 0x80000000 / 0xf0000000 with attr 0x3a (cache-inhibited, guarded); unclaimed accesses logged (`NW-BOOT IO …`), first touch per 4 KiB page always (`NW-BOOT IO page …`) |
+| RAM geometry | NK 0x310548: r12 = `PA_RelocatedLowMem`; the first non-empty bank gets base += r12, size −= r12, total −= r12; lowmem zeroed + `MacLowMemInit` at PA r12; NK area at the top of the last bank (KDP+0x638/+0x63c); logical RAM = banks concatenated minus that area into per-segment page tables; installer 0x3123fc rewrites the **first** PMDT entry of each RAM segment in place | SystemInfo bank 0 described from **PA 0** with size `RAMBase+RAMSize` (the trim yields `(RAMBase, RAMSize)`); two `(0,0xffff,0xa00)` entries per RAM segment so the in-place rewrite cannot collide with the next segment's list. Found at 512 MiB (`ramsize 536870912` in the os921 prefs, kept so MemTop-relative addresses stay comparable with the golden — offsets from MemTop now match, e.g. 0x51004) |
+| device tree | boot-info +0xc is a **BGsTree**: 12-byte node records `{sibling, child, first-prop}` in pre-order, then property records `{next (= size, 0 last), name[32], len, value pad 4}`; the 68k importer (ROM 0x44420–0x44580, first read from PC 0xffc44440 of root +0x14) walks it into the Name Registry. Parcels ('prcl' after the ROM image in the ROM file; no "parcels-offset" constant — locate by scanning): node 88 B `{link, ostype, hdrSize, flags, +20 childStride, a[32]@24, b[32]@56}`, child 60 B `{ostype, flags, 'lzss'@8, unpackedLen@12, cksum@16, packedLen@20, ptr@24, name[32]@28}`. 'node' parcels create `AAPL,CodePrepare` (flags 0x20000) / `AAPL,CodeRegister` (0x10000); 'prop' parcels match flags 1 name==a, 2 parent==a, 4 compatible∋a, 8 device_type==b; child 0x10000/0x20000 → code nodes, 0x100 skip (EtherPrintfLib), 0x20 add-if-absent (cofb vs a card's own ndrv); 'psum'/'rom ' ignored. Verified against the golden tree: identical property lengths and PEF headers for every shared node | `nw_bootinfo.{h,cpp}`: mac99-like tree (uni-north `pci`, Keylargo `mac-io` with gpio/via-pmu/rtc/power-mgt/escc/escc-legacy/ata-3 ×2 with cdrom/interrupt-controller, nvram flash, uni-n, cpus by PVR, memory, chosen, options, packages, aliases, rom/macos) plus a `display` node backed by SheepShaver's frame buffer (address/width/height/depth/linebytes; the ROM's cofb ndrv attaches); parcel merge with LZSS; `DecodeROM` keeps the 'prcl' blob (`nw_parcels_keep`); hardware record moved to +0x100000; 196 harness checks; `/tmp/bitree.py` walks a dump |
+
+Result (60 s run, 512 MiB): the exception stream matches the golden
+structurally through the NK, the 68k StartInit, the tree import and the
+native driver start-up; remaining early differences are geometry (MemTop,
+heap block Δ0x6c0, boot-info page-touch order). A-trap sequences match for
+the first 1190 traps and thereafter differ only in the data-dependent
+import loops (`a148 ffc41d9a` per property). The guest drivers now touch
+exactly these unclaimed register pages, which is the device inventory of
+the mac99 path: VIA-PMU 0x80016000/0x80017000, ESCC 0x80012000, OpenPIC
+0x80040000 + source registers 0x80050000, NVRAM flash 0xff004000–0xff006000
+(golden touches the same, PC 0x572d8), uni-n 0xf8000000, PCI config
+0xf2800000/0xf2c00000, Keylargo ATA 0x80020060 / 0x80021060 (drive-select
+0xa0, read back 0 → no drive).
+
+Tools (in `/tmp`, not in git): `xdiff.py golden ss.log [--loose|--lowonly]`
+strict first divergence; `xdiff2.py golden ss.log [minblk]` difflib
+alignment of the first 2500 events after the NK probe; `adiff.py` the same
+for `(op, 68k-pc)` A-trap pairs; `bitree.py dump [-v]`; `prcl.py`;
+`dis68.py <addr> <len>` (cstool m68k40, resyncs on bad words).
+
+#### S4 step 5 — next gate (open): a drive in the drive queue
+
+Both runs reach ROM `0xffc03808` (open `.LANDisk`, fails in both) and
+`0xffc038a6`: walk `DrvQHdr` (`$30a`), for each drive ≤ 15 whose bit is set
+in `$b0e` call the try-boot routine (`0xffc03916`: `_Read` 1024 bytes at
+offset 0, check `'LK'`). Golden: one pass, `a002 ffc0392c` (`_Read`), then
+the boot blocks draw (`aa14`/`a8a5` at `ffc03b0a`/`ffc03b24`). Ours: the
+drive queue is empty, so the loop repeats `_GetOSTrapAddress`, `_Control`,
+`_Enqueue`, `_GetKeys` (`ffd9c49c`, boot-key check), `_ReadXPRam`,
+`_Open .LANDisk`, six `_CmpString` (unit-table scan) forever — the
+"flashing ?" stage. The keylargo-ata ndrv from the tree probed
+`0x80020060`/`0x80021060` and found no device; nothing else can put a
+volume in the queue.
+
+The fix is a device that answers. Two honest routes, both consistent with
+"fix the gate": 
+
+1. **mac99 device models** (the golden's shape): Keylargo ATA registers
+   (0x80020000/0x80021000, 0x10 stride, DBDMA channels at mac-io
+   +0x8b00/+0x8d00 per the `reg` property) with an ATAPI CD-ROM behind the toast image, so
+   the ROM's own keylargo-ata ndrv and ATAPI driver do the work. Then the
+   same for the devices already being poked: VIA-PMU (PMU protocol: ADB,
+   RTC, NVRAM via PMU), OpenPIC, ESCC (can stay dumb), NVRAM flash, uni-n,
+   PCI config space (uni-north host bridge: the display node's config
+   header). Largest, no ROM changes at all, matches the golden trace
+   register for register.
+2. **Host-backed ndrv in the tree** (SheepShaver-classic style): a
+   `driver,AAPL,MacOS,PowerPC` property on a `cdrom`/`block` node whose PEF
+   calls the host through an `EMUL_OP`-style instruction, serving the toast
+   image the way `cdrom.cpp` does today; ditto for ADB/RTC/video. Smaller,
+   but the trace stops matching the golden at every device boundary, and
+   the ROM's native ATA/PMU code paths are never exercised.
+
+Not decided here; the branch owner picks. Everything before this gate is
+route-independent and landed.
 
 G3 is reached when the ROM mounts the CD, loads the System, and the
 System's own `_Launch` starts `Mac OS Install`, which draws its window
