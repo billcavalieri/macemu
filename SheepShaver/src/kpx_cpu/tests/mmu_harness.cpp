@@ -248,7 +248,12 @@ int main()
 		CHECK(nw_be32_load(&ci[0], 0xff4) == 0xffffffffu);
 		CHECK(nw_be32_load(&ci[0], 0xf80) == 0x002f0037u && nw_be32_load(&ci[0], 0xf90) == 0x001effffu);
 		CHECK(nw_be32_load(&ci[0], 0xd00) == 0xffffffffu && nw_be32_load(&ci[0], 0xd40) == 0x02070102u);
-		CHECK(nw_be32_load(&ci[0], 0xf00) == 0x02070102u && nw_be32_load(&ci[0], 0xf48) == 0x80540000u);
+		CHECK(nw_be32_load(&ci[0], 0xf00) == 0x02070102u);
+		/* level masks follow the list: level 1 = via-pmu (2); level 2 = gpio1, ata, usb 0x1c
+		 * (0, 3, 5, 7); level 3 = 0x1e (8); level 4 = ata dma (4, 6); level 7 = pswitch (1) */
+		CHECK(nw_be32_load(&ci[0], 0xf44) == 0x20000000u && nw_be32_load(&ci[0], 0xf48) == 0x95000000u);
+		CHECK(nw_be32_load(&ci[0], 0xf4c) == 0x00800000u && nw_be32_load(&ci[0], 0xf50) == 0x0a000000u);
+		CHECK(nw_be32_load(&ci[0], 0xf5c) == 0x40000000u && nw_be32_load(&ci[0], 0xf40) == 0 && nw_be32_load(&ci[0], 0xf60) == 0);
 		CHECK(nw_be32_load(&ci[0], 0) == 0 && nw_be32_load(&ci[0], 0x70) == 0x30202020u);
 		CHECK(nw_be32_load(&ci[0], 0x378) == 0x01010000u);
 		CHECK(nw_be32_load(&ci[0], 0x54) == 0 && nw_be32_load(&ci[0], 0x44) == 0);

@@ -577,13 +577,18 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
 		ci[CI_TAIL_D00 + 0x40 + i] = p;
 		ci[CI_TAIL_F00 + i] = p;
 	}
+	/* per-68k-level vector masks, +0xf40[level]: bit (31 - list position)
+	 * for each source of that level. The ROM's level-N autovector handler
+	 * ANDs the NK's pending-vector word with this before dispatching (and
+	 * returns without acknowledging when nothing matches, which re-posts the
+	 * interrupt forever), so this must follow the list. Golden: level 2 =
+	 * 0x80540000 (positions 0, 9, 11, 13 of its 15-entry list). */
 	for (uint32_t o = CI_TAIL_F40; o < CI_TAIL_F80; o += 4)
 		nw_be32_store(ci, o, 0);
-	nw_be32_store(ci, CI_TAIL_F40 + 0x04, 0x20000000u);
-	nw_be32_store(ci, CI_TAIL_F40 + 0x08, 0x80540000u);
-	nw_be32_store(ci, CI_TAIL_F40 + 0x0c, 0x00020000u);
-	nw_be32_store(ci, CI_TAIL_F40 + 0x10, 0x1fa80000u);
-	nw_be32_store(ci, CI_TAIL_F40 + 0x1c, 0x40000000u);
+	for (uint32_t i = 0; i < NW_TRAMPOLINE_NIRQ && i < 32; i++) {
+		const uint32_t o = CI_TAIL_F40 + 4u * (nw_trampoline_irqs[i].prio & 7);
+		nw_be32_store(ci, o, nw_be32_load(ci, o) | (0x80000000u >> i));
+	}
 	/* 16-bit source list, 0xffff terminated */
 	for (uint32_t o = CI_TAIL_F80; o < NW_CI_SIZE; o += 4)
 		nw_be32_store(ci, o, 0xffffffffu);
