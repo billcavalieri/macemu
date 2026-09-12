@@ -45,30 +45,16 @@ Each step has a done-test and a time box. Stop and reassess at any red.
 
 `g3` committed at `f9c0ef0a`, tagged `g3-mill-frozen`. Reference only.
 
-### S1 — Regression truth (½ day)
+### S1 — Regression truth (dropped)
 
-Build this tree and boot **Mac OS 9.0.4** with **ROM 1.6** (ROM Update 1.0)
-to the Finder on Apple Silicon.
+Dropped by decision: 9.0.4 / ROM 1.6 is not a goal of this branch and is not
+a gate for New World work. Nothing here is required to keep the Old World
+path booting; changes are judged only by the S3 golden diff.
 
-- Done: Finder desktop, menu bar, About This Computer says 9.0.4.
-- Red: does not boot. That is bug #1; nothing New World is trustworthy
-  until it is green. `OS921-BOOT-PLAN.md` WP1 already requires this.
-- Kill: red for > 2 days → restart New World work from upstream SheepShaver
-  and port G0–G2 (device tree, MMU, NK exception handling) over cleanly
-  instead of un-milling `ppc-cpu.cpp`.
+### S2 — Cheap goal test (struck)
 
-### S2 — Cheap goal test (½ day, after S1 green)
-
-From the 9.0.4 desktop, mount `Mac OS 9.2.1.toast` and run `Mac OS Install`.
-
-- Outcome A: Welcome window appears. Stated goal met; proves the installer
-  needs nothing but a working Toolbox. Reorder: install 9.2.1 to an HFS
-  image first, then work on booting *that*.
-- Outcome B: installer refuses on machine ID. The gate is Gestalt / ROM
-  identity, a small target. Record exactly what it checks (resviewer on
-  the Upgrader PEF: `Gestalt` selectors, `'Mac OS ROM'` version reads).
-- Outcome C: crash/hang. Log it; it is an installer-vs-Toolbox bug, not a
-  boot bug, and is out of scope until S4.
+Struck: 9.2.1 does not run in SheepShaver from a 9.0.4 desktop either
+(observed), so this test proves nothing about the 9.2.1 boot path.
 
 ### S3 — Golden reference (1–2 days)
 
@@ -188,9 +174,79 @@ device probe. That is the S4 starting point.
 2. Run. The ROM will hang on its first hardware probe.
 3. Use the S3 diff to name the probe (device node, register, or trap).
 4. Provide it the SheepShaver way: a minimal device model, or a
-   `rom_patches.cpp` / `emul_op` driver replacement, as Old World does for
-   9.0.4 and as NewSheep did for New World. One device per change.
+   `rom_patches.cpp` / `emul_op` driver replacement, as Old World does and
+   as NewSheep did for New World. One device per change.
 5. Done-test per device: the diff's first divergence moves later.
+
+#### S4 step 1 status: done (commits `91306bc0`, `03773224`, `48222634`)
+
+The mill was entangled with G2 inside `857f320e` ("G0–G2 live" already had
+22.5k lines and 177 stubs), so a pure `git revert` was impossible. The
+revert is reconstructive: the New World CPU/glue files were reset to the
+clean G1/G2 base `9b0625e8` (ppc-cpu.cpp 1,006 lines) and only architectural
+pieces were re-added. Three commits, one per category, each `git revert`-able:
+
+| commit | scope | removed | kept / added |
+|---|---|---|---|
+| `91306bc0` 1a | `kpx_cpu` | all `g3_*` / `nw_dec_*` helpers, 23k-line `do_interpret` mill, 68k resume, r1/ea fix, ISI retry, sc 0x2e, PEF stubs, MMU-off and PA-whitelist guards, SPRG3 `hotints_vector`, `ivt_mapped`/`delay_ram_bats`, xlate logging | `take_exception` (SRR0/SRR1, MSR clear, vector by MSR[IP]); DSI, ISI, `sc`→0xc00, DEC→0x900 when EE, `tw`/`twi` and illegal→0x700 with SRR1 bits; DEC SPR + tick; fetch outside RAM/ROM/low-mem → 0x200 |
+| `03773224` 1b | `nw_boot_contract.{h,cpp}`, `sheepshaver_glue.cpp` | skip-68k offset, G3 strings, video/click bridge, dec pin/leave, NK IRQ/PIC plant, picspin, host 68k dispatch, host HandleInterrupt policy, ROM HTAB PTE seed, DSI vector fill, planted 0x300 vector, identity BATs, KERNEL_DATA plants | G0 decode, G1 tree/KDP/HTAB gate, G0–G2 log lines; `NKSystemInfo` in r5 (data the Trampoline supplies); event API |
+| `48222634` 1c | `rom_patches.cpp`, video, `main_unix.cpp`, project | NK code patches (PMDT-panic branch 0x31e5e0, print→`blr` ×4, `mtmsr`→`nop` ×2), G3 `MacOSX/video_sdl2.cpp` (dirty bbox, host paint, click, FB dumps), `--g3-skip-68k`, `/tmp/ss-g2-run.log` | project back on `BasiliskII/src/SDL/video_sdl2.cpp`; SDL software-renderer hint |
+
+Event stream (S3 grammar, consumed by `NewWorldViewCLI diff`):
+`NW-BOOT X E <srr0> <vector> [<dar>|<srr1>]`, `NW-BOOT A <op> <68k-pc> <h>`
+(observed when the fetch PC hits one of the ROM emulator's four A-line
+handlers — observation only), `NW-BOOT T <ms> <nX> <nA> <pc> <msr>` once a
+second (pc/msr are extra fields so a silent spin is still located).
+Debug-only observers under `NW_BOOT_LOG`: `PCTRACE` ring dumped once when
+the PC first enters the NK debug region ROM+0x325500..0x325fff, and
+`NKPANIC` registers at ROM+0x326420/0x326428.
+
+Build/run/diff recipe:
+
+```
+xcodebuild -project SheepShaver/src/MacOSX/SheepShaver_Xcode8.xcodeproj \
+  -scheme SheepShaver -configuration Debug ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+  -derivedDataPath /tmp/macemu-s4-dd
+perl -e 'alarm 100; exec @ARGV' -- \
+  /tmp/macemu-s4-dd/Build/Products/Debug/SheepShaver.app/Contents/MacOS/SheepShaver \
+  --config "$HOME/Library/Application Support/SheepShaver/os921/prefs" > /tmp/ss-s4.log 2>&1
+NewWorldViewCLI diff --qemu ~/nw-golden/run1/events.txt --nwboot /tmp/ss-s4.log \
+  --rom "$HOME/Downloads/Mac OS ROM"
+```
+
+`SheepShaver-MMUTests` (70 host tests) builds and passes on the same tree.
+
+**Redo (undo the revert):** `git revert 48222634 03773224 91306bc0`, or
+restore the whole mill with `git checkout g3-mill-frozen -- SheepShaver/src`
+(the G3 `MacOSX/video_sdl2.cpp` comes back with it; re-point the Xcode
+project's `video_sdl2.cpp` reference to `path = video_sdl2.cpp;
+sourceTree = SOURCE_ROOT;`).
+
+#### S4 step 2 — first divergence (open)
+
+100 s run: **0 exceptions, 0 A-lines**. The diff reports no comparable
+events; the `T` lines put the CPU in ROM+0x325xxx–0x326xxx with MSR=0x2000.
+`PCTRACE`/`NKPANIC` name it:
+
+```
+0x310750  bl 0x310790 -> bl 0x325520      NK banner print ("Hello from multitasking …"), returns
+…
+0x31e878  bltl 0x31e5e0 -> b 0x326420     NK panic entry (lr=5031e87c, r1=KDP=17efe000, sprg0=KDP, msr=0)
+0x32665c..0x32667c                        debugger wait loop: ++*(u32*)0, poll 0x3259c0 (no debug port → -1), forever
+```
+
+`0x31e7c0..0x31e878` builds an `'area'` record per PMDT entry (page index
+at +0, count-1 at +2, phys/flags at +4; base = (index<<12)+r26) and panics
+when the next area's base is **below** this one's (`subf.` … `bltl`). The
+PMDT the NK is converting comes from the ConfigInfo block that
+`patch_nanokernel_boot` writes at ROM+0x30d000 for the Old World layout, and
+from the `NKSystemInfo` bank list in r5. Golden takes this path without a
+panic. So the first gate is a **G1 handoff-data gate**: the ConfigInfo PMDT /
+SystemInfo banks handed to NK v2 are out of order or overlapping for the
+9.2.1 ROM's expectations. Next: dump the 9.2.1 ConfigInfo PMDT (resviewer /
+newworldview `BootInfoParser`) and the QEMU `mac99` ConfigInfo after the
+Trampoline, and make SheepShaver's handoff data consistent. This is data,
+not code, and not a skip (the mill's answer was to rewrite the `bltl`).
 
 G3 is reached when the ROM mounts the CD, loads the System, and the
 System's own `_Launch` starts `Mac OS Install`, which draws its window
@@ -220,7 +276,8 @@ WP3 ARM64 JIT on the MMU, WP4 memory banks, WP5 video damage. Not before G3.
 
 ## Non-negotiables carried over
 
-- ROM and toast bytes never land in git.
-- 9.0.4 with ROM 1.6 must keep booting after every change.
+- ROM, toast and golden capture bytes never land in git.
+- (Removed: the 9.0.4 / ROM 1.6 regression requirement. 9.0.4 is not a goal
+  of this branch and is not a gate for New World changes.)
 - "Fix the gate" over "skip the gate". If a change's only justification
   is that the guest gets further, it is a skip; do not land it.
