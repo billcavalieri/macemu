@@ -224,6 +224,8 @@ enum powerpc_instruction {
 	PPC_I(TLBIE),
 	PPC_I(TLBIA),
 	PPC_I(TLBSYNC),
+	PPC_I(TW),
+	PPC_I(TWI),
 	PPC_I(MFSRIN),
 	PPC_I(MTSRIN),
 	PPC_I(XOR),

@@ -19,8 +19,6 @@
  */
 
 #include "cpu/ppc/ppc-mmu.hpp"
-#include "nw_boot_contract.h"
-#include <stdio.h>
 
 ppc32_mmu::ppc32_mmu()
 {
@@ -45,44 +43,7 @@ void ppc32_mmu::reset()
 		dbatu_[i] = 0;
 		dbatl_[i] = 0;
 	}
-	ivt_mapped_ = false;
-	delay_ram_bats_ = false;
-	ram_base_ = 0;
-	ram_size_ = 0;
 	tlbia();
-}
-
-void ppc32_mmu::set_ivt_mapped(bool on)
-{
-	ivt_mapped_ = on;
-	tlbia();
-}
-
-void ppc32_mmu::delay_ram_bats(bool on, uint32_t ram_base, uint32_t ram_size)
-{
-	delay_ram_bats_ = on;
-	ram_base_ = ram_base;
-	ram_size_ = ram_size;
-	tlbia();
-}
-
-bool ppc32_mmu::bat_overlaps(uint32_t batu, uint32_t batl, uint32_t lo, uint32_t hi)
-{
-	(void)batl;
-	if (hi <= lo)
-		return false;
-	if ((batu & 3u) == 0)
-		return false;
-	const uint32_t bl = (batu >> 2) & 0x1fffu;
-	const uint32_t block_mask = (bl << 17) | 0x1ffffu;
-	const uint32_t bepi = batu & 0xfffe0000u;
-	if (((lo ^ bepi) & ~block_mask) == 0)
-		return true;
-	if ((((hi - 1u) ^ bepi) & ~block_mask) == 0)
-		return true;
-	if (bepi >= lo && bepi < hi)
-		return true;
-	return false;
 }
 
 void ppc32_mmu::set_physical_memory(uint8_t *base, uint32_t size)
@@ -105,7 +66,6 @@ void ppc32_mmu::set_msr(uint32_t value)
 void ppc32_mmu::set_sdr1(uint32_t value)
 {
 	sdr1_ = value;
-	tlbia();
 }
 
 void ppc32_mmu::set_sr(unsigned i, uint32_t value)
@@ -195,9 +155,6 @@ bool ppc32_mmu::bat_hit(uint32_t ea, bool insn, uint32_t *pa) const
 	for (unsigned i = 0; i < NBAT; i++) {
 		const uint32_t batu = upper[i];
 		const uint32_t batl = lower[i];
-		if (delay_ram_bats_ && ram_size_ != 0 &&
-		    bat_overlaps(batu, batl, ram_base_, ram_base_ + ram_size_))
-			continue;
 		const bool vs = (batu & 2) != 0;
 		const bool vp = (batu & 1) != 0;
 		if (priv ? !vp : !vs)
@@ -214,16 +171,6 @@ bool ppc32_mmu::bat_hit(uint32_t ea, bool insn, uint32_t *pa) const
 		return true;
 	}
 	return false;
-}
-
-bool ppc32_mmu::ivt_hit(uint32_t ea, uint32_t *pa) const
-{
-	/* Exception page only (EA 0..0xFFF, DSI at 0x300). Does not cover
-	 * KDP-1048 (live miss ea=17efdbe8) or any other RAM/ROM page. */
-	if (!ivt_mapped_ || ea >= 0x1000u)
-		return false;
-	*pa = ea;
-	return true;
 }
 
 bool ppc32_mmu::htab_hit(uint32_t ea, uint32_t *pa)
@@ -293,7 +240,6 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 	ppc32_xlate_result r;
 	r.ok = false;
 	r.pa = 0;
-	r.how = "miss";
 
 	if (width == 0)
 		return r;
@@ -301,56 +247,30 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 	if (!relocation_on(space)) {
 		r.ok = true;
 		r.pa = ea;
-		r.how = "ident";
 		return r;
 	}
 
 	const bool insn = (space == PPC32_XLATE_IR);
 	uint32_t pa;
-	const char *how = "miss";
 
 	if (tlb_lookup(ea, insn, &pa)) {
-		how = "tlb";
 		r.ok = true;
 		r.pa = pa;
-	} else if (bat_hit(ea, insn, &pa)) {
-		how = "bat";
-		tlb_insert(ea, pa, insn);
-		r.ok = true;
-		r.pa = pa;
-	} else if (htab_hit(ea, &pa)) {
-		how = "htab";
-		tlb_insert(ea, pa, insn);
-		r.ok = true;
-		r.pa = pa;
-	} else if (ivt_hit(ea, &pa)) {
-		how = "ivt";
-		tlb_insert(ea, pa, insn);
-		r.ok = true;
-		r.pa = pa;
+		return r;
 	}
-	r.how = how;
 
-	if (space == PPC32_XLATE_DR) {
-		static unsigned n_miss;
-		static unsigned n_any;
-		if (!r.ok && n_miss < 8) {
-			n_miss++;
-			nw_log_xlatehow(how, ea, msr_, sdr1_,
-					 sr_[(ea >> 28) & 0xfu],
-					 dbatu_[3], dbatl_[3]);
-			fprintf(stderr,
-				"NW-BOOT G2: xlatehow=%s ea=%08x msr=%08x sdr1=%08x sr=%08x dbat3=%08x/%08x\n",
-				how, (unsigned)ea, (unsigned)msr_, (unsigned)sdr1_,
-				(unsigned)sr_[(ea >> 28) & 0xfu],
-				(unsigned)dbatu_[3], (unsigned)dbatl_[3]);
-			fflush(stderr);
-		} else if (r.ok && n_any < 8) {
-			n_any++;
-			nw_log_xlatehow(how, ea, msr_, sdr1_,
-					 sr_[(ea >> 28) & 0xfu],
-					 dbatu_[3], dbatl_[3]);
-		}
+	if (bat_hit(ea, insn, &pa)) {
+		tlb_insert(ea, pa, insn);
+		r.ok = true;
+		r.pa = pa;
+		return r;
+	}
+
+	if (htab_hit(ea, &pa)) {
+		tlb_insert(ea, pa, insn);
+		r.ok = true;
+		r.pa = pa;
+		return r;
 	}
 
 	return r;

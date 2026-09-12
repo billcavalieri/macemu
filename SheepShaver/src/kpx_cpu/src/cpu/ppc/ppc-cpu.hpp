@@ -259,11 +259,14 @@ private:
 	uint32 dec_;
 	bool dec_pending_;
 
+	uint32 exception_vector(uint32 vec) const;
+	void take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra);
 	void take_data_dsi(uint32 ea, bool is_store);
 	void take_isi();
 	void take_sc();
 	void take_dec();
-	uint32 hotints_vector(uint32 vec) const;
+	void take_program(uint32 srr1_bits);
+	void tick_decrementer();
 	bool mfspr_oea(uint32 spr, uint32 *value) const;
 	bool mtspr_oea(uint32 spr, uint32 value);
 
@@ -277,13 +280,6 @@ public:
 	powerpc_cpu(task_struct *parent_task);
 #endif
 	~powerpc_cpu();
-
-#ifdef SHEEPSHAVER
-	/* After live G2: short DEC so 0x900 can fire. Not a skip-list. */
-	void nw_arm_dec_after_g2();
-	uint32 guest_dec() const { return dec_; }
-	bool guest_dec_pending() const { return dec_pending_; }
-#endif
 
 	// Specialised memory allocation (needs to be 16-byte aligned)
 	void *operator new(size_t size);
@@ -311,8 +307,11 @@ public:
 	void execute(uint32 entry);
 	void execute();
 
-	/* New World: translate; Old World 9.0.4 stays off (default). */
+	/* New World: architectural MMU + exceptions. Off for non-New World ROMs. */
 	void enable_guest_mmu(bool on);
+	void execute_trap(uint32 opcode);
+	uint32 sprg(unsigned i) const { return sprg_[i & 3]; }
+	uint32 debug_lr() const { return lr(); }
 	bool guest_mmu_enabled() const { return ppc32_guest_mmu_enabled(); }
 	bool guest_fetch(uint32 *opcode);
 	bool guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa);
