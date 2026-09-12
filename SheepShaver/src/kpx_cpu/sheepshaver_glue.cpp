@@ -875,6 +875,8 @@ void init_emul_ppc(void)
 		layout.rom_area_size = ROM_AREA_SIZE;
 		layout.ram_base = RAMBase;
 		layout.ram_size = RAMSize;
+		layout.ci_pa = ROMBase + 0x30d000;
+		layout.bootinfo_pa = NW_BOOTINFO_LA;
 		layout.extra = NULL;
 		layout.n_extra = 0;
 		uint8 si[NW_SI_SIZE];
@@ -888,7 +890,21 @@ void init_emul_ppc(void)
 		Host2Mac_memcpy(procinfo, pi, NW_PI_SIZE);
 		ppc_cpu->set_register(powerpc_registers::GPR(4), any_register(procinfo));
 		ppc_cpu->set_register(powerpc_registers::GPR(6), any_register((uint32)0));	/* no DiagInfo */
-		ppc_cpu->set_register(powerpc_registers::GPR(7), any_register((uint32)0));	/* no RTAS */
+		/*
+		 * S4 step 4b: hardware-info block. Golden: r7 = 'RTAS', r8 = RTAS
+		 * entry (0), r9 -> 0xc0-byte block ('Hnfo' at +0x70). The NK copies
+		 * it to IRP+0xf00 and publishes it at KDP+0xfd0; the 68k StartInit
+		 * takes its ProductInfo record (boot-info +0x51dd0) and I/O bases
+		 * from it. With r7 = 0 the block was all zero: VIA base 0.
+		 */
+		uint8 hw[NW_HWINFO_SIZE];
+		nw_fill_hwinfo_be(hw, &layout);
+		const uint32 hwinfo = SheepMem::Reserve(NW_HWINFO_SIZE);
+		Host2Mac_memcpy(hwinfo, hw, NW_HWINFO_SIZE);
+		ppc_cpu->set_register(powerpc_registers::GPR(7), any_register((uint32)NW_HWINFO_MAGIC_R7));
+		ppc_cpu->set_register(powerpc_registers::GPR(8), any_register((uint32)0));
+		ppc_cpu->set_register(powerpc_registers::GPR(9), any_register(hwinfo));
+		ppc_cpu->set_register(powerpc_registers::GPR(23), any_register((uint32)0));	/* no debug SCC */
 		/*
 		 * Trampoline's other job: the exception vector stubs live at PA 0
 		 * (MSR[IP]=0); on hardware the Trampoline copies them from the ROM
@@ -900,9 +916,10 @@ void init_emul_ppc(void)
 		nw_log_g1_hwinit();
 #if NW_BOOT_LOG
 		{
-			char buf[96];
-			snprintf(buf, sizeof(buf), "G1: NKSystemInfo r5=%08x bank=%08x+%08x vectors@0 from ROM+%06x",
-				 (unsigned)sysinfo, (unsigned)RAMBase, (unsigned)RAMSize, (unsigned)NW_NK_EXC_TABLE_ROM_OFF);
+			char buf[128];
+			snprintf(buf, sizeof(buf), "G1: NKSystemInfo r5=%08x bank=%08x+%08x vectors@0 from ROM+%06x r9=%08x",
+				 (unsigned)sysinfo, (unsigned)RAMBase, (unsigned)RAMSize, (unsigned)NW_NK_EXC_TABLE_ROM_OFF,
+				 (unsigned)hwinfo);
 			nw_boot_log(buf);
 		}
 #endif

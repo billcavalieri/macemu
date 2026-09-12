@@ -43,6 +43,7 @@
 #include "thunks.h"
 #include "video.h"
 #include "nw_boot_contract.h"
+#include "vm_alloc.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -704,9 +705,8 @@ static bool patch_nanokernel_boot(void)
 		extra[n_extra].la = extra[n_extra].pa = SheepMem::Base();
 		extra[n_extra].size = SheepMem::Size();
 		n_extra++;
-		extra[n_extra].la = extra[n_extra].pa = DR_CACHE_BASE;
-		extra[n_extra].size = DR_CACHE_SIZE;
-		n_extra++;
+		/* (No DR cache range: this build does not map DR_CACHE_BASE, and
+		 * under New World the NK owns the DR emulator.) */
 		uint32 fb_size = 0;
 		for (int i = 0; VModes[i].viType != DIS_INVALID; i++) {
 			uint32 sz = VModes[i].viRowBytes * VModes[i].viYsize;
@@ -718,13 +718,32 @@ static bool patch_nanokernel_boot(void)
 			extra[n_extra].size = ((screen_base & 0xfffu) + fb_size + 0xfffu) & ~0xfffu;
 			n_extra++;
 		}
+		/*
+		 * S4 step 4b: the Trampoline's boot-info area (LA 0x64000000,
+		 * 1.5 MiB; golden puts it in RAM at PA 0x15600000 and maps it in
+		 * the seg-6 PMDT). Host identity like SheepMem. It holds the
+		 * ProductInfo/DecoderInfo record the 68k StartInit reaches through
+		 * hardware-info +0x8 (VIA/SCC/OpenPIC bases), later the flattened
+		 * device tree and driver parcels.
+		 */
+		static bool bootinfo_mapped = false;
+		if (!bootinfo_mapped) {
+			if (vm_acquire_fixed(Mac2HostAddr(NW_BOOTINFO_LA), NW_BOOTINFO_SIZE) < 0) {
+				printf("NW-BOOT G1: boot-info area mmap at %08x failed\n", (unsigned)NW_BOOTINFO_LA);
+				return false;
+			}
+			bootinfo_mapped = true;
+		}
 		nw_config_info_layout ci;
 		ci.rom_base = ROMBase;
 		ci.rom_area_size = ROM_AREA_SIZE;
 		ci.ram_base = RAMBase;
 		ci.ram_size = RAMSize;
+		ci.ci_pa = ROMBase + 0x30d000;
+		ci.bootinfo_pa = NW_BOOTINFO_LA;
 		ci.extra = extra;
 		ci.n_extra = n_extra;
+		nw_fill_bootinfo_be(Mac2HostAddr(NW_BOOTINFO_LA), NW_BOOTINFO_SIZE, &ci);
 		int n = nw_fill_config_info_be(ROMBaseHost + 0x30d000, &ci);
 #if NW_BOOT_LOG
 		printf("NW-BOOT G1: ConfigInfo page map %d entries rom=%08x ram=%08x+%08x sheep=%08x+%x fb=%08x+%x\n",
