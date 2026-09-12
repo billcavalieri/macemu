@@ -299,6 +299,289 @@ void nw_fill_kdp_be(uint8_t *page, size_t page_len, const struct nw_kdp_params *
 	nw_be32_store(page, 0xfd0, p->kdp_ea + (uint32_t)NW_KDP_HWINFO_BASE);
 }
 
+/*
+ * NKConfigurationInfo ("NewWorld v1.0" layout) field offsets. Only the
+ * fields the Trampoline rewrites are listed; everything else stays as the
+ * ROM shipped it (offsets are ConfigInfo-relative, so an in-place ROM is
+ * self-consistent).
+ */
+enum {
+	CI_EXC_TABLE_OFF = 0x3c, CI_EXC_TABLE_SIZE = 0x40,
+	CI_HWINIT_OFF = 0x44, CI_HWINIT_SIZE = 0x48,
+	CI_EMUL_CODE_OFF = 0x54, CI_EMUL_CODE_SIZE = 0x58,
+	CI_OPCODE_TBL_OFF = 0x5c, CI_OPCODE_TBL_SIZE = 0x60,
+	CI_LA_INFO_RECORD = 0x9c, CI_LA_KERNEL_DATA = 0xa0, CI_LA_EMULATOR_DATA = 0xa4,
+	CI_LA_DISPATCH_TABLE = 0xa8, CI_LA_EMULATOR_CODE = 0xac,
+	CI_PAGE_ATTR_INIT = 0xb4, CI_PAGEMAP_SIZE = 0xb8, CI_PAGEMAP_OFF = 0xbc,
+	CI_PAGEMAP_IRP = 0xc0, CI_PAGEMAP_KDP = 0xc4, CI_PAGEMAP_EDP = 0xc8,
+	CI_SEGMAP_SUP = 0xcc, CI_SEGMAP_USR = 0x14c, CI_SEGMAP_CPU = 0x1cc, CI_SEGMAP_OVL = 0x24c,
+	CI_BAT_RANGE_INIT = 0x2cc,
+	CI_BATMAP_SUP = 0x34c, CI_BATMAP_USR = 0x350, CI_BATMAP_CPU = 0x354, CI_BATMAP_OVL = 0x358,
+	CI_PA_RELOC_LOWMEM = 0x360,
+	CI_VERSION16 = 0x378, CI_FLAGS_37C = 0x37c,
+	CI_LOWMEM_INIT_TBL = 0xff4,
+	/* PMDT attr low bits: M|PP=2 (RW), M|PP=1 (KDP), 'unmapped' terminator */
+	PMDT_RW = 0x12, PMDT_KDP = 0x11, PMDT_TERM = 0xa00,
+	/* BAT map nibbles (IBAT0..3 low, DBAT0..3 high; f = unused): golden mac99
+	 * uses slot 3 = range 1, slot 2 = range 3 (NK 1 MiB); we add slot 1 =
+	 * range 2 (68k ROM window) since golden's range 1 covers 0xffc00000 and
+	 * ours is the ROM area identity. CPU map: NK only, as golden. */
+	BATMAP_SUP = 0x132f132fu, BATMAP_USR = 0x132f132fu,
+	BATMAP_CPU = 0xf3fff3ffu, BATMAP_OVL = 0x132f132fu
+};
+
+struct pmdt_entry { uint16_t page, count_m1; uint32_t attr; };
+
+static void pmdt_put(uint8_t *ci, int idx, const struct pmdt_entry *e)
+{
+	uint32_t off = (uint32_t)NW_CI_PAGEMAP_OFF + (uint32_t)idx * 8u;
+	ci[off + 0] = (uint8_t)(e->page >> 8);
+	ci[off + 1] = (uint8_t)e->page;
+	ci[off + 2] = (uint8_t)(e->count_m1 >> 8);
+	ci[off + 3] = (uint8_t)e->count_m1;
+	nw_be32_store(ci, off + 4, e->attr);
+}
+
+
+enum { PMDT_MAX_RANGES = 40 };
+struct pmdt_range { uint32_t la, pa, size, attr; int role; };
+
+static int pmdt_add(struct pmdt_range *r, int *nr, uint32_t la, uint32_t pa,
+		    uint32_t size, uint32_t attr, int role)
+{
+	if (*nr >= PMDT_MAX_RANGES)
+		return 0;
+	r[*nr].la = la;
+	r[*nr].pa = pa;
+	r[*nr].size = size;
+	r[*nr].attr = attr;
+	r[*nr].role = role;
+	(*nr)++;
+	return 1;
+}
+
+int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
+{
+	if (ci == NULL || l == NULL)
+		return -1;
+	if ((l->rom_base & 0xfffu) != 0 || l->rom_area_size == 0 || (l->rom_area_size & 0xfffu) ||
+	    (l->rom_base & 0x0fffffffu) + l->rom_area_size > 0x10000000u)
+		return -1;	/* ROM area: page aligned, inside one segment */
+	if ((l->ram_base & 0xfffu) != 0 || l->ram_size <= (uint32_t)NW_NK_LOWMEM_ZEROED)
+		return -1;
+
+	const uint32_t la_irp = nw_be32_load(ci, CI_LA_INFO_RECORD);	/* 0x5fffe000 */
+	const uint32_t la_kdp = nw_be32_load(ci, CI_LA_KERNEL_DATA);	/* 0x68ffe000 */
+	const uint32_t la_edp = nw_be32_load(ci, CI_LA_EMULATOR_DATA);	/* 0x68fff000 */
+	const uint32_t la_emul = nw_be32_load(ci, CI_LA_EMULATOR_CODE);	/* 0x68060000 */
+	const uint32_t la_nk = la_emul & 0xfff00000u;			/* 0x68000000 */
+	if ((la_irp & 0xfffu) || (la_kdp & 0xfffu) || (la_edp & 0xfffu) || la_emul == 0)
+		return -1;
+
+	/* Code stays in place (no NK-side copies), no Old World HWInit probe. */
+	nw_be32_store(ci, CI_EXC_TABLE_OFF, 0);
+	nw_be32_store(ci, CI_EXC_TABLE_SIZE, 0);
+	nw_be32_store(ci, CI_HWINIT_OFF, 0);
+	nw_be32_store(ci, CI_HWINIT_SIZE, 0);
+	nw_be32_store(ci, CI_EMUL_CODE_OFF, 0);
+	nw_be32_store(ci, CI_EMUL_CODE_SIZE, 0);
+	nw_be32_store(ci, CI_OPCODE_TBL_OFF, 0);
+	nw_be32_store(ci, CI_OPCODE_TBL_SIZE, 0);
+
+	/*
+	 * Collect mapped ranges (LA, PA, size, attr, role), split at segment
+	 * boundaries, then emit per segment in ascending page order with one
+	 * terminator each. role: 0 plain, 1 IRP, 2 KDP, 3 EDP (PA filled by NK).
+	 */
+	struct pmdt_range r[PMDT_MAX_RANGES];
+	int nr = 0;
+	pmdt_add(r, &nr, l->rom_base, l->rom_base, l->rom_area_size, PMDT_RW, 0);
+	pmdt_add(r, &nr, la_nk, l->rom_base + (uint32_t)NW_NK_EXC_TABLE_ROM_OFF, 0x100000u, PMDT_RW, 0);
+	pmdt_add(r, &nr, la_irp, 0, 0x1000u, PMDT_RW, 1);
+	pmdt_add(r, &nr, la_kdp, 0, 0x1000u, PMDT_KDP, 2);
+	pmdt_add(r, &nr, la_edp, 0, 0x1000u, PMDT_RW, 3);
+	for (int i = 0; i < l->n_extra; i++) {
+		const struct nw_pmdt_range *x = &l->extra[i];
+		if (x->size == 0 || (x->la & 0xfffu) || (x->pa & 0xfffu) || (x->size & 0xfffu))
+			return -1;
+		uint32_t la = x->la, pa = x->pa, left = x->size;
+		while (left) {	/* split at 256 MiB segment boundaries */
+			uint32_t room = 0x10000000u - (la & 0x0fffffffu);
+			uint32_t chunk = left < room ? left : room;
+			if (!pmdt_add(r, &nr, la, pa, chunk, PMDT_RW, 0))
+				return -1;
+			la += chunk; pa += chunk; left -= chunk;
+		}
+	}
+	/* Overlap check (ranges within the same segment must not intersect). */
+	for (int i = 0; i < nr; i++)
+		for (int j = i + 1; j < nr; j++)
+			if (r[i].la < r[j].la + r[j].size && r[j].la < r[i].la + r[i].size)
+				return -1;
+
+	int n = 0, irp_idx = -1, kdp_idx = -1, edp_idx = -1;
+	uint32_t seg_off[16];
+	for (int seg = 0; seg < 16; seg++) {
+		seg_off[seg] = (uint32_t)n * 8u;
+		/* selection sort of this segment's ranges by LA */
+		int used[PMDT_MAX_RANGES] = { 0 };
+		for (;;) {
+			int best = -1;
+			for (int i = 0; i < nr; i++) {
+				if (used[i] || (int)(r[i].la >> 28) != seg)
+					continue;
+				if (best < 0 || r[i].la < r[best].la)
+					best = i;
+			}
+			if (best < 0)
+				break;
+			used[best] = 1;
+			struct pmdt_entry e;
+			e.page = (uint16_t)((r[best].la >> 12) & 0xffffu);
+			e.count_m1 = (uint16_t)((r[best].size >> 12) - 1u);
+			e.attr = (r[best].pa & 0xfffff000u) | r[best].attr;
+			if (r[best].role == 1) irp_idx = n;
+			if (r[best].role == 2) kdp_idx = n;
+			if (r[best].role == 3) edp_idx = n;
+			if (n >= NW_CI_PAGEMAP_MAX - 1)
+				return -1;
+			pmdt_put(ci, n++, &e);
+		}
+		struct pmdt_entry t;
+		t.page = 0;
+		t.count_m1 = 0xffff;
+		t.attr = (seg >= 6) ? (((uint32_t)seg << 28) | PMDT_TERM | 1u) : PMDT_TERM;
+		if (n >= NW_CI_PAGEMAP_MAX)
+			return -1;
+		pmdt_put(ci, n++, &t);
+	}
+	if (irp_idx < 0 || kdp_idx < 0 || edp_idx < 0)
+		return -1;
+	nw_be32_store(ci, CI_PAGE_ATTR_INIT, PMDT_RW);
+	nw_be32_store(ci, CI_PAGEMAP_SIZE, (uint32_t)n * 8u);
+	nw_be32_store(ci, CI_PAGEMAP_OFF, NW_CI_PAGEMAP_OFF);
+	nw_be32_store(ci, CI_PAGEMAP_IRP, (uint32_t)irp_idx * 8u);
+	nw_be32_store(ci, CI_PAGEMAP_KDP, (uint32_t)kdp_idx * 8u);
+	nw_be32_store(ci, CI_PAGEMAP_EDP, (uint32_t)edp_idx * 8u);
+
+	/* Segment maps: (page-map offset, SR value = seg << 20) x 16, x 4 maps. */
+	const uint32_t segmaps[4] = { CI_SEGMAP_SUP, CI_SEGMAP_USR, CI_SEGMAP_CPU, CI_SEGMAP_OVL };
+	for (int m = 0; m < 4; m++) {
+		for (int seg = 0; seg < 16; seg++) {
+			nw_be32_store(ci, segmaps[m] + (uint32_t)seg * 8u, seg_off[seg]);
+			nw_be32_store(ci, segmaps[m] + (uint32_t)seg * 8u + 4u, (uint32_t)seg << 20);
+		}
+	}
+
+	/* BAT ranges: [1] ROM area (8 MiB block, RW) at its host-side identity;
+	 * [2] the 68k ROM window LA 0xffc00000 (4 MiB, read-only, write-through)
+	 * -> ROM image, as the golden Trampoline does (its PA is the RAM copy of
+	 * the ROM, ours is the ROM area itself); [3] NK 1 MiB at la_nk. */
+	for (int i = 0; i < 32; i++)
+		nw_be32_store(ci, CI_BAT_RANGE_INIT + (uint32_t)i * 4u, 0);
+	nw_be32_store(ci, CI_BAT_RANGE_INIT + 8, l->rom_base | (0x3fu << 2) | 3u);
+	nw_be32_store(ci, CI_BAT_RANGE_INIT + 12, l->rom_base | 0x02u);
+	nw_be32_store(ci, CI_BAT_RANGE_INIT + 16, NW_68K_ROM_LA | (0x1fu << 2) | 3u);
+	nw_be32_store(ci, CI_BAT_RANGE_INIT + 20, l->rom_base | 0x43u);
+	nw_be32_store(ci, CI_BAT_RANGE_INIT + 24, la_nk | (0x07u << 2) | 3u);
+	nw_be32_store(ci, CI_BAT_RANGE_INIT + 28, (l->rom_base + (uint32_t)NW_NK_EXC_TABLE_ROM_OFF) | 0x02u);
+	nw_be32_store(ci, CI_BATMAP_SUP, BATMAP_SUP);
+	nw_be32_store(ci, CI_BATMAP_USR, BATMAP_USR);
+	nw_be32_store(ci, CI_BATMAP_CPU, BATMAP_CPU);
+	nw_be32_store(ci, CI_BATMAP_OVL, BATMAP_OVL);
+
+	/* Low memory lives at the start of the RAM bank; NK zeroes 0x2000 there
+	 * and applies the ROM's own MacLowMemInit table, which sets the 68k
+	 * reset PC (lowmem 4) to 0xffc0002a: the 68k ROM runs in the
+	 * 0xffc00000 window, never at the ROM area's host identity. */
+	nw_be32_store(ci, CI_PA_RELOC_LOWMEM, l->ram_base);
+
+	/* Trampoline marks the record v1.01 (golden: 0101 0000 8100 0000). */
+	nw_be32_store(ci, CI_VERSION16, 0x01010000u);
+	nw_be32_store(ci, CI_FLAGS_37C, 0x81000000u);
+	return n;
+}
+
+void nw_fill_system_info_be(uint8_t *si, const struct nw_config_info_layout *l)
+{
+	if (si == NULL || l == NULL)
+		return;
+	memset(si, 0, NW_SI_SIZE);
+	/* PhysicalMemorySize, UsableMemorySize; bank list at +0x30 (start,size)
+	 * pairs, up to 26. Low memory (LA 0) is the first pages of bank 0: the
+	 * NK writes MacLowMemInit at PA_RelocatedLowMemInit (== ram_base) and
+	 * maps logical page 0 to the first free page, so both must be the same
+	 * page (golden: bank 0 trimmed to start at 0x4000 == PA_RelocatedLowMem).
+	 * Our vectors live at PA 0 outside the bank, so no trim is needed and
+	 * LA x -> PA ram_base + x for the whole bank. */
+	nw_be32_store(si, 0x00, l->ram_size);
+	nw_be32_store(si, 0x04, l->ram_size);
+	nw_be32_store(si, 0x30, l->ram_base);
+	nw_be32_store(si, 0x34, l->ram_size);
+	/* Golden mac99 values for fields the NK reads but we have not decoded. */
+	nw_be32_store(si, 0x100, 0x80040000u);
+	nw_be32_store(si, 0x128, 0x00000035u);
+	nw_be32_store(si, 0x12c, 0xe0000000u);
+}
+
+void nw_fill_processor_info_be(uint8_t *pi, uint32_t pvr, uint32_t cpu_hz,
+			       uint32_t bus_hz, uint32_t tb_hz)
+{
+	if (pi == NULL)
+		return;
+	memset(pi, 0, NW_PI_SIZE);
+	nw_be32_store(pi, 0x00, pvr);
+	nw_be32_store(pi, 0x04, cpu_hz);
+	nw_be32_store(pi, 0x08, bus_hz);
+	nw_be32_store(pi, 0x0c, tb_hz);
+	nw_be32_store(pi, 0x10, 0x1000u);		/* page size */
+	nw_be32_store(pi, 0x14, 0x8000u);		/* L1 data cache size */
+	nw_be32_store(pi, 0x18, 0x8000u);		/* L1 instruction cache size */
+	nw_be32_store(pi, 0x1c, 0x00200020u);	/* cache block sizes */
+	nw_be32_store(pi, 0x20, 0x00000020u);
+	nw_be32_store(pi, 0x24, 0x00200020u);
+	nw_be32_store(pi, 0x28, 0x00200020u);
+	nw_be32_store(pi, 0x2c, 0x00080008u);	/* associativity */
+	nw_be32_store(pi, 0x30, 0x00800002u);
+}
+
+int nw_config_info_pagemap_ok(const uint8_t *ci)
+{
+	if (ci == NULL)
+		return 0;
+	const uint32_t off = nw_be32_load(ci, CI_PAGEMAP_OFF);
+	const uint32_t size = nw_be32_load(ci, CI_PAGEMAP_SIZE);
+	if (off == 0 || size == 0 || (size & 7u) || off + size > (uint32_t)NW_CI_SIZE)
+		return 0;
+	const uint32_t irp = nw_be32_load(ci, CI_PAGEMAP_IRP);
+	const uint32_t kdp = nw_be32_load(ci, CI_PAGEMAP_KDP);
+	const uint32_t edp = nw_be32_load(ci, CI_PAGEMAP_EDP);
+	for (int seg = 0; seg < 16; seg++) {
+		uint32_t p = nw_be32_load(ci, CI_SEGMAP_SUP + (uint32_t)seg * 8u);
+		if (p >= size)
+			return 0;
+		int prev = -1;
+		for (;;) {
+			if (p >= size)
+				return 0;
+			uint32_t page = ((uint32_t)ci[off + p] << 8) | ci[off + p + 1];
+			uint32_t cnt = ((uint32_t)ci[off + p + 2] << 8) | ci[off + p + 3];
+			uint32_t attr = nw_be32_load(ci, off + p + 4);
+			if (page == 0 && cnt == 0xffffu)
+				break;
+			if ((attr & 0xe00u) == 0) {
+				if ((int)page <= prev)
+					return 0;
+				if ((p == irp || p == kdp || p == edp) && cnt != 0)
+					return 0;
+				prev = (int)(page + cnt);
+			}
+			p += 8;
+		}
+	}
+	return 1;
+}
+
 int nw_kdp_save_ptrs_adjacent(const uint8_t *page)
 {
 	if (page == NULL)

@@ -60,7 +60,8 @@ enum {
 	NW_MSR_IR = 0x00000020,
 	NW_MSR_DR = 0x00000010,
 	NW_MSR_ME = 0x00001000,
-	NW_MSR_IP = 0x00000040
+	NW_MSR_IP = 0x00000040,
+	NW_MSR_VEC = 0x02000000
 };
 
 /* Exception vectors (OEA). */
@@ -74,7 +75,8 @@ enum {
 	NW_VEC_FPU = 0x800,
 	NW_VEC_DECREMENTER = 0x900,
 	NW_VEC_SYSCALL = 0xc00,
-	NW_VEC_TRACE = 0xd00
+	NW_VEC_TRACE = 0xd00,
+	NW_VEC_VPU = 0xf20		/* AltiVec unavailable (MSR[VEC] = 0) */
 };
 
 /*
@@ -142,6 +144,73 @@ const struct nw_of_node_spec *nw_of_tree_spec(size_t *count);
 int nw_of_tree_has_required_nodes(void);
 
 void nw_fill_kdp_be(uint8_t *page, size_t page_len, const struct nw_kdp_params *p);
+
+/*
+ * G1 handoff: the Trampoline's job. On a real New World Mac the boot
+ * script's Trampoline completes NKConfigurationInfo (page map, segment
+ * maps, BAT ranges, relocated low memory) and NKSystemInfo (physical RAM
+ * banks) before jumping to the NK. The ROM's own ConfigInfo has an empty
+ * page map (PageMapInitSize 0), so an unfilled handoff makes NK v2 read
+ * garbage PMDTs and panic at "Converting PMDTs to areas" (ROM+0x31e878).
+ *
+ * Layout the fill describes (SheepShaver: logical == physical for ROM):
+ *   PA 0x0000..0x2fff   exception vector stubs (copy of ROM+0x300000)
+ *   PA ram_base         RAM bank 0; Mac low memory (LA 0) is its first
+ *                       pages (PA_RelocatedLowMemInit == ram_base), so
+ *                       logical RAM is LA x -> PA ram_base + x
+ *   LA rom_base         ROM area, identity, rom_area_size (5 MiB)
+ *   LA 0x68000000       1 MiB -> PA rom_base+0x300000 (NK, emulator,
+ *                       dispatch table in place; ROM LA_* defaults kept)
+ *   LA_InfoRecord/LA_KernelData/LA_EmulatorData: ROM defaults; the NK
+ *                       fills their PAs from its own top-of-RAM block.
+ * Reference: QEMU mac99 golden dump of the Trampoline-built ConfigInfo.
+ */
+enum {
+	NW_CI_SIZE = 0x1000,
+	NW_CI_PAGEMAP_OFF = 0x3ac,	/* where the page map is placed */
+	NW_CI_PAGEMAP_MAX = 0x40,	/* entries (0x3ac + 0x40*8 < 0xff4) */
+	NW_SI_SIZE = 0x140,		/* NKSystemInfo bytes the NK copies */
+	NW_NK_EXC_TABLE_ROM_OFF = 0x300000,
+	NW_68K_ROM_LA = 0xffc00000u,	/* 68k ROM window (ROM's own reset PC 0xffc0002a) */
+	NW_NK_EXC_TABLE_COPY_LEN = 0x2800,	/* vectors 0x100..0x27ff; 0x2800.. is XLM */
+	NW_NK_LOWMEM_ZEROED = 0x2000	/* NK clears this much low memory */
+};
+
+/* Extra page-mapped ranges (page aligned), e.g. host areas the guest is
+ * handed pointers into: SheepMem thunks, DR cache, video frame buffer. */
+struct nw_pmdt_range {
+	uint32_t la;
+	uint32_t pa;
+	uint32_t size;
+};
+
+struct nw_config_info_layout {
+	uint32_t rom_base;		/* ROM image LA == PA */
+	uint32_t rom_area_size;	/* ROM_AREA_SIZE (5 MiB) */
+	uint32_t ram_base;		/* PA of the RAM bank; also relocated low-memory PA */
+	uint32_t ram_size;
+	const struct nw_pmdt_range *extra;
+	int n_extra;
+};
+
+/* ci: the 4 KiB ROM ConfigInfo (ROM+0x30d000), big-endian, patched in place.
+ * Returns the number of page-map entries written, or -1 on bad layout. */
+int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l);
+/* si: NW_SI_SIZE bytes, zeroed and filled. */
+void nw_fill_system_info_be(uint8_t *si, const struct nw_config_info_layout *l);
+/*
+ * NKProcessorInfo (r4, NW_PI_SIZE bytes, copied by the NK to KDP+0xf20):
+ * +0 PVR, +4 CPU Hz, +8 bus Hz, +0xc timebase Hz, +0x10 page size, then
+ * L1 cache geometry (golden mac99 G4 values). The NK derives its timeslice
+ * quantum from the timebase field; a zero record made every quantum expire
+ * at once (DEC storm: SetDEC saw deadline == now).
+ */
+enum { NW_PI_SIZE = 0xa0 };
+void nw_fill_processor_info_be(uint8_t *pi, uint32_t pvr, uint32_t cpu_hz,
+			       uint32_t bus_hz, uint32_t tb_hz);
+/* Page-map sanity: per segment ascending page indices, exactly one
+ * terminator per segment, IRP/KDP/EDP offsets point at 1-page entries. */
+int nw_config_info_pagemap_ok(const uint8_t *ci);
 
 int nw_kdp_save_ptrs_adjacent(const uint8_t *page);
 int nw_kdp_bat_range_init_present(const uint8_t *page);

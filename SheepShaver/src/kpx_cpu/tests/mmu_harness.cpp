@@ -118,6 +118,86 @@ int main()
 		CHECK(!nw_htab_gate_pass(&gate));
 	}
 
+	/* G1 ConfigInfo page map (Trampoline job): 9.2.1 ROM LA_* defaults. */
+	{
+		std::vector<uint8_t> ci(NW_CI_SIZE, 0);
+		nw_be32_store(&ci[0], 0x9c, 0x5fffe000u);	/* LA_InfoRecord */
+		nw_be32_store(&ci[0], 0xa0, 0x68ffe000u);	/* LA_KernelData */
+		nw_be32_store(&ci[0], 0xa4, 0x68fff000u);	/* LA_EmulatorData */
+		nw_be32_store(&ci[0], 0xa8, 0x68080000u);	/* LA_DispatchTable */
+		nw_be32_store(&ci[0], 0xac, 0x68060000u);	/* LA_EmulatorCode */
+		nw_be32_store(&ci[0], 0xff4, 4);
+		nw_be32_store(&ci[0], 0xff8, 0xffc0002au);
+		nw_pmdt_range extra[2];
+		extra[0].la = extra[0].pa = 0x50510000u; extra[0].size = 0x80000u;	/* SheepMem */
+		extra[1].la = extra[1].pa = 0x69000000u; extra[1].size = 0x80000u;	/* DR cache */
+		nw_config_info_layout l;
+		l.rom_base = 0x50000000u;
+		l.rom_area_size = 0x500000u;
+		l.ram_base = 0x10000000u;
+		l.ram_size = 0x08000000u;
+		l.extra = extra;
+		l.n_extra = 2;
+		int n = nw_fill_config_info_be(&ci[0], &l);
+		/* 16 terminators + ROM, SheepMem, IRP, NK 1 MiB, KDP, EDP, DR cache */
+		CHECK(n == 16 + 7);
+		CHECK(nw_config_info_pagemap_ok(&ci[0]));
+		CHECK(nw_be32_load(&ci[0], 0xb8) == (uint32_t)n * 8u);
+		CHECK(nw_be32_load(&ci[0], 0xbc) == NW_CI_PAGEMAP_OFF);
+		const uint8_t *pm = &ci[NW_CI_PAGEMAP_OFF];
+		/* seg 5: ROM (0..0x4ff), SheepMem (0x510..), IRP (0xfffe), term */
+		uint32_t s5 = nw_be32_load(&ci[0], 0xcc + 5 * 8);
+		CHECK(((pm[s5] << 8) | pm[s5 + 1]) == 0 && ((pm[s5 + 2] << 8) | pm[s5 + 3]) == 0x4ff);
+		CHECK(nw_be32_load(pm, s5 + 4) == 0x50000012u);
+		CHECK(((pm[s5 + 8] << 8) | pm[s5 + 9]) == 0x510);
+		CHECK(((pm[s5 + 16] << 8) | pm[s5 + 17]) == 0xfffe);
+		CHECK(nw_be32_load(&ci[0], 0xc0) == s5 + 16);	/* IRP offset */
+		CHECK(nw_be32_load(pm, s5 + 28) == 0xa00u);	/* seg 5 terminator */
+		/* seg 6: NK 1 MiB -> ROM+0x300000, KDP, EDP, DR cache, term (a01) */
+		uint32_t s6 = nw_be32_load(&ci[0], 0xcc + 6 * 8);
+		CHECK(((pm[s6] << 8) | pm[s6 + 1]) == 0x8000 && ((pm[s6 + 2] << 8) | pm[s6 + 3]) == 0xff);
+		CHECK(nw_be32_load(pm, s6 + 4) == 0x50300012u);
+		CHECK(nw_be32_load(&ci[0], 0xc4) == s6 + 8);	/* KDP */
+		CHECK(nw_be32_load(pm, s6 + 12) == 0x11u);
+		CHECK(nw_be32_load(&ci[0], 0xc8) == s6 + 16);	/* EDP */
+		CHECK(((pm[s6 + 24] << 8) | pm[s6 + 25]) == 0x9000);
+		CHECK(nw_be32_load(pm, s6 + 36) == 0x60000a01u);
+		/* SR values, BAT ranges, low memory, version */
+		CHECK(nw_be32_load(&ci[0], 0xcc + 6 * 8 + 4) == 0x00600000u);
+		CHECK(nw_be32_load(&ci[0], 0x24c + 15 * 8 + 4) == 0x00f00000u);
+		CHECK(nw_be32_load(&ci[0], 0x2cc + 8) == 0x500000ffu);
+		CHECK(nw_be32_load(&ci[0], 0x2cc + 12) == 0x50000002u);
+		/* 68k ROM window: LA 0xffc00000, 4 MiB, RO write-through -> ROM area */
+		CHECK(nw_be32_load(&ci[0], 0x2cc + 16) == 0xffc0007fu);
+		CHECK(nw_be32_load(&ci[0], 0x2cc + 20) == 0x50000043u);
+		CHECK(nw_be32_load(&ci[0], 0x2cc + 24) == 0x6800001fu);
+		CHECK(nw_be32_load(&ci[0], 0x2cc + 28) == 0x50300002u);
+		CHECK(nw_be32_load(&ci[0], 0x34c) == 0x132f132fu);
+		CHECK(nw_be32_load(&ci[0], 0x354) == 0xf3fff3ffu);
+		CHECK(nw_be32_load(&ci[0], 0x360) == 0x10000000u);
+		/* ROM's own MacLowMemInit (4 -> 0xffc0002a) is left untouched */
+		CHECK(nw_be32_load(&ci[0], 0xff4) == 4 && nw_be32_load(&ci[0], 0xff8) == 0xffc0002au);
+		CHECK(nw_be32_load(&ci[0], 0x378) == 0x01010000u);
+		CHECK(nw_be32_load(&ci[0], 0x54) == 0 && nw_be32_load(&ci[0], 0x44) == 0);
+
+		/* Overlapping extra range is rejected; a bad table fails the check. */
+		nw_pmdt_range bad;
+		bad.la = bad.pa = 0x50100000u; bad.size = 0x1000u;
+		l.extra = &bad; l.n_extra = 1;
+		std::vector<uint8_t> ci2(ci);
+		CHECK(nw_fill_config_info_be(&ci2[0], &l) == -1);
+		std::vector<uint8_t> ci3(ci);
+		ci3[NW_CI_PAGEMAP_OFF + s5 + 8] = 0; ci3[NW_CI_PAGEMAP_OFF + s5 + 9] = 0x10;	/* SheepMem page below ROM end */
+		CHECK(!nw_config_info_pagemap_ok(&ci3[0]));
+
+		uint8_t si[NW_SI_SIZE];
+		nw_fill_system_info_be(si, &l);
+		CHECK(nw_be32_load(si, 0) == 0x08000000u);
+		CHECK(nw_be32_load(si, 0x30) == 0x10000000u);
+		CHECK(nw_be32_load(si, 0x34) == 0x08000000u);
+		CHECK(nw_be32_load(si, 0x38) == 0);
+	}
+
 	/* Debug log needles Grok Build greps (NW-BOOT prefix on SheepShaver Debug). */
 	{
 		CHECK(strcmp(nw_boot_line_g0_newworld(),
