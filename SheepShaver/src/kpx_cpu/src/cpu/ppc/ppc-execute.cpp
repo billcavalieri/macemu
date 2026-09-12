@@ -41,6 +41,7 @@
 #include "main.h"
 #include "prefs.h"
 #include "nw_boot_contract.h"
+#include "nw_io.h"
 #endif
 
 #if ENABLE_MON
@@ -600,6 +601,27 @@ void powerpc_cpu::execute_loadstore(uint32 opcode)
 	if (!guest_data_xlate(ea, SZ, !LD, &pa))
 		return;
 
+#ifdef SHEEPSHAVER
+	/* New World: physical I/O segments go to device models, not host memory. */
+	if (ppc32_guest_mmu_enabled() && nw_io_range(pa)) {
+		if (LD) {
+			uint32 v = nw_io_read(pa, SZ, pc());
+			if (RX)
+				v = (SZ == 2) ? bswap_16(v) : (SZ == 4) ? bswap_32(v) : v;
+			operand_RD::set(this, opcode, OP::apply(v));
+		} else {
+			uint32 v = operand_RS::get(this, opcode);
+			if (RX)
+				v = (SZ == 2) ? bswap_16(v) : (SZ == 4) ? bswap_32(v) : v;
+			nw_io_write(pa, SZ, v & (SZ == 4 ? 0xffffffffu : SZ == 2 ? 0xffffu : 0xffu), pc());
+		}
+		if (UP)
+			RA::set(this, opcode, ea);
+		increment_pc(4);
+		return;
+	}
+#endif
+
 	if (LD)
 		operand_RD::set(this, opcode, OP::apply(memory_helper<SZ, RX>::load(pa)));
 	else
@@ -634,6 +656,17 @@ void powerpc_cpu::execute_loadstore_multiple(uint32 opcode)
 		uint32 pa;
 		if (!guest_data_xlate(ea, 4, !LD, &pa))
 			return;
+#ifdef SHEEPSHAVER
+		if (ppc32_guest_mmu_enabled() && nw_io_range(pa)) {
+			if (LD)
+				gpr(r) = nw_io_read(pa, 4, pc());
+			else
+				nw_io_write(pa, 4, gpr(r), pc());
+			r++;
+			ea += 4;
+			continue;
+		}
+#endif
 		if (LD)
 			gpr(r) = vm_read_memory_4(pa);
 		else
