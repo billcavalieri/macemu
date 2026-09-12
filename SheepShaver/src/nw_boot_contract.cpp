@@ -326,8 +326,9 @@ enum {
 	/* Trampoline tail tables, reached from the hardware-info block */
 	CI_TAIL_CFC = 0xcfc, CI_TAIL_D00 = 0xd00, CI_TAIL_F00 = 0xf00,
 	CI_TAIL_F40 = 0xf40, CI_TAIL_F80 = 0xf80,
-	/* PMDT attr low bits: M|PP=2 (RW), M|PP=3 (RO), M|PP=1 (KDP), 'unmapped' terminator */
-	PMDT_RW = 0x12, PMDT_RO = 0x13, PMDT_KDP = 0x11, PMDT_TERM = 0xa00,
+	/* PMDT attr low bits: M|PP=2 (RW), M|PP=3 (RO), M|PP=1 (KDP), I|M|G|PP=2
+	 * (I/O, golden 0x8000003a / 0xf000003a), 'unmapped' terminator */
+	PMDT_RW = 0x12, PMDT_RO = 0x13, PMDT_KDP = 0x11, PMDT_IO = 0x3a, PMDT_TERM = 0xa00,
 	/* BAT map nibbles (IBAT0..3 low, DBAT0..3 high; f = unused): golden mac99
 	 * uses slot 3 = range 1, slot 2 = range 3 (NK 1 MiB); we add slot 1 =
 	 * range 2 (68k ROM window) since golden's range 1 covers 0xffc00000 and
@@ -417,6 +418,11 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
 	pmdt_add(r, &nr, NW_CI_LA, l->ci_pa, 0x1000u, PMDT_RO, 0);
 	if (l->bootinfo_pa)
 		pmdt_add(r, &nr, NW_BOOTINFO_LA, l->bootinfo_pa, NW_BOOTINFO_SIZE, PMDT_RW, 0);
+	/* I/O segments 1:1, cache-inhibited/guarded, as golden mac99: mac-io
+	 * (0x80000000, whole segment) and the high segment (uni-north; the 68k
+	 * ROM window BAT sits in front of its upper 4 MiB). */
+	pmdt_add(r, &nr, 0x80000000u, 0x80000000u, 0x10000000u, PMDT_IO, 0);
+	pmdt_add(r, &nr, 0xf0000000u, 0xf0000000u, 0x10000000u, PMDT_IO, 0);
 	for (int i = 0; i < l->n_extra; i++) {
 		const struct nw_pmdt_range *x = &l->extra[i];
 		if (x->size == 0 || (x->la & 0xfffu) || (x->pa & 0xfffu) || (x->size & 0xfffu))
@@ -433,13 +439,37 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
 	/* Overlap check (ranges within the same segment must not intersect). */
 	for (int i = 0; i < nr; i++)
 		for (int j = i + 1; j < nr; j++)
-			if (r[i].la < r[j].la + r[j].size && r[j].la < r[i].la + r[i].size)
+			if ((uint64_t)r[i].la < (uint64_t)r[j].la + r[j].size &&
+			    (uint64_t)r[j].la < (uint64_t)r[i].la + r[i].size)
 				return -1;
 
 	int n = 0, irp_idx = -1, kdp_idx = -1, edp_idx = -1;
 	uint32_t seg_off[16];
 	for (int seg = 0; seg < 16; seg++) {
 		seg_off[seg] = (uint32_t)n * 8u;
+		/*
+		 * RAM segments carry a spare 0xa00 entry ahead of the terminator
+		 * (golden: two `0000ffff 00000a00` per segment 0..3, `0000fffd`
+		 * for 4 and 5). NK 0x3123fc rewrites the *first* entry of each
+		 * logical-RAM segment in place into a page-table-backed range
+		 * ((table << 10) | 0xc00); with a single 8-byte entry per segment
+		 * the rewritten seg-0 entry ran into seg 1's and LA 0 resolved
+		 * through the wrong table (512 MiB: LA 0 -> PA 0x20000000 while
+		 * MacLowMemInit sat at 0x10000000). Segment 5 is our ROM area, not
+		 * RAM, so it keeps only the terminator (RAM <= 1 GiB, segs 0..3).
+		 * Golden's 0xfffd for segs 4/5 leaves pages 0xfffe/0xffff to fall
+		 * through into the next list (IRP mirror); we keep every list
+		 * self-terminating with 0xffff.
+		 */
+		if (seg < 5) {
+			struct pmdt_entry p;
+			p.page = 0;
+			p.count_m1 = 0xffffu;
+			p.attr = PMDT_TERM;
+			if (n >= NW_CI_PAGEMAP_MAX - 1)
+				return -1;
+			pmdt_put(ci, n++, &p);
+		}
 		/* selection sort of this segment's ranges by LA */
 		int used[PMDT_MAX_RANGES] = { 0 };
 		for (;;) {
@@ -510,7 +540,8 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
 	/* Low memory lives at the start of the RAM bank; NK zeroes 0x2000 there
 	 * and applies the ROM's own MacLowMemInit table, which sets the 68k
 	 * reset PC (lowmem 4) to 0xffc0002a: the 68k ROM runs in the
-	 * 0xffc00000 window, never at the ROM area's host identity. */
+	 * 0xffc00000 window, never at the ROM area's host identity. This value
+	 * is also the trim applied to bank 0 (see nw_fill_system_info_be). */
 	nw_be32_store(ci, CI_PA_RELOC_LOWMEM, l->ram_base);
 
 	/* Trampoline marks the record v1.01 (golden: 0101 0000 8100 0000) and
@@ -633,16 +664,20 @@ void nw_fill_system_info_be(uint8_t *si, const struct nw_config_info_layout *l)
 		return;
 	memset(si, 0, NW_SI_SIZE);
 	/* PhysicalMemorySize, UsableMemorySize; bank list at +0x30 (start,size)
-	 * pairs, up to 26. Low memory (LA 0) is the first pages of bank 0: the
-	 * NK writes MacLowMemInit at PA_RelocatedLowMemInit (== ram_base) and
-	 * maps logical page 0 to the first free page, so both must be the same
-	 * page (golden: bank 0 trimmed to start at 0x4000 == PA_RelocatedLowMem).
-	 * Our vectors live at PA 0 outside the bank, so no trim is needed and
-	 * LA x -> PA ram_base + x for the whole bank. */
-	nw_be32_store(si, 0x00, l->ram_size);
-	nw_be32_store(si, 0x04, l->ram_size);
-	nw_be32_store(si, 0x30, l->ram_base);
-	nw_be32_store(si, 0x34, l->ram_size);
+	 * pairs, up to 26. NK 0x310548: r12 = ConfigInfo PA_RelocatedLowMem;
+	 * the first non-empty bank gets base += r12, size -= r12 (r12 clamped
+	 * to 0 if size < r12) and the total loses r12 too; lowmem is zeroed and
+	 * MacLowMemInit applied at PA r12, and LA 0 is later mapped to bank 0's
+	 * first page. Golden: bank (0, 0x20000000), r12 = 0x4000 (vectors).
+	 * So the bank must be described from PA 0 with r12 == ram_base: after
+	 * the trim it is (ram_base, ram_size) and lowmem sits on its first page.
+	 * Describing (ram_base, ram_size) directly only worked while
+	 * ram_size < ram_base (clamp); at 512 MiB the NK trimmed 256 MiB off
+	 * and mapped LA 0 to ram_base + 0x10000000. */
+	nw_be32_store(si, 0x00, l->ram_base + l->ram_size);
+	nw_be32_store(si, 0x04, l->ram_base + l->ram_size);
+	nw_be32_store(si, 0x30, 0);
+	nw_be32_store(si, 0x34, l->ram_base + l->ram_size);
 	/* Golden mac99 values for fields the NK reads but we have not decoded. */
 	nw_be32_store(si, 0x100, 0x80040000u);
 	nw_be32_store(si, 0x128, 0x00000035u);

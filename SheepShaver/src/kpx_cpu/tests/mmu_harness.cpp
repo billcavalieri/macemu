@@ -141,13 +141,22 @@ int main()
 		l.extra = extra;
 		l.n_extra = 2;
 		int n = nw_fill_config_info_be(&ci[0], &l);
-		/* 16 terminators + ROM, SheepMem, IRP, boot-info, NK 1 MiB, CI page,
-		 * KDP, EDP, DR cache */
-		CHECK(n == 16 + 9);
+		/* 16 terminators + 5 RAM-segment spares (segs 0..4) + ROM, SheepMem,
+		 * IRP, boot-info, NK 1 MiB, CI page, KDP, EDP, DR cache, I/O seg 8,
+		 * I/O seg f */
+		CHECK(n == 16 + 5 + 11);
 		CHECK(nw_config_info_pagemap_ok(&ci[0]));
 		CHECK(nw_be32_load(&ci[0], 0xb8) == (uint32_t)n * 8u);
 		CHECK(nw_be32_load(&ci[0], 0xbc) == NW_CI_PAGEMAP_OFF);
 		const uint8_t *pm = &ci[NW_CI_PAGEMAP_OFF];
+		/* segs 0..4: two (0, 0xffff, 0xa00) entries each, 16 bytes apart,
+		 * as golden (NK rewrites the first in place into a table range). */
+		for (int s = 0; s < 5; s++) {
+			uint32_t so = nw_be32_load(&ci[0], 0xcc + s * 8);
+			CHECK(so == (uint32_t)s * 16u);
+			CHECK(nw_be32_load(pm, so) == 0x0000ffffu && nw_be32_load(pm, so + 4) == 0xa00u);
+			CHECK(nw_be32_load(pm, so + 8) == 0x0000ffffu && nw_be32_load(pm, so + 12) == 0xa00u);
+		}
 		/* seg 5: ROM (0..0x4ff), SheepMem (0x510..), IRP (0xfffe), term */
 		uint32_t s5 = nw_be32_load(&ci[0], 0xcc + 5 * 8);
 		CHECK(((pm[s5] << 8) | pm[s5 + 1]) == 0 && ((pm[s5 + 2] << 8) | pm[s5 + 3]) == 0x4ff);
@@ -169,6 +178,12 @@ int main()
 		CHECK(nw_be32_load(&ci[0], 0xc8) == s6 + 32);	/* EDP */
 		CHECK(((pm[s6 + 40] << 8) | pm[s6 + 41]) == 0x9000);
 		CHECK(nw_be32_load(pm, s6 + 52) == 0x60000a01u);
+		/* I/O segments: whole segment, 1:1, I|M|G|PP2, then the a01 terminator */
+		uint32_t s8 = nw_be32_load(&ci[0], 0xcc + 8 * 8);
+		CHECK(((pm[s8] << 8) | pm[s8 + 1]) == 0 && ((pm[s8 + 2] << 8) | pm[s8 + 3]) == 0xffff);
+		CHECK(nw_be32_load(pm, s8 + 4) == 0x8000003au && nw_be32_load(pm, s8 + 12) == 0x80000a01u);
+		uint32_t sf = nw_be32_load(&ci[0], 0xcc + 15 * 8);
+		CHECK(nw_be32_load(pm, sf + 4) == 0xf000003au && nw_be32_load(pm, sf + 12) == 0xf0000a01u);
 		/* SR values, BAT ranges, low memory, version */
 		CHECK(nw_be32_load(&ci[0], 0xcc + 6 * 8 + 4) == 0x00600000u);
 		CHECK(nw_be32_load(&ci[0], 0x24c + 15 * 8 + 4) == 0x00f00000u);
@@ -226,10 +241,14 @@ int main()
 
 		uint8_t si[NW_SI_SIZE];
 		nw_fill_system_info_be(si, &l);
-		CHECK(nw_be32_load(si, 0) == 0x08000000u);
-		CHECK(nw_be32_load(si, 0x30) == 0x10000000u);
-		CHECK(nw_be32_load(si, 0x34) == 0x08000000u);
+		/* NK (0x310548) trims bank 0 by PA_RelocatedLowMem and subtracts it
+		 * from the total: bank 0 is described from PA 0 so the trim lands
+		 * the bank at ram_base and lowmem (LA 0) on its first page. */
+		CHECK(nw_be32_load(si, 0) == 0x18000000u);
+		CHECK(nw_be32_load(si, 0x30) == 0);
+		CHECK(nw_be32_load(si, 0x34) == 0x18000000u);
 		CHECK(nw_be32_load(si, 0x38) == 0);
+		CHECK(nw_be32_load(ci.data(), 0x360) == 0x10000000u);
 	}
 
 	/* Debug log needles Grok Build greps (NW-BOOT prefix on SheepShaver Debug). */
