@@ -231,6 +231,20 @@ void sheepshaver_cpu::call_execute_emul_op(powerpc_cpu * cpu, uint32 emul_op) {
 void sheepshaver_cpu::execute_emul_op(uint32 emul_op)
 {
 	M68kRegisters r68;
+	if (ROMType == ROMTYPE_NEWWORLD && nw_la_kdp_pa == 0) {
+		/* First host entry with the NK's MMU up: learn where the NK put
+		 * the kernel data page so host reads of KDP LAs reach it. */
+		ppc32_xlate_result xr = ppc32_guest_mmu().translate(KERNEL_DATA_BASE, PPC32_XLATE_DR, 4, false);
+		if (xr.ok) {
+			nw_la_kdp_pa = xr.pa;
+#if NW_BOOT_LOG
+			char buf[96];
+			snprintf(buf, sizeof(buf), "G1: first EMUL_OP %u at 68k pc %08x; KDP LA %08x -> PA %08x",
+				 (unsigned)emul_op, gpr(24) - 2u, (unsigned)KERNEL_DATA_BASE, (unsigned)xr.pa);
+			nw_boot_log(buf);
+#endif
+		}
+	}
 	WriteMacInt32(XLM_68K_R25, gpr(25));
 	WriteMacInt32(XLM_RUN_MODE, MODE_EMUL_OP);
 	for (int i = 0; i < 8; i++)
@@ -571,11 +585,23 @@ void sheepshaver_cpu::execute_68k(uint32 entry, M68kRegisters *r)
 	gpr(23) = 0;
 	gpr(24) = entry;
 	gpr(25) = ReadMacInt32(XLM_68K_R25);		// MSB of SR
-	gpr(26) = 0;
-	gpr(28) = 0;								// VBR
-	gpr(29) = ReadMacInt32(KERNEL_DATA_BASE + 0x1074);		// Pointer to opcode table
-	gpr(30) = ReadMacInt32(KERNEL_DATA_BASE + 0x1078);		// Address of emulator
-	gpr(31) = KernelDataAddr + 0x1000;
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		/*
+		 * NK v2 emulator (golden, 68k running): r29 = opcode table
+		 * (0x68080000, 512 KiB aligned) | opcode << 3, r30 = emulator code
+		 * base (0x68060000), r31 = Emulator Data (KDP+0x1000), r26/r28 the
+		 * emulator's own state. We are nested inside an EMUL_OP the
+		 * emulator is executing, so those registers are live: keep them
+		 * and only re-point r29 at the entry's opcode.
+		 */
+		gpr(29) &= 0xfff80000u;
+	} else {
+		gpr(26) = 0;
+		gpr(28) = 0;								// VBR
+		gpr(29) = ReadMacInt32(KERNEL_DATA_BASE + 0x1074);		// Pointer to opcode table
+		gpr(30) = ReadMacInt32(KERNEL_DATA_BASE + 0x1078);		// Address of emulator
+		gpr(31) = KernelDataAddr + 0x1000;
+	}
 
 	// Push return address (points to EXEC_RETURN opcode) on stack
 	gpr(1) -= 4;
@@ -921,9 +947,10 @@ void init_emul_ppc(void)
 		 * (MSR[IP]=0); on hardware the Trampoline copies them from the ROM
 		 * exception table (ROM+0x300000) before the NK runs (golden: PA
 		 * 0..0x2fff == ROM+0x300000). Only the first 0x2800 bytes are real
-		 * vectors; 0x2800.. stays SheepShaver's XLM area.
+		 * vectors. This is a physical address (the guest's LA 0 is RAM at
+		 * PA RAMBase, see nw_la_to_pa), so bypass the Mac accessors.
 		 */
-		Host2Mac_memcpy(0, ROMBaseHost + NW_NK_EXC_TABLE_ROM_OFF, NW_NK_EXC_TABLE_COPY_LEN);
+		memcpy(vm_do_get_real_address(0), ROMBaseHost + NW_NK_EXC_TABLE_ROM_OFF, NW_NK_EXC_TABLE_COPY_LEN);
 		nw_log_g1_hwinit();
 #if NW_BOOT_LOG
 		{
@@ -1046,6 +1073,16 @@ void HandleInterrupt(powerpc_registers *r)
 	// We must fill in the events queue in the same thread that did call SDL_SetVideoMode()
 	SDL_PumpEvents();
 #endif
+
+	/*
+	 * New World: NK v2 owns interrupt delivery (decrementer, OpenPIC).
+	 * The Old World injection below pokes the classic KDP layout
+	 * (+0x674/+0x67c) and runs the 68k interrupt routine by hand; with the
+	 * KDP now reachable at its real PA that corrupts the NK's page. Host
+	 * events reach the guest through the device models instead.
+	 */
+	if (ROMType == ROMTYPE_NEWWORLD)
+		return;
 
 	// Do nothing if interrupts are disabled
 	if (int32(ReadMacInt32(XLM_IRQ_NEST)) > 0)

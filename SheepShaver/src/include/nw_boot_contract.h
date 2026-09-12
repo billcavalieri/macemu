@@ -226,6 +226,46 @@ void nw_fill_bootinfo_be(uint8_t *area, uint32_t size, const struct nw_config_in
 /* Apple ROM-file LZSS (parcel payloads, ROM image). Stops at src_size input
  * bytes or dst_size output bytes. */
 void nw_lzss_decode(const uint8_t *src, size_t src_size, uint8_t *dst, size_t dst_size);
+
+/*
+ * Host-side "Mac addresses" under New World.
+ *
+ * Old World: the guest's logical addresses are host addresses (RAM at
+ * RAMBase, low memory at 0). New World: the NK owns LA -> PA and the 68k
+ * sees RAM at LA 0 (PA RAMBase + LA), the ROM at LA 0xffc00000, the kernel
+ * data page at LA 0x68ffe000 (PA chosen by the NK). Host code that handles
+ * guest data (EMUL_OP drivers, Execute68k, the XLM globals at 0x2800) speaks
+ * LAs; cpu_emulation.h routes every Mac accessor through nw_la_to_pa().
+ * Host-owned areas the guest reaches by identity mapping (SheepMem, the
+ * frame buffer, the boot-info area, the ROM image at ROMBase) translate to
+ * themselves. Inactive (identity everywhere) until nw_la_enable().
+ */
+extern uint32_t nw_la_ram_base, nw_la_ram_size, nw_la_rom_base, nw_la_kdp_pa;
+void nw_la_enable(uint32_t ram_base, uint32_t ram_size, uint32_t rom_base);
+
+static inline uint32_t nw_la_to_pa(uint32_t la)
+{
+	if (nw_la_ram_size == 0)
+		return la;
+	if (la < nw_la_ram_size)
+		return la + nw_la_ram_base;
+	if (la >= 0xffc00000u)
+		return nw_la_rom_base + (la - 0xffc00000u);
+	if (nw_la_kdp_pa != 0 && la - 0x68ffe000u < 0x2000u)
+		return nw_la_kdp_pa + (la - 0x68ffe000u);
+	return la;
+}
+
+static inline uint32_t nw_pa_to_la(uint32_t pa)
+{
+	if (nw_la_ram_size == 0)
+		return pa;
+	if (pa - nw_la_ram_base < nw_la_ram_size)
+		return pa - nw_la_ram_base;
+	if (nw_la_kdp_pa != 0 && pa - nw_la_kdp_pa < 0x2000u)
+		return 0x68ffe000u + (pa - nw_la_kdp_pa);
+	return pa;
+}
 /* si: NW_SI_SIZE bytes, zeroed and filled. */
 void nw_fill_system_info_be(uint8_t *si, const struct nw_config_info_layout *l);
 /*

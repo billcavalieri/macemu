@@ -666,6 +666,16 @@ void nw_lzss_decode(const uint8_t *src, size_t src_size, uint8_t *dst, size_t ds
 	nw_decode_lzss(src, dst, (int)src_size, dst + dst_size);
 }
 
+uint32_t nw_la_ram_base, nw_la_ram_size, nw_la_rom_base, nw_la_kdp_pa;
+
+void nw_la_enable(uint32_t ram_base, uint32_t ram_size, uint32_t rom_base)
+{
+	nw_la_ram_base = ram_base;
+	nw_la_rom_base = rom_base;
+	nw_la_kdp_pa = 0;
+	nw_la_ram_size = ram_size;	/* last: activates the translation */
+}
+
 void nw_fill_system_info_be(uint8_t *si, const struct nw_config_info_layout *l)
 {
 	if (si == NULL || l == NULL)
