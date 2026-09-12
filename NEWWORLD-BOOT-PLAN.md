@@ -340,41 +340,82 @@ alignment of the first 2500 events after the NK probe; `adiff.py` the same
 for `(op, 68k-pc)` A-trap pairs; `bitree.py dump [-v]`; `prcl.py`;
 `dis68.py <addr> <len>` (cstool m68k40, resyncs on bad words).
 
-#### S4 step 5 — next gate (open): a drive in the drive queue
+#### S4 step 5 — a drive in the drive queue: done, hybrid route (commits `ee1b547a`, `d12d9fdc`, `5dce0c58`)
 
 Both runs reach ROM `0xffc03808` (open `.LANDisk`, fails in both) and
 `0xffc038a6`: walk `DrvQHdr` (`$30a`), for each drive ≤ 15 whose bit is set
 in `$b0e` call the try-boot routine (`0xffc03916`: `_Read` 1024 bytes at
 offset 0, check `'LK'`). Golden: one pass, `a002 ffc0392c` (`_Read`), then
-the boot blocks draw (`aa14`/`a8a5` at `ffc03b0a`/`ffc03b24`). Ours: the
-drive queue is empty, so the loop repeats `_GetOSTrapAddress`, `_Control`,
-`_Enqueue`, `_GetKeys` (`ffd9c49c`, boot-key check), `_ReadXPRam`,
-`_Open .LANDisk`, six `_CmpString` (unit-table scan) forever — the
-"flashing ?" stage. The keylargo-ata ndrv from the tree probed
-`0x80020060`/`0x80021060` and found no device; nothing else can put a
-volume in the queue.
+the boot blocks draw (`aa14`/`a8a5` at `ffc03b0a`/`ffc03b24`). Before this
+step our drive queue was empty (the keylargo-ata ndrv probed
+`0x80020060`/`0x80021060`, found nothing) — the "flashing ?" stage.
 
-The fix is a device that answers. Two honest routes, both consistent with
-"fix the gate": 
+**Decision: hybrid.** Host-backed `EMUL_OP` DRVRs (SheepShaver classic:
+`.AppleCD`/`.Disk` on the toast/hfv images, later video, ADB, XPRAM) plus
+small device models only for what the NK's and the ROM's own native code
+need (OpenPIC, VIA-PMU shim, NVRAM flash, uni-n, PCI config). Not the QEMU
+route (ATA/DBDMA/ATAPI models), not NK code patches, not a stub for the
+ROM's keylargo-ata ndrv. Rationale: performance (one `EMUL_OP` per I/O
+request, host memory, the same path the JIT already takes on Old World)
+and stability (the NK's own interrupt path and page tables are untouched;
+the 68k side is identical to the classic SheepShaver contract).
 
-1. **mac99 device models** (the golden's shape): Keylargo ATA registers
-   (0x80020000/0x80021000, 0x10 stride, DBDMA channels at mac-io
-   +0x8b00/+0x8d00 per the `reg` property) with an ATAPI CD-ROM behind the toast image, so
-   the ROM's own keylargo-ata ndrv and ATAPI driver do the work. Then the
-   same for the devices already being poked: VIA-PMU (PMU protocol: ADB,
-   RTC, NVRAM via PMU), OpenPIC, ESCC (can stay dumb), NVRAM flash, uni-n,
-   PCI config space (uni-north host bridge: the display node's config
-   header). Largest, no ROM changes at all, matches the golden trace
-   register for register.
-2. **Host-backed ndrv in the tree** (SheepShaver-classic style): a
-   `driver,AAPL,MacOS,PowerPC` property on a `cdrom`/`block` node whose PEF
-   calls the host through an `EMUL_OP`-style instruction, serving the toast
-   image the way `cdrom.cpp` does today; ditto for ADB/RTC/video. Smaller,
-   but the trace stops matching the golden at every device boundary, and
-   the ROM's native ATA/PMU code paths are never exercised.
+Boundary table (what runs where):
 
-Not decided here; the branch owner picks. Everything before this gate is
-route-independent and landed.
+| piece | who | how |
+|---|---|---|
+| NK, 68k emulator, interrupts, page tables | ROM, unpatched | — |
+| `EMUL_OP` reach | `patch_68k_emul` | opcode-table entries at ROM+0x380000 only (`b 0x366084` dispatch; `r29` = table \| op<<3, `r24` = next 68k pc). Old World's 0x36f9xx helpers and DR-emulator patch are skipped |
+| host "Mac address" | `nw_la_to_pa()` in `cpu_emulation.h` | LA<RAMSize → RAMBase+LA; LA≥0xffc00000 → ROMBase+off; KDP LA 0x68ffe000 → PA learned at the first `EMUL_OP` (`execute_emul_op`); SheepMem / frame buffer / boot-info identity. `Execute68k` keeps the live emulator registers; classic `HandleInterrupt` injection is off (it wrote into the real KDP) |
+| 68k ROM data patches (3) | `nw_patch_68k_drivers` | SetSysAppZone constants 0x2800/0x4000 → 0x3000/0x4800 (XLM globals at 0x2800 survive); DRVR bodies + icons in the zero padding at ROM+0x330000 (no DRVR 4 in 9.2.1); the `lea -$32(a7),a7` opening the ROM's driver-install routine (after `NewPtrSysClear; move.l a0,$11c; rts`) → `EMUL_OP_INSTALL_DRIVERS` + `nop`; the handler adjusts a7 and the ROM routine still installs `.EDisk` etc. |
+| drivers | `nw_install_drivers` (`emul_op.cpp` OP_INSTALL_DRIVERS) | `DrvrInstallRsrvMem`, `HLock`, DCE fill, `Open` — `.AppleCD` first (drive 1), then `.Disk`; `AddDrive` from the drivers as on Old World |
+| boot device | boot-info tree (`nw_bootinfo.cpp`) | `/host-drives/cdrom@1` and `/host-drives/disk@0`, `device_type "scsi"`, `AAPL,boot-cookie` = driver refnum; `/chosen bootpath` = the one prefs `bootdriver` names, no partition number |
+
+StartLib (`GetStartupDevice`, parcel shlb, code base 0x5df60 in RAM this
+run) is the arbiter; decoded from the PEF (`/tmp/sldis.py`, TOC strings
+`device_type name ide ata scsi pci reg AAPL,bus-id device_id
+AAPL,boot-cookie AAPL,USBNodeType`): resolve `bootpath` component-wise by
+`name` + `reg`; for each drive-queue driver take `_Status 'boot'`
+(0x6666 = none), dispatch on bits 11–15 of the boot ID (0x2000 → ATA:
+`ata`/`ide` node with `AAPL,bus-id` = bus, child `device_id`/`reg` = dev;
+0x2800 → none; else SCSI: `RegistryEntrySearch` from the root for
+`AAPL,boot-cookie` == refnum (4 bytes) whose `device_type` starts `scsi`;
+found node's unit = the boot ID's SCSI target (`>>27`)); accept when the
+cookie node is the `bootpath` node (`RegistryEntryIDCompare`), the unit
+addresses agree, and a `:N` partition in the path equals the one read from
+the drive's partition map (skipped when either is −1). SheepShaver's DRVRs
+answer 'boot' with `(drive<<11)<<16 | refnum` (CD) / `drive<<16 | refnum`
+(disk), i.e. SCSI form, target = CD drive number / 0. The keylargo-ata ndrv
+deletes the `ata-3` children it cannot probe (`RegistryEntryDelete` from
+the ndrv, both buses), hence the separate root node. The `ata-3` nodes stay
+as in the golden tree; the ndrv loads, probes, finds nothing, and is left
+alone.
+
+Result (clean build, three 40 s runs, 512 MiB): `.AppleCD` installed
+refnum −62, `.Disk` −63, `GetStartupDevice` succeeds on the first call,
+one `.LANDisk` open before the boot-block `_Read` (`a002 ffc0392c`, trap
+~90 500), then the A-trap sequence matches the golden's post-boot-block
+sequence (differences: the golden's `aaf1`/`aaf4` ATA-interrupt traps;
+RAM heap Δ0x800 from the SetSysAppZone move). The System file loads from
+the toast image and System-heap QuickDraw code runs (`a893` from RAM
+`0x802a28` at trap ~162 000, ≈ 15 s). The window is black: no display
+driver yet. `SheepShaver-MMUTests`: 196 checks pass.
+
+Known stall (next gate, not this one): at ≈ 24 s a native task loaded
+from the CD — the Multiprocessing CPU plugin (PEF at toast 0x2082860:
+`Core99Probe`, `FindMPIC`, `FindUniNorth`, `CalculateBusClock`,
+`WaitForZeroPCI`, `MakeSignal`, `SignalProcessor`) — spins on OpenPIC /
+uni-n registers, once with EE=0 at RAM `0x27db84` (no exceptions at all),
+once in MP timed waits (`sc` 0x5d/0x5e, timeout 0x4fff→0x7fff). That is
+the OpenPIC + uni-n item below; the golden has both.
+
+Next gates, in order: OpenPIC (0x80040000, sources 0x80050000) and uni-n
+(0xf8000000) models so the CPU plugin and the NK's interrupt path see
+real registers; host display driver (`driver,AAPL,MacOS,PowerPC` on the
+`display` node, `NATIVE_VIDEO_DO_DRIVER_IO`-style) so the Happy Mac and
+the Welcome window appear; VIA-PMU shim (timer / ADB); ADB input; XPRAM.
+Also open: `a9c9 SysError` seen once at the end of one run (after System
+code starts) — triage after the display driver.
 
 G3 is reached when the ROM mounts the CD, loads the System, and the
 System's own `_Launch` starts `Mac OS Install`, which draws its window
