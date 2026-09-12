@@ -42,6 +42,7 @@
  *   at <sec> dblclick [<x> <y>]
  *   at <sec> down | up            button 0 held / released
  *   at <sec> log <text>           `NW-BOOT SCRIPT <text>` in the log
+ *   at <sec> dump <hexaddr> <hexlen> <path>   guest RAM (logical) to a file
  *
  * Cursor moves are closed-loop on the guest's Mouse low-memory global,
  * so acceleration and clamping in the guest do not matter.

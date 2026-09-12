@@ -35,7 +35,7 @@
 
 namespace {
 
-enum step_kind { ST_WAIT_UNTIL, ST_KEY, ST_MOUSE_TO, ST_BUTTON, ST_SHOT, ST_LOG, ST_PAUSE };
+enum step_kind { ST_WAIT_UNTIL, ST_KEY, ST_MOUSE_TO, ST_BUTTON, ST_SHOT, ST_LOG, ST_PAUSE, ST_DUMP };
 
 struct step {
 	step_kind kind;
@@ -205,6 +205,8 @@ bool parse_command(const std::string &line, const std::vector<std::string> &tok,
 		push(ST_BUTTON, 1);
 	} else if (cmd == "up") {
 		push(ST_BUTTON, 0);
+	} else if (cmd == "dump" && tok.size() > ci + 3) {
+		push(ST_DUMP, (int)strtoul(tok[ci + 1].c_str(), NULL, 16), (int)strtoul(tok[ci + 2].c_str(), NULL, 16), tok[ci + 3]);
 	} else if (cmd == "log") {
 		push(ST_LOG, 0, 0, rest_after(line, (int)ci + 1));
 	} else {
@@ -394,6 +396,21 @@ void nw_script_tick(void)
 		case ST_LOG:
 			printf("NW-BOOT SCRIPT t=%.1f %s\n", el / 1e6, s.text.c_str());
 			break;
+		case ST_DUMP: {
+			/* guest logical addresses in RAM only (the script has no MMU) */
+			const uint32 la = (uint32)s.a, len = (uint32)s.b;
+			if (la >= RAMSize || len > RAMSize - la) {
+				printf("NW-BOOT SCRIPT dump: %08x+%x is not in RAM\n", la, len);
+				break;
+			}
+			FILE *f = fopen(s.text.c_str(), "wb");
+			if (f) {
+				fwrite(Mac2HostAddr(la), 1, len, f);
+				fclose(f);
+			}
+			printf("NW-BOOT SCRIPT t=%.1f dump %08x+%x -> %s\n", el / 1e6, la, len, s.text.c_str());
+			break;
+		}
 		}
 		head++;
 	}
