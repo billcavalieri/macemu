@@ -666,17 +666,29 @@ void nw_fill_hwinfo_be(uint8_t *hw, const struct nw_config_info_layout *l)
  * are offsets the Trampoline relocated against its own view of the ROM
  * ProductInfo; the 68k never dereferences them before Welcome, and they are
  * reproduced as captured.
+ *
+ * Record +0x24 (here +0x4c, mirrored at +0xa4) is UnivROMFlags. Bits 1..3
+ * describe the input path the Trampoline's HandleSpecialNode found in the
+ * device tree: bit 2 for an `adb` node compatible "pmu-99" ("P99 ADB
+ * detected"), bit 1 when there is none but USB ("Virtual (USB-emulated) ADB
+ * detected!"). The 68k ADB Manager (ffc2b5f6) picks its bus routines by
+ * `UnivROMFlags & 0xe`: 0xa keeps the ROM default (no bus, every command
+ * completes without a device; input is expected from USB HID), 0xc installs
+ * the PMU-99 ADB routines (ffc06bf0: PMgrOp 0x20 packets, PMU ADB
+ * interrupt). Golden `-M mac99,via=pmu` shows c003bf1a, `via=pmu-adb`
+ * c003bf1c; everything else in the record is identical. Our tree carries the
+ * pmu-adb shape (nw_bootinfo.cpp), so the record says bit 2.
  */
 static const struct { uint16_t off; uint32_t val; } hwrec[] = {
 	{ 0x01c, 0x00000008u }, { 0x020, 0xf8000000u }, { 0x024, 0x01000000u },
 	{ 0x028, 0x00000098u }, { 0x02c, 0x9bbbc350u }, { 0x030, 0x9bbbc360u },
 	{ 0x034, 0x9bbbc362u }, { 0x038, 0x4c807f1au }, { 0x03c, 0x3fff0402u },
-	{ 0x040, 0x0000001cu }, { 0x044, 0x60000000u }, { 0x04c, 0xc003bf1au },
+	{ 0x040, 0x0000001cu }, { 0x044, 0x60000000u }, { 0x04c, 0xc003bf1cu },
 	{ 0x050, 0x058480efu }, { 0x060, 0x9bbbc488u }, { 0x068, 0x9bbb5a54u },
 	{ 0x06c, 0x9bbb5714u }, { 0x070, 0x9bbb4e90u }, { 0x078, 0x9bbbd2d4u },
 	{ 0x080, 0x30350000u }, { 0x084, 0x9bbbc372u }, { 0x088, 0x00000190u },
 	{ 0x090, 0xffc0e000u }, { 0x098, 0x0000001cu }, { 0x09c, 0x60000000u },
-	{ 0x0a4, 0xc003bf1au }, { 0x0a8, 0x058480efu }, { 0x0b8, 0x1a010000u },
+	{ 0x0a4, 0xc003bf1cu }, { 0x0a8, 0x058480efu }, { 0x0b8, 0x1a010000u },
 	{ 0x0c0, 0xffc00000u }, { 0x0c8, 0x80016000u }, { 0x0cc, 0x80012000u },
 	{ 0x0d0, 0x80012000u }, { 0x1b4, 0x80040000u }, { 0x1b8, 0x00010100u },
 };

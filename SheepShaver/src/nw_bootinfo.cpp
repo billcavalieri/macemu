@@ -4,8 +4,10 @@
  *  See nw_bootinfo.h for the record format (decoded from the 68k importer
  *  at ROM 0x44420: node {sibling, child, props}, property {next, name[32],
  *  len, value}). The tree mirrors the shape the golden mac99 Trampoline
- *  produced, with SheepShaver's own frame buffer as the display device and
- *  without devices SheepShaver does not present (usb, ethernet).
+ *  produced, with SheepShaver's own frame buffer as the display device,
+ *  the host keyboard and mouse as ADB devices behind the PMU (the shape
+ *  OpenBIOS gives `via=pmu-adb`), and without devices SheepShaver does
+ *  not present (usb, ethernet).
  *
  *  Parcels ('prcl' in the Mac OS ROM file):
  *    node header (88): link, ostype, hdr size, flags, +20 child stride,
@@ -240,6 +242,8 @@ Node *build_machine(const nw_bootinfo_params *p)
 	Node *aliases = root->add("aliases");
 	aliases->str("nvram", "/nvram@fff04000");
 	aliases->str("via-pmu", "/pci@f2000000/mac-io@c/via-pmu");
+	aliases->str("adb-keyboard", "/pci@f2000000/mac-io@c/via-pmu/adb/keyboard");
+	aliases->str("adb-mouse", "/pci@f2000000/mac-io@c/via-pmu/adb/mouse");
 	aliases->str("rtc", "/pci@f2000000/mac-io@c/via-pmu/rtc");
 	aliases->str("scca", "/pci@f2000000/mac-io@c/escc/ch-a");
 	aliases->str("sccb", "/pci@f2000000/mac-io@c/escc/ch-b");
@@ -248,6 +252,8 @@ Node *build_machine(const nw_bootinfo_params *p)
 	aliases->str("cdrom", "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1");
 	aliases->str("ide1", "/pci@f2000000/mac-io@c/ata-3@21000");
 	aliases->str("mac-io", "/pci@f2000000/mac-io@c");
+	aliases->str("kbd", "/pci@f2000000/mac-io@c/via-pmu@16000/adb/keyboard@8");
+	aliases->str("keyboard", "/pci@f2000000/mac-io@c/via-pmu@16000/adb/keyboard@8");
 	aliases->str("screen", "/pci@f2000000/display@e");
 
 	Node *openprom = root->add("openprom");
@@ -453,6 +459,20 @@ Node *build_machine(const nw_bootinfo_params *p)
 	add_interrupts(pmu, "0000001900000001", "00000019", "00000001", "00000002", "00000002");
 	pmu->u32("pmu-version", 0x00d0330c);
 	pmu->u32("interrupt-parent", NW_PHANDLE_PIC);
+	/* ADB behind the PMU, as OpenBIOS declares it for `via=pmu-adb`
+	 * (the golden machine used USB input; SheepShaver has no USB) */
+	Node *adb = pmu->add("adb");
+	adb->str("device_type", "adb");
+	adb->str("compatible", "pmu-99");
+	adb->u32("#address-cells", 1);
+	adb->u32("#size-cells", 0);
+	Node *kbd = adb->add("keyboard");
+	kbd->str("device_type", "keyboard");
+	kbd->u32("reg", 8);
+	Node *mouse = adb->add("mouse");
+	mouse->str("device_type", "mouse");
+	mouse->u32("reg", 9);
+	mouse->u32("#buttons", 3);
 	Node *rtc = pmu->add("rtc");
 	rtc->str("device_type", "rtc");
 	rtc->str("compatible", "rtc,via-pmu");

@@ -36,7 +36,24 @@
 
 #ifdef POWERPC_ROM
 #include "thunks.h"
+#include "rom_patches.h"
+#include "nw_devices.h"
 #endif
+
+/*
+ *  New World: the host keyboard and mouse are ADB devices behind the
+ *  modelled PMU (nw_devices.cpp); the ROM's own ADB Manager polls them.
+ *  The classic path below (faked ADB data injected at the 60 Hz interrupt)
+ *  is Old World only.
+ */
+static inline bool nw_input(void)
+{
+#ifdef POWERPC_ROM
+	return ROMType == ROMTYPE_NEWWORLD;
+#else
+	return false;
+#endif
+}
 
 #define DEBUG 0
 #include "debug.h"
@@ -238,6 +255,21 @@ void ADBOp(uint8 op, uint8 *data)
 
 void ADBMouseMoved(int x, int y)
 {
+	if (nw_input()) {
+#ifdef POWERPC_ROM
+		/* the ADB mouse reports deltas; absolute host positions become
+		 * deltas from the last reported position */
+		B2_lock_mutex(mouse_lock);
+		int dx = x, dy = y;
+		if (!relative_mouse) {
+			dx = x - mouse_x; dy = y - mouse_y;
+			mouse_x = x; mouse_y = y;
+		}
+		B2_unlock_mutex(mouse_lock);
+		nw_adb_mouse_move(dx, dy);
+#endif
+		return;
+	}
 	B2_lock_mutex(mouse_lock);
 	if (relative_mouse) {
 		mouse_x += x; mouse_y += y;
@@ -256,6 +288,12 @@ void ADBMouseMoved(int x, int y)
 
 void ADBMouseDown(int button)
 {
+	if (nw_input()) {
+#ifdef POWERPC_ROM
+		nw_adb_mouse_button(button, 1);
+#endif
+		return;
+	}
     // O2S: Add button to buffer
     button_buffer[button_write_ptr] = button;
     button_write_ptr = (button_write_ptr + 1) % BUTTON_BUFFER_SIZE;
@@ -272,6 +310,12 @@ void ADBMouseDown(int button)
 
 void ADBMouseUp(int button)
 {
+	if (nw_input()) {
+#ifdef POWERPC_ROM
+		nw_adb_mouse_button(button, 0);
+#endif
+		return;
+	}
     // O2S: Add button to buffer
     button_buffer[button_write_ptr] = button | 0x80;
     button_write_ptr = (button_write_ptr + 1) % BUTTON_BUFFER_SIZE;
@@ -301,6 +345,12 @@ void ADBSetRelMouseMode(bool relative)
 
 void ADBKeyDown(int code)
 {
+	if (nw_input()) {
+#ifdef POWERPC_ROM
+		nw_adb_key((uint8)code, 1);
+#endif
+		return;
+	}
 	// Add keycode to buffer
 	key_buffer[key_write_ptr] = code;
 	key_write_ptr = (key_write_ptr + 1) % KEY_BUFFER_SIZE;
@@ -320,6 +370,12 @@ void ADBKeyDown(int code)
 
 void ADBKeyUp(int code)
 {
+	if (nw_input()) {
+#ifdef POWERPC_ROM
+		nw_adb_key((uint8)code, 0);
+#endif
+		return;
+	}
 	// Add keycode to buffer
 	key_buffer[key_write_ptr] = code | 0x80;	// Key-up flag
 	key_write_ptr = (key_write_ptr + 1) % KEY_BUFFER_SIZE;
