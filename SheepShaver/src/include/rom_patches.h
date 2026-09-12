@@ -35,6 +35,7 @@ extern int ROMType;
 extern bool DecodeROM(uint8 *data, uint32 size);
 extern bool PatchROM(void);
 extern void InstallDrivers(void);
+extern void nw_install_drivers(void);	// New World hybrid: .Disk and .AppleCD only
 
 extern void AddSifter(uint32 type, int16 id);
 extern bool FindSifter(uint32 type, int16 id);

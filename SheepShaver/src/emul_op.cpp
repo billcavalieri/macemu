@@ -255,6 +255,14 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 			break;
 
 		case OP_INSTALL_DRIVERS: {	// Patch to install our own drivers during startup
+			if (ROMType == ROMTYPE_NEWWORLD) {
+				/* Hybrid: the opcode replaced `lea -$32(a7),a7` at the
+				 * start of the ROM's own driver-install routine, which
+				 * continues after us (nw_patch_68k_drivers). */
+				nw_install_drivers();
+				r->a[7] -= 0x32;
+				break;
+			}
 			// Install drivers
 			InstallDrivers();
 

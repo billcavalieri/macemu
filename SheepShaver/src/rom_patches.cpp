@@ -81,6 +81,19 @@ static bool patch_nanokernel_boot(void);
 static bool patch_68k_emul(void);
 static bool patch_nanokernel(void);
 static bool patch_68k(void);
+static bool nw_patch_68k_drivers(void);
+
+/*
+ * New World hybrid: where SheepShaver's 68k DRVR bodies and icons live in
+ * the ROM image (the 9.2.1 ROM has no DRVR 4 / PCFloppy resource to reuse),
+ * and how the 68k reaches them (ROM LA 0xffc00000, the BAT-mapped read-only
+ * view the ROM's own code uses). 0x330000 is inside the zero padding between
+ * the NK (ends 0x328c40) and the 68k emulator (0x360000).
+ */
+const uint32 NW_DRIVER_SPACE = 0x330000;
+const uint32 NW_DRIVER_SPACE_SIZE = 0x1000;
+const uint32 NW_ROM68K_LA = 0xffc00000u;
+static inline uint32 nw_rom_la(uint32 off) { return NW_ROM68K_LA + off; }
 
 
 /*
@@ -796,6 +809,24 @@ static bool patch_nanokernel_boot(void)
 			printf("NW-BOOT G1: ConfigInfo page map fill failed (%d)\n", n);
 			return false;
 		}
+		/*
+		 * Hybrid route (plan S4 step 5): host-backed drivers the
+		 * SheepShaver way. From here on host code addresses guest memory
+		 * by logical address (RAM at LA 0 is PA RAMBase; see
+		 * nw_la_to_pa), EMUL_OP opcodes reach the host through the 68k
+		 * emulator's opcode table, and the .Disk/.AppleCD DRVRs are
+		 * installed by nw_install_drivers() when the ROM builds its
+		 * unit table. The NK is not patched.
+		 */
+		nw_la_enable(RAMBase, RAMSize, ROMBase);
+		if (!patch_68k_emul()) {
+			printf("PatchROM: patch_68k_emul failed (New World)\n");
+			return false;
+		}
+		if (!nw_patch_68k_drivers()) {
+			printf("PatchROM: nw_patch_68k_drivers failed\n");
+			return false;
+		}
 		return true;
 	}
 
@@ -1154,6 +1185,17 @@ static bool patch_68k_emul(void)
 twi_done:
 
 #if EMULATED_PPC
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		/* The 68k opcode table (8 bytes per opcode, <instr>; b dispatch)
+		 * must be where the entries below assume it: the NOP entry's
+		 * branch reaches the dispatcher at 0x366084. */
+		lp = (uint32 *)(ROMBaseHost + 0x380000 + (0x4e71 << 3));
+		if (ntohl(lp[1]) != 0x4bfbecf8) {
+			printf("PatchROM: 68k opcode table not at 0x380000 (NOP entry %08x %08x)\n",
+			       ntohl(lp[0]), ntohl(lp[1]));
+			return false;
+		}
+	}
 	// Install EMUL_RETURN, EXEC_RETURN, EXEC_NATIVE and EMUL_OP opcodes
 	lp = (uint32 *)(ROMBaseHost + 0x380000 + (M68K_EMUL_RETURN << 3));
 	*lp++ = htonl(POWERPC_EMUL_OP);
@@ -1166,6 +1208,14 @@ twi_done:
 		*lp++ = htonl(POWERPC_EMUL_OP | (i + 3));
 		*lp++ = htonl(0x4bf66e68 - i*8);				// b	0x366084
 	}
+	/*
+	 * New World hybrid: the opcode-table entries above are the only
+	 * emulator change. The 0x36f9xx.. helper routines serve the Old World
+	 * twi rewrite and the DR-emulator interrupt patch replaces NK code;
+	 * NK v2 keeps both jobs.
+	 */
+	if (ROMType == ROMTYPE_NEWWORLD)
+		return true;
 #else
 	// Install EMUL_RETURN, EXEC_RETURN and EMUL_OP opcodes
 	lp = (uint32 *)(ROMBaseHost + 0x380000 + (M68K_EMUL_RETURN << 3));
@@ -1375,6 +1425,108 @@ dr_found:
 	return true;
 }
 
+
+/*
+ *  New World hybrid: host-backed .Disk / .AppleCD drivers (plan S4 step 5)
+ *
+ *  Three data patches to the 68k ROM, no NK code:
+ *   - SetSysAppZone's constants: the system heap starts at 0x3000 instead
+ *     of 0x2800 so SheepShaver's XLM globals (0x2800..0x2fff) survive
+ *     (Old World moves it to RAMBase for the same reason).
+ *   - DRVR bodies (EMUL_OP + rts) and drive icons at NW_DRIVER_SPACE.
+ *   - The ROM's own driver-install routine (right after the unit-table
+ *     allocation `NewPtrSysClear; move.l a0,UTableBase; rts`) starts with
+ *     `lea -$32(a7),a7`; that instruction becomes EMUL_OP_INSTALL_DRIVERS
+ *     + nop, the handler does the stack adjust, and the ROM routine then
+ *     runs unchanged (.EDisk etc. still get installed).
+ */
+
+static bool nw_patch_68k_drivers(void)
+{
+	uint32 base;
+	uint16 *wp;
+	uint32 *lp;
+
+	static const uint8 sys_zone_dat[] = {0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x40, 0x00};
+	if ((base = find_rom_data(0x600, 0x900, sys_zone_dat, sizeof(sys_zone_dat))) == 0) {
+		printf("PatchROM: SetSysAppZone constants not found\n");
+		return false;
+	}
+	lp = (uint32 *)(ROMBaseHost + base);
+	*lp++ = htonl(0x3000);
+	*lp = htonl(0x4800);
+
+	if (!check_rom_patch_space(NW_DRIVER_SPACE, NW_DRIVER_SPACE_SIZE)) {
+		printf("PatchROM: driver space at ROM+%06x not free\n", (unsigned)NW_DRIVER_SPACE);
+		return false;
+	}
+	sony_offset = NW_DRIVER_SPACE;
+	memcpy(ROMBaseHost + sony_offset, sony_driver, sizeof(sony_driver));
+	memcpy(ROMBaseHost + sony_offset + 0x100, disk_driver, sizeof(disk_driver));
+	memcpy(ROMBaseHost + sony_offset + 0x200, cdrom_driver, sizeof(cdrom_driver));
+	SonyDiskIconAddr = nw_rom_la(sony_offset + 0x800);
+	memcpy(ROMBaseHost + sony_offset + 0x800, SonyDiskIcon, sizeof(SonyDiskIcon));
+	SonyDriveIconAddr = nw_rom_la(sony_offset + 0xa00);
+	memcpy(ROMBaseHost + sony_offset + 0xa00, SonyDriveIcon, sizeof(SonyDriveIcon));
+	DiskIconAddr = nw_rom_la(sony_offset + 0xc00);
+	memcpy(ROMBaseHost + sony_offset + 0xc00, DiskIcon, sizeof(DiskIcon));
+	CDROMIconAddr = nw_rom_la(sony_offset + 0xe00);
+	memcpy(ROMBaseHost + sony_offset + 0xe00, CDROMIcon, sizeof(CDROMIcon));
+
+	static const uint8 drvr_install_dat[] = {0xa7, 0x1e, 0x21, 0xc8, 0x01, 0x1c, 0x4e, 0x75, 0x4f, 0xef, 0xff, 0xce, 0x20, 0x4f};
+	if ((base = find_rom_data(0x800, 0xd00, drvr_install_dat, sizeof(drvr_install_dat))) == 0) {
+		printf("PatchROM: ROM driver-install routine not found\n");
+		return false;
+	}
+	wp = (uint16 *)(ROMBaseHost + base + 8);
+	*wp++ = htons(M68K_EMUL_OP_INSTALL_DRIVERS);	/* handler: a7 -= 0x32 */
+	*wp = htons(M68K_NOP);
+	return true;
+}
+
+/*
+ *  New World hybrid: install .Disk and .AppleCD (called from EMUL_OP
+ *  INSTALL_DRIVERS, ROM unit table just created). Same steps as
+ *  InstallDrivers() minus the floppy, serial and Old World extras.
+ */
+
+void nw_install_drivers(void)
+{
+	M68kRegisters r;
+	SheepArray<SIZEOF_IOParam> pb_var;
+	const uintptr pb = pb_var.addr();
+
+	/* .AppleCD is opened first so that the first CD is drive 1: the CD
+	 * driver's DriverGestalt 'boot' response carries the drive number in
+	 * the SCSI-target field, and StartLib compares that with the unit
+	 * address of the boot-info node (/host-drives/cdrom@1). .Disk puts
+	 * the drive number in the partition field, so its target is 0
+	 * (/host-drives/disk@0) whatever its drive number is. */
+	struct { const char *name; uint32 off; int refnum; uint16 flags; } drv[] = {
+		{ "\010.AppleCD", 0x200, CDROMRefNum, CDROMDriverFlags },
+		{ "\005.Disk", 0x100, DiskRefNum, DiskDriverFlags },
+	};
+	for (size_t i = 0; i < sizeof(drv) / sizeof(drv[0]); i++) {
+		if (drv[i].refnum == CDROMRefNum && PrefsFindBool("nocdrom"))
+			continue;
+		r.a[0] = nw_rom_la(sony_offset + drv[i].off);
+		r.d[0] = (uint32)drv[i].refnum;
+		Execute68kTrap(0xa43d, &r);		// DrvrInstallRsrvMem()
+		r.a[0] = ReadMacInt32(ReadMacInt32(0x11c) + ~drv[i].refnum * 4);	// driver handle from Unit Table
+		Execute68kTrap(0xa029, &r);		// HLock()
+		uint32 dce = ReadMacInt32(r.a[0]);
+		WriteMacInt32(dce + dCtlDriver, nw_rom_la(sony_offset + drv[i].off));
+		WriteMacInt16(dce + dCtlFlags, drv[i].flags);
+		SheepString name(drv[i].name);
+		WriteMacInt8(pb + ioPermssn, 0);
+		WriteMacInt32(pb + ioNamePtr, name.addr());
+		r.a[0] = pb;
+		Execute68kTrap(0xa000, &r);		// Open()
+#if NW_BOOT_LOG
+		printf("NW-BOOT G1: %s installed refnum %d, Open -> %d\n", drv[i].name + 1, drv[i].refnum, (int16)r.d[0]);
+#endif
+	}
+}
 
 /*
  *  Nanokernel patches
