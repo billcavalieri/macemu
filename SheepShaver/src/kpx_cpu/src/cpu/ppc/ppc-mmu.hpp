@@ -64,10 +64,14 @@ public:
 		MSR_DR = 0x00000010,
 		MSR_IR = 0x00000020,
 		MSR_IP = 0x00000040,
+		MSR_FP = 0x00002000,
 		MSR_PR = 0x00004000,
 		MSR_EE = 0x00008000,
-		/* Bits cleared on interrupt (EE, PR, FP, FE0, SE, BE, FE1, IR, DR, RI). */
-		MSR_EXC_CLEAR = 0x0000ef32
+		MSR_POW = 0x00040000,
+		MSR_VEC = 0x02000000,
+		/* Bits cleared on interrupt (VEC, POW, EE, PR, FP, FE0, SE, BE, FE1,
+		 * IR, DR, RI) as on the 7400; ILE/ME/IP/LE keep their values. */
+		MSR_EXC_CLEAR = 0x0204ef32
 	};
 
 	typedef bool (*phys_read32_fn)(void *ctx, uint32_t pa, uint32_t *value);

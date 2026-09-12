@@ -276,6 +276,8 @@ private:
 	spr_access_result mtspr_guest(uint32 spr, uint32 value);
 	static bool is_altivec_insn(uint32 opcode);
 	void take_vpu();
+	static bool is_fp_insn(uint32 opcode);
+	void take_fpu();
 
 	uint32 exception_vector(uint32 vec) const;
 	void take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra, uint32 event_pc = 0xffffffffu);
@@ -283,14 +285,21 @@ private:
 	void take_isi(uint32 fault);
 	void take_sc();
 	void take_dec();
+	void take_external();
+	bool async_exception_pending() const;	/* external line or decrementer */
+	void take_async_exception();
 	void take_program(uint32 srr1_bits);
 	void tick_decrementer();
-	uint64 tb_ticks() const;	/* timebase (DEC decrements at this rate) */
+	uint32 tau_read(int idx) const;	/* THRM1/THRM2 with the comparison result */
 	bool mfspr_oea(uint32 spr, uint32 *value) const;
 	bool mtspr_oea(uint32 spr, uint32 value);
 	bool spr_user_readable(uint32 spr) const;
 
 public:
+
+	uint64 tb_ticks() const;	/* guest timebase (DEC decrements at this rate): host ticks + mttb offset */
+	uint64 tb_host_ticks() const;	/* same rate, without the guest's mttb offset: the device clocks (a guest
+					 * writing TBL/TBU must not move the VIA timers or the RTC) */
 
 	// Initialization & finalization
 	void initialize();

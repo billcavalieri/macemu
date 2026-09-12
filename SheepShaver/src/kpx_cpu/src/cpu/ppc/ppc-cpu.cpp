@@ -39,6 +39,8 @@
 
 #ifdef SHEEPSHAVER
 #include "nw_boot_contract.h"
+#include "nw_io.h"
+#include "nw_devices.h"
 #endif
 
 #define DEBUG 0
@@ -426,7 +428,10 @@ void powerpc_cpu::take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra, uin
 	if (event_pc == 0xffffffffu)
 		event_pc = srr0;
 	srr0_ = srr0;
-	srr1_ = (mmu.msr() & 0x0000ffffu) | srr1_extra;
+	/* OEA: SRR1[0,5-9,16-31] come from the MSR (this keeps MSR[VEC], bit 6,
+	   which the NK reads to decide whether the interrupted context owns the
+	   vector unit); SRR1[1-4,10-15] carry exception-specific information. */
+	srr1_ = (mmu.msr() & ~0x783f0000u) | srr1_extra;
 	mmu.set_msr(mmu.msr() & ~ppc32_mmu::MSR_EXC_CLEAR);
 	pc() = exception_vector(vec);
 #ifdef SHEEPSHAVER
@@ -488,6 +493,36 @@ void powerpc_cpu::take_dec()
 	take_exception(NW_VEC_DECREMENTER, pc(), 0);
 }
 
+void powerpc_cpu::take_external()
+{
+	/* Level-sensitive: the line stays asserted until the handler's IACK. */
+	take_exception(NW_VEC_EXTERNAL, pc(), 0);
+}
+
+/*
+ *  Thermal assist unit (MPC750/7400 THRM1..3). Once THRM3[E] is set, a
+ *  THRMn with [V] set completes its comparison: [TIV] = 1 and [TIN] =
+ *  junction temperature above the threshold ([TID] = 0) or below it
+ *  ([TID] = 1). The temperature is a constant; the point is that the
+ *  comparison completes. Mac OS 9's Multiprocessing CPU plugin (Core99)
+ *  scans the thresholds with interrupts off and spins on [TIV].
+ */
+uint32 powerpc_cpu::tau_read(int idx) const
+{
+	enum { TIN = 0x80000000u, TIV = 0x40000000u, TID = 0x4u, V = 0x1u, THRM3_E = 0x1u,
+	       JUNCTION_C = 40 };
+	const int thrm3 = spr_impl_index(powerpc_registers::SPR_THRM3);
+	uint32 v = spr_impl_[idx];
+	if (!(spr_impl_[thrm3] & THRM3_E) || !(v & V))
+		return v & ~(TIN | TIV);
+	const int threshold = (int)((v >> 23) & 0x7f);
+	v &= ~TIN;
+	v |= TIV;
+	if ((v & TID) ? JUNCTION_C < threshold : JUNCTION_C > threshold)
+		v |= TIN;
+	return v;
+}
+
 void powerpc_cpu::take_program(uint32 srr1_bits)
 {
 	/* SRR1[46] trap = 0x00020000, [45] privileged = 0x00040000,
@@ -518,16 +553,20 @@ void powerpc_cpu::execute_trap(uint32 opcode)
 	increment_pc(4);
 }
 
-uint64 powerpc_cpu::tb_ticks() const
+uint64 powerpc_cpu::tb_host_ticks() const
 {
 #ifdef SHEEPSHAVER
 	extern int64 TimebaseSpeed;
 	const uint64 us = GetTicks_usec();
-	const uint64 raw = (us / 1000000u) * (uint64)TimebaseSpeed + ((us % 1000000u) * (uint64)TimebaseSpeed) / 1000000u;
+	return (us / 1000000u) * (uint64)TimebaseSpeed + ((us % 1000000u) * (uint64)TimebaseSpeed) / 1000000u;
 #else
-	const uint64 raw = ((uint64)clock() * 25000000u) / CLOCKS_PER_SEC;
+	return ((uint64)clock() * 25000000u) / CLOCKS_PER_SEC;
 #endif
-	return raw + (uint64)tb_offset_;
+}
+
+uint64 powerpc_cpu::tb_ticks() const
+{
+	return tb_host_ticks() + (uint64)tb_offset_;
 }
 
 /*
@@ -633,7 +672,10 @@ powerpc_cpu::spr_access_result powerpc_cpu::mfspr_guest(uint32 spr, uint32 *valu
 	}
 	const int idx = spr_impl_index(spr);
 	if (idx >= 0) {
-		*value = spr_impl_[idx];
+		if (spr == powerpc_registers::SPR_THRM1 || spr == powerpc_registers::SPR_THRM2)
+			*value = tau_read(idx);
+		else
+			*value = spr_impl_[idx];
 		return SPR_ACCESS_OK;
 	}
 	if (spr == 0 || spr == 4 || spr == 5 || spr == 6) {
@@ -737,6 +779,32 @@ void powerpc_cpu::take_vpu()
 	take_exception(NW_VEC_VPU, pc(), 0);
 }
 
+/*
+ *  Floating-point instructions: primary opcodes 48..55 (lfs/lfd/stfs/stfd
+ *  and their update/indexed forms live at 48-55), 59 (single), 63 (double
+ *  and FPSCR), plus the indexed FP loads/stores in opcode 31.
+ */
+bool powerpc_cpu::is_fp_insn(uint32 opcode)
+{
+	const uint32 opcd = opcode >> 26;
+	if ((opcd >= 48 && opcd <= 55) || opcd == 59 || opcd == 63)
+		return true;
+	if (opcd != 31)
+		return false;
+	switch ((opcode >> 1) & 0x3ff) {
+	case 535: case 567: case 599: case 631:	/* lfsx lfsux lfdx lfdux */
+	case 663: case 695: case 727: case 759:	/* stfsx stfsux stfdx stfdux */
+	case 983:				/* stfiwx */
+		return true;
+	}
+	return false;
+}
+
+void powerpc_cpu::take_fpu()
+{
+	take_exception(NW_VEC_FPU, pc(), 0);
+}
+
 void powerpc_cpu::tick_decrementer()
 {
 	/* DEC decrements at the timebase rate (mftb and DEC share a clock).
@@ -756,8 +824,30 @@ void powerpc_cpu::tick_decrementer()
 	if ((old_dec & 0x80000000u) == 0 && ((dec_ & 0x80000000u) || elapsed > old_dec))
 		dec_pending_ = true;
 #ifdef SHEEPSHAVER
+	nw_devices_tick();
 	nw_event_tick(pc(), ppc32_guest_mmu().msr());
 #endif
+}
+
+bool powerpc_cpu::async_exception_pending() const
+{
+#ifdef SHEEPSHAVER
+	if (nw_io_ext_irq)
+		return true;
+#endif
+	return dec_pending_;
+}
+
+void powerpc_cpu::take_async_exception()
+{
+	/* External interrupt has priority over the decrementer (OEA 6.4.1). */
+#ifdef SHEEPSHAVER
+	if (nw_io_ext_irq) {
+		take_external();
+		return;
+	}
+#endif
+	take_dec();
 }
 
 bool powerpc_cpu::guest_fetch(uint32 *opcode)
@@ -1306,8 +1396,8 @@ void powerpc_cpu::execute(uint32 entry)
 		uint32 opcode;
 		if (ppc32_guest_mmu_enabled()) {
 			tick_decrementer();
-			if (dec_pending_ && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE)) {
-				take_dec();
+			if (async_exception_pending() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE)) {
+				take_async_exception();
 				continue;
 			}
 		}
@@ -1323,6 +1413,11 @@ void powerpc_cpu::execute(uint32 entry)
 		if (ppc32_guest_mmu_enabled() &&
 		    !(ppc32_guest_mmu().msr() & NW_MSR_VEC) && is_altivec_insn(opcode)) {
 			take_vpu();
+			continue;
+		}
+		if (ppc32_guest_mmu_enabled() &&
+		    !(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_FP) && is_fp_insn(opcode)) {
+			take_fpu();
 			continue;
 		}
 		const instr_info_t *ii = decode(opcode);

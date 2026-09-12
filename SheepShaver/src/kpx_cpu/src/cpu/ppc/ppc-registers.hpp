@@ -111,6 +111,11 @@ class powerpc_xer_register
 	uint8 ov;
 	uint8 ca;
 	uint8 byte_count;
+	uint32 reserved;		/* bits 3..24: no architected meaning, but the
+					 * register holds them (G3/G4, QEMU). The Mac OS
+					 * 68k emulator keeps mode flags in bits 22..23 and
+					 * MixedMode's native entry tests them (mfxer) to
+					 * pick the fast path over an NK syscall. */
 public:
 	powerpc_xer_register();
 	void set(uint32 xer);
@@ -127,13 +132,13 @@ public:
 
 inline
 powerpc_xer_register::powerpc_xer_register()
-	: so(0), ov(0), ca(0), byte_count(0)
+	: so(0), ov(0), ca(0), byte_count(0), reserved(0)
 { }
 
 inline uint32
 powerpc_xer_register::get() const
 {
-	return (so << 31) | (ov << 30) | (ca << 29) | byte_count;
+	return (so << 31) | (ov << 30) | (ca << 29) | reserved | byte_count;
 }
 
 inline void
@@ -142,6 +147,7 @@ powerpc_xer_register::set(uint32 xer)
 	so = XER_SO_field::extract(xer);
 	ov = XER_OV_field::extract(xer);
 	ca = XER_CA_field::extract(xer);
+	reserved = xer & 0x1fffff80;
 	byte_count = XER_COUNT_field::extract(xer);
 }
 
