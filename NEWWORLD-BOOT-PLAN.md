@@ -7,8 +7,10 @@ Toolbox, in SheepShaver on Apple Silicon. Then the rest of `OS921-BOOT-PLAN.md`
 **Status:** G3 reached (S4 step 6); **G4 reached** (S4 step 7): the
 installer put 9.2.1 on the 2 GB volume and the installed System boots to the
 Finder (Mac OS Setup Assistant, Control Strip) in ≈ 140 s, interpreter. The
-SDL window shows the guest display. Next gate: the display driver (Apple
-Monitor Plugins −29208), then G5 polish and G6 JIT.
+SDL window shows the guest display through SheepShaver's own video ndrv
+with a real VBL interrupt (S4 step 8); the cursor tracks the ADB mouse.
+Next: New World input mode (guest cursor vs host pointer), XPRAM/NVRAM,
+then G5 polish and G6 JIT.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -571,21 +573,82 @@ frame-buffer coordinates.
    at 60 s, extensions load, Finder with the Mac OS Setup Assistant at
    ≈ 140 s (run 10).
 
-Observed on the installed System, not yet done: "Apple Monitor Plugins
-did not load completely. Error −29208" — the Display Manager finds no
-video driver on the `display` node (the guest still draws straight into
-the ROM's generic linear frame buffer). This is the next device gate:
-SheepShaver's video ndrv as `driver,AAPL,MacOS,PowerPC` on the tree's
-`display` node, served by `NATIVE_VIDEO_DO_DRIVER_IO`, giving the VSL VBL
-service, gamma and the mode list. Also open: XPRAM/NVRAM persistence (the
-startup-disk choice), PMU restart/shutdown, Keylargo GPIO details, BAT
-range 1 overlap, DEC-pending clear on `mtdec`.
-
 Operator notes: `sleep 3` between consecutive SheepShaver runs (an
 instance still tearing down holds the toast/hfv locks: `WARNING: Cannot
 open … (Resource temporarily unavailable)`, then the boot has no disks).
 `ResViewerCLI ls/resources/get` reads the hfv as well as the toast (paths
 `Macintosh HD/System Folder/…`).
+
+#### S4 step 8 — display driver and its VBL interrupt (commits `ba0ea33a`, `39a8cb87`)
+
+Why: on the installed System the cursor never moved (run 13: the script's
+closed-loop `mouse` gave up at 15,15) while keyboard input worked, and a
+control run with the ROM's cofb ndrv moved it. The classic SheepShaver
+driver had registered its VSL service but nothing ever serviced it: the
+OS hangs the display's VBL tasks (cursor tracking among them) on the
+driver's VSL interrupt, which on Old World is SheepShaver's host-side
+`VideoVBL()` injection and on New World did not exist.
+
+1. **Driver on the node.** `nw_build_video_driver()` (`rom_patches.cpp`)
+   takes the `VideoDriverStub.i` PEF, replaces its `DoDriverIO` body
+   (`lwz r2,0x2808; lwz r0,0x28d8; mtctr; bctr`, the Old World low-mem
+   hook) with the NativeOp for `NATIVE_VIDEO_DO_DRIVER_IO` + `blr`, and
+   `nw_bootinfo` puts it on the `display` node as
+   `driver,AAPL,MacOS,PowerPC` (the parcel's `prop` flag adds cofb only
+   when the node has none). `InitCallUniversalProc()` at
+   `OP_INSTALL_DRIVERS` gives `FindLibSymbol` its CFM path. The CPU fetch
+   guard admits SheepMem: `CallMacOS` returns through a trampoline there
+   (run 11's machine check at `5058f1ec`). Boot screen, dialogs and the
+   Finder then render through the SheepShaver driver.
+2. **VBL as a display interrupt.** The display node gets `interrupts`
+   `{0x1d, level}`, OpenPIC source 0x1d (uni-north's line for pci slot e
+   in the mac99 layout, unused by the golden), 68k level 2, Trampoline
+   list position 7 (`AAPL,interrupts`/`interrupt-index` 7). Device model
+   (`nw_devices.cpp`): asserted every 1/60 s of timebase while the
+   driver's VBL enable is on (`nw_display_vbl_enable`, the driver's
+   `cscSetInterrupt`), cleared by the handler (`nw_display_vbl_clear`).
+   The driver installs the handler the way a PCI ndrv does
+   (`nw_install_vbl_handler`, `video.cpp`): `RegistryPropertyGet
+   driver-ist` → `{set, member}`; `GetInterruptFunctions` for the
+   member's enabler; `InstallInterruptFunctions` with a NativeOp thunk
+   for `NATIVE_VIDEO_VBL` (in the system heap) that runs
+   `VideoDriverVBL()` — clear the line, `VSLDoInterruptService` — and
+   returns `kIsrIsComplete`; then the enabler (unmasks IVPR 0x1d).
+3. **Two guest-side facts learned on the way**, both found by reading
+   the ROM's 68k level dispatcher (`ffc0eb80`: autovector stubs →
+   `a2 = *(0x68ffefd0)`, pending words `$28/$2c(a2)`, per-level mask
+   table `$14(a2)` = ConfigInfo `+0xf40`, vector table at
+   `ExpandMem+$210`, `$8c(a2,level)` = vector in service) from register
+   dumps at the repeating emulator trap `6806e8d0` (kernel trap #4, the
+   68k `RTE`):
+   - ConfigInfo `+0xf40[level]` still held the golden masks (level 2 =
+     `0x80540000`, positions 0/9/11/13 of the 15-entry list). With our
+     list, `pending(7) & mask(2) == 0`: the dispatcher returned without
+     acknowledging and the NK re-posted the interrupt forever. ATA would
+     have met the same. Derived from `nw_trampoline_irqs` now
+     (`ba0ea33a`).
+   - Interrupt-set members are numbered per 68k level in list order
+     (set for level 2: gpio1 = 1, ata = 2, 3, display = 4); the handler
+     returns `kIsrIsComplete = 0` — a positive value names a child-set
+     member and the first attempt (1) sent the Interrupt Manager after a
+     child that did not exist (System Error box, no A-traps, DEC ticks
+     only).
+
+Result (run 33, 180 s, interpreter): Finder with the Control Strip at
+≈ 170 s on the SheepShaver driver, handler at 60 Hz, closed-loop cursor
+moves land (run 32: `mouse at 299,299`, click at 461,40 registered). The
+−29208 "Apple Monitor Plugins" alert stays: it appears with the ROM's
+cofb ndrv as well, so it is a Mac OS 9.x / SheepShaver-driver matter, not
+a New World gate. Harness: VBL model (enable, half frame, frame, acknowledge,
+level clear, re-arm), IVPR 0x1d, list and mask pins (411 pass).
+
+Open after this step: the guest cursor is a hardware cursor (not drawn
+into the frame buffer) driven by relative ADB motion, so the host pointer
+and the guest cursor do not coincide in the window — a New World input
+mode (software cursor + relative mouse, or absolute positioning through
+the driver) is the next usability gate. Also XPRAM/NVRAM persistence
+(the startup-disk choice), PMU restart/shutdown, Keylargo GPIO details,
+BAT range 1 overlap.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
