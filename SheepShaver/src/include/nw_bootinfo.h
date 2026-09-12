@@ -1,6 +1,9 @@
 /*
  *  nw_bootinfo.h - New World boot-info area: flattened device tree + parcels
  *
+ *  (C) 2026 Bill Cavalieri
+ *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
+ *
  *  The Trampoline leaves a 'PMR&' 'BGsT' 'ree\0' block at LA 0x64000000:
  *  a device tree in "BGsTree" form (consumed by the 68k StartInit /
  *  NameRegistry importer at ROM 0x44420..0x44580) with the ROM file's

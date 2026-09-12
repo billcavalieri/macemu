@@ -1,6 +1,9 @@
 /*
  *  nw_bootinfo.cpp - New World boot-info area: flattened device tree + parcels
  *
+ *  (C) 2026 Bill Cavalieri
+ *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
+ *
  *  See nw_bootinfo.h for the record format (decoded from the 68k importer
  *  at ROM 0x44420: node {sibling, child, props}, property {next, name[32],
  *  len, value}). The tree mirrors the shape the golden mac99 Trampoline

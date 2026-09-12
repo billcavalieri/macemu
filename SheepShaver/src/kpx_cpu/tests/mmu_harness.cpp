@@ -1,7 +1,8 @@
 /*
  *  mmu_harness.cpp - Host-side SheepShaver-MMUTests (G1 + G2)
  *
- *  SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
+ *  (C) 2026 Bill Cavalieri
+ *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
  *
  *  G1: New World boot contract (tree nodes, Gestalt 406, KDP layout,
  *  Hnfo-or-mtsdr1, BATRangeInit, saveKernelDataPtr adjacency). No ROM.

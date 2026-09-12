@@ -1,7 +1,8 @@
 /*
  *  nw_io.cpp - New World guest I/O space dispatch
  *
- *  SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
+ *  (C) 2026 Bill Cavalieri
+ *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
