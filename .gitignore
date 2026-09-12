@@ -99,6 +99,9 @@ research-score/g3_driver/pack.json
 research-score/g3_driver/pack-log.md
 research-score/g3_driver/pack-slim.md
 research-score/g3_driver/state.json
+# Frame-buffer captures written by the mill runs (ss-g3-mill-*-fb*.png/.pgm).
+research-score/g3_driver/*.png
+research-score/g3_driver/*.pgm
 # Redirected ROM disasm listings (keep rom_disasm.py).
 rom-disasm.md
 rom-disasm.txt
