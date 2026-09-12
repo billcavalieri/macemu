@@ -4,9 +4,11 @@
 Toolbox, in SheepShaver on Apple Silicon. Then the rest of `OS921-BOOT-PLAN.md`
 (G4 install, G5 Finder, G6 JIT).
 
-**Status:** reached (S4 step 6). The ROM boots the CD, the Finder comes up,
-typed input opens `Mac OS Install`, and its Welcome window is drawn by the
-guest into the frame buffer (≈ 200–300 s, ≈ 800 k A-traps, interpreter).
+**Status:** G3 reached (S4 step 6); **G4 reached** (S4 step 7): the
+installer put 9.2.1 on the 2 GB volume and the installed System boots to the
+Finder (Mac OS Setup Assistant, Control Strip) in ≈ 140 s, interpreter. The
+SDL window shows the guest display. Next gate: the display driver (Apple
+Monitor Plugins −29208), then G5 polish and G6 JIT.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -522,6 +524,68 @@ unavailable)`, `.AppleCD` gets a placeholder drive, and the ROM boots to
 the "?" floppy — check for that line before suspecting a regression.
 Never rebuild either scheme while a run is in progress (same DerivedData
 products).
+
+#### S4 step 7 — G4: install, boot the installed volume, host window (commits `dc56b3e9`, `46dddcf2`, `2e45d57f`, `24815925`)
+
+Method: unattended runs. `NW_SCRIPT=<file>` (Debug builds only,
+`nw_script.{h,cpp}`) schedules timed keyboard and mouse input into the
+modelled ADB bus and takes frame-buffer snapshots and RAM dumps — the
+counterpart of the golden capture's QMP driver, and only what a person at
+the window could do (grammar in `nw_script.h`). Cursor moves are closed
+loop on the guest's `Mouse` low-memory global, so click targets are
+frame-buffer coordinates.
+
+1. **Install** (real prefs: 512 MiB, `disk` = blank 2 GB hfv, `cdrom` =
+   9.2.1 toast, `bootdriver -62`). Finder ≈ 40 s; the "disk is
+   unreadable, initialize?" dialog ≈ 50 s (Initialize, name, erase
+   Continue) — the guest wrote the HFS volume through `.Disk`. Typing
+   `Mac OS Install` + Cmd+O in the Finder at 60 s, Welcome ≈ 95 s, then
+   Continue / Select Destination (Macintosh HD, 317 MB) / Continue /
+   Continue at (515,383), License Agree at (450,306), Start at (515,383)
+   at ≈ 147 s. The install ran ≈ 17 min and ended with "The installation
+   process has finished" (run 7, 47 snapshots).
+2. **Host window.** The guest drew correctly but the SDL window stayed
+   black: `SDL_RenderPresent` lives in `VideoVBL()`, reached only through
+   the classic video driver's VBL (`NATIVE_VIDEO_VBL`) and Old World
+   interrupt injection, both off on New World. `VideoHostPresent()` is the
+   present half of `VideoVBL()`; `nw_host_tick()` (glue) calls it at 60 Hz
+   from the CPU thread (the renderer's thread), from the same coarse tick
+   as the device models. No guest state involved.
+3. **Boot the installed volume** (`/tmp/prefs-hd` = real prefs with
+   `bootdriver 0`; the user's prefs file is not edited). First attempt
+   stopped at the start of "Starting Up" (progress bar ≈ 10 %): native
+   user-mode code called through `MixedModeMagic` spun forever at RAM
+   `0xaf49xx/0xaf66xx` after a write to PA `0x80008600` (Keylargo DBDMA
+   channel 6, SCC-B transmit: `0x20002000` = FLUSH), polling a status bit.
+   A RAM dump (`dump` script command) identified the PEF: imports
+   `DriverServicesLib`, `NameRegistryLib`, `BlueAbstractionLayerLib`
+   (`BALSerialOpen` … `LMGetSCCRd/Wr`), data strings `.AOut`, `.BOut`,
+   `chrp,es2`, `chrp,es3` — the System's built-in SCC serial driver,
+   opened at startup by the installed `Internal V.90 Modem` extension
+   (port B). The CD's System never opened a serial port, so G3 did not
+   see it. SheepShaver has no SCC; the tree no longer presents `escc` /
+   `escc-legacy` (rule as for usb, ethernet), the Trampoline interrupt
+   list drops the six escc sources and the ata-3 `AAPL,interrupt-index`
+   values follow (vector == list position); pinned tail values in the
+   harness updated (396 pass). Second attempt: "Mac OS 9.2 Starting Up"
+   at 60 s, extensions load, Finder with the Mac OS Setup Assistant at
+   ≈ 140 s (run 10).
+
+Observed on the installed System, not yet done: "Apple Monitor Plugins
+did not load completely. Error −29208" — the Display Manager finds no
+video driver on the `display` node (the guest still draws straight into
+the ROM's generic linear frame buffer). This is the next device gate:
+SheepShaver's video ndrv as `driver,AAPL,MacOS,PowerPC` on the tree's
+`display` node, served by `NATIVE_VIDEO_DO_DRIVER_IO`, giving the VSL VBL
+service, gamma and the mode list. Also open: XPRAM/NVRAM persistence (the
+startup-disk choice), PMU restart/shutdown, Keylargo GPIO details, BAT
+range 1 overlap, DEC-pending clear on `mtdec`.
+
+Operator notes: `sleep 3` between consecutive SheepShaver runs (an
+instance still tearing down holds the toast/hfv locks: `WARNING: Cannot
+open … (Resource temporarily unavailable)`, then the boot has no disks).
+`ResViewerCLI ls/resources/get` reads the hfv as well as the toast (paths
+`Macintosh HD/System Folder/…`).
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
