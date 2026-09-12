@@ -173,7 +173,22 @@ enum {
 	NW_NK_EXC_TABLE_ROM_OFF = 0x300000,
 	NW_68K_ROM_LA = 0xffc00000u,	/* 68k ROM window (ROM's own reset PC 0xffc0002a) */
 	NW_NK_EXC_TABLE_COPY_LEN = 0x2800,	/* vectors 0x100..0x27ff; 0x2800.. is XLM */
-	NW_NK_LOWMEM_ZEROED = 0x2000	/* NK clears this much low memory */
+	NW_NK_LOWMEM_ZEROED = 0x2000,	/* NK clears this much low memory */
+	NW_CI_LA = 0x68fef000u,		/* ConfigInfo page as the 68k/NK see it (RO) */
+	/* Trampoline boot-info area: LA 0x64000000, 384 pages. Holds the
+	 * 'PMR&' header, the flattened device tree ('BGsTree'), the driver
+	 * parcels, and the ProductInfo/DecoderInfo record at +0x51dd0 that the
+	 * 68k StartInit reaches through hardware-info +0x8. */
+	NW_BOOTINFO_LA = 0x64000000u,
+	NW_BOOTINFO_SIZE = 0x180000,
+	NW_BOOTINFO_HWREC_OFF = 0x51dd0,
+	NW_BOOTINFO_HWREC_PRE = 0x28,	/* bytes before the record the 68k indexes negatively */
+	NW_BOOTINFO_HWREC_LEN = 0x1c0,
+	/* Hardware-info block: r9 at NK entry when r7 == 'RTAS'; the NK copies
+	 * 0xc0 bytes to IRP+0xf00 and publishes it at KDP+0xfd0; the 68k checks
+	 * 'Hnfo' at +0x70. */
+	NW_HWINFO_SIZE = 0xc0,
+	NW_HWINFO_MAGIC_R7 = 0x52544153u	/* 'RTAS' */
 };
 
 /* Extra page-mapped ranges (page aligned), e.g. host areas the guest is
@@ -189,6 +204,8 @@ struct nw_config_info_layout {
 	uint32_t rom_area_size;	/* ROM_AREA_SIZE (5 MiB) */
 	uint32_t ram_base;		/* PA of the RAM bank; also relocated low-memory PA */
 	uint32_t ram_size;
+	uint32_t ci_pa;			/* PA of the ConfigInfo page (rom_base + 0x30d000); mapped RO at NW_CI_LA */
+	uint32_t bootinfo_pa;	/* PA of the NW_BOOTINFO_SIZE boot-info area (0 = none) */
 	const struct nw_pmdt_range *extra;
 	int n_extra;
 };
@@ -196,6 +213,14 @@ struct nw_config_info_layout {
 /* ci: the 4 KiB ROM ConfigInfo (ROM+0x30d000), big-endian, patched in place.
  * Returns the number of page-map entries written, or -1 on bad layout. */
 int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l);
+/* hw: NW_HWINFO_SIZE bytes (r9). Pointers into the ConfigInfo page and the
+ * boot-info area use their guest LAs (NW_CI_LA, NW_BOOTINFO_LA). */
+void nw_fill_hwinfo_be(uint8_t *hw, const struct nw_config_info_layout *l);
+/* area: NW_BOOTINFO_SIZE bytes, zeroed; writes the 'PMR&' header and the
+ * ProductInfo/DecoderInfo record (I/O bases as on mac99: VIA 0x80016000,
+ * SCC 0x80012000, OpenPIC 0x80040000). The device tree and parcels are not
+ * generated yet. */
+void nw_fill_bootinfo_be(uint8_t *area, uint32_t size, const struct nw_config_info_layout *l);
 /* si: NW_SI_SIZE bytes, zeroed and filled. */
 void nw_fill_system_info_be(uint8_t *si, const struct nw_config_info_layout *l);
 /*

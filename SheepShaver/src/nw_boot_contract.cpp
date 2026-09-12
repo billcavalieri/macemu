@@ -319,9 +319,15 @@ enum {
 	CI_BATMAP_SUP = 0x34c, CI_BATMAP_USR = 0x350, CI_BATMAP_CPU = 0x354, CI_BATMAP_OVL = 0x358,
 	CI_PA_RELOC_LOWMEM = 0x360,
 	CI_VERSION16 = 0x378, CI_FLAGS_37C = 0x37c,
-	CI_LOWMEM_INIT_TBL = 0xff4,
-	/* PMDT attr low bits: M|PP=2 (RW), M|PP=1 (KDP), 'unmapped' terminator */
-	PMDT_RW = 0x12, PMDT_KDP = 0x11, PMDT_TERM = 0xa00,
+	CI_WORD_380 = 0x380, CI_WORD_384 = 0x384,
+	CI_LOWMEM_INIT_OFF = 0xb0,	/* offset of the MacLowMemInit table */
+	CI_LOWMEM_INIT_TBL = 0x3a0,	/* Trampoline moves it here (ROM: 0xff4) */
+	CI_VERSION_STR = 0x70, CI_LA_INTERRUPT_CTL = 0x94,
+	/* Trampoline tail tables, reached from the hardware-info block */
+	CI_TAIL_CFC = 0xcfc, CI_TAIL_D00 = 0xd00, CI_TAIL_F00 = 0xf00,
+	CI_TAIL_F40 = 0xf40, CI_TAIL_F80 = 0xf80,
+	/* PMDT attr low bits: M|PP=2 (RW), M|PP=3 (RO), M|PP=1 (KDP), 'unmapped' terminator */
+	PMDT_RW = 0x12, PMDT_RO = 0x13, PMDT_KDP = 0x11, PMDT_TERM = 0xa00,
 	/* BAT map nibbles (IBAT0..3 low, DBAT0..3 high; f = unused): golden mac99
 	 * uses slot 3 = range 1, slot 2 = range 3 (NK 1 MiB); we add slot 1 =
 	 * range 2 (68k ROM window) since golden's range 1 covers 0xffc00000 and
@@ -369,6 +375,8 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
 		return -1;	/* ROM area: page aligned, inside one segment */
 	if ((l->ram_base & 0xfffu) != 0 || l->ram_size <= (uint32_t)NW_NK_LOWMEM_ZEROED)
 		return -1;
+	if ((l->ci_pa & 0xfffu) != 0 || (l->bootinfo_pa & 0xfffu) != 0)
+		return -1;
 
 	const uint32_t la_irp = nw_be32_load(ci, CI_LA_INFO_RECORD);	/* 0x5fffe000 */
 	const uint32_t la_kdp = nw_be32_load(ci, CI_LA_KERNEL_DATA);	/* 0x68ffe000 */
@@ -377,6 +385,10 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
 	const uint32_t la_nk = la_emul & 0xfff00000u;			/* 0x68000000 */
 	if ((la_irp & 0xfffu) || (la_kdp & 0xfffu) || (la_edp & 0xfffu) || la_emul == 0)
 		return -1;
+
+	/* Trampoline clears the checksum/signature words. */
+	for (uint32_t o = 0; o < 0x28; o += 4)
+		nw_be32_store(ci, o, 0);
 
 	/* Code stays in place (no NK-side copies), no Old World HWInit probe. */
 	nw_be32_store(ci, CI_EXC_TABLE_OFF, 0);
@@ -400,6 +412,11 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
 	pmdt_add(r, &nr, la_irp, 0, 0x1000u, PMDT_RW, 1);
 	pmdt_add(r, &nr, la_kdp, 0, 0x1000u, PMDT_KDP, 2);
 	pmdt_add(r, &nr, la_edp, 0, 0x1000u, PMDT_RW, 3);
+	/* ConfigInfo page, read-only, where the 68k and the hardware-info block
+	 * expect it (golden: (8fef, 1, 0x3013)); boot-info area RW. */
+	pmdt_add(r, &nr, NW_CI_LA, l->ci_pa, 0x1000u, PMDT_RO, 0);
+	if (l->bootinfo_pa)
+		pmdt_add(r, &nr, NW_BOOTINFO_LA, l->bootinfo_pa, NW_BOOTINFO_SIZE, PMDT_RW, 0);
 	for (int i = 0; i < l->n_extra; i++) {
 		const struct nw_pmdt_range *x = &l->extra[i];
 		if (x->size == 0 || (x->la & 0xfffu) || (x->pa & 0xfffu) || (x->size & 0xfffu))
@@ -496,10 +513,118 @@ int nw_fill_config_info_be(uint8_t *ci, const struct nw_config_info_layout *l)
 	 * 0xffc00000 window, never at the ROM area's host identity. */
 	nw_be32_store(ci, CI_PA_RELOC_LOWMEM, l->ram_base);
 
-	/* Trampoline marks the record v1.01 (golden: 0101 0000 8100 0000). */
+	/* Trampoline marks the record v1.01 (golden: 0101 0000 8100 0000) and
+	 * clears the stale Old World words 0x364..0x374. */
+	for (uint32_t o = 0x364; o <= 0x374; o += 4)
+		nw_be32_store(ci, o, 0);
 	nw_be32_store(ci, CI_VERSION16, 0x01010000u);
 	nw_be32_store(ci, CI_FLAGS_37C, 0x81000000u);
+	nw_be32_store(ci, CI_WORD_380, 0x03200258u);
+	nw_be32_store(ci, CI_WORD_384, 0x0c800004u);
+	nw_be32_store(ci, CI_VERSION_STR, 0x30202020u);		/* "0   " */
+	nw_be32_store(ci, CI_LA_INTERRUPT_CTL, 0x80060000u);	/* golden mac99 */
+
+	/* MacLowMemInit moves from 0xff4 to 0x3a0 (the tail is used below):
+	 * (offset 4, 0xffc0002a), then a zero offset terminates. */
+	nw_be32_store(ci, CI_LOWMEM_INIT_OFF, CI_LOWMEM_INIT_TBL);
+	nw_be32_store(ci, CI_LOWMEM_INIT_TBL + 0, 4);
+	nw_be32_store(ci, CI_LOWMEM_INIT_TBL + 4, NW_68K_ROM_LA + 0x2a);
+	nw_be32_store(ci, CI_LOWMEM_INIT_TBL + 8, 0);
+
+	/*
+	 * Tail tables the Trampoline appends (golden mac99 values). The
+	 * hardware-info block points at +0xcfc, +0xf40 and +0xf80; +0xf80 is a
+	 * 0xffff-terminated list of 16-bit OpenPIC interrupt sources (0x2f VIA-PMU
+	 * first), +0xd40/+0xf00 hold a 16-byte descriptor, the rest is 0xff fill.
+	 */
+	for (uint32_t o = CI_TAIL_D00; o < CI_TAIL_D00 + 0x40; o += 4)
+		nw_be32_store(ci, o, 0xffffffffu);
+	static const uint32_t desc16[4] = { 0x02070104u, 0x04040404u, 0x04020402u, 0x04020300u };
+	for (int i = 0; i < 4; i++) {
+		nw_be32_store(ci, CI_TAIL_D00 + 0x40 + (uint32_t)i * 4u, desc16[i]);
+		nw_be32_store(ci, CI_TAIL_F00 + (uint32_t)i * 4u, desc16[i]);
+	}
+	for (uint32_t o = CI_TAIL_F40; o < CI_TAIL_F80; o += 4)
+		nw_be32_store(ci, o, 0);
+	nw_be32_store(ci, CI_TAIL_F40 + 0x04, 0x20000000u);
+	nw_be32_store(ci, CI_TAIL_F40 + 0x08, 0x80540000u);
+	nw_be32_store(ci, CI_TAIL_F40 + 0x0c, 0x00020000u);
+	nw_be32_store(ci, CI_TAIL_F40 + 0x10, 0x1fa80000u);
+	nw_be32_store(ci, CI_TAIL_F40 + 0x1c, 0x40000000u);
+	static const uint32_t irq_list[8] = { 0x002f0037u, 0x00190025u, 0x00040005u, 0x00240006u,
+					      0x0007000du, 0x0002000eu, 0x0003001cu, 0x001effffu };
+	for (uint32_t o = CI_TAIL_F80; o < NW_CI_SIZE; o += 4)
+		nw_be32_store(ci, o, 0xffffffffu);
+	for (int i = 0; i < 8; i++)
+		nw_be32_store(ci, CI_TAIL_F80 + (uint32_t)i * 4u, irq_list[i]);
 	return n;
+}
+
+void nw_fill_hwinfo_be(uint8_t *hw, const struct nw_config_info_layout *l)
+{
+	if (hw == NULL || l == NULL)
+		return;
+	memset(hw, 0, NW_HWINFO_SIZE);
+	nw_be32_store(hw, 0x00, l->rom_base);			/* ROM image PA */
+	nw_be32_store(hw, 0x04, NW_BOOTINFO_LA + 0x0c);		/* boot-info entry list */
+	nw_be32_store(hw, 0x08, NW_BOOTINFO_LA + NW_BOOTINFO_HWREC_OFF);	/* ProductInfo record */
+	nw_be32_store(hw, 0x0c, l->ci_pa);			/* ConfigInfo PA */
+	nw_be32_store(hw, 0x10, NW_CI_LA + CI_TAIL_F80);	/* interrupt source list */
+	nw_be32_store(hw, 0x14, NW_CI_LA + CI_TAIL_F40);
+	nw_be32_store(hw, 0x18, 0x80040000u);			/* OpenPIC (mac99 mac-io + 0x40000) */
+	nw_be32_store(hw, 0x3c, 0x00001400u);
+	nw_be32_store(hw, 0x70, 0x486e666fu);			/* 'Hnfo' */
+	nw_be32_store(hw, 0x74, 0x00403035u);			/* +0x76: machine id 0x3035, 68k reads it */
+	nw_be32_store(hw, 0x78, 0x00250024u);
+	nw_be32_store(hw, 0x7c, 0x08000800u);
+	nw_be32_store(hw, 0x80, 0x00190002u);
+	nw_be32_store(hw, 0x84, 0x08000037u);
+	nw_be32_store(hw, 0x88, 0x00010000u);
+	nw_be32_store(hw, 0x94, 0x00000004u);
+	nw_be32_store(hw, 0x9c, 0x00410000u);
+	nw_be32_store(hw, 0xa0, 0x63173569u);
+	nw_be32_store(hw, 0xa8, NW_CI_LA + CI_TAIL_CFC);
+}
+
+/*
+ * ProductInfo/DecoderInfo record the Trampoline builds for a mac99-class
+ * machine (captured from the golden run after the 68k StartInit had applied
+ * its own ROM-table fixups, which are idempotent). Offsets are relative to
+ * record - NW_BOOTINFO_HWREC_PRE. +0x28 (record +0) is the offset of the
+ * DecoderInfo (0x98); DecoderInfo +0x8 is the VIA base, +0xc/+0x10 the SCC
+ * bases, +0xf4 the OpenPIC; DecoderInfo -0x28 (record +0x70) holds the
+ * hardware flags the 68k tests (bit 2: VIA1 present). The 0x9bbbxxxx words
+ * are offsets the Trampoline relocated against its own view of the ROM
+ * ProductInfo; the 68k never dereferences them before Welcome, and they are
+ * reproduced as captured.
+ */
+static const struct { uint16_t off; uint32_t val; } hwrec[] = {
+	{ 0x01c, 0x00000008u }, { 0x020, 0xf8000000u }, { 0x024, 0x01000000u },
+	{ 0x028, 0x00000098u }, { 0x02c, 0x9bbbc350u }, { 0x030, 0x9bbbc360u },
+	{ 0x034, 0x9bbbc362u }, { 0x038, 0x4c807f1au }, { 0x03c, 0x3fff0402u },
+	{ 0x040, 0x0000001cu }, { 0x044, 0x60000000u }, { 0x04c, 0xc003bf1au },
+	{ 0x050, 0x058480efu }, { 0x060, 0x9bbbc488u }, { 0x068, 0x9bbb5a54u },
+	{ 0x06c, 0x9bbb5714u }, { 0x070, 0x9bbb4e90u }, { 0x078, 0x9bbbd2d4u },
+	{ 0x080, 0x30350000u }, { 0x084, 0x9bbbc372u }, { 0x088, 0x00000190u },
+	{ 0x090, 0xffc0e000u }, { 0x098, 0x0000001cu }, { 0x09c, 0x60000000u },
+	{ 0x0a4, 0xc003bf1au }, { 0x0a8, 0x058480efu }, { 0x0b8, 0x1a010000u },
+	{ 0x0c0, 0xffc00000u }, { 0x0c8, 0x80016000u }, { 0x0cc, 0x80012000u },
+	{ 0x0d0, 0x80012000u }, { 0x1b4, 0x80040000u }, { 0x1b8, 0x00010100u },
+};
+
+void nw_fill_bootinfo_be(uint8_t *area, uint32_t size, const struct nw_config_info_layout *l)
+{
+	if (area == NULL || l == NULL || size < (uint32_t)NW_BOOTINFO_SIZE)
+		return;
+	memset(area, 0, NW_BOOTINFO_SIZE);
+	/* 'PMR&' 'BGsT' 'ree\0': boot-globals header; the entry list at +0xc
+	 * (device tree, parcels) is a later gate and stays empty. */
+	nw_be32_store(area, 0x0, 0x504d5226u);
+	nw_be32_store(area, 0x4, 0x42477354u);
+	nw_be32_store(area, 0x8, 0x72656500u);
+	const uint32_t base = NW_BOOTINFO_HWREC_OFF - NW_BOOTINFO_HWREC_PRE;
+	for (size_t i = 0; i < sizeof(hwrec) / sizeof(hwrec[0]); i++)
+		nw_be32_store(area, base + hwrec[i].off, hwrec[i].val);
 }
 
 void nw_fill_system_info_be(uint8_t *si, const struct nw_config_info_layout *l)

@@ -136,11 +136,14 @@ int main()
 		l.rom_area_size = 0x500000u;
 		l.ram_base = 0x10000000u;
 		l.ram_size = 0x08000000u;
+		l.ci_pa = 0x5030d000u;
+		l.bootinfo_pa = NW_BOOTINFO_LA;
 		l.extra = extra;
 		l.n_extra = 2;
 		int n = nw_fill_config_info_be(&ci[0], &l);
-		/* 16 terminators + ROM, SheepMem, IRP, NK 1 MiB, KDP, EDP, DR cache */
-		CHECK(n == 16 + 7);
+		/* 16 terminators + ROM, SheepMem, IRP, boot-info, NK 1 MiB, CI page,
+		 * KDP, EDP, DR cache */
+		CHECK(n == 16 + 9);
 		CHECK(nw_config_info_pagemap_ok(&ci[0]));
 		CHECK(nw_be32_load(&ci[0], 0xb8) == (uint32_t)n * 8u);
 		CHECK(nw_be32_load(&ci[0], 0xbc) == NW_CI_PAGEMAP_OFF);
@@ -153,15 +156,19 @@ int main()
 		CHECK(((pm[s5 + 16] << 8) | pm[s5 + 17]) == 0xfffe);
 		CHECK(nw_be32_load(&ci[0], 0xc0) == s5 + 16);	/* IRP offset */
 		CHECK(nw_be32_load(pm, s5 + 28) == 0xa00u);	/* seg 5 terminator */
-		/* seg 6: NK 1 MiB -> ROM+0x300000, KDP, EDP, DR cache, term (a01) */
+		/* seg 6: boot-info (0x4000, 384 pages), NK 1 MiB -> ROM+0x300000,
+		 * ConfigInfo page RO, KDP, EDP, DR cache, term (a01) */
 		uint32_t s6 = nw_be32_load(&ci[0], 0xcc + 6 * 8);
-		CHECK(((pm[s6] << 8) | pm[s6 + 1]) == 0x8000 && ((pm[s6 + 2] << 8) | pm[s6 + 3]) == 0xff);
-		CHECK(nw_be32_load(pm, s6 + 4) == 0x50300012u);
-		CHECK(nw_be32_load(&ci[0], 0xc4) == s6 + 8);	/* KDP */
-		CHECK(nw_be32_load(pm, s6 + 12) == 0x11u);
-		CHECK(nw_be32_load(&ci[0], 0xc8) == s6 + 16);	/* EDP */
-		CHECK(((pm[s6 + 24] << 8) | pm[s6 + 25]) == 0x9000);
-		CHECK(nw_be32_load(pm, s6 + 36) == 0x60000a01u);
+		CHECK(((pm[s6] << 8) | pm[s6 + 1]) == 0x4000 && ((pm[s6 + 2] << 8) | pm[s6 + 3]) == 0x17f);
+		CHECK(nw_be32_load(pm, s6 + 4) == 0x64000012u);
+		CHECK(((pm[s6 + 8] << 8) | pm[s6 + 9]) == 0x8000 && ((pm[s6 + 10] << 8) | pm[s6 + 11]) == 0xff);
+		CHECK(nw_be32_load(pm, s6 + 12) == 0x50300012u);
+		CHECK(((pm[s6 + 16] << 8) | pm[s6 + 17]) == 0x8fef && nw_be32_load(pm, s6 + 20) == 0x5030d013u);
+		CHECK(nw_be32_load(&ci[0], 0xc4) == s6 + 24);	/* KDP */
+		CHECK(nw_be32_load(pm, s6 + 28) == 0x11u);
+		CHECK(nw_be32_load(&ci[0], 0xc8) == s6 + 32);	/* EDP */
+		CHECK(((pm[s6 + 40] << 8) | pm[s6 + 41]) == 0x9000);
+		CHECK(nw_be32_load(pm, s6 + 52) == 0x60000a01u);
 		/* SR values, BAT ranges, low memory, version */
 		CHECK(nw_be32_load(&ci[0], 0xcc + 6 * 8 + 4) == 0x00600000u);
 		CHECK(nw_be32_load(&ci[0], 0x24c + 15 * 8 + 4) == 0x00f00000u);
@@ -175,10 +182,37 @@ int main()
 		CHECK(nw_be32_load(&ci[0], 0x34c) == 0x132f132fu);
 		CHECK(nw_be32_load(&ci[0], 0x354) == 0xf3fff3ffu);
 		CHECK(nw_be32_load(&ci[0], 0x360) == 0x10000000u);
-		/* ROM's own MacLowMemInit (4 -> 0xffc0002a) is left untouched */
-		CHECK(nw_be32_load(&ci[0], 0xff4) == 4 && nw_be32_load(&ci[0], 0xff8) == 0xffc0002au);
+		/* MacLowMemInit (4 -> 0xffc0002a) moved to 0x3a0; tail tables as golden */
+		CHECK(nw_be32_load(&ci[0], 0xb0) == 0x3a0u);
+		CHECK(nw_be32_load(&ci[0], 0x3a0) == 4 && nw_be32_load(&ci[0], 0x3a4) == 0xffc0002au &&
+		      nw_be32_load(&ci[0], 0x3a8) == 0);
+		CHECK(nw_be32_load(&ci[0], 0xff4) == 0xffffffffu);
+		CHECK(nw_be32_load(&ci[0], 0xf80) == 0x002f0037u && nw_be32_load(&ci[0], 0xf9c) == 0x001effffu);
+		CHECK(nw_be32_load(&ci[0], 0xd00) == 0xffffffffu && nw_be32_load(&ci[0], 0xd40) == 0x02070104u);
+		CHECK(nw_be32_load(&ci[0], 0xf00) == 0x02070104u && nw_be32_load(&ci[0], 0xf48) == 0x80540000u);
+		CHECK(nw_be32_load(&ci[0], 0) == 0 && nw_be32_load(&ci[0], 0x70) == 0x30202020u);
 		CHECK(nw_be32_load(&ci[0], 0x378) == 0x01010000u);
 		CHECK(nw_be32_load(&ci[0], 0x54) == 0 && nw_be32_load(&ci[0], 0x44) == 0);
+
+		/* Hardware-info block (r9) and the boot-info record it points at. */
+		uint8_t hw[NW_HWINFO_SIZE];
+		nw_fill_hwinfo_be(hw, &l);
+		CHECK(nw_be32_load(hw, 0x70) == 0x486e666fu);		/* 'Hnfo' */
+		CHECK(nw_be32_load(hw, 0x00) == 0x50000000u && nw_be32_load(hw, 0x0c) == 0x5030d000u);
+		CHECK(nw_be32_load(hw, 0x08) == 0x64051dd0u && nw_be32_load(hw, 0x04) == 0x6400000cu);
+		CHECK(nw_be32_load(hw, 0x10) == 0x68feff80u && nw_be32_load(hw, 0x14) == 0x68feff40u &&
+		      nw_be32_load(hw, 0xa8) == 0x68fefcfcu);
+		CHECK(((hw[0x76] << 8) | hw[0x77]) == 0x3035);	/* 68k: machine id */
+		std::vector<uint8_t> bi(NW_BOOTINFO_SIZE, 0xee);
+		nw_fill_bootinfo_be(&bi[0], NW_BOOTINFO_SIZE, &l);
+		CHECK(nw_be32_load(&bi[0], 0) == 0x504d5226u && nw_be32_load(&bi[0], 0xc) == 0);
+		const uint32_t rec = NW_BOOTINFO_HWREC_OFF;
+		CHECK(nw_be32_load(&bi[0], rec) == 0x98u);			/* -> DecoderInfo */
+		CHECK(nw_be32_load(&bi[0], rec + 0x98 - 0x28) == 0x1cu);	/* flags: VIA1, no VIA2 */
+		CHECK(nw_be32_load(&bi[0], rec + 0x98 + 0x8) == 0x80016000u);	/* VIA base */
+		CHECK(nw_be32_load(&bi[0], rec + 0x98 + 0x2c) == 0);		/* VIA2 absent */
+		CHECK(nw_be32_load(&bi[0], rec + 0x98 + 0xf4) == 0x80040000u);	/* OpenPIC */
+		CHECK(nw_be32_load(&bi[0], rec - 0x28 + 0x1c) == 8);
 
 		/* Overlapping extra range is rejected; a bad table fails the check. */
 		nw_pmdt_range bad;
