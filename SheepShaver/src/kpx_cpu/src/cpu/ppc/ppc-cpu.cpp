@@ -443,10 +443,10 @@ void powerpc_cpu::take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra, uin
 #endif
 }
 
-void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
+void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store, uint32 fault)
 {
 	ppc32_hotints_dsi dsi;
-	dsi.take_data_dsi(ppc32_guest_mmu(), pc(), ea, is_store);
+	dsi.take_data_dsi(ppc32_guest_mmu(), pc(), ea, is_store, fault);
 	srr0_ = dsi.srr0;
 	srr1_ = dsi.srr1;
 	dar_ = dsi.dar;
@@ -468,10 +468,10 @@ void powerpc_cpu::take_data_dsi(uint32 ea, bool is_store)
 #endif
 }
 
-void powerpc_cpu::take_isi()
+void powerpc_cpu::take_isi(uint32 fault)
 {
-	/* SRR1[1] = 1: translation not found (no PTE / BAT). */
-	take_exception(NW_VEC_ISI, pc(), 0x40000000u);
+	/* SRR1[1] no translation, [3] no-execute/guarded, [4] protection. */
+	take_exception(NW_VEC_ISI, pc(), fault ? fault : (uint32)PPC32_FAULT_NOTRANS);
 }
 
 void powerpc_cpu::take_sc()
@@ -768,7 +768,7 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 	}
 	ppc32_xlate_result r = ppc32_guest_mmu().translate(pc(), PPC32_XLATE_IR, 4);
 	if (!r.ok) {
-		take_isi();
+		take_isi(r.fault);
 		return false;
 	}
 #ifdef SHEEPSHAVER
@@ -805,12 +805,12 @@ bool powerpc_cpu::guest_data_xlate(uint32 ea, unsigned width, bool is_store, uin
 		*pa = ea;
 		return true;
 	}
-	ppc32_xlate_result r = ppc32_guest_mmu().translate(ea, PPC32_XLATE_DR, width);
+	ppc32_xlate_result r = ppc32_guest_mmu().translate(ea, PPC32_XLATE_DR, width, is_store);
 	if (r.ok) {
 		*pa = r.pa;
 		return true;
 	}
-	take_data_dsi(ea, is_store);
+	take_data_dsi(ea, is_store, r.fault);
 	return false;
 }
 

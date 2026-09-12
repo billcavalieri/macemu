@@ -36,9 +36,24 @@ enum ppc32_xlate_space {
 	PPC32_XLATE_DR = 1
 };
 
+/*
+ * fault: DSISR (data) / SRR1 (fetch) bits when !ok, as the OEA defines them
+ * and QEMU's hash32 MMU sets them:
+ *   0x40000000  no translation (no BAT, no PTE)
+ *   0x08000000  protection violation (PP/key, BAT PP)
+ *   0x10000000  fetch from a no-execute segment or guarded page
+ * The store bit (0x02000000) is added by the caller for data faults.
+ */
+enum {
+	PPC32_FAULT_NOTRANS = 0x40000000u,
+	PPC32_FAULT_PROT = 0x08000000u,
+	PPC32_FAULT_NOEXEC = 0x10000000u
+};
+
 struct ppc32_xlate_result {
 	bool ok;
 	uint32_t pa;
+	uint32_t fault;
 };
 
 class ppc32_mmu
@@ -56,6 +71,7 @@ public:
 	};
 
 	typedef bool (*phys_read32_fn)(void *ctx, uint32_t pa, uint32_t *value);
+	typedef bool (*phys_write32_fn)(void *ctx, uint32_t pa, uint32_t value);
 
 	ppc32_mmu();
 
@@ -63,6 +79,8 @@ public:
 
 	void set_physical_memory(uint8_t *base, uint32_t size);
 	void set_phys_read32(phys_read32_fn fn, void *ctx);
+	/* Used to set the PTE R/C bits in the guest HTAB (QEMU does the same). */
+	void set_phys_write32(phys_write32_fn fn, void *ctx);
 
 	void set_msr(uint32_t value);
 	uint32_t msr() const { return msr_; }
@@ -81,35 +99,53 @@ public:
 
 	/*
 	 * space selects instruction vs data translation (MSR[IR] vs MSR[DR]).
-	 * width is the access size in bytes (1/2/4/8); first cut uses it only
-	 * as a non-zero access marker.
+	 * width is the access size in bytes (1/2/4/8), used as a non-zero
+	 * access marker. is_store asks for write permission (data only) and
+	 * sets the PTE C bit on success; fetches need execute permission.
+	 * Protection follows the OEA: key = MSR[PR] ? Kp : Ks; PP 0..3 with
+	 * key 0 -> RW RW RW RO, key 1 -> none RO RW RO; BAT PP 0 none, 2 RW,
+	 * 1/3 RO. BAT translations are not cached; TLB entries are tagged with
+	 * the segment register they were derived from.
 	 */
-	ppc32_xlate_result translate(uint32_t ea, ppc32_xlate_space space, unsigned width);
+	ppc32_xlate_result translate(uint32_t ea, ppc32_xlate_space space, unsigned width,
+				     bool is_store = false);
 
 	void get_ibat(unsigned i, uint32_t *upper, uint32_t *lower) const;
 	void get_dbat(unsigned i, uint32_t *upper, uint32_t *lower) const;
 
 private:
 	enum { NBAT = 4, NSR = 16, NTLB = 64 };
+	enum { PROT_R = 1, PROT_W = 2, PROT_X = 4 };
 
 	struct tlb_entry {
 		bool valid;
 		bool insn;
+		bool guarded;
+		bool c_set;
+		bool r_set;
+		uint8_t pp;
 		uint32_t ea_page;
 		uint32_t pa_page;
+		uint32_t sr_val;
+		uint32_t pte_pa;	/* address of PTE word 1 (R/C updates) */
 	};
 
 	bool relocation_on(ppc32_xlate_space space) const;
-	bool bat_hit(uint32_t ea, bool insn, uint32_t *pa) const;
-	bool htab_hit(uint32_t ea, uint32_t *pa);
+	bool bat_hit(uint32_t ea, bool insn, uint32_t *pa, unsigned *prot) const;
+	bool htab_hit(uint32_t ea, tlb_entry *e);
 	bool phys_read32(uint32_t pa, uint32_t *value) const;
-	void tlb_insert(uint32_t ea, uint32_t pa, bool insn);
-	bool tlb_lookup(uint32_t ea, bool insn, uint32_t *pa) const;
+	bool phys_write32(uint32_t pa, uint32_t value);
+	tlb_entry *tlb_insert(const tlb_entry &e);
+	tlb_entry *tlb_lookup(uint32_t ea, bool insn);
+	unsigned pte_prot(uint8_t pp, uint32_t sr_val) const;
+	void note_access(tlb_entry *e, bool is_store);
 
 	uint8_t *phys_;
 	uint32_t phys_size_;
 	phys_read32_fn phys_read32_;
 	void *phys_read32_ctx_;
+	phys_write32_fn phys_write32_;
+	void *phys_write32_ctx_;
 	uint32_t msr_;
 	uint32_t sdr1_;
 	uint32_t sr_[NSR];
@@ -139,13 +175,15 @@ struct ppc32_hotints_dsi {
 	uint32_t vector;
 	uint32_t sprg[4];
 
-	void take_data_dsi(ppc32_mmu &mmu, uint32_t fault_pc, uint32_t fault_ea, bool is_store)
+	void take_data_dsi(ppc32_mmu &mmu, uint32_t fault_pc, uint32_t fault_ea, bool is_store,
+			   uint32_t fault = PPC32_FAULT_NOTRANS)
 	{
 		srr0 = fault_pc;
 		srr1 = mmu.msr();
 		dar = fault_ea;
-		/* Bit 1 = no translation; bit 6 = store. AlignmentInt reads these. */
-		dsisr = 0x40000000u | (is_store ? 0x02000000u : 0);
+		/* Bit 1 = no translation / bit 4 = protection; bit 6 = store.
+		 * AlignmentInt and the NK's fault handler read these. */
+		dsisr = (fault ? fault : PPC32_FAULT_NOTRANS) | (is_store ? 0x02000000u : 0);
 		vector = (srr1 & ppc32_mmu::MSR_IP) ? 0xfff00300u : 0x300u;
 		mmu.set_msr(mmu.msr() & ~ppc32_mmu::MSR_EXC_CLEAR);
 	}

@@ -849,6 +849,16 @@ static bool guest_phys_read32(void *, uint32_t pa, uint32_t *value)
 	return true;
 }
 
+/* PTE R/C updates land in the guest HTAB (RAM). */
+static bool guest_phys_write32(void *, uint32_t pa, uint32_t value)
+{
+	extern uint32 RAMBase, RAMSize;
+	if (pa < RAMBase || pa + 4 > RAMBase + RAMSize)
+		return false;
+	vm_write_memory_4(pa, value);
+	return true;
+}
+
 void init_emul_ppc(void)
 {
 	// Get pointer to KernelData in host address space
@@ -862,6 +872,7 @@ void init_emul_ppc(void)
 
 	if (ROMType == ROMTYPE_NEWWORLD) {
 		ppc32_guest_mmu().set_phys_read32(guest_phys_read32, NULL);
+		ppc32_guest_mmu().set_phys_write32(guest_phys_write32, NULL);
 		ppc_cpu->enable_guest_mmu(true);
 		/*
 		 * G1 handoff: NK v2 (0x3104a8) walks NKSystemInfo in r5 for the

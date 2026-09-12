@@ -263,8 +263,8 @@ int main()
 		mmu.reset();
 		mmu.set_physical_memory(&ram[0], ram_size);
 		mmu.set_msr(ppc32_mmu::MSR_DR | ppc32_mmu::MSR_IR);
-		/* DBAT0: EA 0x80000000, 128 KiB, Vs, PA 0x00020000 */
-		mmu.set_dbat(0, 0x80000002u, 0x00020000u);
+		/* DBAT0: EA 0x80000000, 128 KiB, Vs, PA 0x00020000, PP=2 (RW) */
+		mmu.set_dbat(0, 0x80000002u, 0x00020002u);
 		const ppc32_xlate_result hit =
 			mmu.translate(0x80000010u, PPC32_XLATE_DR, 4);
 		CHECK(hit.ok);
@@ -337,8 +337,8 @@ int main()
 		mmu.reset();
 		mmu.set_physical_memory(&ram[0], ram_size);
 		mmu.set_msr(ppc32_mmu::MSR_IR); /* IR on, DR off */
-		mmu.set_ibat(0, 0x90000002u, 0x00040000u);
-		mmu.set_dbat(0, 0x90000002u, 0x00080000u);
+		mmu.set_ibat(0, 0x90000002u, 0x00040002u);
+		mmu.set_dbat(0, 0x90000002u, 0x00080002u);
 
 		const ppc32_xlate_result ir =
 			mmu.translate(0x90000020u, PPC32_XLATE_IR, 4);
@@ -393,6 +393,15 @@ int main()
 			mmu.translate(ea, PPC32_XLATE_DR, 4);
 		CHECK(after.ok);
 		CHECK(after.pa == 0x00060000u);
+
+		/* tlbie works by congruence class (EA[13..19]): a tlbie on
+		 * 0x00001000 drops the cached 0x10001000 too (the NK flushes the
+		 * whole TLB with tlbie over 0..0x7f000); a different class does not. */
+		program_pte(&ram[0], sdr1, vsid, ea, 0, 0x00070u);
+		mmu.tlbie(0x00002000u);
+		CHECK(mmu.translate(ea, PPC32_XLATE_DR, 4).pa == 0x00060000u);
+		mmu.tlbie(0x00001000u);
+		CHECK(mmu.translate(ea, PPC32_XLATE_DR, 4).pa == 0x00070000u);
 	}
 
 	/* width 0 is not a valid access */
@@ -431,8 +440,8 @@ int main()
 		be32_store(&ram[0], fault_pc, stw_r3_0_r4);
 
 		/* Code page identity-mapped for data (early NK insn side). */
-		mmu.set_dbat(0, 0x00000002u, 0x00000000u);
-		mmu.set_ibat(0, 0x00000002u, 0x00000000u);
+		mmu.set_dbat(0, 0x00000002u, 0x00000002u);
+		mmu.set_ibat(0, 0x00000002u, 0x00000002u);
 		mmu.set_msr(ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR);
 
 		const ppc32_xlate_result data_miss =
@@ -491,6 +500,91 @@ int main()
 		const ppc32_xlate_result lwz = dsi.lwz_faulting_insn(mmu);
 		CHECK(lwz.ok);
 		CHECK(lwz.pa == (rpn << 12));
+	}
+
+	/*
+	 * Protection (OEA 32-bit, as QEMU hash32): PP/key, BAT PP, R/C bits,
+	 * no-execute segments, guarded pages, SR-tagged TLB entries. Golden
+	 * shows the NK re-faulting on an already mapped EDP page from the
+	 * user-mode emulator; without these checks the fault never happens.
+	 */
+	{
+		mmu.reset();
+		mmu.set_physical_memory(&ram[0], ram_size);
+		memset(&ram[0], 0, ram_size);
+		const uint32_t sdr1 = 0x00100000u;
+		const uint32_t ea = 0x20003000u;	/* segment 2 */
+		const uint32_t rpn = 0x00070u;
+		mmu.set_sdr1(sdr1);
+		mmu.set_msr(ppc32_mmu::MSR_DR | ppc32_mmu::MSR_IR);
+
+		/* PP=0, Ks=0 Kp=1: supervisor RW, user no access. */
+		mmu.set_sr(2, 0x20000000u | 5u);
+		program_pte(&ram[0], sdr1, 5, ea, 0, rpn);
+		const uint32_t pte1_pa = pteg_addr(sdr1, ((5u & 0x7ffffu) ^ ((ea >> 12) & 0xffffu))) + 4;
+		CHECK((nw_be32_load(&ram[0], pte1_pa) & 0x180u) == 0);
+		ppc32_xlate_result sup = mmu.translate(ea, PPC32_XLATE_DR, 4, false);
+		CHECK(sup.ok && sup.pa == (rpn << 12));
+		CHECK((nw_be32_load(&ram[0], pte1_pa) & 0x180u) == 0x100u);	/* R set, C clear */
+		sup = mmu.translate(ea, PPC32_XLATE_DR, 4, true);
+		CHECK(sup.ok);
+		CHECK((nw_be32_load(&ram[0], pte1_pa) & 0x180u) == 0x180u);	/* C set on store */
+		mmu.set_msr(ppc32_mmu::MSR_DR | ppc32_mmu::MSR_IR | ppc32_mmu::MSR_PR);
+		ppc32_xlate_result usr = mmu.translate(ea, PPC32_XLATE_DR, 4, false);
+		CHECK(!usr.ok && usr.fault == PPC32_FAULT_PROT);
+		ppc32_hotints_dsi dsi;
+		dsi.take_data_dsi(mmu, 0x1000u, ea, true, usr.fault);
+		CHECK(dsi.dsisr == (PPC32_FAULT_PROT | 0x02000000u));
+		CHECK(dsi.dar == ea);
+		mmu.set_msr(ppc32_mmu::MSR_DR | ppc32_mmu::MSR_IR | ppc32_mmu::MSR_PR);
+		/* Kp=0: user RW through the same PTE (new SR value, no tlbie). */
+		mmu.set_sr(2, 5u);
+		usr = mmu.translate(ea, PPC32_XLATE_DR, 4, true);
+		CHECK(usr.ok && usr.pa == (rpn << 12));
+		/* PP=3: read-only for everyone. */
+		nw_be32_store(&ram[0], pte1_pa, (rpn << 12) | 3u);
+		mmu.tlbie(ea);
+		mmu.set_msr(ppc32_mmu::MSR_DR | ppc32_mmu::MSR_IR);
+		CHECK(mmu.translate(ea, PPC32_XLATE_DR, 4, false).ok);
+		ppc32_xlate_result ro = mmu.translate(ea, PPC32_XLATE_DR, 4, true);
+		CHECK(!ro.ok && ro.fault == PPC32_FAULT_PROT);
+		/* PP=1 under key 1: read-only; key 0: RW. */
+		nw_be32_store(&ram[0], pte1_pa, (rpn << 12) | 1u);
+		mmu.tlbie(ea);
+		mmu.set_sr(2, 0x40000000u | 5u);	/* Ks=1 */
+		CHECK(mmu.translate(ea, PPC32_XLATE_DR, 4, false).ok);
+		CHECK(mmu.translate(ea, PPC32_XLATE_DR, 4, true).fault == PPC32_FAULT_PROT);
+		mmu.set_sr(2, 5u);
+		CHECK(mmu.translate(ea, PPC32_XLATE_DR, 4, true).ok);
+		/* Fetch: N segment, guarded page, otherwise executable. */
+		mmu.set_sr(2, 0x10000000u | 5u);
+		ppc32_xlate_result nx = mmu.translate(ea, PPC32_XLATE_IR, 4);
+		CHECK(!nx.ok && nx.fault == PPC32_FAULT_NOEXEC);
+		mmu.set_sr(2, 5u);
+		CHECK(mmu.translate(ea, PPC32_XLATE_IR, 4).ok);
+		nw_be32_store(&ram[0], pte1_pa, (rpn << 12) | 0x8u | 2u);	/* G */
+		mmu.tlbie(ea);
+		ppc32_xlate_result g = mmu.translate(ea, PPC32_XLATE_IR, 4);
+		CHECK(!g.ok && g.fault == PPC32_FAULT_NOEXEC);
+		CHECK(mmu.translate(ea, PPC32_XLATE_DR, 4).ok);	/* data on guarded is fine */
+		/* A different VSID in the SR misses the cached entry: no PTE. */
+		mmu.set_sr(2, 6u);
+		ppc32_xlate_result other = mmu.translate(ea, PPC32_XLATE_DR, 4);
+		CHECK(!other.ok && other.fault == PPC32_FAULT_NOTRANS);
+		/* BAT PP: 0 no access, 1 read-only, 2 RW; not cached across mtbat. */
+		mmu.set_dbat(1, 0x30000002u, 0x00200000u);
+		ppc32_xlate_result b0 = mmu.translate(0x30000100u, PPC32_XLATE_DR, 4);
+		CHECK(!b0.ok && b0.fault == PPC32_FAULT_PROT);
+		mmu.set_dbat(1, 0x30000002u, 0x00200001u);
+		CHECK(mmu.translate(0x30000100u, PPC32_XLATE_DR, 4).ok);
+		CHECK(mmu.translate(0x30000100u, PPC32_XLATE_DR, 4, true).fault == PPC32_FAULT_PROT);
+		mmu.set_dbat(1, 0x30000002u, 0x00200002u);
+		CHECK(mmu.translate(0x30000100u, PPC32_XLATE_DR, 4, true).ok);
+		mmu.set_dbat(1, 0x30000002u, 0x00300002u);	/* moved: no stale cache */
+		CHECK(mmu.translate(0x30000100u, PPC32_XLATE_DR, 4).pa == 0x00300100u);
+		/* Vs-only BAT is invisible in user mode. */
+		mmu.set_msr(ppc32_mmu::MSR_DR | ppc32_mmu::MSR_IR | ppc32_mmu::MSR_PR);
+		CHECK(mmu.translate(0x30000100u, PPC32_XLATE_DR, 4).fault == PPC32_FAULT_NOTRANS);
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);

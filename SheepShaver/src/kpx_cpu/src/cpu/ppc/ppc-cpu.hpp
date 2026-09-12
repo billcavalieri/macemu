@@ -279,8 +279,8 @@ private:
 
 	uint32 exception_vector(uint32 vec) const;
 	void take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra, uint32 event_pc = 0xffffffffu);
-	void take_data_dsi(uint32 ea, bool is_store);
-	void take_isi();
+	void take_data_dsi(uint32 ea, bool is_store, uint32 fault);
+	void take_isi(uint32 fault);
 	void take_sc();
 	void take_dec();
 	void take_program(uint32 srr1_bits);

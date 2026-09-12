@@ -26,6 +26,8 @@ ppc32_mmu::ppc32_mmu()
 	phys_size_ = 0;
 	phys_read32_ = 0;
 	phys_read32_ctx_ = 0;
+	phys_write32_ = 0;
+	phys_write32_ctx_ = 0;
 	tlb_next_ = 0;
 	reset();
 }
@@ -58,6 +60,12 @@ void ppc32_mmu::set_phys_read32(phys_read32_fn fn, void *ctx)
 	phys_read32_ctx_ = ctx;
 }
 
+void ppc32_mmu::set_phys_write32(phys_write32_fn fn, void *ctx)
+{
+	phys_write32_ = fn;
+	phys_write32_ctx_ = ctx;
+}
+
 void ppc32_mmu::set_msr(uint32_t value)
 {
 	msr_ = value;
@@ -65,6 +73,8 @@ void ppc32_mmu::set_msr(uint32_t value)
 
 void ppc32_mmu::set_sdr1(uint32_t value)
 {
+	if (sdr1_ != value)
+		tlbia();
 	sdr1_ = value;
 }
 
@@ -111,11 +121,17 @@ void ppc32_mmu::get_dbat(unsigned i, uint32_t *upper, uint32_t *lower) const
 	}
 }
 
+/*
+ * tlbie invalidates by congruence class, not by full EA: 6xx/7xx/74xx TLBs
+ * index on EA[13..19] (up to 128 sets), so every entry whose low page-index
+ * bits match goes, whatever its upper EA bits or VSID. The NK's "flush
+ * everything" is a loop of tlbie over EA 0..0x7f000, which relies on this.
+ */
 void ppc32_mmu::tlbie(uint32_t ea)
 {
-	const uint32_t page = ea & ~0xfffu;
+	const uint32_t cls = ea & 0x7f000u;
 	for (unsigned i = 0; i < NTLB; i++) {
-		if (tlb_[i].valid && tlb_[i].ea_page == page)
+		if (tlb_[i].valid && (tlb_[i].ea_page & 0x7f000u) == cls)
 			tlb_[i].valid = false;
 	}
 }
@@ -146,7 +162,22 @@ bool ppc32_mmu::phys_read32(uint32_t pa, uint32_t *value) const
 	return true;
 }
 
-bool ppc32_mmu::bat_hit(uint32_t ea, bool insn, uint32_t *pa) const
+bool ppc32_mmu::phys_write32(uint32_t pa, uint32_t value)
+{
+	if (phys_write32_)
+		return phys_write32_(phys_write32_ctx_, pa, value);
+	if (phys_ == 0 || (uint64_t)pa + 4 > phys_size_)
+		return false;
+	uint8_t *p = phys_ + pa;
+	p[0] = (uint8_t)(value >> 24);
+	p[1] = (uint8_t)(value >> 16);
+	p[2] = (uint8_t)(value >> 8);
+	p[3] = (uint8_t)value;
+	return true;
+}
+
+/* BAT hit: pa and the access rights from BATL[PP] (0 none, 2 RW, 1/3 RO). */
+bool ppc32_mmu::bat_hit(uint32_t ea, bool insn, uint32_t *pa, unsigned *prot) const
 {
 	const uint32_t *upper = insn ? ibatu_ : dbatu_;
 	const uint32_t *lower = insn ? ibatl_ : dbatl_;
@@ -168,12 +199,38 @@ bool ppc32_mmu::bat_hit(uint32_t ea, bool insn, uint32_t *pa) const
 
 		const uint32_t brpn = batl & 0xfffe0000u;
 		*pa = (brpn & ~block_mask) | (ea & block_mask);
+		const unsigned pp = batl & 3u;
+		*prot = 0;
+		if (pp != 0) {
+			*prot = PROT_R | PROT_X;
+			if (pp == 2)
+				*prot |= PROT_W;
+		}
 		return true;
 	}
 	return false;
 }
 
-bool ppc32_mmu::htab_hit(uint32_t ea, uint32_t *pa)
+/* Rights granted by PTE PP under the current key (SR Ks/Kp by MSR[PR]). */
+unsigned ppc32_mmu::pte_prot(uint8_t pp, uint32_t sr_val) const
+{
+	const bool priv = (msr_ & MSR_PR) != 0;
+	const bool key = priv ? (sr_val & 0x20000000u) != 0 : (sr_val & 0x40000000u) != 0;
+	unsigned prot;
+	if (!key)
+		prot = (pp == 3) ? PROT_R : (PROT_R | PROT_W);
+	else if (pp == 0)
+		prot = 0;
+	else if (pp == 2)
+		prot = PROT_R | PROT_W;
+	else
+		prot = PROT_R;
+	if (prot && !(sr_val & 0x10000000u))	/* SR N: no-execute */
+		prot |= PROT_X;
+	return prot;
+}
+
+bool ppc32_mmu::htab_hit(uint32_t ea, tlb_entry *e)
 {
 	const uint32_t sr_val = sr_[(ea >> 28) & 0xfu];
 	if (sr_val & 0x80000000u)
@@ -204,42 +261,64 @@ bool ppc32_mmu::htab_hit(uint32_t ea, uint32_t *pa)
 			if (!v || h != (hash_id != 0) || pte_vsid != vsid || pte_api != api)
 				continue;
 
-			const uint32_t rpn = w1 >> 12;
-			*pa = (rpn << 12) | (ea & 0xfffu);
+			e->valid = true;
+			e->guarded = (w1 & 0x8u) != 0;
+			e->c_set = (w1 & 0x80u) != 0;
+			e->r_set = (w1 & 0x100u) != 0;
+			e->pp = (uint8_t)(w1 & 3u);
+			e->ea_page = ea & ~0xfffu;
+			e->pa_page = w1 & 0xfffff000u;
+			e->sr_val = sr_val;
+			e->pte_pa = pteg + slot * 8u + 4u;
 			return true;
 		}
 	}
 	return false;
 }
 
-void ppc32_mmu::tlb_insert(uint32_t ea, uint32_t pa, bool insn)
+ppc32_mmu::tlb_entry *ppc32_mmu::tlb_insert(const tlb_entry &src)
 {
 	tlb_entry &e = tlb_[tlb_next_];
+	e = src;
 	e.valid = true;
-	e.insn = insn;
-	e.ea_page = ea & ~0xfffu;
-	e.pa_page = pa & ~0xfffu;
 	tlb_next_ = (tlb_next_ + 1) % NTLB;
+	return &e;
 }
 
-bool ppc32_mmu::tlb_lookup(uint32_t ea, bool insn, uint32_t *pa) const
+ppc32_mmu::tlb_entry *ppc32_mmu::tlb_lookup(uint32_t ea, bool insn)
 {
 	const uint32_t page = ea & ~0xfffu;
+	const uint32_t sr_val = sr_[(ea >> 28) & 0xfu];
 	for (unsigned i = 0; i < NTLB; i++) {
-		const tlb_entry &e = tlb_[i];
-		if (e.valid && e.insn == insn && e.ea_page == page) {
-			*pa = e.pa_page | (ea & 0xfffu);
-			return true;
-		}
+		tlb_entry &e = tlb_[i];
+		if (e.valid && e.insn == insn && e.ea_page == page && e.sr_val == sr_val)
+			return &e;
 	}
-	return false;
+	return 0;
 }
 
-ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, unsigned width)
+/* Referenced/Changed: set in the guest PTE on the first permitted access /
+ * store, as hardware and QEMU's hash32 do. */
+void ppc32_mmu::note_access(tlb_entry *e, bool is_store)
+{
+	const bool set_r = !e->r_set, set_c = is_store && !e->c_set;
+	if (!set_r && !set_c)
+		return;
+	uint32_t w1;
+	if (phys_read32(e->pte_pa, &w1))
+		phys_write32(e->pte_pa, w1 | 0x100u | (set_c ? 0x80u : 0));
+	e->r_set = true;
+	if (set_c)
+		e->c_set = true;
+}
+
+ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, unsigned width,
+					bool is_store)
 {
 	ppc32_xlate_result r;
 	r.ok = false;
 	r.pa = 0;
+	r.fault = 0;
 
 	if (width == 0)
 		return r;
@@ -251,28 +330,48 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 	}
 
 	const bool insn = (space == PPC32_XLATE_IR);
+	const unsigned need = insn ? PROT_X : (is_store ? PROT_W : PROT_R);
 	uint32_t pa;
+	unsigned prot;
 
-	if (tlb_lookup(ea, insn, &pa)) {
+	if (bat_hit(ea, insn, &pa, &prot)) {
+		if ((prot & need) != need) {
+			r.fault = PPC32_FAULT_PROT;
+			return r;
+		}
 		r.ok = true;
 		r.pa = pa;
 		return r;
 	}
 
-	if (bat_hit(ea, insn, &pa)) {
-		tlb_insert(ea, pa, insn);
-		r.ok = true;
-		r.pa = pa;
+	if (insn && (sr_[(ea >> 28) & 0xfu] & 0x10000000u)) {
+		r.fault = PPC32_FAULT_NOEXEC;
 		return r;
 	}
 
-	if (htab_hit(ea, &pa)) {
-		tlb_insert(ea, pa, insn);
-		r.ok = true;
-		r.pa = pa;
-		return r;
+	tlb_entry *e = tlb_lookup(ea, insn);
+	if (e == 0) {
+		tlb_entry fresh;
+		fresh.insn = insn;
+		if (!htab_hit(ea, &fresh)) {
+			r.fault = PPC32_FAULT_NOTRANS;
+			return r;
+		}
+		e = tlb_insert(fresh);
 	}
 
+	if (insn && e->guarded) {
+		r.fault = PPC32_FAULT_NOEXEC;
+		return r;
+	}
+	prot = pte_prot(e->pp, e->sr_val);
+	if ((prot & need) != need) {
+		r.fault = PPC32_FAULT_PROT;
+		return r;
+	}
+	note_access(e, is_store);
+	r.ok = true;
+	r.pa = e->pa_page | (ea & 0xfffu);
 	return r;
 }
 
