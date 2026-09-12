@@ -41,6 +41,7 @@
 #include "nw_boot_contract.h"
 #include "nw_io.h"
 #include "nw_devices.h"
+#include "nw_script.h"
 #endif
 
 #define DEBUG 0
@@ -825,6 +826,9 @@ void powerpc_cpu::tick_decrementer()
 		dec_pending_ = true;
 #ifdef SHEEPSHAVER
 	nw_devices_tick();
+#if NW_BOOT_LOG
+	nw_script_tick();
+#endif
 	nw_event_tick(pc(), ppc32_guest_mmu().msr());
 #endif
 }

@@ -35,6 +35,7 @@
 #include "thunks.h"
 #include "nw_boot_contract.h"
 #include "nw_devices.h"
+#include "nw_script.h"
 
 // Used for NativeOp trampolines
 #include "video.h"
@@ -918,6 +919,9 @@ void init_emul_ppc(void)
 		 * sense, destination) before the NK runs; the 68k StartInit only
 		 * toggles their mask bits afterwards. */
 		nw_trampoline_program_pic();
+#if NW_BOOT_LOG
+		nw_script_init();	/* NW_SCRIPT operator script, Debug only */
+#endif
 		/*
 		 * G1 handoff: NK v2 (0x3104a8) walks NKSystemInfo in r5 for the
 		 * physical RAM banks (bank size at +52). The Trampoline fills this
