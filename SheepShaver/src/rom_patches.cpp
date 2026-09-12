@@ -785,6 +785,9 @@ static bool patch_nanokernel_boot(void)
 			bp.bus_hz = (uint32)BusClockSpeed;
 			bp.tb_hz = (uint32)TimebaseSpeed;
 			bp.parcels = nw_parcels_get(&bp.parcels_size);
+			bp.cd_refnum = PrefsFindBool("nocdrom") ? 0 : (int16_t)CDROMRefNum;
+			bp.disk_refnum = (int16_t)DiskRefNum;
+			bp.boot_from_cd = (PrefsFindInt32("bootdriver") == CDROMRefNum);
 			uint32 tree_end = nw_bootinfo_build_tree(Mac2HostAddr(NW_BOOTINFO_LA), NW_BOOTINFO_TREE_MAX, &bp);
 			if (tree_end == 0) {
 				printf("NW-BOOT G1: boot-info device tree build failed (parcels %s, %u bytes)\n",

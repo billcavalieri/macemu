@@ -201,9 +201,15 @@ void add_ata(Node *ata, int bus)
 	ata->hex("AAPL,address", bus == 0 ? "8002000080008b00" : "8002100080008d00");
 	ata->u32("AAPL,bus-id", (uint32_t)bus);
 	ata->u32("interrupt-parent", NW_PHANDLE_PIC);
-	Node *cd = ata->add("cdrom");
-	cd->u32("reg", bus == 0 ? 1u : 0u);
-	cd->str("device_type", "block");
+	/* Golden (QEMU mac99): cdrom@1 on bus 0, nothing on bus 1. The ROM's
+	 * keylargo-ata ndrv probes the bus, finds nothing here, and deletes
+	 * the child (observed: RegistryEntryDelete from the ndrv). The
+	 * host-backed drives live under /host-drives instead. */
+	if (bus == 0) {
+		Node *cd = ata->add("cdrom");
+		cd->u32("reg", 1);
+		cd->str("device_type", "block");
+	}
 }
 
 const char *cpu_node_name(uint32_t pvr)
@@ -240,7 +246,7 @@ Node *build_machine(const nw_bootinfo_params *p)
 	aliases->str("ide0", "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1");
 	aliases->str("cd", "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1");
 	aliases->str("cdrom", "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1");
-	aliases->str("ide1", "/pci@f2000000/mac-io@c/ata-3@21000/cdrom@0");
+	aliases->str("ide1", "/pci@f2000000/mac-io@c/ata-3@21000");
 	aliases->str("mac-io", "/pci@f2000000/mac-io@c");
 	aliases->str("screen", "/pci@f2000000/display@e");
 
@@ -295,7 +301,14 @@ Node *build_machine(const nw_bootinfo_params *p)
 	chosen->u32("memory", 0x00010006);
 	chosen->u32("display", 0x00010002);
 	chosen->str("bootargs", "");
-	chosen->str("bootpath", "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1:9,\\\\:tbxi");
+	/* No partition number: StartLib compares it with the one it derives
+	 * from the drive's partition map, and the SheepShaver DRVRs present
+	 * the HFS partition itself (no map). The unit address is checked
+	 * against the SCSI-target field of the driver's 'boot' response:
+	 * .AppleCD puts its drive number there (1: it is opened first, see
+	 * nw_install_drivers), .Disk leaves it 0. */
+	chosen->str("bootpath", p->boot_from_cd ? "/host-drives/cdrom@1:,\\\\:tbxi"
+					       : "/host-drives/disk@0:,\\\\:tbxi");
 
 	root->add("builtin")->add("console");
 	Node *packages = root->add("packages");
@@ -349,6 +362,37 @@ Node *build_machine(const nw_bootinfo_params *p)
 	nvram->hex("reg", "fff0400000004000");
 	nvram->str("device_type", "nvram");
 	nvram->str("compatible", "nvram,flash");
+
+	/*
+	 * SheepShaver's host-backed drives (.AppleCD / .Disk DRVRs, installed
+	 * by the EMUL_OP driver hook). Not part of the mac99 golden tree: no
+	 * ROM driver claims this node, so nothing deletes it, and StartLib's
+	 * GetStartupDevice can resolve "bootpath" to it and match the
+	 * AAPL,boot-cookie tag against the drive queue (see nw_bootinfo.h).
+	 * device_type "scsi": StartLib picks its lookup by the driver's
+	 * DriverGestalt 'boot' response; the SheepShaver DRVRs answer with
+	 * the classic (drive, refnum) form, which StartLib treats as a SCSI
+	 * boot ID and then requires the cookie node to be device_type
+	 * "scsi" with a unit address equal to the SCSI target field. The
+	 * DRVRs are the Apple SCSI .AppleCD/.Disk personalities, so that is
+	 * what they are. See NEWWORLD-BOOT-PLAN.md S4 step 5.
+	 */
+	Node *hd = root->add("host-drives");
+	hd->u32("#address-cells", 1);
+	hd->u32("#size-cells", 0);
+	hd->str("device_type", "block-host");
+	if (p->cd_refnum) {
+		Node *cd = hd->add("cdrom");
+		cd->u32("reg", 1);
+		cd->str("device_type", "scsi");
+		cd->u32("AAPL,boot-cookie", (uint32_t)(uint16_t)p->cd_refnum);
+	}
+	if (p->disk_refnum) {
+		Node *dk = hd->add("disk");
+		dk->u32("reg", 0);
+		dk->str("device_type", "scsi");
+		dk->u32("AAPL,boot-cookie", (uint32_t)(uint16_t)p->disk_refnum);
+	}
 
 	Node *pci = root->add("pci");
 	add_pci_ids(pci, 0x106b, 0x1f, 0, 0x00060000);

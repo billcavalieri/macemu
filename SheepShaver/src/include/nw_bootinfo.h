@@ -36,6 +36,19 @@ struct nw_bootinfo_params {
 	uint32_t pvr, cpu_hz, bus_hz, tb_hz;
 	const uint8_t *parcels;		/* 'prcl' blob, may be NULL */
 	size_t parcels_size;
+	/*
+	 * Boot device (StartLib's GetStartupDevice): it resolves /chosen
+	 * "bootpath" to a node and, for every drive queue entry, looks for a
+	 * child of that node whose "AAPL,boot-cookie" (4 bytes) equals the
+	 * drive's driver refnum. The ROM's device drivers tag their nodes
+	 * this way at probe time (and the keylargo-ata ndrv deletes ATA
+	 * children it does not find). SheepShaver's host-backed DRVRs have
+	 * fixed refnums, so the tree carries the tags on its own node:
+	 * /host-drives/cdrom@1 = cd_refnum, /host-drives/disk@0 = disk_refnum
+	 * (0 = no node). boot_from_cd picks which one "bootpath" names.
+	 */
+	int16_t cd_refnum, disk_refnum;
+	int boot_from_cd;
 };
 
 enum {
