@@ -22,16 +22,19 @@
 #include <string.h>
 #include "nw_io.h"
 
-enum { NW_IO_MAX_DEVICES = 16, NW_IO_LOG_MAX = 64 };
+enum { NW_IO_MAX_DEVICES = 16, NW_IO_LOG_MAX = 64, NW_IO_PAGES_MAX = 128 };
 
 static struct nw_io_device g_devs[NW_IO_MAX_DEVICES];
 static int g_ndevs;
 static int g_log_count;
+static uint32_t g_pages[NW_IO_PAGES_MAX];
+static int g_npages;
 
 void nw_io_reset(void)
 {
 	g_ndevs = 0;
 	g_log_count = 0;
+	g_npages = 0;
 }
 
 int nw_io_register(const struct nw_io_device *dev)
@@ -57,8 +60,23 @@ static const struct nw_io_device *find(uint32_t pa)
 	return NULL;
 }
 
+/* First unclaimed touch of each 4 KiB page is always reported: this is the
+ * inventory of device registers the guest expects (the gate list). */
+static void log_page(char rw, uint32_t pa, int size, uint32_t value, uint32_t pc)
+{
+	const uint32_t page = pa & ~0xfffu;
+	for (int i = 0; i < g_npages; i++)
+		if (g_pages[i] == page)
+			return;
+	if (g_npages < NW_IO_PAGES_MAX)
+		g_pages[g_npages++] = page;
+	printf("NW-BOOT IO page %08x first %c%d %08x %08x %08x\n", (unsigned)page, rw, size,
+	       (unsigned)pa, (unsigned)value, (unsigned)pc);
+}
+
 static void log_unclaimed(char rw, uint32_t pa, int size, uint32_t value, uint32_t pc)
 {
+	log_page(rw, pa, size, value, pc);
 	if (g_log_count >= NW_IO_LOG_MAX)
 		return;
 	g_log_count++;
