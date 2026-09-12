@@ -128,6 +128,8 @@ public:
 	static uint32 Reserve(uint32 size);
 	static void Release(uint32 size);
 	static uint32 ReserveProc(uint32 size);
+	static uint32 Base() { return (uint32)base; }
+	static uint32 Size() { return size; }
 	friend class SheepVar;
 };
 

@@ -41,6 +41,7 @@
 #include "serial.h"
 #include "macos_util.h"
 #include "thunks.h"
+#include "video.h"
 #include "nw_boot_contract.h"
 
 #define DEBUG 0
@@ -675,16 +676,6 @@ static bool patch_nanokernel_boot(void)
 	uint32 *lp;
 	uint32 base, loc;
 
-	// ROM boot structure patches
-	lp = (uint32 *)(ROMBaseHost + 0x30d000);
-	lp[0x9c >> 2] = htonl(KernelDataAddr);			// LA_InfoRecord
-	lp[0xa0 >> 2] = htonl(KernelDataAddr);			// LA_KernelData
-	lp[0xa4 >> 2] = htonl(KernelDataAddr + 0x1000);	// LA_EmulatorData
-	lp[0xa8 >> 2] = htonl(ROMBase + 0x480000);		// LA_DispatchTable
-	lp[0xac >> 2] = htonl(ROMBase + 0x460000);		// LA_EmulatorCode
-	lp[0x360 >> 2] = htonl(RAMBase);				// Physical RAM base
-	lp[0xfd8 >> 2] = htonl(ROMBase + 0x2a);		// 68k reset vector
-
 	/*
 	 * New World: leave NK entry intact. 0x310000 is `b 0x31000c`; mfmsr
 	 * then tests MSR[DR]. DR off (our reset MSR) takes 0x3104a8, which
@@ -699,9 +690,64 @@ static bool patch_nanokernel_boot(void)
 		 * (0x325520/0x32572c/0x325850/0x325874) and nop'd two mtmsr
 		 * (0x325664/0x325ab4). Each of those hid a gate the golden run
 		 * passes honestly; the boot-event diff must name them instead.
+		 *
+		 * S4 step 4 (PMDT gate): do the Trampoline's job on the data
+		 * instead. The 9.2.1 ROM's ConfigInfo has an empty page map, so
+		 * the NK read garbage PMDTs and panicked at 0x31e878. Keep the
+		 * ROM's LA_* defaults (0x68ffe000 KDP, 0x68060000 emulator) and
+		 * fill page map / segment maps / BAT ranges / relocated low
+		 * memory for SheepShaver's layout. See nw_boot_contract.h.
 		 */
+		/* Host areas the guest is handed pointers into: identity mapped. */
+		nw_pmdt_range extra[4];
+		int n_extra = 0;
+		extra[n_extra].la = extra[n_extra].pa = SheepMem::Base();
+		extra[n_extra].size = SheepMem::Size();
+		n_extra++;
+		extra[n_extra].la = extra[n_extra].pa = DR_CACHE_BASE;
+		extra[n_extra].size = DR_CACHE_SIZE;
+		n_extra++;
+		uint32 fb_size = 0;
+		for (int i = 0; VModes[i].viType != DIS_INVALID; i++) {
+			uint32 sz = VModes[i].viRowBytes * VModes[i].viYsize;
+			if (sz > fb_size)
+				fb_size = sz;
+		}
+		if (screen_base && fb_size) {
+			extra[n_extra].la = extra[n_extra].pa = screen_base & ~0xfffu;
+			extra[n_extra].size = ((screen_base & 0xfffu) + fb_size + 0xfffu) & ~0xfffu;
+			n_extra++;
+		}
+		nw_config_info_layout ci;
+		ci.rom_base = ROMBase;
+		ci.rom_area_size = ROM_AREA_SIZE;
+		ci.ram_base = RAMBase;
+		ci.ram_size = RAMSize;
+		ci.extra = extra;
+		ci.n_extra = n_extra;
+		int n = nw_fill_config_info_be(ROMBaseHost + 0x30d000, &ci);
+#if NW_BOOT_LOG
+		printf("NW-BOOT G1: ConfigInfo page map %d entries rom=%08x ram=%08x+%08x sheep=%08x+%x fb=%08x+%x\n",
+		       n, (unsigned)ROMBase, (unsigned)RAMBase, (unsigned)RAMSize,
+		       (unsigned)SheepMem::Base(), (unsigned)SheepMem::Size(),
+		       (unsigned)screen_base, (unsigned)fb_size);
+#endif
+		if (n < 0 || !nw_config_info_pagemap_ok(ROMBaseHost + 0x30d000)) {
+			printf("NW-BOOT G1: ConfigInfo page map fill failed (%d)\n", n);
+			return false;
+		}
 		return true;
 	}
+
+	// ROM boot structure patches
+	lp = (uint32 *)(ROMBaseHost + 0x30d000);
+	lp[0x9c >> 2] = htonl(KernelDataAddr);			// LA_InfoRecord
+	lp[0xa0 >> 2] = htonl(KernelDataAddr);			// LA_KernelData
+	lp[0xa4 >> 2] = htonl(KernelDataAddr + 0x1000);	// LA_EmulatorData
+	lp[0xa8 >> 2] = htonl(ROMBase + 0x480000);		// LA_DispatchTable
+	lp[0xac >> 2] = htonl(ROMBase + 0x460000);		// LA_EmulatorCode
+	lp[0x360 >> 2] = htonl(RAMBase);				// Physical RAM base
+	lp[0xfd8 >> 2] = htonl(ROMBase + 0x2a);		// 68k reset vector
 
 	// Skip SR/BAT/SDR init
 	loc = 0x310000;
@@ -1019,6 +1065,15 @@ static bool patch_68k_emul(void)
 		return false;
 	}
 	D(bug("twi %08lx\n", base));
+	/*
+	 * New World: the emulator's kernel calls (`twui r31,n` at +0x36e8c0:
+	 * 0 start, 1 mixed mode, 2 reset, 3 FE0A, 4 interrupt, 5 FE0F, ...)
+	 * trap to NK v2 (0x700, SRR1 trap bit) — golden's first emulator event
+	 * is exactly that. The Old World rewrite below made SheepShaver the
+	 * kernel for those calls; with NK v2 running, leave them to the NK.
+	 */
+	if (ROMType == ROMTYPE_NEWWORLD)
+		goto twi_done;
 	lp = (uint32 *)(ROMBaseHost + base);
 	*lp++ = htonl(0x48000000 + 0x36f900 - base);		// b 0x36f900 (Emulator start)
 	*lp++ = htonl(0x48000000 + 0x36fa00 - base - 4);	// b 0x36fa00 (Mixed mode)
@@ -1036,6 +1091,7 @@ static bool patch_68k_emul(void)
 	*lp++ = htonl(POWERPC_ILLEGAL);
 	*lp++ = htonl(POWERPC_ILLEGAL);
 	*lp = htonl(POWERPC_ILLEGAL);
+twi_done:
 
 #if EMULATED_PPC
 	// Install EMUL_RETURN, EXEC_RETURN, EXEC_NATIVE and EMUL_OP opcodes
@@ -1225,6 +1281,8 @@ static bool patch_68k_emul(void)
 	*lp = htonl(0x4e800020);					// blr
 
 	// Patch DR emulator to jump to right address when an interrupt occurs
+	if (ROMType == ROMTYPE_NEWWORLD)
+		return true;	// NK v2 owns interrupt return; DR emulator left as shipped
 	lp = (uint32 *)(ROMBaseHost + 0x370000);
 	while (lp < (uint32 *)(ROMBaseHost + 0x380000)) {
 		if (ntohl(*lp) == 0x4ca80020)		// bclr		5,8

@@ -870,19 +870,39 @@ void init_emul_ppc(void)
 		 * record here. Data only. The NK itself is not modified.
 		 */
 		extern uint32 RAMBase, RAMSize;
-		const uint32 sysinfo = SheepMem::Reserve(0x120);
-		Mac_memset(sysinfo, 0, 0x120);
-		WriteMacInt32(sysinfo + 0, RAMSize);
-		WriteMacInt32(sysinfo + 4, RAMBase);
-		WriteMacInt32(sysinfo + 48, RAMBase);
-		WriteMacInt32(sysinfo + 52, RAMSize);
+		nw_config_info_layout layout;
+		layout.rom_base = ROMBase;
+		layout.rom_area_size = ROM_AREA_SIZE;
+		layout.ram_base = RAMBase;
+		layout.ram_size = RAMSize;
+		layout.extra = NULL;
+		layout.n_extra = 0;
+		uint8 si[NW_SI_SIZE];
+		nw_fill_system_info_be(si, &layout);
+		const uint32 sysinfo = SheepMem::Reserve(NW_SI_SIZE);
+		Host2Mac_memcpy(sysinfo, si, NW_SI_SIZE);
 		ppc_cpu->set_register(powerpc_registers::GPR(5), any_register(sysinfo));
+		uint8 pi[NW_PI_SIZE];
+		nw_fill_processor_info_be(pi, PVR, (uint32)CPUClockSpeed, (uint32)BusClockSpeed, (uint32)TimebaseSpeed);
+		const uint32 procinfo = SheepMem::Reserve(NW_PI_SIZE);
+		Host2Mac_memcpy(procinfo, pi, NW_PI_SIZE);
+		ppc_cpu->set_register(powerpc_registers::GPR(4), any_register(procinfo));
+		ppc_cpu->set_register(powerpc_registers::GPR(6), any_register((uint32)0));	/* no DiagInfo */
+		ppc_cpu->set_register(powerpc_registers::GPR(7), any_register((uint32)0));	/* no RTAS */
+		/*
+		 * Trampoline's other job: the exception vector stubs live at PA 0
+		 * (MSR[IP]=0); on hardware the Trampoline copies them from the ROM
+		 * exception table (ROM+0x300000) before the NK runs (golden: PA
+		 * 0..0x2fff == ROM+0x300000). Only the first 0x2800 bytes are real
+		 * vectors; 0x2800.. stays SheepShaver's XLM area.
+		 */
+		Host2Mac_memcpy(0, ROMBaseHost + NW_NK_EXC_TABLE_ROM_OFF, NW_NK_EXC_TABLE_COPY_LEN);
 		nw_log_g1_hwinit();
 #if NW_BOOT_LOG
 		{
 			char buf[96];
-			snprintf(buf, sizeof(buf), "G1: NKSystemInfo r5=%08x ram=%08x+%08x",
-				 (unsigned)sysinfo, (unsigned)RAMBase, (unsigned)RAMSize);
+			snprintf(buf, sizeof(buf), "G1: NKSystemInfo r5=%08x bank=%08x+%08x vectors@0 from ROM+%06x",
+				 (unsigned)sysinfo, (unsigned)RAMBase, (unsigned)RAMSize, (unsigned)NW_NK_EXC_TABLE_ROM_OFF);
 			nw_boot_log(buf);
 		}
 #endif
