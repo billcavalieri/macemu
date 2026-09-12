@@ -4,6 +4,10 @@
 Toolbox, in SheepShaver on Apple Silicon. Then the rest of `OS921-BOOT-PLAN.md`
 (G4 install, G5 Finder, G6 JIT).
 
+**Status:** reached (S4 step 6). The ROM boots the CD, the Finder comes up,
+typed input opens `Mac OS Install`, and its Welcome window is drawn by the
+guest into the frame buffer (≈ 200–300 s, ≈ 800 k A-traps, interpreter).
+
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
 Everything after the 68k handoff is not.
@@ -421,6 +425,103 @@ G3 is reached when the ROM mounts the CD, loads the System, and the
 System's own `_Launch` starts `Mac OS Install`, which draws its window
 through the guest QuickDraw. A host blit is not G3. `G3_WINDOW=yes` is
 never set by host code.
+
+#### S4 step 6 — interrupts, device models, input: done, Welcome reached (commits `1db182ad`, `62d69bd0`, `5e5031f1`, `3447e358`, `6d7dca79`)
+
+Gates fixed, in the order they were hit. Each is a device the golden
+machine has and native code (NK, CPU plugin, PMU library, ADB Manager)
+addresses directly; each got a model in `nw_devices.cpp` (hybrid rule:
+models only for what native code touches, `EMUL_OP` DRVRs for the rest).
+
+1. **OpenPIC, uni-n, PCI config, Keylargo timer/GPIO.** The MP CPU plugin's
+   `Core99Probe`/`FindMPIC`/`CalculateBusClock` and the NK's interrupt
+   path read real registers now. External interrupts: the CPU takes
+   0x500 when the model raises `nw_io_ext_irq` and MSR[EE] is set (ahead
+   of DEC); the models tick from the DEC sampling point on the host-side
+   timebase (`tb_host_ticks`, unaffected by guest `mttb`).
+2. **Exception state.** SRR1 carried only MSR[16..31]; the NK reads
+   SRR1[VEC] to decide whether the interrupted context owns the vector
+   unit, so SRR1 now takes MSR[0,5-9,16-31] and MSR[VEC]/[POW] are cleared
+   on entry (7400 set). FP-unavailable (0x800) is raised for FP opcodes
+   with MSR[FP] clear (the NK lazily enables FP as it does VEC). XER keeps
+   its unarchitected bits: the 68k emulator stores mode flags in
+   XER[22..23] and MixedMode's native entry tests them with `mfxer`.
+   TAU: `THRM1/2` reads complete their comparison once `THRM3[E]` is set;
+   the CPU plugin spins on `[TIV]` with interrupts off.
+3. **Trampoline OpenPIC programming.** The Trampoline programs every
+   source it collected from the tree (`AAPL,interrupt-vectors` /
+   `-priorities`): `IVPR = masked | prio | vector`, vector = index in its
+   list, level sense from the specifier, `IDR` = CPU 0, `CTPR` 0. The NK's
+   0x500 handler maps the IACK vector to a 68k level with
+   `lbz level, 0xf00(vector)` on the ConfigInfo page (the priority byte
+   table in list order) by absolute PA — so the filled ConfigInfo now
+   lives at PA 0x3000 (`NW_CI_PA`, golden hardware-info +0xc), r3 at NK
+   entry points there, and the low-memory host mapping is 0x4000. The 68k
+   StartInit afterwards only toggles mask bits; before this every source
+   stayed at priority 0 and nothing was delivered. `nw_trampoline_irqs[]`
+   is the golden mac99 list; the ConfigInfo tail tables are generated from
+   it.
+4. **VIA-PMU.** Shift-register protocol on the VIA at 0x80016000, PMU
+   commands the PMU library and the 68k `PMgrOp` path issue, one-second
+   and timer interrupts through GPIO1/`extint-gpio1` (source 0x2f) and
+   `via-pmu` (0x19).
+5. **Input.** The golden machine takes input over USB; SheepShaver has no
+   USB. The Trampoline's `HandleSpecialNode` (ROM-file table at 0x197d0:
+   `adb`/`chrp,adb0`, `adb`/`pmu`, `adb`/`pmu-99`, via-cuda, via-pmu,
+   power-mgt, usb, keyboard, mouse …) encodes the input path it finds in
+   the ProductInfo `UnivROMFlags` word (record +0x24, mirrored +0x7c;
+   low-mem `$dd4`, ExpandMem +0x384/+0x3dc): bit 2 for "P99 ADB detected",
+   bit 1 for "Virtual (USB-emulated) ADB detected!". The 68k ADB Manager
+   (`ffc2b5f6`) selects bus routines by `UnivROMFlags & 0xe`: 0xa keeps
+   the ROM default (no bus; every command completes without a device),
+   0xc installs the PMU-99 routines (`ffc06bf0`: `PMgrOp 0x20` packets,
+   `$19a` = PMU ADB interrupt handler `ffc06d56`). Golden `via=pmu`:
+   `c003bf1a`; golden `via=pmu-adb`: `c003bf1c`; the rest of the record
+   identical. SheepShaver presents the `via=pmu-adb` shape: tree
+   `via-pmu/adb` (compatible `pmu-99`) with `keyboard@8`, `mouse@9` and
+   the `kbd`/`keyboard`/`adb-*` aliases, `UnivROMFlags` bit 2, an ADB bus
+   model behind the PMU (keyboard address 2 handler 1, mouse address 3
+   handler 2, Talk/Listen R3, the address-collision dance, autopoll mask),
+   and `adb.cpp` routes host key/mouse events to it on New World. The ROM
+   enumerates both, autopolls (`[2c code ff]` with PMU interrupt bits
+   0x14), and the System's RAM keyboard handler (`0019e4b6`) runs `a079
+   GetADBInfo / a9c3 KeyTranslate / a02f PostEvent` as in the golden.
+
+Result (clean build, `/tmp/prefs-nodisk` = golden-equivalent prefs, 512
+MiB, foreground 200 s run): ADB Manager installs the keyboard handler
+(`a079 0019e39c`, `a07c 0019e492`, trap ≈ 119 k), Finder `InitWindows`
+(`a912`) at ≈ 172 k, `_Launch` (`a9f2`) at ≈ 393 k, 652 k traps and 1.8 M
+exceptions in 200 s; typing `Mac OS Install` + Cmd+O in the Finder opens
+the installer and its Welcome window is drawn into the frame buffer
+(verified from a guest frame-buffer dump during development; the SDL
+window mirrors that buffer). `SheepShaver-MMUTests`: 396 checks.
+
+Not done, not blocking: the ROM's own display driver semantics (the
+guest draws straight into the `display` node's frame buffer; no mode
+switch, gamma, or VBL from a driver), XPRAM/NVRAM persistence, Keylargo
+GPIO details, the IDE probes at 0x80020000/0x80021000 and SCC polling at
+0x80012000 (all answered by the unclaimed-I/O default), BAT range 1
+overlap in `nw_boot_contract.cpp`, DEC-pending clear on `mtdec`.
+
+Trampoline reference points (Mac OS ROM file `0x26f2ca` bytes, relocated
+copy at LA `0x1fee0000` ↔ file offset `X - 0x1fee0000 + 0xc264`; the
+early copy runs at 0x200000): `HandleSpecialNode` table `0x197d0`,
+strings `0x18ee3` "P99 ADB detected", `0x18655` "Initializing ADB
+information", `0x186b9` "Virtual (USB-emulated) ADB"; flag merge into
+the template at pc `0x206994`; 68k side `ffc0ab74` ORs the ROM
+ProductInfo flags `c001bf00` into the template, `ffc01cf2` copies the
+univ table (`a22e`), `ffc000c0..ffc00190` stores `$dd4/$dd8/$2408`.
+
+Operator notes learned here: SheepShaver must run in the foreground of
+the tool shell (`perl -e 'alarm N; exec @ARGV' -- …`; backgrounded
+children are killed when the command returns). `perl alarm` does not stop
+`qemu-system-ppc` (it ignores SIGALRM); use `(qemu … & pid=$!; sleep N;
+kill -9 $pid)`. An orphaned QEMU holds an exclusive lock on the toast:
+SheepShaver then logs `WARNING: Cannot open … (Resource temporarily
+unavailable)`, `.AppleCD` gets a placeholder drive, and the ROM boots to
+the "?" floppy — check for that line before suspecting a regression.
+Never rebuild either scheme while a run is in progress (same DerivedData
+products).
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
