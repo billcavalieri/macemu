@@ -37,11 +37,29 @@ enum {
 	NW_IO_MACIO_BASE = 0x80000000u,
 	NW_IO_MACIO_SIZE = 0x10000000u,
 	NW_IO_HIGH_BASE = 0xf0000000u,
-	NW_IO_VIA_PMU_BASE = 0x80016000u,
+	NW_IO_MACIO_GPIO_BASE = 0x80000050u,		/* Keylargo GPIO: 8 level bytes, 36 pin registers */
+	NW_IO_MACIO_GPIO_SIZE = 0x30u,
+	NW_IO_VIA_PMU_BASE = 0x80016000u,		/* 6522 registers at stride 0x200 */
+	NW_IO_VIA_PMU_SIZE = 0x2000u,
 	NW_IO_SCC_LEGACY_BASE = 0x80012000u,
 	NW_IO_SCC_BASE = 0x80013000u,
-	NW_IO_OPENPIC_BASE = 0x80040000u
+	NW_IO_KEYLARGO_TIMER_BASE = 0x80015000u,	/* free-running 18.432 MHz counter at +0x38/+0x3c */
+	NW_IO_KEYLARGO_TIMER_SIZE = 0x1000u,
+	NW_IO_OPENPIC_BASE = 0x80040000u,
+	NW_IO_OPENPIC_SIZE = 0x40000u,			/* global 0x1000, sources 0x10000, per-CPU 0x20000 */
+	NW_IO_UNIN_BASE = 0xf8000000u,
+	NW_IO_UNIN_SIZE = 0x1000u,
+	NW_IO_PCI_CONFIG_ADDR = 0xf2800000u,		/* uni-north PCI host bridge (pci@f2000000) */
+	NW_IO_PCI_CONFIG_DATA = 0xf2c00000u,
+	NW_IO_PCI_CONFIG_SIZE = 0x1000u
 };
+
+/*
+ * The OpenPIC's INT output = the CPU's external interrupt line (level). The
+ * CPU samples it together with the decrementer and takes vector 0x500 when
+ * MSR[EE] is set. Written only by the OpenPIC model (nw_devices.cpp).
+ */
+extern int nw_io_ext_irq;
 
 struct nw_io_device {
 	const char *name;

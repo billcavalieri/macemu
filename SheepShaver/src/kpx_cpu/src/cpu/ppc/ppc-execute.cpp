@@ -590,6 +590,45 @@ DEFINE_MEMORY_HELPER(1);
 DEFINE_MEMORY_HELPER(2);
 DEFINE_MEMORY_HELPER(4);
 
+/*
+ *	Physical-address accessors for the less common load/store forms (string,
+ *	floating-point, reservation, vector, dcbz). New World I/O segments must
+ *	reach the device models from every path; a host dereference of a guest
+ *	I/O physical address is a SIGSEGV (seen with a 68k BlockMove, lswx/stswx,
+ *	from 0x809122c3).
+ */
+#ifdef SHEEPSHAVER
+static inline bool pa_is_io(uint32 pa) { return ppc32_guest_mmu_enabled() && nw_io_range(pa); }
+#define PA_IO_READ(PA, SZ, PC) nw_io_read((PA), (SZ), (PC))
+#define PA_IO_WRITE(PA, SZ, V, PC) nw_io_write((PA), (SZ), (V), (PC))
+#else
+static inline bool pa_is_io(uint32) { return false; }
+#define PA_IO_READ(PA, SZ, PC) 0u
+#define PA_IO_WRITE(PA, SZ, V, PC) ((void)0)
+#endif
+
+static inline uint32 pa_read_1(uint32 pa, uint32 pc) { return pa_is_io(pa) ? PA_IO_READ(pa, 1, pc) : vm_read_memory_1(pa); }
+static inline uint32 pa_read_2(uint32 pa, uint32 pc) { return pa_is_io(pa) ? PA_IO_READ(pa, 2, pc) : vm_read_memory_2(pa); }
+static inline uint32 pa_read_4(uint32 pa, uint32 pc) { return pa_is_io(pa) ? PA_IO_READ(pa, 4, pc) : vm_read_memory_4(pa); }
+static inline uint64 pa_read_8(uint32 pa, uint32 pc)
+{
+	if (!pa_is_io(pa))
+		return vm_read_memory_8(pa);
+	return ((uint64)PA_IO_READ(pa, 4, pc) << 32) | PA_IO_READ(pa + 4, 4, pc);
+}
+static inline void pa_write_1(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 1, v & 0xffu, pc); else vm_write_memory_1(pa, v); }
+static inline void pa_write_2(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 2, v & 0xffffu, pc); else vm_write_memory_2(pa, v); }
+static inline void pa_write_4(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 4, v, pc); else vm_write_memory_4(pa, v); }
+static inline void pa_write_8(uint32 pa, uint64 v, uint32 pc)
+{
+	if (!pa_is_io(pa)) {
+		vm_write_memory_8(pa, v);
+		return;
+	}
+	PA_IO_WRITE(pa, 4, (uint32)(v >> 32), pc);
+	PA_IO_WRITE(pa + 4, 4, (uint32)v, pc);
+}
+
 template< class OP, class RA, class RB, bool LD, int SZ, bool UP, bool RX >
 void powerpc_cpu::execute_loadstore(uint32 opcode)
 {
@@ -701,12 +740,12 @@ void powerpc_cpu::execute_fp_loadstore(uint32 opcode)
 		if (DB) {
 			if (!guest_data_xlate(ea, 8, false, &pa))
 				return;
-			v = vm_read_memory_8(pa);
+			v = pa_read_8(pa, pc());
 		}
 		else {
 			if (!guest_data_xlate(ea, 4, false, &pa))
 				return;
-			v = fp_load_single_convert(vm_read_memory_4(pa));
+			v = fp_load_single_convert(pa_read_4(pa, pc()));
 		}
 		operand_fp_dw_RD::set(this, opcode, v);
 	}
@@ -716,12 +755,12 @@ void powerpc_cpu::execute_fp_loadstore(uint32 opcode)
 		if (DB) {
 			if (!guest_data_xlate(ea, 8, true, &pa))
 				return;
-			vm_write_memory_8(pa, v);
+			pa_write_8(pa, v, pc());
 		}
 		else {
 			if (!guest_data_xlate(ea, 4, true, &pa))
 				return;
-			vm_write_memory_4(pa, fp_store_single_convert(v));
+			pa_write_4(pa, fp_store_single_convert(v), pc());
 		}
 	}
 
@@ -756,31 +795,31 @@ void powerpc_cpu::execute_load_string(uint32 opcode)
 		uint32 pa;
 		if (!guest_data_xlate(ea + i, 4, false, &pa))
 			return;
-		gpr(rd) = vm_read_memory_4(pa);
+		gpr(rd) = pa_read_4(pa, pc());
 	}
 	switch (nb - i) {
 	case 1: {
 		uint32 pa;
 		if (!guest_data_xlate(ea + i, 1, false, &pa))
 			return;
-		gpr(rd) = vm_read_memory_1(pa) << 24;
+		gpr(rd) = pa_read_1(pa, pc()) << 24;
 		break;
 	}
 	case 2: {
 		uint32 pa;
 		if (!guest_data_xlate(ea + i, 2, false, &pa))
 			return;
-		gpr(rd) = vm_read_memory_2(pa) << 16;
+		gpr(rd) = pa_read_2(pa, pc()) << 16;
 		break;
 	}
 	case 3: {
 		uint32 pa;
 		if (!guest_data_xlate(ea + i, 2, false, &pa))
 			return;
-		uint32 hi = vm_read_memory_2(pa);
+		uint32 hi = pa_read_2(pa, pc());
 		if (!guest_data_xlate(ea + i + 2, 1, false, &pa))
 			return;
-		gpr(rd) = (hi << 16) + (vm_read_memory_1(pa) << 8);
+		gpr(rd) = (hi << 16) + (pa_read_1(pa, pc()) << 8);
 		break;
 	}
 	}
@@ -805,7 +844,7 @@ void powerpc_cpu::execute_store_string(uint32 opcode)
 		uint32 pa;
 		if (!guest_data_xlate(ea + i, 1, true, &pa))
 			return;
-		vm_write_memory_1(pa, gpr(rs) >> sh);
+		pa_write_1(pa, gpr(rs) >> sh, pc());
 		sh -= 8;
 		if (sh < 0) {
 			sh = 24;
@@ -829,7 +868,7 @@ void powerpc_cpu::execute_lwarx(uint32 opcode)
 	uint32 pa;
 	if (!guest_data_xlate(ea, 4, false, &pa))
 		return;
-	uint32 reserve_data = vm_read_memory_4(pa);
+	uint32 reserve_data = pa_read_4(pa, pc());
 	regs().reserve_valid = 1;
 	regs().reserve_addr = pa;
 #if KPX_MAX_CPUS != 1
@@ -850,10 +889,10 @@ void powerpc_cpu::execute_stwcx(uint32 opcode)
 	if (regs().reserve_valid) {
 		if (regs().reserve_addr == pa
 #if KPX_MAX_CPUS != 1
-			&& regs().reserve_data == vm_read_memory_4(pa)
+			&& regs().reserve_data == pa_read_4(pa, pc())
 #endif
 			) {
-			vm_write_memory_4(pa, operand_RS::get(this, opcode));
+			pa_write_4(pa, operand_RS::get(this, opcode), pc());
 			cr().set(0, standalone_CR_EQ_field::mask());
 		}
 		regs().reserve_valid = 0;
@@ -1494,7 +1533,8 @@ void powerpc_cpu::execute_dcbz(uint32 opcode)
 	uint32 pa;
 	if (!guest_data_xlate(ea, 32, true, &pa))
 		return;
-	vm_memset(pa - (pa % 32), 0, 32);
+	if (!pa_is_io(pa))
+		vm_memset(pa - (pa % 32), 0, 32);
 	increment_pc(4);
 }
 
@@ -1525,26 +1565,26 @@ void powerpc_cpu::execute_vector_load(uint32 opcode)
 	case 1:
 		if (!guest_data_xlate(ea, 1, false, &pa))
 			return;
-		VD::set_element(vD, (ea & 0x0f), vm_read_memory_1(pa));
+		VD::set_element(vD, (ea & 0x0f), pa_read_1(pa, pc()));
 		break;
 	case 2:
 		if (!guest_data_xlate(ea & ~1, 2, false, &pa))
 			return;
-		VD::set_element(vD, ((ea >> 1) & 0x07), vm_read_memory_2(pa));
+		VD::set_element(vD, ((ea >> 1) & 0x07), pa_read_2(pa, pc()));
 		break;
 	case 4:
 		if (!guest_data_xlate(ea & ~3, 4, false, &pa))
 			return;
-		VD::set_element(vD, ((ea >> 2) & 0x03), vm_read_memory_4(pa));
+		VD::set_element(vD, ((ea >> 2) & 0x03), pa_read_4(pa, pc()));
 		break;
 	case 8:
 		ea &= ~15;
 		if (!guest_data_xlate(ea, 16, false, &pa))
 			return;
-		vD.w[0] = vm_read_memory_4(pa +  0);
-		vD.w[1] = vm_read_memory_4(pa +  4);
-		vD.w[2] = vm_read_memory_4(pa +  8);
-		vD.w[3] = vm_read_memory_4(pa + 12);
+		vD.w[0] = pa_read_4(pa +  0, pc());
+		vD.w[1] = pa_read_4(pa +  4, pc());
+		vD.w[2] = pa_read_4(pa +  8, pc());
+		vD.w[3] = pa_read_4(pa + 12, pc());
 		break;
 	}
 	increment_pc(4);
@@ -1560,26 +1600,26 @@ void powerpc_cpu::execute_vector_store(uint32 opcode)
 	case 1:
 		if (!guest_data_xlate(ea, 1, true, &pa))
 			return;
-		vm_write_memory_1(pa, VS::get_element(vS, (ea & 0x0f)));
+		pa_write_1(pa, VS::get_element(vS, (ea & 0x0f)), pc());
 		break;
 	case 2:
 		if (!guest_data_xlate(ea & ~1, 2, true, &pa))
 			return;
-		vm_write_memory_2(pa, VS::get_element(vS, ((ea >> 1) & 0x07)));
+		pa_write_2(pa, VS::get_element(vS, ((ea >> 1) & 0x07)), pc());
 		break;
 	case 4:
 		if (!guest_data_xlate(ea & ~3, 4, true, &pa))
 			return;
-		vm_write_memory_4(pa, VS::get_element(vS, ((ea >> 2) & 0x03)));
+		pa_write_4(pa, VS::get_element(vS, ((ea >> 2) & 0x03)), pc());
 		break;
 	case 8:
 		ea &= ~15;
 		if (!guest_data_xlate(ea, 16, true, &pa))
 			return;
-		vm_write_memory_4(pa +  0, vS.w[0]);
-		vm_write_memory_4(pa +  4, vS.w[1]);
-		vm_write_memory_4(pa +  8, vS.w[2]);
-		vm_write_memory_4(pa + 12, vS.w[3]);
+		pa_write_4(pa +  0, vS.w[0], pc());
+		pa_write_4(pa +  4, vS.w[1], pc());
+		pa_write_4(pa +  8, vS.w[2], pc());
+		pa_write_4(pa + 12, vS.w[3], pc());
 		break;
 	}
 	increment_pc(4);

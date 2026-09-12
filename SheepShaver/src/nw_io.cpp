@@ -29,6 +29,7 @@ static int g_ndevs;
 static int g_log_count;
 static uint32_t g_pages[NW_IO_PAGES_MAX];
 static int g_npages;
+int nw_io_ext_irq;
 
 void nw_io_reset(void)
 {
@@ -87,6 +88,7 @@ static void log_unclaimed(char rw, uint32_t pa, int size, uint32_t value, uint32
 	if (g_log_count == NW_IO_LOG_MAX)
 		printf("NW-BOOT IO (further unclaimed accesses not logged)\n");
 }
+
 
 uint32_t nw_io_read(uint32_t pa, int size, uint32_t pc)
 {
