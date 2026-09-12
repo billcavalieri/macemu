@@ -691,35 +691,15 @@ static bool patch_nanokernel_boot(void)
 	 * programs SRs/BATs and mtsdr1. Do not trampoline to 0x310044 (that
 	 * is the post-OF continuation) and do not apply the Old World
 	 * skip-SR/BAT/SDR rewrite of 0x310000.
-	 * PMDT convert panics into NK debug dump on an out-of-order
-	 * area compare (0x31e878 blt → 0x31e5e0 → dump). Continue
-	 * with the next PMDT instead.
 	 */
 	if (ROMType == ROMTYPE_NEWWORLD) {
-		lp = (uint32 *)(ROMBaseHost + 0x31e5e0);
-		if (ntohl(*lp) == 0x48007e40)
-			*lp = htonl(0x48000094); /* b 0x31e674 */
-		/* NK debug print (lock + putchar) stalls boot. Callers expect blr.
-		 * 0x325520 string, 0x325850 hex, 0x32572c / 0x325874 variants. */
-		static const uint32 nk_print[] = {
-			0x325520, 0x32572c, 0x325850, 0x325874
-		};
-		for (unsigned i = 0; i < sizeof(nk_print) / sizeof(nk_print[0]); i++) {
-			lp = (uint32 *)(ROMBaseHost + nk_print[i]);
-			if (ntohl(*lp) == 0x7c3042a6)
-				*lp = htonl(0x4e800020);
-		}
 		/*
-		 * 0x325664 mtmsr r31 often clears DR before lwz KDP-1048.
-		 * Leave DR on so that load is the first data DSI (KDP is not
-		 * in the ROM HTAB or the PIC DBAT).
+		 * S4: no NK code patches. Earlier mill rewrote the PMDT panic
+		 * branch (0x31e5e0), turned the NK debug print into blr
+		 * (0x325520/0x32572c/0x325850/0x325874) and nop'd two mtmsr
+		 * (0x325664/0x325ab4). Each of those hid a gate the golden run
+		 * passes honestly; the boot-event diff must name them instead.
 		 */
-		lp = (uint32 *)(ROMBaseHost + 0x325664);
-		if (ntohl(*lp) == 0x7fe00124)
-			*lp = htonl(0x60000000);
-		lp = (uint32 *)(ROMBaseHost + 0x325ab4);
-		if (ntohl(*lp) == 0x7fe00124)
-			*lp = htonl(0x60000000);
 		return true;
 	}
 

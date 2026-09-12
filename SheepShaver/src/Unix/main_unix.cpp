@@ -731,14 +731,6 @@ static bool init_sdl()
 
 	SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
 	SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
-	{
-		FILE *bf = fopen("/tmp/ss-g2-run.log", "a");
-		if (bf) {
-			fprintf(bf, "SDL_Init starting flags=%d\n", sdl_flags);
-			fflush(bf);
-			fclose(bf);
-		}
-	}
 	if (SDL_Init(sdl_flags) == -1) {
 		char str[256];
 		sprintf(str, "Could not initialize SDL: %s.\n", SDL_GetError());
@@ -746,14 +738,6 @@ static bool init_sdl()
 		return false;
 	}
 	atexit(SDL_Quit);
-	{
-		FILE *bf = fopen("/tmp/ss-g2-run.log", "a");
-		if (bf) {
-			fprintf(bf, "SDL_Init done\n");
-			fflush(bf);
-			fclose(bf);
-		}
-	}
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 	/* Drop-file poll omitted: SDL_PollEvent+Delay on first AppKit
@@ -870,12 +854,6 @@ int main(int argc, char **argv)
 				UserPrefsPath = argv[i];
 				argv[i] = NULL;
 			}
-		} else if (strcmp(argv[i], "--g3-skip-68k") == 0) {
-			argv[i++] = NULL;
-			if (i < argc) {
-				setenv("G3_SKIP_68K_OFF", argv[i], 1);
-				argv[i] = NULL;
-			}
 		} else if (strcmp(argv[i], "--nogui") == 0) {
 			// We intercept the --nogui commandline so that the settings
 			// window can change the setting from the prefs file
@@ -931,15 +909,7 @@ int main(int argc, char **argv)
 	}
 
 	// Read preferences
-	{
-		FILE *bf = fopen("/tmp/ss-g2-run.log", "a");
-		if (bf) { fprintf(bf, "PrefsInit\n"); fflush(bf); fclose(bf); }
-	}
 	PrefsInit(vmdir, argc, argv);
-	{
-		FILE *bf = fopen("/tmp/ss-g2-run.log", "a");
-		if (bf) { fprintf(bf, "PrefsInit done\n"); fflush(bf); fclose(bf); }
-	}
 	// Only use nogui preference if not passed as command line argument
 	if (use_gui == -1)
 		use_gui = !PrefsFindBool("nogui");
