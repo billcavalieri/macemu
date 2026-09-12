@@ -598,12 +598,8 @@ const struct nw_irq_source nw_trampoline_irqs[NW_TRAMPOLINE_NIRQ] = {
 	{ 0x2f, 2, 1 },	/* extint-gpio1: PMU interrupt */
 	{ 0x37, 7, 0 },	/* programmer-switch NMI */
 	{ 0x19, 1, 1 },	/* via-pmu */
-	{ 0x25, 4, 1 },	/* escc ch-a */
-	{ 0x04, 4, 0 },	/*   dma tx */
-	{ 0x05, 4, 0 },	/*   dma rx */
-	{ 0x24, 4, 1 },	/* escc ch-b */
-	{ 0x06, 4, 0 },
-	{ 0x07, 4, 0 },
+	/* (golden: escc ch-a 0x25/0x04/0x05 and ch-b 0x24/0x06/0x07 here; the
+	 * tree has no escc, see nw_bootinfo.cpp) */
 	{ 0x0d, 2, 1 },	/* ata-3 bus 0 */
 	{ 0x02, 4, 0 },	/*   dma */
 	{ 0x0e, 2, 1 },	/* ata-3 bus 1 */

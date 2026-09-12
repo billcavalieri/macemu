@@ -7,7 +7,7 @@
  *  produced, with SheepShaver's own frame buffer as the display device,
  *  the host keyboard and mouse as ADB devices behind the PMU (the shape
  *  OpenBIOS gives `via=pmu-adb`), and without devices SheepShaver does
- *  not present (usb, ethernet).
+ *  not present (usb, ethernet, escc serial).
  *
  *  Parcels ('prcl' in the Mac OS ROM file):
  *    node header (88): link, ostype, hdr size, flags, +20 child stride,
@@ -157,32 +157,6 @@ void add_pci_ids(Node *n, uint32_t vendor, uint32_t device, uint32_t rev, uint32
 	n->u32("subsystem-id", 0x1100);
 }
 
-void add_escc_channel(Node *ch, bool a, bool legacy)
-{
-	ch->str("device_type", "serial");
-	if (!legacy) {
-		ch->str("compatible", a ? "chrp,es2" : "chrp,es3");
-		ch->hex("reg", a ? "00013020000000010001303000000001000130500000000100008400000001000000850000000100"
-				 : "00013000000000010001301000000001000130400000000100008600000001000000870000000100");
-		ch->hex("AAPL,address", a ? "8001302080013030800130508000840080008500" : "8001300080013010800130408000860080008700");
-	} else {
-		ch->str("compatible", a ? "chrp,es4" : "chrp,es5");
-		ch->hex("reg", a ? "000120020000000100012006000000010001200a0000000100008400000001000000850000000100"
-				 : "00012000000000010001200400000001000120080000000100008600000001000000870000000100");
-		ch->hex("AAPL,address", a ? "80012002800120068001200a8000840080008500" : "8001200080012004800120088000860080008700");
-	}
-	if (a)
-		add_interrupts(ch, "000000250000000100000004000000000000000500000000", "000000250000000400000005",
-			       "000000040000000400000004", legacy ? "000000090000000a0000000b" : "000000030000000400000005",
-			       "000000030000000400000005");
-	else
-		add_interrupts(ch, "000000240000000100000006000000000000000700000000", "000000240000000600000007",
-			       "000000040000000400000004", legacy ? "0000000c0000000d0000000e" : "000000060000000700000008",
-			       "000000060000000700000008");
-	ch->u32("slot-names", 0);
-	ch->u32("interrupt-parent", NW_PHANDLE_PIC);
-}
-
 void add_ata(Node *ata, int bus)
 {
 	ata->str("device_type", "ata");
@@ -194,10 +168,10 @@ void add_ata(Node *ata, int bus)
 	ata->hex("AAPL,pio-timing", "0000052600000085000000250000002500000025000000000000000000000000");
 	if (bus == 0)
 		add_interrupts(ata, "0000000d000000010000000200000000", "0000000d00000002", "0000000200000004",
-			       "0000000f00000010", "000000090000000a");
+			       "0000000300000004", "0000000300000004");
 	else
 		add_interrupts(ata, "0000000e000000010000000300000000", "0000000e00000003", "0000000200000004",
-			       "0000001100000012", "0000000b0000000c");
+			       "0000000500000006", "0000000500000006");
 	ata->u32("#interrupt-cells", 2);
 	ata->hex("reg", bus == 0 ? "000200000000100000008b0000000200" : "000210000000100000008d0000000200");
 	ata->hex("AAPL,address", bus == 0 ? "8002000080008b00" : "8002100080008d00");
@@ -245,8 +219,6 @@ Node *build_machine(const nw_bootinfo_params *p)
 	aliases->str("adb-keyboard", "/pci@f2000000/mac-io@c/via-pmu/adb/keyboard");
 	aliases->str("adb-mouse", "/pci@f2000000/mac-io@c/via-pmu/adb/mouse");
 	aliases->str("rtc", "/pci@f2000000/mac-io@c/via-pmu/rtc");
-	aliases->str("scca", "/pci@f2000000/mac-io@c/escc/ch-a");
-	aliases->str("sccb", "/pci@f2000000/mac-io@c/escc/ch-b");
 	aliases->str("ide0", "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1");
 	aliases->str("cd", "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1");
 	aliases->str("cdrom", "/pci@f2000000/mac-io@c/ata-3@20000/cdrom@1");
@@ -482,26 +454,12 @@ Node *build_machine(const nw_bootinfo_params *p)
 	pmgt->str("registry-name", "extint-gpio1");
 	pmgt->hex("prim-info", "000000ff0000002c00030d400001e70500003400000000000000260d46000278783c00");
 
-	Node *escc = macio->add("escc");
-	escc->u32("#address-cells", 1);
-	escc->hex("reg", "0001300000001000");
-	escc->u32("AAPL,address", 0x80013000u);
-	escc->str("device_type", "escc");
-	static const char escc_compat[] = "escc\0CHRP,es0";
-	escc->strs("compatible", escc_compat, sizeof(escc_compat));
-	escc->empty("ranges");
-	add_escc_channel(escc->add("ch-a"), true, false);
-	add_escc_channel(escc->add("ch-b"), false, false);
-
-	Node *esccl = macio->add("escc-legacy");
-	esccl->u32("#address-cells", 1);
-	esccl->hex("reg", "0001200000001000");
-	esccl->u32("AAPL,address", 0x80012000u);
-	esccl->str("device_type", "escc-legacy");
-	esccl->str("compatible", "chrp,es1");
-	esccl->empty("ranges");
-	add_escc_channel(esccl->add("ch-a"), true, true);
-	add_escc_channel(esccl->add("ch-b"), false, true);
+	/* No escc / escc-legacy (the golden machine's SCC serial ports): the
+	 * System's serial driver (.AOut/.BOut, found by `chrp,es2`/`chrp,es3`)
+	 * drives the SCC and its DBDMA channels directly and spins on channel
+	 * status at open, and the installed Internal V.90 Modem extension opens
+	 * port B at startup. SheepShaver has no SCC; serial ports, if wanted,
+	 * are host DRVRs as on Old World. */
 
 	add_ata(macio->add("ata-3"), 0);
 	add_ata(macio->add("ata-3"), 1);

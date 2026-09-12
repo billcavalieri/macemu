@@ -235,14 +235,16 @@ struct nw_config_info_layout {
  * interrupt is queued forever. The 68k StartInit then only toggles the mask
  * bits (bset/bclr #7 on the low-address byte of the little-endian
  * register), so without this programming every source keeps priority 0 and
- * nothing is ever delivered. Golden mac99 order and priorities.
+ * nothing is ever delivered. Golden mac99 order and priorities, minus the
+ * sources of nodes our tree does not carry (escc); the tree's
+ * AAPL,interrupt-index values are positions in this list.
  */
 struct nw_irq_source {
 	uint8_t src;
 	uint8_t prio;
 	uint8_t level;
 };
-enum { NW_TRAMPOLINE_NIRQ = 15 };
+enum { NW_TRAMPOLINE_NIRQ = 9 };
 extern const struct nw_irq_source nw_trampoline_irqs[NW_TRAMPOLINE_NIRQ];
 /* Writes the table into the OpenPIC model (nw_devices.h); call after
  * nw_devices_init(), before the guest runs. */

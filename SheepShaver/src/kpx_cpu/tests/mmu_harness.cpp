@@ -245,9 +245,9 @@ int main()
 		CHECK(nw_be32_load(&ci[0], 0x3a0) == 4 && nw_be32_load(&ci[0], 0x3a4) == 0xffc0002au &&
 		      nw_be32_load(&ci[0], 0x3a8) == 0);
 		CHECK(nw_be32_load(&ci[0], 0xff4) == 0xffffffffu);
-		CHECK(nw_be32_load(&ci[0], 0xf80) == 0x002f0037u && nw_be32_load(&ci[0], 0xf9c) == 0x001effffu);
-		CHECK(nw_be32_load(&ci[0], 0xd00) == 0xffffffffu && nw_be32_load(&ci[0], 0xd40) == 0x02070104u);
-		CHECK(nw_be32_load(&ci[0], 0xf00) == 0x02070104u && nw_be32_load(&ci[0], 0xf48) == 0x80540000u);
+		CHECK(nw_be32_load(&ci[0], 0xf80) == 0x002f0037u && nw_be32_load(&ci[0], 0xf90) == 0x001effffu);
+		CHECK(nw_be32_load(&ci[0], 0xd00) == 0xffffffffu && nw_be32_load(&ci[0], 0xd40) == 0x02070102u);
+		CHECK(nw_be32_load(&ci[0], 0xf00) == 0x02070102u && nw_be32_load(&ci[0], 0xf48) == 0x80540000u);
 		CHECK(nw_be32_load(&ci[0], 0) == 0 && nw_be32_load(&ci[0], 0x70) == 0x30202020u);
 		CHECK(nw_be32_load(&ci[0], 0x378) == 0x01010000u);
 		CHECK(nw_be32_load(&ci[0], 0x54) == 0 && nw_be32_load(&ci[0], 0x44) == 0);
@@ -1188,7 +1188,7 @@ int main()
 		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + NW_PMU_IRQ * 0x20 + 0x10) == 1);
 		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + NW_GPIO9_IRQ * 0x20) == 0x80870001u);	/* edge, prio 7 */
 		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 0x2f * 0x20) == 0x80c20000u);
-		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 0x0d * 0x20) == 0x80c20009u);
+		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 0x0d * 0x20) == 0x80c20003u);	/* ata-3 bus 0: list position 3 */
 		CHECK(nw_openpic_read(NW_OPENPIC_SRC0 + 0x08 * 0x20) == 0xa0000000u);		/* not in the list: reset value */
 		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0x80) == 0);
 		/* ConfigInfo tail agrees with the programmed table: +0xf80[i] == src, +0xf00[i] == prio */
