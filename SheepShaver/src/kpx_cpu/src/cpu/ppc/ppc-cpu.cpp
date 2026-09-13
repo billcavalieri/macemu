@@ -910,6 +910,20 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 	return true;
 }
 
+bool powerpc_cpu::guest_data_probe(uint32 ea, unsigned width, bool is_store, uint32 *pa)
+{
+	if (!ppc32_guest_mmu_enabled()) {
+		*pa = ea;
+		return true;
+	}
+	ppc32_xlate_result r = ppc32_guest_mmu().translate(ea, PPC32_XLATE_DR, width, is_store);
+	if (r.ok) {
+		*pa = r.pa;
+		return true;
+	}
+	return false;
+}
+
 bool powerpc_cpu::guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa)
 {
 	if (!ppc32_guest_mmu_enabled()) {
@@ -1269,32 +1283,46 @@ void * PF_CONVENTION powerpc_cpu::compile_chain_block(block_info *sbi)
 uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
-	ppc->pc() = pc;
 	uint32 pa;
-	if (!ppc->guest_data_xlate(ea, 4, false, &pa)) {
+	/* Copy-out is gated. Shadow runs must not take a DSI, double-hit I/O,
+	 * or vm_write an unmapped PA (no SIGSEGV recovery from JIT code). */
+	if (!ppc->guest_data_probe(ea, 4, false, &pa)) {
 		*fault = 1;
 		return 0;
 	}
-	if (nw_pa_kind(pa) == NW_PA_IO)
-		return nw_io_read(pa, 4, pc);
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
+		return 0;
+	}
+	if (kind == NW_PA_NONE) {
+		*fault = 1;
+		return 0;
+	}
 	return vm_read_memory_4(pa);
 }
 
 void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int *fault)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
-	ppc->pc() = pc;
 	uint32 pa;
-	if (!ppc->guest_data_xlate(ea, 4, true, &pa)) {
+	(void)pc;
+	if (!ppc->guest_data_probe(ea, 4, true, &pa)) {
 		*fault = 1;
 		return;
 	}
-	if (nw_pa_kind(pa) == NW_PA_IO) {
-		nw_io_write(pa, 4, val, pc);
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
 		return;
 	}
-	if (nw_pa_kind(pa) != NW_PA_ROM)
-		vm_write_memory_4(pa, val);
+	if (kind == NW_PA_ROM)
+		return;
+	if (!nw_pa_writable(pa)) {
+		*fault = 1;
+		return;
+	}
+	vm_write_memory_4(pa, val);
 }
 
 static bool nw_jit_peek(uint32 ea, uint32 *opcode)
@@ -1323,6 +1351,24 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	if (!nw_jit_op_dispatch(first_opcode)) {
 		nw_jit_verify_skip(1);
 		return 0;
+	}
+
+	{
+		const int prim0 = (int)(first_opcode >> 26);
+		if (prim0 == 32 || prim0 == 36) {
+			const int ra = (int)((first_opcode >> 16) & 0x1f);
+			const int simm = (int16_t)(first_opcode & 0xffffu);
+			const uint32 ea = (ra ? gpr(ra) : 0) + (uint32)simm;
+			uint32 pa;
+			const int is_st = (prim0 == 36);
+			if (!guest_data_probe(ea, 4, is_st, &pa) ||
+			    nw_pa_kind(pa) == NW_PA_IO ||
+			    nw_pa_kind(pa) == NW_PA_NONE ||
+			    (is_st && !nw_pa_writable(pa))) {
+				nw_jit_verify_uncompared(nw_pa_kind(pa) == NW_PA_IO ? 2 : 1);
+				return 0;
+			}
+		}
 	}
 
 	const uint32 guest_pc = pc();
@@ -1373,7 +1419,24 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	jc.host = this;
 	fn(&jc);
 
+	if (jc.fault) {
+		static unsigned nskip_log;
+		nskip_log++;
+		if (nskip_log <= 8u) {
+			printf("NW-BOOT JIT verify skip-%s #%u pc=%08x op=%08x n=%d\n",
+			       jc.fault == 2 ? "io" : "dsi", nskip_log,
+			       (unsigned)guest_pc, (unsigned)first_opcode, n);
+			fflush(stdout);
+		}
+		nw_jit_verify_uncompared(jc.fault);
+		/* Guest follows kpx one insn at a time so SIGSEGV recovery
+		 * stays on the interpreter path. */
+		return 0;
+	}
+
 	for (int i = 0; i < n; i++) {
+		if (pc() != guest_pc + (uint32)i * 4u)
+			break;
 		const instr_info_t *ii = decode(ops[i]);
 		ii->execute(this, ops[i]);
 #if NW_BOOT_LOG
@@ -1384,8 +1447,6 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	}
 
 	unsigned bits = 0;
-	if (jc.fault)
-		bits |= 1u;
 	if (jc.pc != pc())
 		bits |= 2u;
 	if (jc.cr != cr().get())

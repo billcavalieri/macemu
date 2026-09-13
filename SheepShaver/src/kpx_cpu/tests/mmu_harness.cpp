@@ -65,6 +65,28 @@ static uint8_t pmu_recv(void)
 	return b;
 }
 
+static uint8_t g_jit_hram[64];
+static uint32_t harness_jit_lwz(void *, uint32_t ea, uint32_t, int *fault)
+{
+	if (ea + 4 > sizeof(g_jit_hram)) {
+		*fault = 1;
+		return 0;
+	}
+	return ((uint32_t)g_jit_hram[ea] << 24) | ((uint32_t)g_jit_hram[ea + 1] << 16) |
+	       ((uint32_t)g_jit_hram[ea + 2] << 8) | g_jit_hram[ea + 3];
+}
+static void harness_jit_stw(void *, uint32_t ea, uint32_t val, uint32_t, int *fault)
+{
+	if (ea + 4 > sizeof(g_jit_hram)) {
+		*fault = 1;
+		return;
+	}
+	g_jit_hram[ea] = (uint8_t)(val >> 24);
+	g_jit_hram[ea + 1] = (uint8_t)(val >> 16);
+	g_jit_hram[ea + 2] = (uint8_t)(val >> 8);
+	g_jit_hram[ea + 3] = (uint8_t)val;
+}
+
 static int g_test_pmu_power_ev = -1;
 static void test_pmu_power_hook(int ev, void *ctx)
 {
@@ -1677,7 +1699,8 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_addi(3, 0, 1)));
 		CHECK(nw_jit_op_supported(nw_ppc_lwz(3, 1, 0)));
 		CHECK(nw_jit_op_dispatch(nw_ppc_addi(3, 0, 1)));
-		CHECK(!nw_jit_op_dispatch(nw_ppc_lwz(3, 1, 0)));
+		CHECK(nw_jit_op_dispatch(nw_ppc_lwz(3, 1, 0)));
+		CHECK(!nw_jit_op_dispatch(nw_ppc_stw(3, 1, 0)));
 		CHECK(nw_jit_op_ends_block(nw_ppc_blr()));
 		CHECK(nw_jit_op_ends_block(nw_ppc_bc(NW_PPC_BO_TRUE, 0, 8)));
 		CHECK(!nw_jit_op_supported(0x60000000u));	/* ori r0,r0,0 nop is not in the 4a subset */
@@ -1689,6 +1712,63 @@ int main()
 		CHECK(strcmp(nw_jit_mode_name(), "verify") == 0);
 		nw_jit_set_mode(NW_JIT_OFF);
 		CHECK(nw_jit_mode() == NW_JIT_OFF);
+	}
+
+	/* WP3 4b-2: lwz/stw helpers vs C oracle, including host path and
+	 * a faulting lwz before blr (must ret, not hang on cbnz 0). */
+	{
+		nw_jit_reset();
+		struct nw_jit_cpu a, b;
+		uint32_t ops[4];
+
+		/* RA=0: EA is d, not gpr[0]+d */
+		uint8_t ram[64];
+		memset(ram, 0, sizeof(ram));
+		ram[16] = 0xaa; ram[17] = 0xbb; ram[18] = 0xcc; ram[19] = 0xdd;
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.mem = ram;
+		a.mem_base = 0;
+		a.mem_size = sizeof(ram);
+		a.gpr[0] = 0xdead0000u;
+		ops[0] = nw_ppc_lwz(3, 0, 16);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1000u) == 1);
+		nw_jit_fn fn = nw_jit_compile(ops, 2, 0x1000u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[3] == 0xaabbccdd && b.gpr[3] == a.gpr[3] && b.pc == a.pc);
+
+		memset(g_jit_hram, 0, sizeof(g_jit_hram));
+		nw_jit_set_host_mem(harness_jit_lwz, harness_jit_stw);
+
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.host = (void *)1;
+		a.gpr[3] = 0x11223344u;
+		a.gpr[1] = 16;
+		ops[0] = nw_ppc_stw(3, 1, 0);
+		ops[1] = nw_ppc_lwz(5, 1, 0);
+		ops[2] = nw_ppc_blr();
+		b = a;
+		fn = nw_jit_compile(ops, 3, 0x1700u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(b.gpr[5] == 0x11223344u && b.pc == 0x2000u);
+		CHECK(g_jit_hram[16] == 0x11 && g_jit_hram[19] == 0x44);
+
+		/* faulting lwz then blr: pc stays at lwz, LR untouched */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.host = (void *)1;
+		a.gpr[1] = 0x1000u;
+		ops[0] = nw_ppc_lwz(3, 1, 0);
+		ops[1] = nw_ppc_blr();
+		fn = nw_jit_compile(ops, 2, 0x1800u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&a);
+		CHECK(a.fault == 1 && a.pc == 0x1800u && a.lr == 0x2000u);
 	}
 
 	/* WP3 4b: fall-through PC after a 4-insn ALU block with no terminator. */

@@ -35,8 +35,10 @@
  * runs compiled code. NW_JIT_VERIFY compiles the same N-insn block the
  * live path would, runs it on a shadow CPU, then kpx interprets; the
  * guest follows kpx. NW_JIT_ON is still that shadow (copy-out is gated
- * until verify is clean per-op including lwz/stw helpers).
+ * until verify is clean per-op including lwz/stw helpers — 4b-2).
  */
+enum { NW_JIT_MAX_BLOCK = 16 };
+
 struct nw_jit_cpu {
 	uint32_t gpr[32];
 	uint32_t cr;
@@ -51,6 +53,9 @@ struct nw_jit_cpu {
 	uint32_t mem_base;
 	uint32_t mem_size;
 	void *host;
+	int nstore;
+	uint32_t store_ea[NW_JIT_MAX_BLOCK];
+	uint32_t store_val[NW_JIT_MAX_BLOCK];
 };
 
 typedef void (*nw_jit_fn)(struct nw_jit_cpu *cpu);
@@ -66,8 +71,6 @@ enum {
 	NW_JIT_VERIFY = 3
 };
 
-enum { NW_JIT_MAX_BLOCK = 16 };
-
 void nw_jit_reset(void);
 
 int nw_jit_mode(void);
@@ -75,13 +78,14 @@ void nw_jit_set_mode(int mode);
 const char *nw_jit_mode_name(void);
 
 int nw_jit_op_supported(uint32_t op);
-/* Live path: supported minus lwz/stw until helpers are vs-kpx clean. */
+/* Live path: supported minus stw (4b-2: lwz vs-kpx first; stw gated). */
 int nw_jit_op_dispatch(uint32_t op);
 int nw_jit_op_ends_block(uint32_t op);
 
 void nw_jit_verify_note(const uint32_t *ops, int n, int miss);
 void nw_jit_verify_fail(void);
 void nw_jit_verify_skip(int mem);
+void nw_jit_verify_uncompared(int fault);	/* 1 = DSI probe, 2 = I/O skip */
 void nw_jit_verify_dump(const char *why);
 
 typedef uint32_t (*nw_jit_host_lwz)(void *host, uint32_t ea, uint32_t pc, int *fault);

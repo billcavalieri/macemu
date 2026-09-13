@@ -73,7 +73,8 @@ static struct nw_jit_hist g_hist[] = {
 	{36, -1, "stw", 0, 0, 0},
 };
 
-static uint64_t g_v_cmp, g_v_miss, g_v_fail, g_v_skip_unsup, g_v_skip_mem, g_v_other, g_v_other_miss;
+static uint64_t g_v_cmp, g_v_miss, g_v_fail, g_v_skip_unsup, g_v_skip_mem;
+static uint64_t g_v_skip_dsi, g_v_skip_io, g_v_other, g_v_other_miss;
 static uint64_t g_v_blocks[NW_JIT_MAX_BLOCK + 1];
 
 static uint32_t spr_num(uint32_t op);
@@ -106,7 +107,7 @@ void nw_jit_reset(void)
 	g_exec_blocks = 0;
 	g_exec_insns = 0;
 	g_v_cmp = g_v_miss = g_v_fail = g_v_skip_unsup = g_v_skip_mem = 0;
-	g_v_other = g_v_other_miss = 0;
+	g_v_skip_dsi = g_v_skip_io = g_v_other = g_v_other_miss = 0;
 	memset(g_v_blocks, 0, sizeof(g_v_blocks));
 	for (size_t i = 0; i < sizeof(g_hist) / sizeof(g_hist[0]); i++)
 		g_hist[i].n = g_hist[i].miss = g_hist[i].insns = 0;
@@ -230,7 +231,9 @@ int nw_jit_op_supported(uint32_t op)
 int nw_jit_op_dispatch(uint32_t op)
 {
 	const int prim = (int)(op >> 26);
-	if (prim == 32 || prim == 36)
+	/* stw stays off the live path until RAM writes are vs-kpx'd
+	 * without the 50310490 fill-loop hang (4b2-ver). lwz is on. */
+	if (prim == 36)
 		return 0;
 	return nw_jit_op_supported(op);
 }
@@ -284,11 +287,20 @@ void nw_jit_verify_skip(int mem)
 		g_v_skip_unsup++;
 }
 
+void nw_jit_verify_uncompared(int fault)
+{
+	if (fault == 2)
+		g_v_skip_io++;
+	else
+		g_v_skip_dsi++;
+}
+
 void nw_jit_verify_dump(const char *why)
 {
-	if (!g_v_cmp && !g_v_skip_unsup && !g_v_skip_mem && !g_v_fail)
+	if (!g_v_cmp && !g_v_skip_unsup && !g_v_skip_mem && !g_v_fail &&
+	    !g_v_skip_dsi && !g_v_skip_io)
 		return;
-	uint64_t n_blr = 0, n_mfspr = 0, n_mtspr = 0;
+	uint64_t n_blr = 0, n_mfspr = 0, n_mtspr = 0, n_lwz = 0, n_stw = 0;
 	for (size_t i = 0; i < sizeof(g_hist) / sizeof(g_hist[0]); i++) {
 		if (g_hist[i].prim == 19)
 			n_blr = g_hist[i].n;
@@ -296,14 +308,20 @@ void nw_jit_verify_dump(const char *why)
 			n_mfspr = g_hist[i].n;
 		if (g_hist[i].prim == 31 && g_hist[i].xo == 467)
 			n_mtspr = g_hist[i].n;
+		if (g_hist[i].prim == 32)
+			n_lwz = g_hist[i].n;
+		if (g_hist[i].prim == 36)
+			n_stw = g_hist[i].n;
 	}
-	printf("NW-BOOT G1: jit verify %s cmp %llu miss %llu fail %llu skip_unsup %llu skip_mem %llu blr %llu mfspr %llu mtspr %llu\n",
+	printf("NW-BOOT G1: jit verify %s cmp %llu miss %llu fail %llu skip_unsup %llu skip_mem %llu skip_dsi %llu skip_io %llu blr %llu mfspr %llu mtspr %llu lwz %llu stw %llu\n",
 	       why ? why : "?",
 	       (unsigned long long)g_v_cmp, (unsigned long long)g_v_miss,
 	       (unsigned long long)g_v_fail,
 	       (unsigned long long)g_v_skip_unsup, (unsigned long long)g_v_skip_mem,
+	       (unsigned long long)g_v_skip_dsi, (unsigned long long)g_v_skip_io,
 	       (unsigned long long)n_blr, (unsigned long long)n_mfspr,
-	       (unsigned long long)n_mtspr);
+	       (unsigned long long)n_mtspr,
+	       (unsigned long long)n_lwz, (unsigned long long)n_stw);
 	if (why && strcmp(why, "periodic") == 0) {
 		fflush(stdout);
 		return;
@@ -524,7 +542,7 @@ uint32_t nw_jit_helper_lwz(struct nw_jit_cpu *cpu, uint32_t ea)
 		int f = 0;
 		uint32_t v = g_host_lwz(cpu->host, ea, cpu->pc, &f);
 		if (f)
-			cpu->fault = 1;
+			cpu->fault = f;
 		return v;
 	}
 	cpu->fault = 1;
@@ -533,6 +551,11 @@ uint32_t nw_jit_helper_lwz(struct nw_jit_cpu *cpu, uint32_t ea)
 
 void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 {
+	if (cpu->nstore < NW_JIT_MAX_BLOCK) {
+		cpu->store_ea[cpu->nstore] = ea;
+		cpu->store_val[cpu->nstore] = val;
+		cpu->nstore++;
+	}
 	if (cpu->mem) {
 		if (!mem_ok(cpu, ea)) {
 			cpu->fault = 1;
@@ -545,7 +568,7 @@ void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 		int f = 0;
 		g_host_stw(cpu->host, ea, val, cpu->pc, &f);
 		if (f)
-			cpu->fault = 1;
+			cpu->fault = f;
 		return;
 	}
 	cpu->fault = 1;
@@ -1137,6 +1160,20 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 		}
 		for (int i = 0; i < e.nfault; i++) {
 			int32_t delta = (int32_t)(epilogue - e.fault_br[i]);
+			*e.fault_br[i] = a64_cbnz(W8, delta);
+		}
+	} else if (e.nfault) {
+		/* Terminator already emitted ret. Faults must not fall into it
+		 * (cbnz 0 is a hang) and must not execute the branch. */
+		uint32_t *fault_ep = e.p;
+		if (!emit_ret(&e)) {
+#ifdef __APPLE__
+			pthread_jit_write_protect_np(1);
+#endif
+			return NULL;
+		}
+		for (int i = 0; i < e.nfault; i++) {
+			int32_t delta = (int32_t)(fault_ep - e.fault_br[i]);
 			*e.fault_br[i] = a64_cbnz(W8, delta);
 		}
 	}

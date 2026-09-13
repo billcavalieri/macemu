@@ -347,6 +347,7 @@ public:
 	bool guest_mmu_enabled() const { return ppc32_guest_mmu_enabled(); }
 	bool guest_fetch(uint32 *opcode);
 	bool guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa);
+	bool guest_data_probe(uint32 ea, unsigned width, bool is_store, uint32 *pa);
 #ifdef SHEEPSHAVER
 	int nw_jit_try(uint32 first_opcode);
 	static uint32 jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault);
