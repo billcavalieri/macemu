@@ -735,7 +735,9 @@ L2CR are 0 at first FPU-unavail on both CPUs; the 750 L2I/L2IP poll at
 `5031954c` (`mfspr 1017` / `rlwinm. r8,r8,31,0,0` / `bne .-8`, wait while
 L2IP set) never ran before the crash, and ignored L2CR writes would read
 L2IP=0 and not spin. Default PVR stays 7400 (QEMU golden; 9.2.1 QuickDraw
-AltiVec). `NW_PVR` in `main_unix.cpp` overrides it for experiments.
+AltiVec). `NW_PVR` in `main_unix.cpp` overrides it for experiments; every
+run logs `NW-BOOT G1: PVR xxxxxxxx (default|NW_PVR)` so a result names
+its CPU, and a non-hex value is ignored rather than becoming PVR 0.
 
 **Apple Monitor Plugins / −29208.** Two 200 s installed-volume runs
 (`/tmp/g6/i2.log`, `/tmp/g6/run.log`) with `every 10 shot` through t=190
@@ -755,10 +757,14 @@ component, file, system-too-old, **monitor not supported**, prefs,
 **communicating with the display**, missing Display Enabler — no
 string contains the digits 29208. The INIT PEF hardcodes `li r31,
 -29210` (GetResource `'gnht',100` = RemoraManager failed) and
-`li r31, -30472`; it does not contain −29208. Displays.h in SuperMario
-and Carbon names `kDMDriverNotDisplayMgrAwareErr` as **−6228**, not
-−29208. The number is whatever OSErr the INIT/handlers pass to string
-[1]; this session did not catch the dialog on screen to read it.
+`li r31, -30472`; it does not contain −29208, and neither does the
+data-fork PEF (no `addi` immediate, no 16- or 32-bit constant). The
+INIT's own codes sit in the same −29xxx range, so −29208 is most likely
+a Remora-internal code computed or held in a handler, not a Display
+Manager OSErr: Displays.h in SuperMario and Carbon names
+`kDMDriverNotDisplayMgrAwareErr` as **−6228**. The number is whatever
+OSErr the INIT/handlers pass to string [1]; this session did not catch
+the dialog on screen to read it.
 
 TEMP `VideoStatus`/`VideoControl` log (`NW-BOOT VIDEO`, removed before
 commit) on the second run, every selector except VBL-rate
@@ -781,16 +787,27 @@ Answered with `noErr`: `cscGetGamma` (8), `cscGetCurMode` (10),
 kAllModesSafe` — a fake 21″ CRT, no `kHasDDCConnection`. The extension
 has gnht 180 "iMac Device Component" and DisplayIIC/ADB/USB handlers;
 `cscGetCommunicationInfo` is the I2C/DDC probe (`VDCommunicationInfoRec`,
-`kVideoBusI2C`). We have no I2C bus and no EDID on the `display` node
-(golden QEMU VGA has none either: width/height/depth/linebytes/driver
-only). The same dialog was already observed with the ROM cofb ndrv
-(S4 step 8), so it is not a wrong `cscGetModeTiming` on our driver.
+`kVideoBusI2C`). We have no I2C bus and no EDID / `AAPL,ddc` property
+on the `display` node; the golden's `QEMU,VGA@e` node has no such
+property either (PCI ids, model, compatible, reg, assigned-addresses,
+width/height/depth/linebytes, driver). The same dialog was already
+observed with the ROM cofb ndrv (S4 step 8), so it is not a wrong
+`cscGetModeTiming` on our driver.
 
-Cause: Apple Monitor Plugins is looking for an Apple panel it can talk
-to (DDC/I2C, ADB, or USB). SheepShaver's display is a linear frame
-buffer with no DDC data by design. Not a property we omit that QEMU
-has, and not a selector we should fake. Leave the extension on the
+Most likely cause: Apple Monitor Plugins is looking for an Apple panel
+it can talk to (DDC/I2C, ADB, or USB). SheepShaver's display is a linear
+frame buffer with no DDC data by design. Not a property we omit that
+QEMU has, and not a selector we should fake. Leave the extension on the
 volume; do not suppress the alert.
+
+Open: S4 step 7 (cofb) and S4 step 8 (our ndrv; run 33's script sent a
+Return at 150 s just to dismiss it) saw the dialog on this same volume;
+the two runs above did not, with no SheepShaver-side video change in
+between other than the S4 step 9 software cursor. It is therefore
+timing-dependent or otherwise not deterministic, and the paragraph
+above is an inference from the selector log, not from a caught
+failure. When it next shows, read the OSErr off the shot and match it
+against the `NW-BOOT VIDEO` probe before deciding anything.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
