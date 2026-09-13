@@ -697,9 +697,9 @@ override ("keeping VBL") that never fired, and a composited hardware
 cursor tried while chasing the freeze.
 
 Open: XPRAM/NVRAM persistence (the startup-disk choice), PMU
-restart/shutdown, Keylargo GPIO details, BAT range 1 overlap; the −29208
-"Apple Monitor Plugins" alert (not a gate). A 750 PVR (`NW_PVR=00080202`)
-is documented, not the default — see below.
+restart/shutdown, Keylargo GPIO details, BAT range 1 overlap. A 750 PVR
+(`NW_PVR=00080202`) is documented, not the default — see below. The
+Apple Monitor Plugins dialog is not a gate; see the addendum.
 
 Found while using it (commit `350e1e4b`): a highlighted menu item's text
 came out speckled black. The frame buffer already held those pixels
@@ -736,6 +736,61 @@ L2CR are 0 at first FPU-unavail on both CPUs; the 750 L2I/L2IP poll at
 L2IP set) never ran before the crash, and ignored L2CR writes would read
 L2IP=0 and not spin. Default PVR stays 7400 (QEMU golden; 9.2.1 QuickDraw
 AltiVec). `NW_PVR` in `main_unix.cpp` overrides it for experiments.
+
+**Apple Monitor Plugins / −29208.** Two 200 s installed-volume runs
+(`/tmp/g6/i2.log`, `/tmp/g6/run.log`) with `every 10 shot` through t=190
+never drew the dialog: shots from Welcome through Finder (`shot-000`…
+`shot-019`) and the Apple-menu grab at 186 s (`menu.ppm`) show the
+desktop only. Mouse landed (`t=55.5 mouse at 202,202`, `t=178.7 mouse
+at 10,6`). Highlight check on `menu.ppm` (x 48..124, y 80..93): 36
+pixels with a channel below (51,51,153), all near-black in bbox
+90,86–97,93 — the cursor at the script target, not speckled text.
+
+The dialog text, when it is shown, is the extension's own STR# 101
+(`ResViewerCLI get` on `Macintosh HD/System Folder/Extensions/Apple
+Monitor Plugins`): DLOG/DITL 21000 (`^0^1`, OK) with string [1]
+"Apple Monitor Plugins did not load completely.\r\rError:" and the
+OSErr appended. Other STR# 101 entries name memory, resource,
+component, file, system-too-old, **monitor not supported**, prefs,
+**communicating with the display**, missing Display Enabler — no
+string contains the digits 29208. The INIT PEF hardcodes `li r31,
+-29210` (GetResource `'gnht',100` = RemoraManager failed) and
+`li r31, -30472`; it does not contain −29208. Displays.h in SuperMario
+and Carbon names `kDMDriverNotDisplayMgrAwareErr` as **−6228**, not
+−29208. The number is whatever OSErr the INIT/handlers pass to string
+[1]; this session did not catch the dialog on screen to read it.
+
+TEMP `VideoStatus`/`VideoControl` log (`NW-BOOT VIDEO`, removed before
+commit) on the second run, every selector except VBL-rate
+`cscGetInterrupt` / `cscGetHardwareCursorDrawState`:
+
+| t | selector | result |
+|---|---|---|
+| 0 | control 70 | controlErr (−17) |
+| 0, 11, 89 | status 28 `cscGetMultiConnect` | statusErr (−18) |
+| 21 | status 20 `cscGetGammaInfoList` | statusErr |
+| 51, 89 | status 30 `cscGetTimingRanges` | statusErr |
+| 89 | status 32 `cscGetCommunicationInfo` | statusErr |
+| 130 | status 43 (not in Video.h through 32) | statusErr |
+
+Answered with `noErr`: `cscGetGamma` (8), `cscGetCurMode` (10),
+`cscGetConnection` (12, nine times), `cscGetModeTiming` (13),
+`cscGetPreferredConfiguration` (16), `cscGetVideoParameters` (18).
+`cscGetDDCBlock` (27) was **never called**. `cscGetConnection` reports
+`kMultiModeCRT3Connect`, sense 6/`0x23`, flags `kAllModesValid|
+kAllModesSafe` — a fake 21″ CRT, no `kHasDDCConnection`. The extension
+has gnht 180 "iMac Device Component" and DisplayIIC/ADB/USB handlers;
+`cscGetCommunicationInfo` is the I2C/DDC probe (`VDCommunicationInfoRec`,
+`kVideoBusI2C`). We have no I2C bus and no EDID on the `display` node
+(golden QEMU VGA has none either: width/height/depth/linebytes/driver
+only). The same dialog was already observed with the ROM cofb ndrv
+(S4 step 8), so it is not a wrong `cscGetModeTiming` on our driver.
+
+Cause: Apple Monitor Plugins is looking for an Apple panel it can talk
+to (DDC/I2C, ADB, or USB). SheepShaver's display is a linear frame
+buffer with no DDC data by design. Not a property we omit that QEMU
+has, and not a selector we should fake. Leave the extension on the
+volume; do not suppress the alert.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
