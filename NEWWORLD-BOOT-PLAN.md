@@ -20,8 +20,8 @@ decode (`nw_pa_kind`), bank map at boot, ROM stores dropped. WP3 4a
 (S4 step 14): ARM64 integer-subset JIT matches the C oracle. **WP3 4b
 dispatcher** (S4 step 15): fallback boot identical, not faster;
 `NW_JIT=verify` block-shadow vs kpx is 0-miss on the integer subset
-(copy-out gated until `lwz`/`stw` helpers are vs-kpx’d). Next: WP3 4b-2 (`lwz`/`stw` vs-kpx, idle translate), then 4c, 4d,
-the three-run G6 table; WP5 after G6.
+and on `lwz` (S4 step 16; `stw` still gated). Next: WP3 4b-2 `stw`
+vs-kpx, then idle translate, 4c, 4d, the three-run G6 table; WP5 after G6.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -1099,8 +1099,8 @@ stop at unsupported / page / branch / Altivec / FP), runs it on a shadow
 CPU, then kpx interprets; the guest follows kpx. Per-op histogram is permanent
 (`G1: jit verify`). 20 s `/tmp/g8/4b-ver.log`: `cmp 97000000 miss 0 fail 0`;
 `blr 3182391`, `mfspr 17`, `mtspr 7522`; blocklen 16 seen; rfi `503113c4`.
-`lwz`/`stw` stay off `nw_jit_op_dispatch` until their helpers go through the
-same check. `NW_JIT=on` is still that shadow (copy-out gated).
+`lwz` is on `nw_jit_op_dispatch`; `stw` stays off (S4 step 16).
+`NW_JIT=on` is still that shadow (copy-out gated).
 
 Emitter vs-kpx misses that were fixed (quoted from `/tmp/g8/4b-kpx.log`
 and `4b-kpx2.log`): `rlwinm.` CR0, `cmpi`/`cmp` `crfD≠0`, `blrl` LR,
@@ -1109,6 +1109,15 @@ JIT was a false clean. Guess-phase ON boots (`4b-on3`/`4b-on4`) are
 negative controls (`/tmp/g8/README-4b-negative.txt`).
 
 Harness 579 passed, 0 failed. Branch `arm64-jit`.
+
+#### S4 step 16 — WP3 4b-2 `lwz` vs-kpx (`stw` gated)
+
+`lwz` uses `guest_data_probe` (no DSI from a shadow run). NONE/IO first
+insns return to kpx. 25 s `/tmp/g8/4b2-lwz.log`: `cmp 129400000 miss 0`,
+`lwz 23700761 miss 0`, `mfspr 17`, `mtspr 8893`, `blr 4869615`, rfi
+`6806e8b0`. Turning `stw` on hung the ROM page-fill at `50310490`
+(NONE stack at `0x3fbfe000` clobbered `r12`). Copy-out still gated.
+Harness 588 passed, 0 failed. Branch `arm64-jit`.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
