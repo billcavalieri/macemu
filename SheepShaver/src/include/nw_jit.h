@@ -78,7 +78,8 @@ void nw_jit_set_mode(int mode);
 const char *nw_jit_mode_name(void);
 
 int nw_jit_op_supported(uint32_t op);
-/* Live path: supported minus stw (4b-2: lwz vs-kpx first; stw gated). */
+/* Live path: supported ops whose EA is a writable/readable bank (NONE/IO
+ * mem ops stay on kpx — 4b-2 fill at 50310490). */
 int nw_jit_op_dispatch(uint32_t op);
 int nw_jit_op_ends_block(uint32_t op);
 

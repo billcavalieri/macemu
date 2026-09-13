@@ -1325,6 +1325,72 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 	vm_write_memory_4(pa, val);
 }
 
+static int nw_jit_pa_ok(uint32 pa, int is_st)
+{
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO || kind == NW_PA_NONE)
+		return 0;
+	if (is_st && !nw_pa_writable(pa))
+		return 0;
+	return 1;
+}
+
+static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
+{
+	const int prim = (int)(op >> 26);
+	if (prim != 32 && prim != 36)
+		return 1;
+	const int ra = (int)((op >> 16) & 0x1f);
+	const int simm = (int16_t)(op & 0xffffu);
+	const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
+	uint32 pa;
+	if (!ppc->guest_data_probe(ea, 4, prim == 36, &pa))
+		return 0;
+	return nw_jit_pa_ok(pa, prim == 36);
+}
+
+static uint32 nw_jit_rotl32(uint32 x, uint32 n)
+{
+	n &= 31;
+	return n ? ((x << n) | (x >> (32 - n))) : x;
+}
+
+static uint32 nw_jit_mask(uint32 mb, uint32 me)
+{
+	return (mb > me) ?
+		~(((uint32)-1 >> mb) ^ ((me >= 31) ? 0 : (uint32)-1 >> (me + 1))) :
+		(((uint32)-1 >> mb) ^ ((me >= 31) ? 0 : (uint32)-1 >> (me + 1)));
+}
+
+static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
+{
+	const int prim = (int)(op >> 26);
+	const int rd = (int)((op >> 21) & 0x1f);
+	const int ra = (int)((op >> 16) & 0x1f);
+	const int rb = (int)((op >> 11) & 0x1f);
+	const int xo = (int)((op >> 1) & 0x3ff);
+	const int simm = (int16_t)(op & 0xffffu);
+	if (prim == 14) {
+		sg[rd] = (ra ? sg[ra] : 0) + (uint32)simm;
+		return;
+	}
+	if (prim == 21) {
+		const int sh = rb, mb = (int)((op >> 6) & 0x1f), me = (int)((op >> 1) & 0x1f);
+		sg[ra] = nw_jit_rotl32(sg[rd], (uint32)sh) & nw_jit_mask((uint32)mb, (uint32)me);
+		return;
+	}
+	if (prim == 31 && xo == 266) {
+		sg[rd] = sg[ra] + sg[rb];
+		return;
+	}
+	if (prim == 32) {
+		const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
+		uint32 pa;
+		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0))
+			sg[rd] = vm_read_memory_4(pa);
+	}
+}
+
 static bool nw_jit_peek(uint32 ea, uint32 *opcode)
 {
 	if (!ppc32_guest_mmu_enabled()) {
@@ -1353,22 +1419,18 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		return 0;
 	}
 
-	{
+	uint32 sg[32];
+	for (int i = 0; i < 32; i++)
+		sg[i] = gpr(i);
+	if (!nw_jit_op_mem_ok(this, first_opcode, sg)) {
 		const int prim0 = (int)(first_opcode >> 26);
-		if (prim0 == 32 || prim0 == 36) {
-			const int ra = (int)((first_opcode >> 16) & 0x1f);
-			const int simm = (int16_t)(first_opcode & 0xffffu);
-			const uint32 ea = (ra ? gpr(ra) : 0) + (uint32)simm;
-			uint32 pa;
-			const int is_st = (prim0 == 36);
-			if (!guest_data_probe(ea, 4, is_st, &pa) ||
-			    nw_pa_kind(pa) == NW_PA_IO ||
-			    nw_pa_kind(pa) == NW_PA_NONE ||
-			    (is_st && !nw_pa_writable(pa))) {
-				nw_jit_verify_uncompared(nw_pa_kind(pa) == NW_PA_IO ? 2 : 1);
-				return 0;
-			}
-		}
+		const int ra = (int)((first_opcode >> 16) & 0x1f);
+		const int simm = (int16_t)(first_opcode & 0xffffu);
+		const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
+		uint32 pa = 0;
+		guest_data_probe(ea, 4, prim0 == 36, &pa);
+		nw_jit_verify_uncompared(nw_pa_kind(pa) == NW_PA_IO ? 2 : 1);
+		return 0;
 	}
 
 	const uint32 guest_pc = pc();
@@ -1378,6 +1440,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	uint32 ops[NW_JIT_MAX_BLOCK];
 	ops[0] = first_opcode;
 	int n = 1;
+	nw_jit_sg_apply(this, sg, ops[0]);
 	while (n < NW_JIT_MAX_BLOCK && !nw_jit_op_ends_block(ops[n - 1])) {
 		const uint32 ea = guest_pc + (uint32)n * 4u;
 		if ((ea & ~0xfffu) != (guest_pc & ~0xfffu))
@@ -1389,7 +1452,10 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			break;
 		if (!nw_jit_op_dispatch(op))
 			break;
+		if (!nw_jit_op_mem_ok(this, op, sg))
+			break;
 		ops[n++] = op;
+		nw_jit_sg_apply(this, sg, op);
 	}
 
 	nw_jit_fn fn = nw_jit_compile(ops, n, guest_pc, phys_page, msr_ir, 0);
@@ -1419,6 +1485,32 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	jc.host = this;
 	fn(&jc);
 
+	unsigned stbits = 0;
+	{
+		uint32 sg2[32];
+		for (int i = 0; i < 32; i++)
+			sg2[i] = gpr(i);
+		int si = 0;
+		for (int i = 0; i < n; i++) {
+			const uint32 op = ops[i];
+			const int prim = (int)(op >> 26);
+			if (prim == 36) {
+				const int rd = (int)((op >> 21) & 0x1f);
+				const int ra = (int)((op >> 16) & 0x1f);
+				const int simm = (int16_t)(op & 0xffffu);
+				const uint32 ea = (ra ? sg2[ra] : 0) + (uint32)simm;
+				const uint32 val = sg2[rd];
+				if (si >= jc.nstore || jc.store_ea[si] != ea || jc.store_val[si] != val)
+					stbits |= 256u;
+				si++;
+			} else {
+				nw_jit_sg_apply(this, sg2, op);
+			}
+		}
+		if (si != jc.nstore)
+			stbits |= 256u;
+	}
+
 	if (jc.fault) {
 		static unsigned nskip_log;
 		nskip_log++;
@@ -1446,7 +1538,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			break;
 	}
 
-	unsigned bits = 0;
+	unsigned bits = stbits;
 	if (jc.pc != pc())
 		bits |= 2u;
 	if (jc.cr != cr().get())
