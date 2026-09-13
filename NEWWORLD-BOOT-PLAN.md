@@ -650,6 +650,56 @@ the driver) is the next usability gate. Also XPRAM/NVRAM persistence
 (the startup-disk choice), PMU restart/shutdown, Keylargo GPIO details,
 BAT range 1 overlap.
 
+#### S4 step 9 — New World input mode (commits `4b093935`, `7e761abe`, `c140f7d4`, `74976bda`)
+
+Goal: what you see is where the guest clicks. Design: the driver reports
+a software cursor (QuickDraw draws it into the frame buffer) and the SDL
+front end feeds relative ADB motion from a grabbed mouse.
+
+1. **Software cursor** (`video.cpp`): on New World
+   `video_can_change_cursor()` is false regardless of `hardcursor` — the
+   host pointer is not the Mac cursor there (nothing writes
+   MTemp/RawMouse) — and `UseHardwareCursor()` follows it. `ROMType` is
+   now identified at the end of `DecodeROM()` (`IdentifyROMType()`,
+   `rom_patches.cpp`) because `VideoInit` runs before `PatchROM`.
+2. **Relative grab** (`video_sdl2.cpp`, `utils_macosx.mm`): grabbed
+   (SDL relative mode, host pointer hidden) whenever the window has
+   focus; Ctrl+G releases (Ctrl+F5 too) and the release sticks until
+   Ctrl+G or a click in the window, which captures and is swallowed;
+   while released `SDL_MOUSEMOTION` is dropped; the title says "Ctrl+G to
+   release". Operator scripts (`nw_script_active()`) keep the window out
+   of it. macOS: `SetRelativeMouseMode` synthesizes a focus-lost (settle
+   window + real focus check), the relative-mode hide is not drained by
+   `SDL_ShowCursor` (`macosx_force_host_cursor`), and `NSWindow
+   setTitle:` must run on the main thread (`macosx_set_window_title`).
+3. **The gate that was really there.** With all of the above the cursor
+   moved during boot and froze once the installed System had loaded its
+   extensions (moves at 55 s and 68 s landed, 84 s and later never did;
+   keyboard fine; CD boot unaffected). Bus trace: at ≈ 75 s the cursor
+   device driver writes `Listen R3 [63 00]` to the mouse and reads
+   register 3 back three times, three rounds 2.5 s apart. We answered
+   `03 02` — flags clear, i.e. "exceptional event, SRQ disabled" — and
+   the driver dropped the device; ≈ 500 mouse reports per move were then
+   delivered and acknowledged (autopoll re-armed after each) but never
+   reached MTemp. A real device answers register 3 with bit 6 set and
+   bit 5 = SRQ enable, and handler `0x00` rewrites that bit
+   (`BasiliskII/src/adb.cpp` does the same). Modelled in
+   `nw_devices.cpp`; the probe no longer happens at all. QEMU's
+   `adb-mouse` answers the bare address too, but the golden run boots the
+   CD and never reaches that driver, so the golden could not show it.
+
+Result (run 10, 200 s, interpreter, installed volume): software cursor,
+move at 55 s → 202,202 in 16 steps; at 178 s (Finder) → 589,53 in 34
+steps with the cursor drawn on the Macintosh HD icon; double-click at
+186 s opens the Macintosh HD window. Harness 411 pass (the two Talk R3
+expectations carry the flag bits). Removed on the way: a `cscSetInterrupt`
+override ("keeping VBL") that never fired, and a composited hardware
+cursor tried while chasing the freeze.
+
+Open: XPRAM/NVRAM persistence (the startup-disk choice), PMU
+restart/shutdown, Keylargo GPIO details, BAT range 1 overlap; the −29208
+"Apple Monitor Plugins" alert (not a gate).
+
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
 WP3 ARM64 JIT on the MMU, WP4 memory banks, WP5 video damage. Not before G3.
