@@ -1533,6 +1533,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		ii->execute(this, ops[i]);
 #if NW_BOOT_LOG
 		nw_event_insn();
+		nw_jit_pc_hot(guest_pc + (uint32)i * 4u, ops[i]);
 #endif
 		if (nw_jit_op_ends_block(ops[i]))
 			break;
@@ -1803,6 +1804,7 @@ void powerpc_cpu::execute(uint32 entry)
 		}
 #endif
 		const instr_info_t *ii = decode(opcode);
+		const uint32 insn_pc = pc();
 #if PPC_EXECUTE_DUMP_STATE
 		if (dump_state)
 			dump_instruction(opcode);
@@ -1819,6 +1821,7 @@ void powerpc_cpu::execute(uint32 entry)
 		ii->execute(this, opcode);
 #if defined(SHEEPSHAVER) && NW_BOOT_LOG
 		nw_event_insn();
+		nw_jit_pc_hot(insn_pc, opcode);
 #endif
 #if PPC_EXECUTE_DUMP_STATE
 		if (dump_state)

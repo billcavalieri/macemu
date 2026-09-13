@@ -75,6 +75,12 @@ static struct nw_jit_hist g_hist[] = {
 
 static uint64_t g_v_cmp, g_v_miss, g_v_fail, g_v_skip_unsup, g_v_skip_mem;
 static uint64_t g_v_skip_dsi, g_v_skip_io, g_v_other, g_v_other_miss;
+
+enum { NW_JIT_PCHOT = 1024, NW_JIT_PCPROBE = 8, NW_JIT_PCTOP = 12 };
+static struct {
+	uint32_t pc, op;
+	uint64_t n;
+} g_pchot[NW_JIT_PCHOT];
 static uint64_t g_v_blocks[NW_JIT_MAX_BLOCK + 1];
 
 static uint32_t spr_num(uint32_t op);
@@ -111,6 +117,7 @@ void nw_jit_reset(void)
 	memset(g_v_blocks, 0, sizeof(g_v_blocks));
 	for (size_t i = 0; i < sizeof(g_hist) / sizeof(g_hist[0]); i++)
 		g_hist[i].n = g_hist[i].miss = g_hist[i].insns = 0;
+	memset(g_pchot, 0, sizeof(g_pchot));
 }
 
 void nw_jit_invalidate_page(uint32_t phys_page)
@@ -293,8 +300,10 @@ void nw_jit_verify_uncompared(int fault)
 void nw_jit_verify_dump(const char *why)
 {
 	if (!g_v_cmp && !g_v_skip_unsup && !g_v_skip_mem && !g_v_fail &&
-	    !g_v_skip_dsi && !g_v_skip_io)
+	    !g_v_skip_dsi && !g_v_skip_io) {
+		nw_jit_pc_hot_dump(why);
 		return;
+	}
 	uint64_t n_blr = 0, n_mfspr = 0, n_mtspr = 0, n_lwz = 0, n_stw = 0;
 	for (size_t i = 0; i < sizeof(g_hist) / sizeof(g_hist[0]); i++) {
 		if (g_hist[i].prim == 19)
@@ -334,7 +343,62 @@ void nw_jit_verify_dump(const char *why)
 			printf("NW-BOOT G1: jit verify blocklen %d n=%llu\n",
 			       i, (unsigned long long)g_v_blocks[i]);
 	}
+	nw_jit_pc_hot_dump(why);
 	fflush(stdout);
+}
+
+void nw_jit_pc_hot(uint32_t pc, uint32_t op)
+{
+	int i = (int)((pc >> 2) & (NW_JIT_PCHOT - 1));
+	int cold = i;
+	uint64_t cold_n = ~(uint64_t)0;
+	for (int p = 0; p < NW_JIT_PCPROBE; p++) {
+		int j = (i + p) & (NW_JIT_PCHOT - 1);
+		if (g_pchot[j].n == 0 || g_pchot[j].pc == pc) {
+			g_pchot[j].pc = pc;
+			if (!g_pchot[j].op)
+				g_pchot[j].op = op;
+			g_pchot[j].n++;
+			return;
+		}
+		if (g_pchot[j].n < cold_n) {
+			cold_n = g_pchot[j].n;
+			cold = j;
+		}
+	}
+	g_pchot[cold].pc = pc;
+	g_pchot[cold].op = op;
+	g_pchot[cold].n = 1;
+}
+
+void nw_jit_pc_hot_dump(const char *why)
+{
+	int top[NW_JIT_PCTOP];
+	int ntop = 0;
+	for (int i = 0; i < NW_JIT_PCHOT; i++) {
+		if (!g_pchot[i].n)
+			continue;
+		int k = ntop;
+		while (k > 0 && g_pchot[i].n > g_pchot[top[k - 1]].n)
+			k--;
+		if (k >= NW_JIT_PCTOP)
+			continue;
+		int n = ntop < NW_JIT_PCTOP ? ntop : NW_JIT_PCTOP - 1;
+		for (int j = n; j > k; j--)
+			top[j] = top[j - 1];
+		top[k] = i;
+		if (ntop < NW_JIT_PCTOP)
+			ntop++;
+	}
+	for (int i = 0; i < ntop; i++) {
+		int j = top[i];
+		printf("NW-BOOT G1: jit pc-hot %s pc=%08x op=%08x n=%llu\n",
+		       why ? why : "?",
+		       (unsigned)g_pchot[j].pc, (unsigned)g_pchot[j].op,
+		       (unsigned long long)g_pchot[j].n);
+	}
+	if (ntop)
+		fflush(stdout);
 }
 
 int nw_jit_op_ends_block(uint32_t op)

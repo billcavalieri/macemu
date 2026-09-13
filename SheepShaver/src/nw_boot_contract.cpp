@@ -4,6 +4,7 @@
 
 #include "nw_boot_contract.h"
 #include "nw_devices.h"
+#include "nw_jit.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1089,6 +1090,9 @@ void nw_event_tick(uint32_t pc, uint32_t msr)
 	       nw_event_nx, nw_event_na, (unsigned)pc, (unsigned)msr,
 	       nw_event_ni, nw_event_nf);
 	fflush(stdout);
+	static unsigned tsec;
+	if ((++tsec % 10u) == 0)
+		nw_jit_pc_hot_dump("tick");
 #else
 	(void)pc;
 	(void)msr;

@@ -88,6 +88,8 @@ void nw_jit_verify_fail(void);
 void nw_jit_verify_skip(int mem);
 void nw_jit_verify_uncompared(int fault);	/* 1 = DSI probe, 2 = I/O skip */
 void nw_jit_verify_dump(const char *why);
+void nw_jit_pc_hot(uint32_t pc, uint32_t op);
+void nw_jit_pc_hot_dump(const char *why);
 
 typedef uint32_t (*nw_jit_host_lwz)(void *host, uint32_t ea, uint32_t pc, int *fault);
 typedef void (*nw_jit_host_stw)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
