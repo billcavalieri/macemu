@@ -24,11 +24,12 @@ and on `lwz`/`stw` (S4 step 16; NONE/IO mem ops stay on kpx). Idle PC-hotness
 (`/tmp/g8/4b2-hot4.log`, Finder, PMU shutdown): the 68k emulator loop at
 `68066084..90` (`rlwimi` / `mtspr 256` / `sth` / `bclr`) is ~4× anything
 in the 4a subset; those four are emitted and copy-out is ON
-(`08b38d4c`). 4c invalidation is in (`fe7b1cb3`; harness 612).
-`4b2-on3` ≈ 22 Mops/s vs ≈ 24–32 interpreter; most insns still fall to
-kpx. Do not call G6 yet. Next: 4d (SRR0/DAR/DSISR match, G2 HIT with
-JIT on), then the three-run G6 table; WP5 after G6. Watch flush/s vs
-ops/s before growing the emitter (`4b2-on7`: 1.5 M flushes in 18 s).
+(`08b38d4c`). 4c invalidation is in (`fe7b1cb3`). 4d DSI from compiled
+loads/stores (`7f7661bf`). **G6 reached** (S4 step 17): three
+interpreter and three `NW_JIT=on` G5-script boots, each PMU shutdown
+exit 0, G2 HIT, About 9.2.1. JIT is on and slower (≈ 210 s to Finder
+vs ≈ 130 s; ≈ 190 k flush/s). WP5 video damage is next; do not grow
+the emitter until flush/s drops.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -1147,7 +1148,9 @@ Same shape at `68067ef0`. `bc` at `68067f60` (`4082ff90`, BO=4) is in the
 4a subset; it is 5th. `NW_JIT=verify`/`on` is still shadow+kpx, so it is
 slower than the interpreter. Translating the 4a subset will not move idle.
 Those four are emitted (`5fa010a2`); copy-out ON (`08b38d4c`);
-4c invalidation in (`fe7b1cb3`). Harness 612 passed, 0 failed. Next: 4d.
+4c invalidation in (`fe7b1cb3`). 4d DSI copy-out (`7f7661bf`).
+DEC pending while MSB=1 (`a64942bf`) so ON leaves the ROM wait.
+Harness 613. **G6:** S4 step 17.
 
 #### S4 step 16 addendum — idle emit, copy-out, 4c
 
@@ -1160,10 +1163,45 @@ walk; T-line last field is cumulative JIT flush count. Evidence:
 `4b2-on7` 18 s, flush 1.5 M, 68k loop hottest. Harness 612. Branch
 `arm64-jit` @ `fe7b1cb3`.
 
+#### S4 step 17 — G6 three-run table
+
+Same G5 script (10 s shots, About, Special → Shut Down). Finder = first
+frame with the menu bar and Macintosh HD. Interpreter idle = T-line
+delta t=140–169; JIT idle = t=210–237 (Finder is later). Debug,
+512 MiB, 640×480×32, `--config /tmp/prefs-hd`. Logs `/tmp/g8/g6-iN.log`
+and `/tmp/g8/g6-jN.log`. All six: G2 `SRR0=PC DR on HIT`, PMU `0x7e`.
+
+Interpreter `NW_JIT=off`:
+
+| | i1 | i2 | i3 |
+|---|---|---|---|
+| time to Finder | 130 s | 130 s | 130 s |
+| boot ops/s (t=80) | 21.08 M | 21.05 M | 20.86 M |
+| idle ops/s | 15.15 M | 14.96 M | 14.87 M |
+| idle exceptions/s | 3353 | 3285 | 3276 |
+| idle A-traps/s | 573 | 525 | 522 |
+| idle presents/s | 60.0 | 60.0 | 60.0 |
+| JIT flush/s | 0 | 0 | 0 |
+
+`NW_JIT=on` (`G1: jit on`):
+
+| | j1 | j2 | j3 |
+|---|---|---|---|
+| time to Finder | 210 s | 210 s | 210 s |
+| boot ops/s (t=80) | 14.30 M | 14.11 M | 14.21 M |
+| idle ops/s | 11.16 M | 10.82 M | 10.88 M |
+| idle exceptions/s | 4146 | 4073 | 3848 |
+| idle A-traps/s | 1273 | 1228 | 942 |
+| idle presents/s | 59.9 | 59.9 | 59.9 |
+| JIT flush/s | 192 k | 190 k | 186 k |
+
+JIT is not faster. G6 is the table, not a speed gate. Branch `arm64-jit`
+@ `a64942bf`. Harness 613 passed, 0 failed.
+
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
-WP3 ARM64 JIT on the MMU through 4d and the G6 measurement table, then
-WP5 video damage. Not before G3. Do not treat WP5 as a peer of 4b-2/4d.
+WP5 video damage after G6. Flush/s is the next CPU cost; do not grow
+the emitter until that drops.
 
 ---
 

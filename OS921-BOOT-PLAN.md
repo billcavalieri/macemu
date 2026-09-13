@@ -166,7 +166,35 @@ Scheme `SheepShaver` (MacOSX target). `SheepShaver-MMUTests` is a native Debug t
 
 ## Measurement
 
-Same Mac, same RAM, same ROM: time to Finder, PPC ops/s, tiles/s, JIT flush/s, DSI/s after idle. Fill after G6.
+Same Mac, same RAM, same ROM, Debug 512 MiB 640×480×32, G5 script.
+Finder = first 10 s shot with the menu bar and Macintosh HD. Presents/s
+stands in for tiles/s until WP5. Exceptions/s stands in for DSI/s.
+
+Interpreter `NW_JIT=off` (`/tmp/g8/g6-iN.log`), idle t=140–169:
+
+| | i1 | i2 | i3 |
+|---|---|---|---|
+| time to Finder | 130 s | 130 s | 130 s |
+| boot ops/s (t=80) | 21.08 M | 21.05 M | 20.86 M |
+| idle ops/s | 15.15 M | 14.96 M | 14.87 M |
+| idle exceptions/s | 3353 | 3285 | 3276 |
+| idle A-traps/s | 573 | 525 | 522 |
+| idle presents/s | 60.0 | 60.0 | 60.0 |
+| JIT flush/s | 0 | 0 | 0 |
+
+`NW_JIT=on` (`/tmp/g8/g6-jN.log`), idle t=210–237:
+
+| | j1 | j2 | j3 |
+|---|---|---|---|
+| time to Finder | 210 s | 210 s | 210 s |
+| boot ops/s (t=80) | 14.30 M | 14.11 M | 14.21 M |
+| idle ops/s | 11.16 M | 10.82 M | 10.88 M |
+| idle exceptions/s | 4146 | 4073 | 3848 |
+| idle A-traps/s | 1273 | 1228 | 942 |
+| idle presents/s | 59.9 | 59.9 | 59.9 |
+| JIT flush/s | 192 k | 190 k | 186 k |
+
+Filled at G6 (`arm64-jit` `a64942bf`). JIT is on and slower.
 
 ## Out of scope
 

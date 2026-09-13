@@ -1,17 +1,13 @@
-# Next steps: WP3 4d through G6, then WP5
+# Next steps: WP5 video damage
 
-Branch **`arm64-jit`** at **`fe7b1cb3`** (S4 step 16 done through 4c).
-Idle 68k loop `68066084..90` (`rlwimi`/`mtspr 256`/`sth`/`bclr`) is
-emitted; copy-out is ON (`08b38d4c`); 4c invalidation is in
-(`fe7b1cb3`: tlbie/tlbia, mtsr/mtsrin, BAT/SDR1, icbi, live stw/sth of
-a compiled page). Harness 612. `4b2-on3` ≈ 22 Mops/s vs ≈ 24–32
-interpreter; most insns still fall to kpx. Do not call G6 yet.
+Branch **`arm64-jit`** at **`a64942bf`**. **G6 reached:** three
+interpreter and three `NW_JIT=on` G5-script boots, PMU shutdown each,
+table in `NEWWORLD-BOOT-PLAN.md` S4 step 17 and `OS921-BOOT-PLAN.md`
+Measurement. JIT is on and slower (210 s vs 130 s to Finder; ≈ 190 k
+flush/s). Harness 613.
 
-**Next (strict order):** 4d exception exactness (SRR0/DAR/DSISR match,
-G2 HIT with JIT on), then the three-run G6 measurement table.
-**WP5 video damage after G6**, not before. Before growing the emitter,
-measure flush/s vs ops/s: `4b2-on7` logged 1.5 M flushes in 18 s.
-Follow `NEWWORLD-BOOT-PLAN.md` conventions.
+**Next:** WP5 video damage (`video-damage`). Do not grow the emitter
+until flush/s drops. Follow `NEWWORLD-BOOT-PLAN.md` conventions.
 
 Deferred (unchanged): Sleep (`0x7f`), Startup Disk / OF `boot-device`.
 
@@ -225,13 +221,10 @@ change the MMU model to suit the JIT, or claim G6 from a single run.
 
 ## Step 5 - G6 accept
 
-JIT on in the Debug scheme for the run (a pref or env, logged in the
-`G1:` banner like `PVR`), the same G5 script, exit 0, and the
-measurement table filled: time to Finder, ops/s, exceptions/s,
-A-traps/s, JIT flush/s, frames/s, each interpreter vs JIT, three runs
-each. Addendum, header status to G6, `OS921-BOOT-PLAN.md` "Measurement"
-filled in. Do not claim G6 until this three-run table exists. Do not
-enable bare `NW_JIT=on` until copy-out is gated off (after 4b-2 / 4c / 4d).
+**Done** (`a64942bf`, S4 step 17). Three interpreter and three
+`NW_JIT=on` G5-script boots, PMU `0x7e` each, `G1: jit on`, G2 HIT.
+Table in `NEWWORLD-BOOT-PLAN.md` and `OS921-BOOT-PLAN.md` Measurement.
+JIT is slower (210 s vs 130 s to Finder; ≈ 190 k flush/s).
 
 ## Step 6 - WP5 video damage (branch `video-damage`)
 
