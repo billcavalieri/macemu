@@ -1091,8 +1091,10 @@ void nw_event_tick(uint32_t pc, uint32_t msr)
 	       nw_event_ni, nw_event_nf, (unsigned long long)nw_jit_flush_count());
 	fflush(stdout);
 	static unsigned tsec;
-	if ((++tsec % 10u) == 0)
+	if ((++tsec % 10u) == 0) {
 		nw_jit_pc_hot_dump("tick");
+		nw_jit_stats_print("tick");
+	}
 #else
 	(void)pc;
 	(void)msr;

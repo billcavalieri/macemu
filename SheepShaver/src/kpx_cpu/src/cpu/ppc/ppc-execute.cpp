@@ -1321,7 +1321,7 @@ void powerpc_cpu::execute_mtsr(uint32 opcode)
 		ppc32_guest_mmu().set_sr(rA_field::extract(opcode) & 0xfu,
 					 operand_RS::get(this, opcode));
 #ifdef SHEEPSHAVER
-		nw_jit_invalidate_all();
+		nw_jit_invalidate_all_src(NW_JIT_FL_SR);
 #endif
 	}
 	increment_pc(4);
@@ -1345,7 +1345,7 @@ void powerpc_cpu::execute_mtsrin(uint32 opcode)
 		ppc32_guest_mmu().set_sr((ea >> 28) & 0xfu,
 					 operand_RS::get(this, opcode));
 #ifdef SHEEPSHAVER
-		nw_jit_invalidate_all();
+		nw_jit_invalidate_all_src(NW_JIT_FL_SR);
 #endif
 	}
 	increment_pc(4);
@@ -1522,7 +1522,7 @@ void powerpc_cpu::execute_invalidate_cache_range()
 				const ppc32_xlate_result r =
 					ppc32_guest_mmu().translate(ea, PPC32_XLATE_IR, 4);
 				if (r.ok)
-					nw_jit_invalidate_page(r.pa);
+					nw_jit_invalidate_page_src(r.pa, NW_JIT_FL_ICBI);
 				if (ea == last)
 					break;
 				ea += 0x1000u;

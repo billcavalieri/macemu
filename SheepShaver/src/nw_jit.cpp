@@ -49,6 +49,9 @@ static size_t g_code_used;
 static struct nw_jit_entry g_cache[NW_JIT_CACHE];
 static uint8_t g_pagebit[512];	/* 4096 bits: (phys>>12)&4095 may have compiled code */
 static uint64_t g_flush;
+static uint64_t g_flush_src[NW_JIT_FL_N];	/* entries dropped, by cause */
+static uint64_t g_flush_calls[NW_JIT_FL_N];	/* invalidate calls, by cause */
+static uint64_t g_compiles;
 static uint64_t g_exec_blocks, g_exec_insns;
 static int g_mode = -1;
 static nw_jit_host_lwz g_host_lwz;
@@ -133,6 +136,9 @@ void nw_jit_reset(void)
 	memset(g_pagebit, 0, sizeof(g_pagebit));
 	g_code_used = 0;
 	g_flush = 0;
+	g_compiles = 0;
+	memset(g_flush_src, 0, sizeof(g_flush_src));
+	memset(g_flush_calls, 0, sizeof(g_flush_calls));
 	g_exec_blocks = 0;
 	g_exec_insns = 0;
 	g_v_cmp = g_v_miss = g_v_fail = g_v_skip_unsup = g_v_skip_mem = 0;
@@ -143,33 +149,56 @@ void nw_jit_reset(void)
 	memset(g_pchot, 0, sizeof(g_pchot));
 }
 
-void nw_jit_invalidate_page(uint32_t phys_page)
+void nw_jit_invalidate_page_src(uint32_t phys_page, int src)
 {
 	phys_page &= ~0xfffu;
+	if (src < 0 || src >= NW_JIT_FL_N)
+		src = NW_JIT_FL_OTHER;
 	if (!pagebit_get(phys_page))
 		return;
+	g_flush_calls[src]++;
 	for (int i = 0; i < NW_JIT_CACHE; i++) {
 		if (g_cache[i].used && g_cache[i].phys_page == phys_page) {
 			g_cache[i].used = 0;
 			g_flush++;
+			g_flush_src[src]++;
 		}
 	}
 }
 
-void nw_jit_invalidate_all(void)
+void nw_jit_invalidate_page(uint32_t phys_page)
 {
+	nw_jit_invalidate_page_src(phys_page, NW_JIT_FL_OTHER);
+}
+
+void nw_jit_invalidate_all_src(int src)
+{
+	if (src < 0 || src >= NW_JIT_FL_N)
+		src = NW_JIT_FL_OTHER;
+	g_flush_calls[src]++;
 	for (int i = 0; i < NW_JIT_CACHE; i++) {
 		if (g_cache[i].used) {
 			g_cache[i].used = 0;
 			g_flush++;
+			g_flush_src[src]++;
 		}
 	}
 	memset(g_pagebit, 0, sizeof(g_pagebit));
 }
 
+void nw_jit_invalidate_all(void)
+{
+	nw_jit_invalidate_all_src(NW_JIT_FL_OTHER);
+}
+
 uint64_t nw_jit_flush_count(void)
 {
 	return g_flush;
+}
+
+uint64_t nw_jit_compile_count(void)
+{
+	return g_compiles;
 }
 
 int nw_jit_mode(void)
@@ -203,14 +232,32 @@ const char *nw_jit_mode_name(void)
 	}
 }
 
+void nw_jit_stats_print(const char *why)
+{
+	if (!g_exec_blocks && nw_jit_mode() == NW_JIT_OFF)
+		return;
+	static const char *const src_name[NW_JIT_FL_N] = {
+		"store", "icbi", "tlb", "sr", "bat", "sdr1", "wrap", "other"
+	};
+	printf("NW-BOOT G1: jit stats %s mode %s blocks %llu insns %llu flush %llu compiles %llu\n",
+	       why, nw_jit_mode_name(),
+	       (unsigned long long)g_exec_blocks,
+	       (unsigned long long)g_exec_insns,
+	       (unsigned long long)g_flush,
+	       (unsigned long long)g_compiles);
+	for (int i = 0; i < NW_JIT_FL_N; i++) {
+		if (g_flush_calls[i] || g_flush_src[i])
+			printf("NW-BOOT G1: jit flush %s calls %llu entries %llu\n",
+			       src_name[i],
+			       (unsigned long long)g_flush_calls[i],
+			       (unsigned long long)g_flush_src[i]);
+	}
+	fflush(stdout);
+}
+
 static void nw_jit_atexit_stats(void)
 {
-	if (g_exec_blocks || nw_jit_mode() != NW_JIT_OFF)
-		printf("NW-BOOT G1: jit stats mode %s blocks %llu insns %llu flush %llu\n",
-		       nw_jit_mode_name(),
-		       (unsigned long long)g_exec_blocks,
-		       (unsigned long long)g_exec_insns,
-		       (unsigned long long)g_flush);
+	nw_jit_stats_print("exit");
 	nw_jit_verify_dump("exit");
 }
 
@@ -1555,10 +1602,9 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 		return NULL;
 	if (g_code_used + 8192 > NW_JIT_CODE_SIZE) {
 		g_code_used = 0;
-		memset(g_cache, 0, sizeof(g_cache));
-		memset(g_pagebit, 0, sizeof(g_pagebit));
-		g_flush++;
+		nw_jit_invalidate_all_src(NW_JIT_FL_WRAP);
 	}
+	g_compiles++;
 #ifdef __APPLE__
 	pthread_jit_write_protect_np(0);
 #endif

@@ -125,9 +125,25 @@ int nw_jit_interp_n(struct nw_jit_cpu *cpu, const uint32_t *ops, int n, uint32_t
 nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
 			uint32_t phys_page, uint32_t msr_ir, uint32_t endian);
 
+/* Flush attribution for jit stats. */
+enum {
+	NW_JIT_FL_STORE = 0,	/* compiled stw/sth into a page with blocks */
+	NW_JIT_FL_ICBI,		/* icbi range */
+	NW_JIT_FL_TLB,		/* tlbie/tlbia -> invalidate_cache */
+	NW_JIT_FL_SR,		/* mtsr/mtsrin */
+	NW_JIT_FL_BAT,		/* mtibat/mtdbat */
+	NW_JIT_FL_SDR1,		/* mtsdr1 */
+	NW_JIT_FL_WRAP,		/* code buffer wrap */
+	NW_JIT_FL_OTHER,
+	NW_JIT_FL_N
+};
 void nw_jit_invalidate_page(uint32_t phys_page);
+void nw_jit_invalidate_page_src(uint32_t phys_page, int src);
 void nw_jit_invalidate_all(void);
+void nw_jit_invalidate_all_src(int src);
 uint64_t nw_jit_flush_count(void);
+uint64_t nw_jit_compile_count(void);
+void nw_jit_stats_print(const char *why);
 
 /* PPC instruction constructors for the harness. */
 uint32_t nw_ppc_addi(int rd, int ra, int simm);
