@@ -12,7 +12,9 @@ with a real VBL interrupt (S4 step 8); the cursor tracks the ADB mouse.
 PRAM persists across runs through a model of the boot flash's NVRAM
 blocks (S4 step 9 addendum). Special → Restart and Shut Down go through
 the PMU model (S4 step 10): restart re-executes the process (one log,
-two boots), shut down exits 0. Next: G5 polish and G6 JIT.
+two boots), shut down exits 0. **G5 reached** (S4 step 11): Finder,
+menu bar, About This Computer reads Mac OS 9.2.1. Next: measurement
+baseline, then WP4 banks / WP3 JIT / WP5 damage / G6.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -698,8 +700,9 @@ expectations carry the flag bits). Removed on the way: a `cscSetInterrupt`
 override ("keeping VBL") that never fired, and a composited hardware
 cursor tried while chasing the freeze.
 
-Open: Keylargo GPIO details, BAT range 1 overlap. PMU restart/shutdown
-is done (S4 step 10 below).
+Open: BAT range 1 overlap. PMU restart/shutdown is done (S4 step 10).
+The three per-boot unclaimed I/O pages (SCC, both ATA) and the
+Keylargo FCR RMW on reset are claimed as absent devices (S4 step 11).
 XPRAM/NVRAM persistence is done (NVRAM flash model, addendum below). A
 750 PVR (`NW_PVR=00080202`) is documented, not the default — see below.
 The Apple Monitor Plugins dialog is not a gate; see the addendum.
@@ -947,10 +950,48 @@ the PMU and the host acts on what the PMU received.
    the second boot are the three of the first (`80012000`, `80020000`,
    `80021000`); nothing new.
 
-Left: Sleep (`0x7f`) untouched; the FCR/GPIO writes before the reset
-stay unclaimed; the exec restarts with the same command line, so a
-prefs change made by the guest (Startup Disk) is picked up only through
-the files it wrote.
+Left: Sleep (`0x7f`) untouched; the exec restarts with the same command
+line, so a prefs change made by the guest (Startup Disk) is picked up
+only through the files it wrote. The FCR/GPIO writes before the reset
+are claimed as absent devices in S4 step 11 (reads 0, writes dropped).
+
+#### S4 step 11 — G5 accept (Finder, menu bar, About This Computer)
+
+G5 text (`OS921-BOOT-PLAN.md`): Finder desktop, menu bar, about box
+says 9.2.1. Two of three were already in the 13 Sep install-boot shots;
+this step records the About box and the idle-desktop rates, and claims
+the I/O pages every boot used to log as unclaimed.
+
+1. **Proof** (`/tmp/g8/g5.log`, `g5.nws`, fresh NVRAM `/tmp/g8/home`,
+   installed volume, `alarm 280`, **exit 0**). Starting Up at 30 s and
+   60 s (`g5-000.png`, `g5-001.png`); Finder with menu bar, Control
+   Strip, Macintosh HD and the CD window at 90 s (`g5-002.png`). Apple
+   menu → About This Computer at 238 s (`g5-about.png`): **Version:
+   Mac OS 9.2.1**, Built-in Memory 768 MB (prefs `ramsize` is 512 MiB;
+   the extra is not investigated), Virtual Memory Off. Special → Shut
+   Down → `PMU shutdown (0x7e 4d415454)`. Apple Monitor Plugins −29208
+   did not appear.
+2. **Idle rates** (T-line deltas, script t=170–232, 61 s, no input):
+   ≈ **18 200 exceptions/s**, ≈ **7 000 A-traps/s**. These are the WP3 /
+   WP5 / "DSI/s after idle" baseline until the instruction counter in
+   step 2 of `G5-G6-brief.md`. Time to Finder is between 60 s (Starting
+   Up) and 90 s (desktop).
+3. **Absent devices** (`nw_devices.cpp`, `nw_io.h`): SCC
+   (`0x80012000`+0x2000, legacy and escc; the tree has no escc), both
+   keylargo-ata buses (`0x80020000`, `0x80021000`, 4 KiB each; the ndrv
+   probes and deletes empty buses), and Keylargo FCR0..FCR4
+   (`0x80000038`+0x18, abuts GPIO). Reads 0, writes dropped — the unclaimed
+   default — so a new `IO page … first` line is a surprise again. 20 s
+   boot `/tmp/g8/io-claim.log` has none of the three pages and no
+   `unclaimed` lines. Harness 459 pass (+6). Reliability commits ahead
+   of this step: `23c6b8a9` (stale PMU event), `3b68fae4` (`Sys_read`
+   loop + `.AppleCD` WARNING), `d69305b7` (scripted run exits on
+   `O_EXLOCK` `EAGAIN`; `/tmp/g8/lock-test.log` exit 1).
+
+Left: Sleep; Startup Disk / OF `boot-device`; BAT range 1 overlap;
+measurement counters (G5-G6-brief step 2). The 0a "full reinstall"
+verify of the `Sys_read` loop was not repeated over the working G5
+volume.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
