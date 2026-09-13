@@ -13,8 +13,9 @@ PRAM persists across runs through a model of the boot flash's NVRAM
 blocks (S4 step 9 addendum). Special → Restart and Shut Down go through
 the PMU model (S4 step 10): restart re-executes the process (one log,
 two boots), shut down exits 0. **G5 reached** (S4 step 11): Finder,
-menu bar, About This Computer reads Mac OS 9.2.1. Next: measurement
-baseline, then WP4 banks / WP3 JIT / WP5 damage / G6.
+menu bar, About This Computer reads Mac OS 9.2.1. Interpreter baseline
+(S4 step 12): ≈ 80–110 s to Finder, ≈ 31.6 Mops/s during boot, ≈ 23.7 Mops/s
+and 60 presents/s at idle. Next: WP4 banks / WP3 JIT / WP5 damage / G6.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -207,8 +208,9 @@ pieces were re-added. Three commits, one per category, each `git revert`-able:
 Event stream (S3 grammar, consumed by `NewWorldViewCLI diff`):
 `NW-BOOT X E <srr0> <vector> [<dar>|<srr1>]`, `NW-BOOT A <op> <68k-pc> <h>`
 (observed when the fetch PC hits one of the ROM emulator's four A-line
-handlers — observation only), `NW-BOOT T <ms> <nX> <nA> <pc> <msr>` once a
-second (pc/msr are extra fields so a silent spin is still located).
+handlers — observation only), `NW-BOOT T <ms> <nX> <nA> <pc> <msr> <nI> <nF>`
+once a second (pc/msr locate a silent spin; nI is interpreter ops, nF is
+`VideoHostPresent` calls; Debug / `NW_BOOT_LOG` only).
 Debug-only observers under `NW_BOOT_LOG`: `PCTRACE` ring dumped once when
 the PC first enters the NK debug region ROM+0x325500..0x325fff, and
 `NKPANIC` registers at ROM+0x326420/0x326428.
@@ -988,10 +990,47 @@ the I/O pages every boot used to log as unclaimed.
    loop + `.AppleCD` WARNING), `d69305b7` (scripted run exits on
    `O_EXLOCK` `EAGAIN`; `/tmp/g8/lock-test.log` exit 1).
 
-Left: Sleep; Startup Disk / OF `boot-device`; BAT range 1 overlap;
-measurement counters (G5-G6-brief step 2). The 0a "full reinstall"
-verify of the `Sys_read` loop was not repeated over the working G5
-volume.
+Left: Sleep; Startup Disk / OF `boot-device`; BAT range 1 overlap.
+The 0a "full reinstall" verify of the `Sys_read` loop was not repeated
+over the working G5 volume. Measurement counters are S4 step 12.
+
+#### S4 step 12 — interpreter measurement baseline
+
+`OS921-BOOT-PLAN.md` Measurement: time to Finder, PPC ops/s, tiles/s,
+JIT flush/s, DSI/s after idle. Only exceptions/s and A-traps/s existed.
+Behind `NW_BOOT_LOG` the interpreter dispatch increments a 64-bit op
+counter after each `execute`, and `VideoHostPresent()` increments a
+present counter; both are extra fields on the `T` line
+(`<nI> <nF>`). Release is unchanged.
+
+Cost, three boots each, 10 s shots, Finder = first frame with the
+menu bar and the Macintosh HD icon (`/tmp/g8/bN`, `/tmp/g8/aN`):
+
+| | 1 | 2 | 3 |
+|---|---|---|---|
+| before (`bN.log`) | 80 s | 100 s | 100 s |
+| after (`aN.log`) | 110 s | 110 s | 110 s |
+
+The before spread was already 20 s; after is one shot interval outside
+the slowest before. Not reverted.
+
+Baseline, interpreter, 512 MiB guest RAM, 640×480×32, Debug, three
+after-runs (`a1`–`a3.log`). Boot ops/s is nI at t=80 / 80 s; idle is
+the T-line delta over t=110–129 (Finder is up, no input):
+
+| | a1 | a2 | a3 |
+|---|---|---|---|
+| time to Finder | 110 s | 110 s | 110 s |
+| boot ops/s (t=80) | 31.63 M | 31.51 M | 31.70 M |
+| idle ops/s | 23.71 M | 22.98 M | 24.42 M |
+| idle exceptions/s | 3556 | 3465 | 3853 |
+| idle A-traps/s | 794 | 697 | 1126 |
+| idle presents/s | 59.9 | 60.0 | 60.0 |
+
+G5 step 1b (no op counter, 61 s after clicking the desktop) was
+≈ 18 200 exceptions/s and 7 000 A-traps/s — a busier desktop than
+these 19 s windows. G6 compares against this table. JIT flush/s is
+zero (no JIT).
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
