@@ -428,9 +428,18 @@ static void get_system_info(void)
 	 * (AltiVec). The 750 then SystemCrashes (NanoKernel trap 15) when the
 	 * 68k emulator tries to allocate a slot. Keep the 7400 default: that
 	 * is the QEMU golden, and 9.2.1 QuickDraw uses AltiVec. See
-	 * NEWWORLD-BOOT-PLAN.md S4 step 9. */
-	if (const char *nw_pvr = getenv("NW_PVR"))
-		PVR = (uint32)strtoul(nw_pvr, NULL, 16);
+	 * NEWWORLD-BOOT-PLAN.md S4 step 9. An empty or non-hex value is
+	 * ignored (strtoul would give PVR 0). Values remapped below (7450+,
+	 * 970) still end up as 7400. */
+	bool pvr_overridden = false;
+	if (const char *nw_pvr = getenv("NW_PVR")) {
+		uint32 v = (uint32)strtoul(nw_pvr, NULL, 16);
+		if (v) {
+			PVR = v;
+			pvr_overridden = true;
+		} else
+			printf("NW-BOOT G1: NW_PVR '%s' is not a hex PVR; ignored\n", nw_pvr);
+	}
 	int pref_cpu_clock = PrefsFindInt32("cpuclock");
 	if (pref_cpu_clock) CPUClockSpeed = 1000000 * pref_cpu_clock;
 #elif defined(__APPLE__) && defined(__MACH__)
@@ -613,6 +622,11 @@ static void get_system_info(void)
 		break;
 	}
 	D(bug("PVR: %08x (assumed)\n", PVR));
+#if EMULATED_PPC
+	/* Record the PVR the guest will see, so a run log says which CPU a
+	 * result was obtained on (750 vs 7400 boot differently). */
+	printf("NW-BOOT G1: PVR %08x%s\n", (unsigned)PVR, pvr_overridden ? " (NW_PVR)" : " (default)");
+#endif
 }
 
 static bool load_mac_rom(void)
