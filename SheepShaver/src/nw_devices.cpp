@@ -877,11 +877,11 @@ enum { ADB_KEY_RING = 256 };
 
 static struct {
 	/* keyboard */
-	uint8_t kbd_addr, kbd_handler;
+	uint8_t kbd_addr, kbd_handler, kbd_flags;
 	uint8_t keys[ADB_KEY_RING];
 	std::atomic<unsigned> key_wr, key_rd;
 	/* mouse */
-	uint8_t mouse_addr, mouse_handler;
+	uint8_t mouse_addr, mouse_handler, mouse_flags;
 	std::atomic<int> dx, dy;
 	std::atomic<unsigned> buttons;		/* bit 0 primary, bit 1 secondary */
 	unsigned last_buttons;
@@ -894,15 +894,29 @@ static struct {
 	int reply_sz;
 } adb;
 
+/* Register 3 high byte as a real device answers it: bit 6 set (no
+ * exceptional event), bit 5 service-request enable, low nibble the
+ * address (devices may return anything there). Listen R3 with handler
+ * 0x00 rewrites the enable bit; Mac OS 9's cursor device driver writes
+ * 0x63 and reads it back, and drops the mouse when the flags stay clear. */
+enum { ADB_R3_FLAGS = 0x60 };
+
 static void adb_reset(void)
 {
 	adb.kbd_addr = NW_ADB_KBD_ADDR;
 	adb.kbd_handler = 1;
+	adb.kbd_flags = ADB_R3_FLAGS;
 	adb.mouse_addr = NW_ADB_MOUSE_ADDR;
 	adb.mouse_handler = 2;			/* as QEMU's adb-mouse after reset */
+	adb.mouse_flags = ADB_R3_FLAGS;
 	adb.last_buttons = adb.buttons.load();
 	adb.dx.store(0);
 	adb.dy.store(0);
+}
+
+static inline uint8_t adb_r3_hi(uint8_t flags, uint8_t addr)
+{
+	return (uint8_t)((flags & 0xf0) | (addr & 0x0f));
 }
 
 void nw_adb_key(uint8_t code, int down)
@@ -953,8 +967,12 @@ static int adb_kbd_request(uint8_t *obuf, const uint8_t *buf, int len)
 			switch (buf[2]) {
 			case 0xff:				/* self test */
 				break;
-			case 0xfe: case 0xfd: case 0x00:	/* change address (and activator/enable) */
+			case 0xfe: case 0xfd:	/* change address (no collision / activator) */
 				adb.kbd_addr = buf[1] & 0xf;
+				break;
+			case 0x00:				/* change address and SRQ enable */
+				adb.kbd_addr = buf[1] & 0xf;
+				adb.kbd_flags = (uint8_t)((adb.kbd_flags & 0xd0) | (buf[1] & 0x20));
 				break;
 			default:				/* new address and handler */
 				adb.kbd_addr = buf[1] & 0xf;
@@ -975,7 +993,7 @@ static int adb_kbd_request(uint8_t *obuf, const uint8_t *buf, int len)
 		obuf[1] = 0x07;					/* LEDs off */
 		return 2;
 	case 3:
-		obuf[0] = adb.kbd_addr;
+		obuf[0] = adb_r3_hi(adb.kbd_flags, adb.kbd_addr);
 		obuf[1] = adb.kbd_handler;
 		return 2;
 	default:
@@ -1016,8 +1034,12 @@ static int adb_mouse_request(uint8_t *obuf, const uint8_t *buf, int len)
 			switch (buf[2]) {
 			case 0xff:
 				break;
-			case 0xfe: case 0xfd: case 0x00:
+			case 0xfe: case 0xfd:
 				adb.mouse_addr = buf[1] & 0xf;
+				break;
+			case 0x00:
+				adb.mouse_addr = buf[1] & 0xf;
+				adb.mouse_flags = (uint8_t)((adb.mouse_flags & 0xd0) | (buf[1] & 0x20));
 				break;
 			default:
 				adb.mouse_addr = buf[1] & 0xf;
@@ -1034,7 +1056,7 @@ static int adb_mouse_request(uint8_t *obuf, const uint8_t *buf, int len)
 	case 0:
 		return adb_mouse_poll(obuf);
 	case 3:
-		obuf[0] = adb.mouse_addr;
+		obuf[0] = adb_r3_hi(adb.mouse_flags, adb.mouse_addr);
 		obuf[1] = adb.mouse_handler;
 		return 2;
 	default:

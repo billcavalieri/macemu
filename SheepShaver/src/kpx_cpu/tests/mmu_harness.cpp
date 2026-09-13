@@ -1131,7 +1131,7 @@ int main()
 		CHECK(pmu_recv() == NW_PMU_INT_ADB);
 		CHECK(pmu_recv() == 0x01);
 		CHECK(pmu_recv() == 2);
-		CHECK(pmu_recv() == NW_ADB_KBD_ADDR);
+		CHECK(pmu_recv() == (0x60 | NW_ADB_KBD_ADDR));		/* flags: no exceptional event, SRQ enabled */
 		CHECK(pmu_recv() == 1);
 		/* Listen R3 at 3: move the mouse to address 7, handler 2 */
 		pmu_send(NW_PMU_ADB_CMD); pmu_send(5); pmu_send(0x3b); pmu_send(0x00); pmu_send(2); pmu_send(0x07); pmu_send(0x02);
@@ -1145,7 +1145,7 @@ int main()
 		CHECK(pmu_recv() == NW_PMU_INT_ADB);
 		CHECK(pmu_recv() == 0x01);
 		CHECK(pmu_recv() == 2);
-		CHECK(pmu_recv() == 7);
+		CHECK(pmu_recv() == (0x60 | 7));
 		CHECK(pmu_recv() == 2);
 		pmu_send(NW_PMU_ADB_CMD); pmu_send(3); pmu_send(0x3f); pmu_send(0x00); pmu_send(0);	/* 3 is empty now */
 		pmu_send(NW_PMU_INT_ACK);
