@@ -1,16 +1,17 @@
-# Next steps: WP3 4b-2 through G6, then WP5
+# Next steps: WP3 4d through G6, then WP5
 
-Branch **`arm64-jit`** at **`94d7484c`** (S4 step 16, WP3 4b-2 `lwz`/
-`stw` vs-kpx). Idle PC-hotness (`/tmp/g8/4b2-hot4.log`): Finder 68k
-emulator loop `68066084..90` is `rlwimi`/`mtspr 256`/`sth`/`bclr`, not
-the 4a integer subset. `NW_JIT=on` is still shadow+kpx (slower, not
-faster). Copy-out gated.
+Branch **`arm64-jit`** at **`fe7b1cb3`** (S4 step 16 done through 4c).
+Idle 68k loop `68066084..90` (`rlwimi`/`mtspr 256`/`sth`/`bclr`) is
+emitted; copy-out is ON (`08b38d4c`); 4c invalidation is in
+(`fe7b1cb3`: tlbie/tlbia, mtsr/mtsrin, BAT/SDR1, icbi, live stw/sth of
+a compiled page). Harness 612. `4b2-on3` ≈ 22 Mops/s vs ≈ 24–32
+interpreter; most insns still fall to kpx. Do not call G6 yet.
 
-**Next (strict order):** vs-kpx that 4-insn loop, then copy-out,
-then 4c invalidation, 4d exception exactness, then the three-run G6
-measurement table. **WP5 video damage after G6**, not before. Do not set
-`NW_JIT=on` until copy-out is gated off. Follow `NEWWORLD-BOOT-PLAN.md`
-conventions.
+**Next (strict order):** 4d exception exactness (SRR0/DAR/DSISR match,
+G2 HIT with JIT on), then the three-run G6 measurement table.
+**WP5 video damage after G6**, not before. Before growing the emitter,
+measure flush/s vs ops/s: `4b2-on7` logged 1.5 M flushes in 18 s.
+Follow `NEWWORLD-BOOT-PLAN.md` conventions.
 
 Deferred (unchanged): Sleep (`0x7f`), Startup Disk / OF `boot-device`.
 
@@ -24,7 +25,7 @@ in git; `--config /tmp/prefs-hd` (never edit the user's prefs);
 runs; `/* TEMP */` on every probe, `rg TEMP SheepShaver/src` empty
 before commit; evidence → change → prediction → rebuild → run → quote;
 small commits, one cause each; harness `SheepShaver-MMUTests`
-**≥ 450 passed, 0 failed**; new source files carry the two copyright
+**≥ 612 passed, 0 failed**; new source files carry the two copyright
 lines.
 
 Two rules learned this session, now mandatory:

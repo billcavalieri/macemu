@@ -23,9 +23,12 @@ dispatcher** (S4 step 15): fallback boot identical, not faster;
 and on `lwz`/`stw` (S4 step 16; NONE/IO mem ops stay on kpx). Idle PC-hotness
 (`/tmp/g8/4b2-hot4.log`, Finder, PMU shutdown): the 68k emulator loop at
 `68066084..90` (`rlwimi` / `mtspr 256` / `sth` / `bclr`) is ~4× anything
-in the 4a subset. Copy-out of the current subset cannot beat the
-interpreter at idle. Next: vs-kpx those four ops, then copy-out, 4c, 4d,
-G6; WP5 after G6.
+in the 4a subset; those four are emitted and copy-out is ON
+(`08b38d4c`). 4c invalidation is in (`fe7b1cb3`; harness 612).
+`4b2-on3` ≈ 22 Mops/s vs ≈ 24–32 interpreter; most insns still fall to
+kpx. Do not call G6 yet. Next: 4d (SRR0/DAR/DSISR match, G2 HIT with
+JIT on), then the three-run G6 table; WP5 after G6. Watch flush/s vs
+ops/s before growing the emitter (`4b2-on7`: 1.5 M flushes in 18 s).
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -1143,12 +1146,24 @@ Last 60 s ≈ 18.2 Mops/s, 60 fps. Hottest 4-insn loop (delta over ~80 s):
 Same shape at `68067ef0`. `bc` at `68067f60` (`4082ff90`, BO=4) is in the
 4a subset; it is 5th. `NW_JIT=verify`/`on` is still shadow+kpx, so it is
 slower than the interpreter. Translating the 4a subset will not move idle.
-Next: vs-kpx `rlwimi`/`sth`/`bclr`/`mtspr 256`, then copy-out. Harness 589
-passed, 0 failed.
+Those four are emitted (`5fa010a2`); copy-out ON (`08b38d4c`);
+4c invalidation in (`fe7b1cb3`). Harness 612 passed, 0 failed. Next: 4d.
+
+#### S4 step 16 addendum — idle emit, copy-out, 4c
+
+Emitted the Finder 68k idle loop (`rlwimi` / `mtspr 256` / `sth` /
+`bclr`) instead of skipping it; fixed `bclr` fall-through SIGILL;
+copy-out ON. 4c: `tlbie`/`tlbia` (`invalidate_cache`), `mtsr`/`mtsrin`,
+BAT/SDR1, `icbi`, and live `stw`/`sth` of a compiled page drop
+translation-cache entries; page filter keeps uncompiled stores off the
+walk; T-line last field is cumulative JIT flush count. Evidence:
+`4b2-on7` 18 s, flush 1.5 M, 68k loop hottest. Harness 612. Branch
+`arm64-jit` @ `fe7b1cb3`.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
-WP3 ARM64 JIT on the MMU, WP5 video damage, then G6. Not before G3.
+WP3 ARM64 JIT on the MMU through 4d and the G6 measurement table, then
+WP5 video damage. Not before G3. Do not treat WP5 as a peer of 4b-2/4d.
 
 ---
 
