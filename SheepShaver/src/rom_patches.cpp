@@ -142,6 +142,27 @@ static size_t nw_build_video_driver(void)
  *  Decode ROM image, 4 MB plain images or NewWorld CHRP (lzss or parcels/prcl)
  */
 
+/* VideoInit runs before PatchROM; SDL grab and the software-cursor
+ * choice need ROMType as soon as the image is in ROMBaseHost. */
+static bool IdentifyROMType(void)
+{
+	if (!memcmp(ROMBaseHost + 0x30d064, "Boot TNT", 8))
+		ROMType = ROMTYPE_TNT;
+	else if (!memcmp(ROMBaseHost + 0x30d064, "Boot Alchemy", 12))
+		ROMType = ROMTYPE_ALCHEMY;
+	else if (!memcmp(ROMBaseHost + 0x30d064, "Boot Zanzibar", 13))
+		ROMType = ROMTYPE_ZANZIBAR;
+	else if (!memcmp(ROMBaseHost + 0x30d064, "Boot Gazelle", 12))
+		ROMType = ROMTYPE_GAZELLE;
+	else if (!memcmp(ROMBaseHost + 0x30d064, "Boot Gossamer", 13))
+		ROMType = ROMTYPE_GOSSAMER;
+	else if (!memcmp(ROMBaseHost + 0x30d064, "NewWorld", 8))
+		ROMType = ROMTYPE_NEWWORLD;
+	else
+		return false;
+	return true;
+}
+
 bool DecodeROM(uint8 *data, uint32 size)
 {
 	if (!nw_decode_rom_image(data, size, ROMBaseHost, ROM_SIZE))
@@ -150,6 +171,7 @@ bool DecodeROM(uint8 *data, uint32 size)
 	 * the ROM image; keep them for the boot-info device tree (PatchROM). */
 	nw_parcels_keep(data, size);
 	nw_log_g0_decode(ROMBaseHost, ROM_SIZE);
+	IdentifyROMType();
 	return true;
 }
 
@@ -647,20 +669,7 @@ bool PatchROM(void)
 	D(bug("Resource Map at %08lx\n", ntohl(*(uint32 *)(ROMBaseHost + 26))));
 	D(bug("Trap Tables at %08lx\n\n", ntohl(*(uint32 *)(ROMBaseHost + 34))));
 
-	// Detect ROM type
-	if (!memcmp(ROMBaseHost + 0x30d064, "Boot TNT", 8))
-		ROMType = ROMTYPE_TNT;
-	else if (!memcmp(ROMBaseHost + 0x30d064, "Boot Alchemy", 12))
-		ROMType = ROMTYPE_ALCHEMY;
-	else if (!memcmp(ROMBaseHost + 0x30d064, "Boot Zanzibar", 13))
-		ROMType = ROMTYPE_ZANZIBAR;
-	else if (!memcmp(ROMBaseHost + 0x30d064, "Boot Gazelle", 12))
-		ROMType = ROMTYPE_GAZELLE;
-	else if (!memcmp(ROMBaseHost + 0x30d064, "Boot Gossamer", 13))
-		ROMType = ROMTYPE_GOSSAMER;
-	else if (!memcmp(ROMBaseHost + 0x30d064, "NewWorld", 8))
-		ROMType = ROMTYPE_NEWWORLD;
-	else
+	if (!IdentifyROMType())
 		return false;
 
 	nw_log_g1_patch_skip(ROMType == ROMTYPE_NEWWORLD);

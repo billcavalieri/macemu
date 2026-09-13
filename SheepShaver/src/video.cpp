@@ -214,8 +214,10 @@ bool VideoSnapshot(int xsize, int ysize, uint8 *p)
 
 
 /*
- *  Determine whether we should use the hardware or software cursor, and return true for the former, false for the latter.
- *  Currently we use the hardware cursor if we can, but perhaps this can be made a preference someday.
+ *  Hardware vs software cursor. New World reports a software cursor: the
+ *  host pointer is not the Mac cursor there (see video_can_change_cursor),
+ *  so QuickDraw draws it into the frame buffer. Old World follows the
+ *  hardcursor preference.
  */
 
 static bool UseHardwareCursor(void)
@@ -240,6 +242,8 @@ static int16 VideoOpen(uint32 pb, VidLocals *csSave)
 	csSave->saveVidParms = 0;			// Add the right table
 	csSave->luminanceMapping = false;
 	csSave->cursorHardware = UseHardwareCursor();
+	if (ROMType == ROMTYPE_NEWWORLD)
+		printf("NW-BOOT G1: video ndrv: %s cursor\n", csSave->cursorHardware ? "hardware" : "software");
 	csSave->cursorX = 0;
 	csSave->cursorY = 0;
 	csSave->cursorVisible = 0;
