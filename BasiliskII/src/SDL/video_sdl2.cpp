@@ -77,6 +77,7 @@
 #include "nw_devices.h"
 #include "rom_patches.h"
 #include "nw_script.h"
+#include "nw_boot_contract.h"
 #endif
 
 #define DEBUG 0
@@ -1889,6 +1890,9 @@ void VideoHostPresent(void)
 		do_toggle_fullscreen();
 
 	present_sdl_video();
+#if NW_BOOT_LOG
+	nw_event_frame();
+#endif
 }
 
 /*

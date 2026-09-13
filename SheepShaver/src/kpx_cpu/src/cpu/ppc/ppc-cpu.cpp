@@ -1443,6 +1443,9 @@ void powerpc_cpu::execute(uint32 entry)
 		assert(ii->execute.ptr() != 0);
 #endif
 		ii->execute(this, opcode);
+#if defined(SHEEPSHAVER) && NW_BOOT_LOG
+		nw_event_insn();
+#endif
 #if PPC_EXECUTE_DUMP_STATE
 		if (dump_state)
 			dump_registers();

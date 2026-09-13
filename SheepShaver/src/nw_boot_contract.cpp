@@ -1027,7 +1027,23 @@ int nw_emu_aline_handler(uint32_t off)
 #if NW_BOOT_LOG
 static unsigned long nw_event_nx;
 static unsigned long nw_event_na;
+static unsigned long long nw_event_ni;
+static unsigned long nw_event_nf;
 #endif
+
+void nw_event_insn(void)
+{
+#if NW_BOOT_LOG
+	nw_event_ni++;
+#endif
+}
+
+void nw_event_frame(void)
+{
+#if NW_BOOT_LOG
+	nw_event_nf++;
+#endif
+}
 
 void nw_event_exception(uint32_t srr0, uint32_t vector, uint32_t extra, int extra_valid)
 {
@@ -1068,9 +1084,10 @@ void nw_event_tick(uint32_t pc, uint32_t msr)
 	if (tv.tv_sec == last)
 		return;
 	last = tv.tv_sec;
-	printf("NW-BOOT T %lld %lu %lu %08x %08x\n",
+	printf("NW-BOOT T %lld %lu %lu %08x %08x %llu %lu\n",
 	       (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000,
-	       nw_event_nx, nw_event_na, (unsigned)pc, (unsigned)msr);
+	       nw_event_nx, nw_event_na, (unsigned)pc, (unsigned)msr,
+	       nw_event_ni, nw_event_nf);
 	fflush(stdout);
 #else
 	(void)pc;

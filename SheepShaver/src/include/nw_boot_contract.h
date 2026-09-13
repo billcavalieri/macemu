@@ -365,10 +365,15 @@ void nw_log_translator_off(void);
  */
 void nw_event_exception(uint32_t srr0, uint32_t vector, uint32_t extra, int extra_valid);
 void nw_event_aline(uint32_t op, uint32_t pc68k, int handler);
-/* Periodic `T <epoch_ms> <nX> <nA> <pc> <msr>` tick, at most once per
- * second. pc/msr are extra fields (the golden importer ignores them) so a
- * silent spin still names where the CPU is. */
+/* Periodic `T <epoch_ms> <nX> <nA> <pc> <msr> <nI> <nF>` tick, at most
+ * once per second. pc/msr are extra fields (the golden importer ignores
+ * them) so a silent spin still names where the CPU is. nI is interpreter
+ * ops, nF is VideoHostPresent calls (Debug / NW_BOOT_LOG only). */
 void nw_event_tick(uint32_t pc, uint32_t msr);
+#if NW_BOOT_LOG
+void nw_event_insn(void);
+void nw_event_frame(void);
+#endif
 
 /* Host-side periodic work on the CPU thread for New World (window
  * presentation at 60 Hz; the classic path hangs this off the video driver's
