@@ -282,10 +282,11 @@ static void vbl_tick(void)
 
 void nw_devices_tick(void)
 {
-	if (g_pmu_power_pending >= 0 && g_pmu_power_hook) {
+	if (g_pmu_power_pending >= 0) {
 		const int ev = g_pmu_power_pending;
 		g_pmu_power_pending = -1;
-		g_pmu_power_hook(ev, g_pmu_power_ctx);
+		if (g_pmu_power_hook)
+			g_pmu_power_hook(ev, g_pmu_power_ctx);
 	}
 	via_tick();
 	vbl_tick();

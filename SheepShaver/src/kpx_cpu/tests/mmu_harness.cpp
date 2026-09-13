@@ -1139,6 +1139,16 @@ int main()
 		CHECK(g_test_pmu_power_ev == NW_PMU_POWER_OFF);
 		nw_pmu_set_power_hook(NULL, NULL);
 
+		g_test_pmu_power_ev = -1;
+		pmu_send(NW_PMU_RESET);
+		CHECK(nw_pmu_state() == 0);
+		nw_devices_tick();
+		CHECK(g_test_pmu_power_ev == -1);
+		nw_pmu_set_power_hook(test_pmu_power_hook, NULL);
+		nw_devices_tick();
+		CHECK(g_test_pmu_power_ev == -1);
+		nw_pmu_set_power_hook(NULL, NULL);
+
 		/* ADB behind the PMU (interrupt mask is ADB only here). Packets are
 		 * {cmd, flags, len, data...}; every packet answers through the PMU
 		 * interrupt: INT_ACK -> {0x10, 0x01, len, data...} or {0x10, 0x00}. */
