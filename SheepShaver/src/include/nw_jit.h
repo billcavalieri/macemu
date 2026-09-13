@@ -37,7 +37,8 @@
  * guest follows kpx. NW_JIT_ON copy-out commits the shadow; mtspr DEC
  * goes through the same 0→1 / tb_base path as kpx mtspr_oea. 4c: the
  * cache drops on tlbie (invalidate_cache), mtsr/BAT/SDR1, icbi, and
- * a live stw/sth of a translated page.
+ * a live stw/sth of a translated page. 4d: ON DSI from a helper takes
+ * the exception with SRR0 = the faulting PC (same as kpx), not kpx replay.
  */
 enum { NW_JIT_MAX_BLOCK = 16 };
 
@@ -51,6 +52,8 @@ struct nw_jit_cpu {
 	uint32_t dec;
 	uint32_t msr;
 	uint32_t fault;
+	uint32_t fault_ea;
+	uint32_t fault_st;	/* 1 if the faulting access was a store */
 	uint32_t dec_wr;	/* 1 if this block executed mtspr DEC */
 	uint8_t *mem;
 	uint32_t mem_base;

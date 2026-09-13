@@ -678,6 +678,7 @@ uint32_t nw_jit_helper_lwz(struct nw_jit_cpu *cpu, uint32_t ea)
 	if (cpu->mem) {
 		if (!mem_ok(cpu, ea)) {
 			cpu->fault = 1;
+			cpu->fault_ea = ea;
 			return 0;
 		}
 		return mem_ld_be(cpu, ea);
@@ -685,11 +686,14 @@ uint32_t nw_jit_helper_lwz(struct nw_jit_cpu *cpu, uint32_t ea)
 	if (g_host_lwz && cpu->host) {
 		int f = 0;
 		uint32_t v = g_host_lwz(cpu->host, ea, cpu->pc, &f);
-		if (f)
+		if (f) {
 			cpu->fault = f;
+			cpu->fault_ea = ea;
+		}
 		return v;
 	}
 	cpu->fault = 1;
+	cpu->fault_ea = ea;
 	return 0;
 }
 
@@ -698,6 +702,7 @@ uint32_t nw_jit_helper_lh(struct nw_jit_cpu *cpu, uint32_t ea)
 	if (cpu->mem) {
 		if (!mem_ok_n(cpu, ea, 2)) {
 			cpu->fault = 1;
+			cpu->fault_ea = ea;
 			return 0;
 		}
 		const uint8_t *p = cpu->mem + (ea - cpu->mem_base);
@@ -706,11 +711,14 @@ uint32_t nw_jit_helper_lh(struct nw_jit_cpu *cpu, uint32_t ea)
 	if (g_host_lh && cpu->host) {
 		int f = 0;
 		uint32_t v = g_host_lh(cpu->host, ea, cpu->pc, &f);
-		if (f)
+		if (f) {
 			cpu->fault = f;
+			cpu->fault_ea = ea;
+		}
 		return v;
 	}
 	cpu->fault = 1;
+	cpu->fault_ea = ea;
 	return 0;
 }
 
@@ -724,6 +732,8 @@ void nw_jit_helper_sth(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 	if (cpu->mem) {
 		if (!mem_ok_n(cpu, ea, 2)) {
 			cpu->fault = 1;
+			cpu->fault_ea = ea;
+			cpu->fault_st = 1;
 			return;
 		}
 		uint8_t *p = cpu->mem + (ea - cpu->mem_base);
@@ -736,11 +746,16 @@ void nw_jit_helper_sth(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 	if (g_host_sth16 && cpu->host) {
 		int f = 0;
 		g_host_sth16(cpu->host, ea, val & 0xffffu, cpu->pc, &f);
-		if (f)
+		if (f) {
 			cpu->fault = f;
+			cpu->fault_ea = ea;
+			cpu->fault_st = 1;
+		}
 		return;
 	}
 	cpu->fault = 1;
+	cpu->fault_ea = ea;
+	cpu->fault_st = 1;
 }
 
 void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
@@ -753,6 +768,8 @@ void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 	if (cpu->mem) {
 		if (!mem_ok(cpu, ea)) {
 			cpu->fault = 1;
+			cpu->fault_ea = ea;
+			cpu->fault_st = 1;
 			return;
 		}
 		mem_st_be(cpu, ea, val);
@@ -766,11 +783,16 @@ void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 	if (g_host_stw && cpu->host) {
 		int f = 0;
 		g_host_stw(cpu->host, ea, val, cpu->pc, &f);
-		if (f)
+		if (f) {
 			cpu->fault = f;
+			cpu->fault_ea = ea;
+			cpu->fault_st = 1;
+		}
 		return;
 	}
 	cpu->fault = 1;
+	cpu->fault_ea = ea;
+	cpu->fault_st = 1;
 }
 
 int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)

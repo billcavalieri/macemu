@@ -1817,6 +1817,7 @@ int main()
 		CHECK(fn != NULL);
 		fn(&a);
 		CHECK(a.fault == 1 && a.pc == 0x1800u && a.lr == 0x2000u);
+		CHECK(a.fault_ea == 0x1000u && a.fault_st == 0);
 
 		/* rlwimi r4, r3, 8, 0, 7  insert top byte; mtlr; bclr not taken */
 		memset(&a, 0, sizeof(a));

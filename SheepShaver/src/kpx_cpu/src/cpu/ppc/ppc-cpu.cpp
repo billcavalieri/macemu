@@ -1557,6 +1557,36 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	fn(&jc);
 
 	if (jc.fault) {
+		if (mode == NW_JIT_ON && jc.fault == 1 && ppc32_guest_mmu_enabled()) {
+			const ppc32_xlate_result xr = ppc32_guest_mmu().translate(
+				jc.fault_ea, PPC32_XLATE_DR, 4, jc.fault_st != 0);
+			if (!xr.ok) {
+				for (int i = 0; i < 32; i++)
+					gpr(i) = jc.gpr[i];
+				cr().set(jc.cr);
+				xer().set(jc.xer);
+				lr() = jc.lr;
+				ctr() = jc.ctr;
+				pc() = jc.pc;
+				if (jc.dec_wr) {
+					if ((dec_ & 0x80000000u) == 0 && (jc.dec & 0x80000000u))
+						dec_pending_ = true;
+					dec_ = jc.dec;
+					dec_tb_base_ = tb_ticks();
+				}
+				static unsigned ndsi_log;
+				if (ndsi_log < 8u) {
+					ndsi_log++;
+					printf("NW-BOOT G1: jit dsi #%u pc=%08x ea=%08x st=%u\n",
+					       ndsi_log, (unsigned)jc.pc,
+					       (unsigned)jc.fault_ea, (unsigned)jc.fault_st);
+					fflush(stdout);
+				}
+				take_data_dsi(jc.fault_ea, jc.fault_st != 0, xr.fault);
+				nw_jit_note_exec(n);
+				return 1;
+			}
+		}
 		static unsigned nskip_log;
 		nskip_log++;
 		if (nskip_log <= 8u) {
@@ -1566,8 +1596,8 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			fflush(stdout);
 		}
 		nw_jit_verify_uncompared(jc.fault);
-		/* Guest follows kpx one insn at a time so SIGSEGV recovery
-		 * stays on the interpreter path. */
+		/* VERIFY / IO / unmapped PA: guest follows kpx so SIGSEGV
+		 * recovery stays on the interpreter path. */
 		return 0;
 	}
 
