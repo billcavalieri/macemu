@@ -805,6 +805,9 @@ static void gui_activate (GtkApplication *app)
 #endif
 
 #if EMULATED_PPC
+static char **nw_saved_argv;
+static volatile sig_atomic_t nw_pmu_restart_after_quit;
+
 static void nw_pmu_host_power(int event, void *ctx)
 {
 	(void)ctx;
@@ -812,6 +815,9 @@ static void nw_pmu_host_power(int event, void *ctx)
 		return;
 	if (event == NW_PMU_POWER_OFF) {
 		nw_nvram_flush();
+		QuitEmulator();
+	} else if (event == NW_PMU_POWER_RESTART) {
+		nw_pmu_restart_after_quit = 1;
 		QuitEmulator();
 	}
 }
@@ -830,6 +836,13 @@ int main(int argc, char **argv)
 	// Initialize variables
 	RAMBase = 0;
 	tzset();
+
+#if EMULATED_PPC
+	nw_saved_argv = (char **)malloc((size_t)(argc + 1) * sizeof(char *));
+	for (int i = 0; i < argc; i++)
+		nw_saved_argv[i] = strdup(argv[i]);
+	nw_saved_argv[argc] = NULL;
+#endif
 
 	// Print some info
 	printf(GetString(STR_ABOUT_TEXT1), VERSION_MAJOR, VERSION_MINOR);
@@ -1354,6 +1367,25 @@ static void Quit(void)
 		if (rpc_method_invoke(gui_connection, RPC_METHOD_EXIT, RPC_TYPE_INVALID) == RPC_ERROR_NO_ERROR)
 			rpc_method_wait_for_reply(gui_connection, RPC_TYPE_INVALID);
 	}
+
+#if EMULATED_PPC
+	// PMU restart: everything above closed the disks (releasing their
+	// O_EXLOCKs) and saved NVRAM; start over as the same command line.
+	// An operator script (Debug) would replay from t=0 and select Restart
+	// again: the second boot runs NW_SCRIPT_RESTART instead, or none.
+	if (nw_pmu_restart_after_quit && nw_saved_argv && nw_saved_argv[0]) {
+		const char *next_script = getenv("NW_SCRIPT_RESTART");
+		if (next_script && *next_script)
+			setenv("NW_SCRIPT", next_script, 1);
+		else
+			unsetenv("NW_SCRIPT");
+		unsetenv("NW_SCRIPT_RESTART");
+		fflush(stdout);
+		fflush(stderr);
+		execv(nw_saved_argv[0], nw_saved_argv);
+		fprintf(stderr, "NW-BOOT G1: PMU restart execv failed: %s\n", strerror(errno));
+	}
+#endif
 
 	exit(0);
 }
