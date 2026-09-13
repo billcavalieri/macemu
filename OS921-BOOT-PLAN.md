@@ -113,7 +113,10 @@ No identity map. No patching the nanokernel to skip VM.
 
 Guest physical space is banks: RAM, ROM (Mac OS ROM + overlays), PCI/IO, video, NVRAM. Decode once. RAM and ROM hits are pointer math; IO hits a trap table. The MMU outputs a physical address; banks resolve it.
 
-**Done:** A bank map printed at boot. ROM execute-only. Video bank marked for damage tracking. No functional change to 9.0.4 first; then New World ROM is a bank, not a memcpy into RAM.
+**Done (New World, S4 step 13):** bank map printed at boot (`nw_io_log_banks`).
+ROM stores dropped through `nw_pa_kind` (execute-only). `NW_PA_FB` marked
+for WP5 damage tracking. Old World 9.0.4 unchanged (banks are New World
+only). New World ROM is a bank at `0x50000000`, not a memcpy into RAM.
 
 ### WP5 — Video damage
 

@@ -15,7 +15,9 @@ the PMU model (S4 step 10): restart re-executes the process (one log,
 two boots), shut down exits 0. **G5 reached** (S4 step 11): Finder,
 menu bar, About This Computer reads Mac OS 9.2.1. Interpreter baseline
 (S4 step 12): ≈ 80–110 s to Finder, ≈ 31.6 Mops/s during boot, ≈ 23.7 Mops/s
-and 60 presents/s at idle. Next: WP4 banks / WP3 JIT / WP5 damage / G6.
+and 60 presents/s at idle. **WP4 reached** (S4 step 13): one physical
+decode (`nw_pa_kind`), bank map at boot, ROM stores dropped. Next: WP3 JIT /
+WP5 damage / G6.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -1032,9 +1034,43 @@ G5 step 1b (no op counter, 61 s after clicking the desktop) was
 these 19 s windows. G6 compares against this table. JIT flush/s is
 zero (no JIT).
 
+#### S4 step 13 — WP4 memory banks
+
+`OS921-BOOT-PLAN.md` WP4: guest physical space is banks; decode once;
+RAM/ROM hits are pointer math; I/O hits a trap table. `nw_pa_kind()`
+(`nw_io.cpp`) is that decode. The interpreter's load/store path
+(`ppc-execute.cpp`) and `nw_io_read`/`nw_io_write` both use it. ROM
+stores are dropped (they do not reach the `vm_protect`ed host mapping).
+`NW_PA_FB` is the bank WP5 will mark for damage tracking. Banks are set
+only for `ROMTYPE_NEWWORLD`; Old World 9.0.4 is unchanged.
+
+Bank map at boot, after `nw_devices_init` so mac-io and the 16 NVRAM
+flash aliases are listed (`/tmp/g8/wp4-banks.log`):
+
+```
+ram 10000000+20000000
+rom 50000000+500000
+sheep 50510000+80000
+fb 50590000+12c000
+lowmem 00000000+4000
+kdp 68ffe000+2000
+bootinfo 64000000+180000
+io nvram-flash ff004000+4000 x16 stride 100000
+io openpic 80040000+40000
+io via-pmu 80016000+2000
+… (keylargo-timer, uni-n, pci-config, gpio, fcr, scc, ata-3-0/1)
+```
+
+3c: `/tmp/g8/wp4.log` (`wp4.nws`, HOME `/tmp/g8/home`, alarm 230, exit 0).
+No `IO page` / `unclaimed` lines. Finder with menu bar and Macintosh HD
+at 110 s (`wp4/010.png`; 90 s still Starting Up, 100 s menu bar only) —
+same shot interval as the step-12 after-runs. Special → Shut Down at
+140 s (`wp4/013.png`) → `PMU shutdown (0x7e 4d415454)` exit 0. Harness
+521 passed, 0 failed (+62). Branch `memory-subsystem`.
+
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
-WP3 ARM64 JIT on the MMU, WP4 memory banks, WP5 video damage. Not before G3.
+WP3 ARM64 JIT on the MMU, WP5 video damage, then G6. Not before G3.
 
 ---
 
