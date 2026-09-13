@@ -15,6 +15,7 @@
 #include "nw_io.h"
 #include "nw_devices.h"
 #include "nw_nvram.h"
+#include "nw_jit.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -1501,6 +1502,119 @@ int main()
 		uint8_t rom_sent[4] = { 0xaa, 0xbb, 0xcc, 0xdd };
 		CHECK(!nw_pa_writable(0x50000000u));
 		CHECK(rom_sent[0] == 0xaa);
+	}
+
+	/* WP3 4a: ARM64 JIT matches the C oracle on the NK idle integer subset. */
+	{
+		nw_jit_reset();
+		struct nw_jit_cpu a, b;
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		uint32_t ops[8];
+		ops[0] = nw_ppc_addi(3, 0, 42);
+		ops[1] = nw_ppc_add(4, 3, 3, 0);
+		ops[2] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 3, 0x1000u) == 1);
+		CHECK(a.gpr[3] == 42 && a.gpr[4] == 84 && a.pc == 0x2000u);
+		nw_jit_fn fn = nw_jit_compile(ops, 3, 0x1000u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(b.gpr[3] == a.gpr[3] && b.gpr[4] == a.gpr[4] && b.pc == a.pc && b.lr == a.lr);
+
+		/* add. records CR0 */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		ops[0] = nw_ppc_addi(3, 0, -1);
+		ops[1] = nw_ppc_add(4, 3, 3, 1);
+		ops[2] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 3, 0x1000u) == 1);
+		fn = nw_jit_compile(ops, 3, 0x1100u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == (uint32_t)-2 && (a.cr >> 28) == 8);
+		CHECK(b.gpr[4] == a.gpr[4] && b.cr == a.cr);
+
+		/* rlwinm r4, r3, 8, 0, 23  (shift left 8) */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x00000011u;
+		ops[0] = nw_ppc_rlwinm(4, 3, 8, 0, 23);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1000u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1200u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0x00001100u && b.gpr[4] == a.gpr[4]);
+
+		/* stw / lwz through a BE buffer */
+		uint8_t ram[64];
+		memset(ram, 0, sizeof(ram));
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.mem = ram;
+		a.mem_base = 0;
+		a.mem_size = sizeof(ram);
+		a.gpr[3] = 0x11223344u;
+		a.gpr[1] = 16;
+		ops[0] = nw_ppc_stw(3, 1, 0);
+		ops[1] = nw_ppc_lwz(5, 1, 0);
+		ops[2] = nw_ppc_blr();
+		b = a;
+		uint8_t ram2[64];
+		memset(ram2, 0, sizeof(ram2));
+		b.mem = ram2;
+		CHECK(nw_jit_interp_n(&a, ops, 3, 0x1000u) == 1);
+		fn = nw_jit_compile(ops, 3, 0x1300u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[5] == 0x11223344u && b.gpr[5] == a.gpr[5]);
+		CHECK(ram[16] == 0x11 && ram[19] == 0x44);
+		CHECK(ram2[16] == 0x11 && ram2[19] == 0x44);
+
+		/* cmp / bc not taken: blt does not fire, both addi run */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		ops[0] = nw_ppc_addi(3, 0, 2);
+		ops[1] = nw_ppc_addi(4, 0, 1);
+		ops[2] = nw_ppc_cmp(3, 4);
+		ops[3] = nw_ppc_bc(NW_PPC_BO_TRUE, 0, 8);	/* blt .+8, not taken */
+		ops[4] = nw_ppc_addi(5, 0, 99);
+		ops[5] = nw_ppc_addi(5, 0, 1);
+		ops[6] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 7, 0x1000u) == 1);
+		fn = nw_jit_compile(ops, 7, 0x1400u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[5] == 1 && b.gpr[5] == 1 && b.pc == a.pc && b.cr == a.cr);
+
+		/* mtspr / mfspr DEC */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		ops[0] = nw_ppc_addi(3, 0, 0x55);
+		ops[1] = nw_ppc_mtspr(NW_PPC_SPR_DEC, 3);
+		ops[2] = nw_ppc_mfspr(4, NW_PPC_SPR_DEC);
+		ops[3] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 4, 0x1000u) == 1);
+		fn = nw_jit_compile(ops, 4, 0x1500u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.dec == 0x55 && a.gpr[4] == 0x55);
+		CHECK(b.dec == a.dec && b.gpr[4] == a.gpr[4]);
+
+		/* cache key: same (page, pc, ir, endian) hits; msr_ir distinguishes */
+		nw_jit_fn fn2 = nw_jit_compile(ops, 4, 0x1500u, 0x1000u, 0, 0);
+		CHECK(fn2 == fn);
+		nw_jit_fn fn3 = nw_jit_compile(ops, 4, 0x1500u, 0x1000u, 1, 0);
+		CHECK(fn3 != NULL && fn3 != fn);
+		uint64_t fl = nw_jit_flush_count();
+		nw_jit_invalidate_page(0x1000u);
+		CHECK(nw_jit_flush_count() > fl);
+		CHECK(nw_jit_compile(ops, 4, 0x1500u, 0x1000u, 0, 0) != fn);
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);
