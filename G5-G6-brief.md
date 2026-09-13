@@ -1,12 +1,12 @@
 # Next steps: WP3 4b-2 through G6, then WP5
 
 Branch **`arm64-jit`** at **`94d7484c`** (S4 step 16, WP3 4b-2 `lwz`/
-`stw` vs-kpx). Past G5, interpreter baseline, WP4 banks, WP3 4a, WP3 4b
-fallback, and `lwz`/`stw` vs-kpx (`/tmp/g8/4b2-stw2.log`: 21.0 M `lwz`
-and 12.2 M `stw` 0-miss; NONE/IO stay on kpx). Copy-out gated until
-idle translate.
+`stw` vs-kpx). Idle PC-hotness (`/tmp/g8/4b2-hot4.log`): Finder 68k
+emulator loop `68066084..90` is `rlwimi`/`mtspr 256`/`sth`/`bclr`, not
+the 4a integer subset. `NW_JIT=on` is still shadow+kpx (slower, not
+faster). Copy-out gated.
 
-**Next (strict order):** WP3 4b-2 idle PC-hotness then translate,
+**Next (strict order):** vs-kpx that 4-insn loop, then copy-out,
 then 4c invalidation, 4d exception exactness, then the three-run G6
 measurement table. **WP5 video damage after G6**, not before. Do not set
 `NW_JIT=on` until copy-out is gated off. Follow `NEWWORLD-BOOT-PLAN.md`
@@ -201,9 +201,11 @@ Order of work, each step with the interpreter as oracle:
     lines) and no faster. (Done at `cf7f8eb4` / S4 step 15.)
 4b-2. **`lwz`/`stw` helpers vs-kpx**, then idle-loop translate; measure
     ops/s at idle against the step 2 baseline. Copy-out stays gated until
-    the load/store helpers match. **`lwz`/`stw` done** at `94d7484c`
-    (21.0 M / 12.2 M, 0 miss). NONE/IO mem ops stay on kpx. Next: idle
-    PC-hotness then translate.
+    the load/store helpers match. **`lwz`/`stw` done** at `94d7484c`.
+    Idle hotness: 68k emulator `rlwimi`/`mtspr 256`/`sth`/`bclr` at
+    `68066084..90` (`/tmp/g8/4b2-hot4.log`). Next: vs-kpx those ops,
+    then copy-out. Do not enable copy-out of the 4a subset and expect
+    idle to get faster.
     WP3's "done" line: NK idle loop faster than the interpreter by a
     measured factor, 9.2.1 still page-faults correctly.
 4c. **Invalidation gates**, each with a harness test and a boot run:

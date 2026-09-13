@@ -20,7 +20,12 @@ decode (`nw_pa_kind`), bank map at boot, ROM stores dropped. WP3 4a
 (S4 step 14): ARM64 integer-subset JIT matches the C oracle. **WP3 4b
 dispatcher** (S4 step 15): fallback boot identical, not faster;
 `NW_JIT=verify` block-shadow vs kpx is 0-miss on the integer subset
-and on `lwz`/`stw` (S4 step 16; NONE/IO mem ops stay on kpx). Next: WP3 4b-2 idle translate, then 4c, 4d, the three-run G6 table; WP5 after G6.
+and on `lwz`/`stw` (S4 step 16; NONE/IO mem ops stay on kpx). Idle PC-hotness
+(`/tmp/g8/4b2-hot4.log`, Finder, PMU shutdown): the 68k emulator loop at
+`68066084..90` (`rlwimi` / `mtspr 256` / `sth` / `bclr`) is ~4× anything
+in the 4a subset. Copy-out of the current subset cannot beat the
+interpreter at idle. Next: vs-kpx those four ops, then copy-out, 4c, 4d,
+G6; WP5 after G6.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -1118,9 +1123,28 @@ and unwritable first insns return to kpx. `stw` ends the block. Shadow
 write before replay double-applied `lwz`/`add`/`stw` at `50310574`).
 25 s `/tmp/g8/4b2-stw2.log`: `cmp 126600000 miss 0`, `lwz 21035780`,
 `stw 12248261`, `mfspr 16`, `mtspr 9144`, `blr 4428751`, rfi `6806e8b0`.
-`skip_dsi 938` `skip_io 480073`. Copy-out still gated. Next: idle
-PC-hotness then translate. Harness 589 passed, 0 failed. Branch
-`arm64-jit`.
+`skip_dsi 938` `skip_io 480073`. Copy-out still gated. Harness 589
+passed, 0 failed. Branch `arm64-jit`.
+
+#### S4 step 16 addendum — idle PC-hotness
+
+Permanent `G1: jit pc-hot` (top 12 PCs every 10 s). Finder idle
+`/tmp/g8/4b2-hot4.log` exit 0 `PMU shutdown` (Done click only because the
+previous run was SIGTERM; a clean shut down does not show Disk First Aid).
+Last 60 s ≈ 18.2 Mops/s, 60 fps. Hottest 4-insn loop (delta over ~80 s):
+
+| pc | op | insn |
+|---|---|---|
+| `68066084` | `537d1b78` | `rlwimi` (prim 20) |
+| `68066088` | `7fa803a6` | `mtspr` SPR 256, not DEC |
+| `6806608c` | `af780002` | `sth` |
+| `68066090` | `4ca80020` | `bclr` BO=5 BI=8 |
+
+Same shape at `68067ef0`. `bc` at `68067f60` (`4082ff90`, BO=4) is in the
+4a subset; it is 5th. `NW_JIT=verify`/`on` is still shadow+kpx, so it is
+slower than the interpreter. Translating the 4a subset will not move idle.
+Next: vs-kpx `rlwimi`/`sth`/`bclr`/`mtspr 256`, then copy-out. Harness 589
+passed, 0 failed.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
