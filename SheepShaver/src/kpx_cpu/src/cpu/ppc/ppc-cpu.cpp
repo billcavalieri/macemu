@@ -1562,6 +1562,35 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		return 0;
 	}
 
+	if (mode == NW_JIT_ON) {
+		for (int i = 0; i < 32; i++)
+			gpr(i) = jc.gpr[i];
+		cr().set(jc.cr);
+		xer().set(jc.xer);
+		lr() = jc.lr;
+		ctr() = jc.ctr;
+		pc() = jc.pc;
+		dec_ = jc.dec;
+		nw_jit_note_exec(n);
+#if NW_BOOT_LOG
+		{
+			static unsigned nlog;
+			if (nlog < 16u) {
+				nlog++;
+				printf("NW-BOOT JIT on #%u n=%d pc=%08x op=%08x -> %08x\n",
+				       nlog, n, (unsigned)guest_pc, (unsigned)first_opcode,
+				       (unsigned)jc.pc);
+				fflush(stdout);
+			}
+			for (int i = 0; i < n; i++) {
+				nw_event_insn();
+				nw_jit_pc_hot(guest_pc + (uint32)i * 4u, ops[i]);
+			}
+		}
+#endif
+		return 1;
+	}
+
 	for (int i = 0; i < n; i++) {
 		if (pc() != guest_pc + (uint32)i * 4u)
 			break;

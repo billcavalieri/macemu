@@ -702,7 +702,7 @@ void nw_jit_helper_sth(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 		p[1] = (uint8_t)val;
 		return;
 	}
-	if (nw_jit_mode() == NW_JIT_VERIFY || nw_jit_mode() == NW_JIT_ON)
+	if (nw_jit_mode() == NW_JIT_VERIFY)
 		return;
 	if (g_host_sth16 && cpu->host) {
 		int f = 0;
@@ -732,7 +732,7 @@ void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 	/* Shadow: record only. A live write before kpx replay makes
 	 * lwz/add/stw in one block double-apply (4b2-stw gpr11 10000000
 	 * vs 20000000 at 50310574). Copy-out will call the host store. */
-	if (nw_jit_mode() == NW_JIT_VERIFY || nw_jit_mode() == NW_JIT_ON)
+	if (nw_jit_mode() == NW_JIT_VERIFY)
 		return;
 	if (g_host_stw && cpu->host) {
 		int f = 0;
@@ -1482,9 +1482,10 @@ static int is_term(uint32_t op)
 	const int xo = (int)((op >> 1) & 0x3ff);
 	const int rd = (int)((op >> 21) & 0x1f);
 	const int ra = (int)((op >> 16) & 0x1f);
-	(void)rd;
 	(void)ra;
-	return prim == 18 || (prim == 19 && xo == 16);
+	/* Only unconditional transfers always emit ret. Conditional bclr
+	 * must fall through to the epilogue ret (ON SIGILL at 4b2-on2). */
+	return prim == 18 || (prim == 19 && xo == 16 && rd == 20);
 }
 
 static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)

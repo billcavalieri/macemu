@@ -1664,6 +1664,36 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[5] == 1 && b.gpr[5] == 1 && b.pc == a.pc && b.cr == a.cr);
 
+		/* bc taken: addi -1, cmpwi, blt skips the 99 */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		ops[0] = nw_ppc_addi(3, 0, -1);
+		ops[1] = nw_ppc_cmpi(3, 0);
+		ops[2] = nw_ppc_bc(NW_PPC_BO_TRUE, 0, 8);
+		ops[3] = nw_ppc_addi(5, 0, 99);
+		ops[4] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 5, 0x1c00u) == 1);
+		fn = nw_jit_compile(ops, 5, 0x1c00u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[5] == 0 && b.gpr[5] == 0 && a.pc == 0x1c10u && b.pc == a.pc);
+
+		/* bclr BO=5 not taken (CR bit 8 set) falls through */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x3000u;
+		a.cr = 0x00800000u;	/* bit 8 */
+		ops[0] = nw_ppc_addi(3, 0, 1);
+		ops[1] = nw_ppc_bclr(5, 8);
+		ops[2] = nw_ppc_addi(4, 0, 7);
+		ops[3] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 4, 0x1d00u) == 1);
+		fn = nw_jit_compile(ops, 4, 0x1d00u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(b.gpr[3] == 1 && b.gpr[4] == 7 && b.pc == 0x3000u);
+
 		/* mtspr / mfspr DEC */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
