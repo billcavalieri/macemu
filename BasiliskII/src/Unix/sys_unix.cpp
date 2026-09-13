@@ -642,6 +642,13 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
 		} else if (errno == EAGAIN) {
 			// File is likely already locked by another process.
 			printf("WARNING: Cannot open %s (%s)\n", name, strerror(errno));
+			/* A scripted New World run clicking on the "?" floppy
+			 * after a second instance held O_EXLOCK is how the
+			 * 12 Sep volume was reported crashed. Exit instead. */
+			if (const char *script = getenv("NW_SCRIPT")) {
+				if (script[0])
+					exit(1);
+			}
 			return NULL;
 		}
 	}
