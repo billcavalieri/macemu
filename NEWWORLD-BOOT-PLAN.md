@@ -700,6 +700,23 @@ Open: XPRAM/NVRAM persistence (the startup-disk choice), PMU
 restart/shutdown, Keylargo GPIO details, BAT range 1 overlap; the −29208
 "Apple Monitor Plugins" alert (not a gate).
 
+Found while using it (commit `350e1e4b`): a highlighted menu item's text
+came out speckled black. The frame buffer already held those pixels
+(`shot` during the highlight), with or without `gfxaccel`, so the guest
+computed them: partial-coverage pixels were exactly `highlight ×
+(1 − c)` and full-coverage ones black, i.e. the antialiasing blend's
+`fg × c` term was zero. An AltiVec instruction histogram over the
+highlight put the work in System code at `0x3d39xx–0x3d3e10`; a `dump`
+of that range disassembled (`llvm-mc -triple=powerpc`) shows the blend
+unpacking the foreground colour with `vmrghb v17,v0,v17` — destination
+aliased with a source. kpx_cpu's merge (and pack, unpack,
+`vsldoi`/`vslo`/`vsro`, `vsl`/`vsr`, `vperm`, the sums) wrote `vD` element
+by element while reading the inputs by reference, so the register was
+zeroed. Old World SheepShaver never ran 9.1+, whose QuickDraw uses
+AltiVec here. Inputs are copied now. (A 750 PVR was tried first to take
+the scalar path: the NanoKernel stalls in its 750 init at `5032571c` —
+noted, not pursued; the golden is a 7400 too.)
+
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
 WP3 ARM64 JIT on the MMU, WP4 memory banks, WP5 video damage. Not before G3.
