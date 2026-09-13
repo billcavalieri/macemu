@@ -104,6 +104,7 @@
 #include "xlowmem.h"
 #include "xpram.h"
 #include "nw_nvram.h"
+#include "nw_devices.h"
 #include "timer.h"
 #include "adb.h"
 #include "video.h"
@@ -803,6 +804,19 @@ static void gui_activate (GtkApplication *app)
 #endif
 #endif
 
+#if EMULATED_PPC
+static void nw_pmu_host_power(int event, void *ctx)
+{
+	(void)ctx;
+	if (ROMType != ROMTYPE_NEWWORLD)
+		return;
+	if (event == NW_PMU_POWER_OFF) {
+		nw_nvram_flush();
+		QuitEmulator();
+	}
+}
+#endif
+
 int main(int argc, char **argv)
 {
 #ifdef ENABLE_GTK3
@@ -1175,8 +1189,10 @@ int main(int argc, char **argv)
 	// New World: PRAM goes through the ROM's nvram,flash ndrv into the boot
 	// flash (the classic XPRAM EMUL_OPs never fire on that ROM); the flash
 	// image sits next to the XPRAM file
-	if (ROMType == ROMTYPE_NEWWORLD)
+	if (ROMType == ROMTYPE_NEWWORLD) {
 		nw_nvram_init((std::string(XPRAMFilePath()) + ".flash").c_str());
+		nw_pmu_set_power_hook(nw_pmu_host_power, NULL);
+	}
 #endif
 
 	// Clear caches (as we loaded and patched code) and write protect ROM
