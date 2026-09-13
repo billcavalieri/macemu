@@ -745,6 +745,49 @@ void Sys_close(void *arg)
 
 
 /*
+ *  pread/pwrite the whole request. A single read() can return short or
+ *  -1/EINTR; the latter cast to size_t looked like a short transfer and
+ *  .AppleCD then returned readErr (the 13 Sep "Big System Morsels"
+ *  install failure). pread so the offset cannot race with another seek.
+ */
+
+static size_t sys_pread_all(int fd, void *buffer, loff_t offset, size_t length)
+{
+	uint8 *p = (uint8 *)buffer;
+	size_t got = 0;
+	while (got < length) {
+		ssize_t n = pread(fd, p + got, length - got, (off_t)(offset + (loff_t)got));
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			return got;
+		}
+		if (n == 0)
+			break;
+		got += (size_t)n;
+	}
+	return got;
+}
+
+static size_t sys_pwrite_all(int fd, void *buffer, loff_t offset, size_t length)
+{
+	uint8 *p = (uint8 *)buffer;
+	size_t got = 0;
+	while (got < length) {
+		ssize_t n = pwrite(fd, p + got, length - got, (off_t)(offset + (loff_t)got));
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			return got;
+		}
+		if (n == 0)
+			break;
+		got += (size_t)n;
+	}
+	return got;
+}
+
+/*
  *  Read "length" bytes from file/device, starting at "offset", to "buffer",
  *  returns number of bytes read (or 0)
  */
@@ -762,13 +805,8 @@ size_t Sys_read(void *arg, void *buffer, loff_t offset, size_t length)
 
 	if (fh->generic_disk)
 		return fh->generic_disk->read(buffer, offset, length);
-	
-	// Seek to position
-	if (lseek(fh->fd, offset + fh->start_byte, SEEK_SET) < 0)
-		return 0;
 
-	// Read data
-	return read(fh->fd, buffer, length);
+	return sys_pread_all(fh->fd, buffer, offset + fh->start_byte, length);
 }
 
 
@@ -786,12 +824,7 @@ size_t Sys_write(void *arg, void *buffer, loff_t offset, size_t length)
 	if (fh->generic_disk)
 		return fh->generic_disk->write(buffer, offset, length);
 
-	// Seek to position
-	if (lseek(fh->fd, offset + fh->start_byte, SEEK_SET) < 0)
-		return 0;
-
-	// Write data
-	return write(fh->fd, buffer, length);
+	return sys_pwrite_all(fh->fd, buffer, offset + fh->start_byte, length);
 }
 
 

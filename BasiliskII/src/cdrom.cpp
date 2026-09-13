@@ -596,8 +596,11 @@ int16 CDROMPrime(uint32 pb, uint32 dce)
 	void *buffer = Mac2HostAddr(ReadMacInt32(pb + ioBuffer));
 	size_t length = ReadMacInt32(pb + ioReqCount);
 	loff_t position = ReadMacInt32(dce + dCtlPosition);
-	if ((length & (info->block_size - 1)) || (position & (info->block_size - 1)))
+	if ((length & (info->block_size - 1)) || (position & (info->block_size - 1))) {
+		printf("WARNING: .AppleCD paramErr pos=%llx len=%zx bs=%d\n",
+		       (unsigned long long)position, length, info->block_size);
 		return paramErr;
+	}
 	info->twok_offset = (position + info->start_byte) & 0x7ff;
 	
 	size_t actual = 0;
@@ -614,6 +617,8 @@ int16 CDROMPrime(uint32 pb, uint32 dce)
 				memset(buffer, 0, 0x200);
 				actual = 0x200;
 			} else {
+				printf("WARNING: .AppleCD read pos=%llx len=%zx actual=%zx errno=%d\n",
+				       (unsigned long long)position, length, actual, errno);
 				return readErr;
 			}
 		}
