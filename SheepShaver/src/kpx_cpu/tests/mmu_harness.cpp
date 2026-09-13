@@ -1439,6 +1439,70 @@ int main()
 		remove(path);
 	}
 
+	/* WP4: one physical decode (nw_pa_kind) for RAM/ROM/Sheep/FB/KDP/I/O. */
+	{
+		struct nw_devices_clock clk;
+		clk.ticks = fake_tb_ticks;
+		clk.ctx = NULL;
+		clk.hz = 25000000u;
+		nw_io_reset();
+		nw_banks_set(NW_PA_RAM, 0x10000000u, 0x20000000u);
+		nw_banks_set(NW_PA_ROM, 0x50000000u, 0x500000u);
+		nw_banks_set(NW_PA_SHEEP, 0x50510000u, 0x80000u);
+		nw_banks_set(NW_PA_FB, 0x50590000u, 0x12c000u);
+		nw_banks_set(NW_PA_LOWMEM, 0, 0x4000u);
+		nw_banks_set(NW_PA_KDP, 0x68ffe000u, 0x2000u);
+		nw_banks_set(NW_PA_BOOTINFO, 0x64000000u, 0x180000u);
+		nw_devices_init(&clk);
+		nw_nvram_init(NULL);
+		CHECK(nw_pa_kind(0x10000000u) == NW_PA_RAM);
+		CHECK(nw_pa_kind(0x2fffffffu) == NW_PA_RAM);
+		CHECK(nw_pa_kind(0x30000000u) == NW_PA_NONE);
+		CHECK(nw_pa_kind(0x50000000u) == NW_PA_ROM);
+		CHECK(nw_pa_kind(0x504fffffu) == NW_PA_ROM);
+		CHECK(nw_pa_kind(0x50500000u) == NW_PA_NONE);
+		CHECK(nw_pa_kind(0x50510000u) == NW_PA_SHEEP);
+		CHECK(nw_pa_kind(0x5058ffffu) == NW_PA_SHEEP);
+		CHECK(nw_pa_kind(0x50590000u) == NW_PA_FB);
+		CHECK(nw_pa_kind(0x506bbfffu) == NW_PA_FB);
+		CHECK(nw_pa_kind(0) == NW_PA_LOWMEM);
+		CHECK(nw_pa_kind(0x3fffu) == NW_PA_LOWMEM);
+		CHECK(nw_pa_kind(0x4000u) == NW_PA_NONE);
+		CHECK(nw_pa_kind(0x68ffe000u) == NW_PA_KDP);
+		CHECK(nw_pa_kind(0x64000000u) == NW_PA_BOOTINFO);
+		CHECK(nw_pa_kind(NW_IO_VIA_PMU_BASE) == NW_PA_IO);
+		CHECK(nw_pa_kind(NW_IO_OPENPIC_BASE) == NW_PA_IO);
+		CHECK(nw_pa_kind(NW_IO_UNIN_BASE) == NW_PA_IO);
+		CHECK(nw_pa_kind(NW_IO_SCC_LEGACY_BASE) == NW_PA_IO);
+		CHECK(nw_pa_kind(NW_IO_ATA0_BASE) == NW_PA_IO);
+		CHECK(nw_pa_writable(0x10000000u));
+		CHECK(nw_pa_writable(0x50590000u));
+		CHECK(!nw_pa_writable(0x50000000u));
+		CHECK(!nw_pa_writable(NW_IO_VIA_PMU_BASE));
+		CHECK(!nw_pa_writable(0x30000000u));
+		int nflash = 0;
+		for (int i = 0; i < NW_NVRAM_ALIASES; i++) {
+			uint32_t pa = NW_NVRAM_FLASH_BASE + (uint32_t)i * NW_NVRAM_ALIAS_STRIDE + NW_NVRAM_FLASH_OFFSET;
+			CHECK(nw_pa_kind(pa) == NW_PA_IO);
+			CHECK(nw_pa_kind(pa + NW_NVRAM_SIZE - 1) == NW_PA_IO);
+			nflash++;
+		}
+		CHECK(nflash == 16);
+		int ndev_flash = 0;
+		for (int i = 0; i < nw_io_n_devices(); i++) {
+			const struct nw_io_device *d = nw_io_device(i);
+			if (d && d->name && strcmp(d->name, "nvram-flash") == 0)
+				ndev_flash++;
+		}
+		CHECK(ndev_flash == 16);
+		CHECK(nw_io_n_devices() == 11 + 16);	/* 11 mac-io models + 16 flash aliases */
+		/* a store to ROM must not reach host memory: the interpreter
+		 * drops when !nw_pa_writable, which is 0 for the ROM bank. */
+		uint8_t rom_sent[4] = { 0xaa, 0xbb, 0xcc, 0xdd };
+		CHECK(!nw_pa_writable(0x50000000u));
+		CHECK(rom_sent[0] == 0xaa);
+	}
+
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

@@ -35,6 +35,7 @@
 #include "thunks.h"
 #include "nw_boot_contract.h"
 #include "nw_devices.h"
+#include "nw_io.h"
 #include "nw_script.h"
 
 // Used for NativeOp trampolines
@@ -929,6 +930,7 @@ void init_emul_ppc(void)
 		clk.ctx = NULL;
 		clk.hz = (uint32)TimebaseSpeed;
 		nw_devices_init(&clk);
+		nw_io_log_banks();
 		/* The Trampoline programs the OpenPIC sources (priority, vector,
 		 * sense, destination) before the NK runs; the 68k StartInit only
 		 * toggles their mask bits afterwards. */

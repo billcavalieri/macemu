@@ -105,6 +105,7 @@
 #include "xpram.h"
 #include "nw_nvram.h"
 #include "nw_devices.h"
+#include "nw_io.h"
 #include "timer.h"
 #include "adb.h"
 #include "video.h"
@@ -1205,6 +1206,23 @@ int main(int argc, char **argv)
 	if (ROMType == ROMTYPE_NEWWORLD) {
 		nw_nvram_init((std::string(XPRAMFilePath()) + ".flash").c_str());
 		nw_pmu_set_power_hook(nw_pmu_host_power, NULL);
+		nw_banks_set(NW_PA_RAM, RAMBase, RAMSize);
+		nw_banks_set(NW_PA_ROM, ROMBase, ROM_AREA_SIZE);
+		nw_banks_set(NW_PA_SHEEP, SheepMem::Base(), SheepMem::Size());
+		{
+			uint32 fb_size = 0;
+			for (int i = 0; VModes[i].viType != DIS_INVALID; i++) {
+				uint32 sz = VModes[i].viRowBytes * VModes[i].viYsize;
+				if (sz > fb_size)
+					fb_size = sz;
+			}
+			if (screen_base && fb_size)
+				nw_banks_set(NW_PA_FB, screen_base & ~0xfffu,
+				             ((screen_base & 0xfffu) + fb_size + 0xfffu) & ~0xfffu);
+		}
+		nw_banks_set(NW_PA_LOWMEM, 0, 0x4000);
+		nw_banks_set(NW_PA_KDP, KERNEL_DATA_BASE, KERNEL_AREA_SIZE);
+		nw_banks_set(NW_PA_BOOTINFO, NW_BOOTINFO_LA, NW_BOOTINFO_SIZE);
 	}
 #endif
 

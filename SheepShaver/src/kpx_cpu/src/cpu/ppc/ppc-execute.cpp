@@ -598,11 +598,13 @@ DEFINE_MEMORY_HELPER(4);
  *	from 0x809122c3).
  */
 #ifdef SHEEPSHAVER
-static inline bool pa_is_io(uint32 pa) { return ppc32_guest_mmu_enabled() && nw_io_range(pa); }
+static inline bool pa_is_io(uint32 pa) { return ppc32_guest_mmu_enabled() && nw_pa_kind(pa) == NW_PA_IO; }
+static inline bool pa_is_rom(uint32 pa) { return ppc32_guest_mmu_enabled() && nw_pa_kind(pa) == NW_PA_ROM; }
 #define PA_IO_READ(PA, SZ, PC) nw_io_read((PA), (SZ), (PC))
 #define PA_IO_WRITE(PA, SZ, V, PC) nw_io_write((PA), (SZ), (V), (PC))
 #else
 static inline bool pa_is_io(uint32) { return false; }
+static inline bool pa_is_rom(uint32) { return false; }
 #define PA_IO_READ(PA, SZ, PC) 0u
 #define PA_IO_WRITE(PA, SZ, V, PC) ((void)0)
 #endif
@@ -616,17 +618,18 @@ static inline uint64 pa_read_8(uint32 pa, uint32 pc)
 		return vm_read_memory_8(pa);
 	return ((uint64)PA_IO_READ(pa, 4, pc) << 32) | PA_IO_READ(pa + 4, 4, pc);
 }
-static inline void pa_write_1(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 1, v & 0xffu, pc); else vm_write_memory_1(pa, v); }
-static inline void pa_write_2(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 2, v & 0xffffu, pc); else vm_write_memory_2(pa, v); }
-static inline void pa_write_4(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 4, v, pc); else vm_write_memory_4(pa, v); }
+static inline void pa_write_1(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 1, v & 0xffu, pc); else if (!pa_is_rom(pa)) vm_write_memory_1(pa, v); }
+static inline void pa_write_2(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 2, v & 0xffffu, pc); else if (!pa_is_rom(pa)) vm_write_memory_2(pa, v); }
+static inline void pa_write_4(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 4, v, pc); else if (!pa_is_rom(pa)) vm_write_memory_4(pa, v); }
 static inline void pa_write_8(uint32 pa, uint64 v, uint32 pc)
 {
-	if (!pa_is_io(pa)) {
-		vm_write_memory_8(pa, v);
+	if (pa_is_io(pa)) {
+		PA_IO_WRITE(pa, 4, (uint32)(v >> 32), pc);
+		PA_IO_WRITE(pa + 4, 4, (uint32)v, pc);
 		return;
 	}
-	PA_IO_WRITE(pa, 4, (uint32)(v >> 32), pc);
-	PA_IO_WRITE(pa + 4, 4, (uint32)v, pc);
+	if (!pa_is_rom(pa))
+		vm_write_memory_8(pa, v);
 }
 
 template< class OP, class RA, class RB, bool LD, int SZ, bool UP, bool RX >
@@ -641,8 +644,8 @@ void powerpc_cpu::execute_loadstore(uint32 opcode)
 		return;
 
 #ifdef SHEEPSHAVER
-	/* New World: physical I/O segments go to device models, not host memory. */
-	if (ppc32_guest_mmu_enabled() && nw_io_range(pa)) {
+	/* New World: physical decode (nw_pa_kind) — I/O to devices, ROM stores dropped. */
+	if (pa_is_io(pa)) {
 		if (LD) {
 			uint32 v = nw_io_read(pa, SZ, pc());
 			if (RX)
@@ -654,6 +657,12 @@ void powerpc_cpu::execute_loadstore(uint32 opcode)
 				v = (SZ == 2) ? bswap_16(v) : (SZ == 4) ? bswap_32(v) : v;
 			nw_io_write(pa, SZ, v & (SZ == 4 ? 0xffffffffu : SZ == 2 ? 0xffffu : 0xffu), pc());
 		}
+		if (UP)
+			RA::set(this, opcode, ea);
+		increment_pc(4);
+		return;
+	}
+	if (!LD && pa_is_rom(pa)) {
 		if (UP)
 			RA::set(this, opcode, ea);
 		increment_pc(4);
@@ -696,11 +705,16 @@ void powerpc_cpu::execute_loadstore_multiple(uint32 opcode)
 		if (!guest_data_xlate(ea, 4, !LD, &pa))
 			return;
 #ifdef SHEEPSHAVER
-		if (ppc32_guest_mmu_enabled() && nw_io_range(pa)) {
+		if (pa_is_io(pa)) {
 			if (LD)
 				gpr(r) = nw_io_read(pa, 4, pc());
 			else
 				nw_io_write(pa, 4, gpr(r), pc());
+			r++;
+			ea += 4;
+			continue;
+		}
+		if (!LD && pa_is_rom(pa)) {
 			r++;
 			ea += 4;
 			continue;
@@ -1533,7 +1547,7 @@ void powerpc_cpu::execute_dcbz(uint32 opcode)
 	uint32 pa;
 	if (!guest_data_xlate(ea, 32, true, &pa))
 		return;
-	if (!pa_is_io(pa))
+	if (!pa_is_io(pa) && !pa_is_rom(pa))
 		vm_memset(pa - (pa % 32), 0, 32);
 	increment_pc(4);
 }

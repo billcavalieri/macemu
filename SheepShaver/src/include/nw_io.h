@@ -33,7 +33,24 @@
  * SheepShaver identity-maps guest memory onto host addresses, so those PAs
  * are not memory: loads and stores that translate into them are routed here
  * to device models instead of being dereferenced.
+ *
+ * WP4: nw_pa_kind() is the one physical decode. RAM/ROM/SheepMem/FB/KDP
+ * hits are pointer math (vm_*); I/O hits the trap table below; everything
+ * else is the unclaimed default. ROM is not writable (a store is dropped).
+ * NW_PA_FB is the bank WP5 will mark for damage tracking.
  */
+enum {
+	NW_PA_NONE = 0,
+	NW_PA_RAM,
+	NW_PA_ROM,
+	NW_PA_SHEEP,
+	NW_PA_FB,
+	NW_PA_LOWMEM,
+	NW_PA_KDP,
+	NW_PA_BOOTINFO,
+	NW_PA_IO
+};
+
 enum {
 	NW_IO_MACIO_BASE = 0x80000000u,
 	NW_IO_MACIO_SIZE = 0x10000000u,
@@ -81,6 +98,13 @@ static inline int nw_io_range(uint32_t pa)
 {
 	return (pa - NW_IO_MACIO_BASE) < NW_IO_MACIO_SIZE || pa >= NW_IO_HIGH_BASE;
 }
+
+void nw_banks_set(int kind, uint32_t base, uint32_t size);
+int nw_pa_kind(uint32_t pa);
+int nw_pa_writable(uint32_t pa);	/* 1 for RAM-like banks; 0 for ROM, I/O, none */
+void nw_io_log_banks(void);
+int nw_io_n_devices(void);
+const struct nw_io_device *nw_io_device(int i);
 
 /* Register a device; returns 0 on success, -1 if the table is full or the
  * range overlaps. size in bytes; off passed to handlers is pa - base. */
