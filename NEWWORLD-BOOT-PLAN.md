@@ -16,8 +16,9 @@ two boots), shut down exits 0. **G5 reached** (S4 step 11): Finder,
 menu bar, About This Computer reads Mac OS 9.2.1. Interpreter baseline
 (S4 step 12): ≈ 80–110 s to Finder, ≈ 31.6 Mops/s during boot, ≈ 23.7 Mops/s
 and 60 presents/s at idle. **WP4 reached** (S4 step 13): one physical
-decode (`nw_pa_kind`), bank map at boot, ROM stores dropped. Next: WP3 JIT /
-WP5 damage / G6.
+decode (`nw_pa_kind`), bank map at boot, ROM stores dropped. WP3 4a
+(S4 step 14): ARM64 integer-subset JIT matches the C oracle. Next: WP3 4b
+dispatcher / WP5 damage / G6.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -1067,6 +1068,20 @@ at 110 s (`wp4/010.png`; 90 s still Starting Up, 100 s menu bar only) —
 same shot interval as the step-12 after-runs. Special → Shut Down at
 140 s (`wp4/013.png`) → `PMU shutdown (0x7e 4d415454)` exit 0. Harness
 521 passed, 0 failed (+62). Branch `memory-subsystem`.
+
+#### S4 step 14 — WP3 4a, ARM64 integer-subset equivalence
+
+`OS921-BOOT-PLAN.md` WP3: interpreter remains the source of truth;
+equivalence tests run a block of PPC ops through both. `nw_jit.cpp` is
+an ARM64 emitter (`MAP_JIT` + `pthread_jit_write_protect_np`) for the
+NK idle integer subset (`addi`/`add`/`add.`, `rlwinm`, `lwz`/`stw`,
+`cmp`, `bc` not-taken, `blr`, `mtspr`/`mfspr` DEC). A C interpreter of
+the same subset is the oracle. Translation cache keyed by
+`(phys_page, guest_pc, msr_ir, endian)`. dyngen stays off.
+
+Not wired into `powerpc_cpu::execute` yet (4b). Harness 548 passed, 0
+failed (+27). Branch `arm64-jit` (reset from `newworld-boot` after
+WP4; the old G0–G2 `arm64-jit` tip is an ancestor).
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
