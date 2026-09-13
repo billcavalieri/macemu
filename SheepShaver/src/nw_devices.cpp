@@ -20,6 +20,7 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <atomic>
@@ -28,6 +29,21 @@
 
 
 static struct nw_devices_clock g_tb;
+
+static void (*g_pmu_power_hook)(int event, void *ctx);
+static void *g_pmu_power_ctx;
+static int g_pmu_power_pending = -1;
+
+void nw_pmu_set_power_hook(void (*hook)(int event, void *ctx), void *ctx)
+{
+	g_pmu_power_hook = hook;
+	g_pmu_power_ctx = ctx;
+}
+
+static void pmu_queue_power(int event)
+{
+	g_pmu_power_pending = event;
+}
 
 static uint64_t tb_now(void)
 {
@@ -266,6 +282,11 @@ static void vbl_tick(void)
 
 void nw_devices_tick(void)
 {
+	if (g_pmu_power_pending >= 0 && g_pmu_power_hook) {
+		const int ev = g_pmu_power_pending;
+		g_pmu_power_pending = -1;
+		g_pmu_power_hook(ev, g_pmu_power_ctx);
+	}
 	via_tick();
 	vbl_tick();
 	for (int t = 0; t < NW_OPENPIC_NTMR; t++) {
@@ -1194,13 +1215,20 @@ static void pmu_dispatch(void)
 			adb.autopoll = 0;
 		return;
 	case NW_PMU_RESET:
+		if (in_len == 0) {
+			printf("NW-BOOT G1: PMU reset (0xd0)\n");
+			pmu_queue_power(NW_PMU_POWER_RESTART);
+		}
+		return;
 	case NW_PMU_SYSTEM_READY:
 		return;
 	case NW_PMU_SHUTDOWN:
 		if (in_len != 4)
 			return;
+		printf("NW-BOOT G1: PMU shutdown (0x7e %02x%02x%02x%02x)\n", in[0], in[1], in[2], in[3]);
 		out[0] = 0;
 		via.rsp_sz = 1;
+		pmu_queue_power(NW_PMU_POWER_OFF);
 		return;
 	case NW_PMU_READ_RTC: {
 		if (in_len != 0)

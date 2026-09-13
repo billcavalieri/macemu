@@ -64,6 +64,13 @@ static uint8_t pmu_recv(void)
 	return b;
 }
 
+static int g_test_pmu_power_ev = -1;
+static void test_pmu_power_hook(int ev, void *ctx)
+{
+	(void)ctx;
+	g_test_pmu_power_ev = ev;
+}
+
 #define CHECK(cond) do { \
 	if (cond) { \
 		g_pass++; \
@@ -1112,6 +1119,25 @@ int main()
 		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 5, 1, 0) == 0);
 		nw_io_write(NW_IO_MACIO_GPIO_BASE + 2, 1, 0xff, 0);
 		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 2, 1, 0) == 0);
+
+		g_test_pmu_power_ev = -1;
+		nw_pmu_set_power_hook(test_pmu_power_hook, NULL);
+		pmu_send(NW_PMU_RESET);
+		CHECK(nw_pmu_state() == 0);
+		CHECK(g_test_pmu_power_ev == -1);
+		nw_devices_tick();
+		CHECK(g_test_pmu_power_ev == NW_PMU_POWER_RESTART);
+		g_test_pmu_power_ev = -1;
+		pmu_send(NW_PMU_SHUTDOWN);
+		pmu_send('M');
+		pmu_send('A');
+		pmu_send('T');
+		pmu_send('T');
+		CHECK(pmu_recv() == 0);
+		CHECK(g_test_pmu_power_ev == -1);
+		nw_devices_tick();
+		CHECK(g_test_pmu_power_ev == NW_PMU_POWER_OFF);
+		nw_pmu_set_power_hook(NULL, NULL);
 
 		/* ADB behind the PMU (interrupt mask is ADB only here). Packets are
 		 * {cmd, flags, len, data...}; every packet answers through the PMU

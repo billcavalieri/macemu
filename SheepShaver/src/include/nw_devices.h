@@ -106,6 +106,15 @@ struct nw_devices_clock {
 void nw_devices_init(const struct nw_devices_clock *tb);
 /* Periodic work (OpenPIC timers); call from the CPU's coarse tick. */
 void nw_devices_tick(void);
+
+enum nw_pmu_power_event {
+	NW_PMU_POWER_RESTART = 0,
+	NW_PMU_POWER_OFF = 1
+};
+
+/* Invoked from nw_devices_tick() after the PMU command handshake completes. */
+void nw_pmu_set_power_hook(void (*hook)(int event, void *ctx), void *ctx);
+
 /* Display VBL interrupt enable (the video driver's cscSetInterrupt) and
  * status clear (its interrupt handler). */
 void nw_display_vbl_enable(int on);
