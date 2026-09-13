@@ -835,6 +835,12 @@ void powerpc_cpu::tick_decrementer()
 	dec_ = old_dec - elapsed;
 	if ((old_dec & 0x80000000u) == 0 && ((dec_ & 0x80000000u) || elapsed > old_dec))
 		dec_pending_ = true;
+	/* Edge 0→1 is the OEA; after take_dec, pending is clear. JIT ON can
+	 * leave DEC negative without a following mtdec (g6-js: 1×0x900 vs
+	 * 8678×0x500 at 503191d8, A-traps stall, Happy Mac frozen). Keep the
+	 * exception asserted while the MSB is 1 so nap still wakes. */
+	if (dec_ & 0x80000000u)
+		dec_pending_ = true;
 #ifdef SHEEPSHAVER
 	nw_devices_tick();
 	nw_host_tick();
