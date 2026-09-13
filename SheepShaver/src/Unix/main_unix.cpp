@@ -422,6 +422,15 @@ static void get_system_info(void)
 
 #if EMULATED_PPC
 	PVR = 0x000c0000;			// Default: 7400 (with AltiVec)
+	/* Optional hex override (e.g. NW_PVR=00080202 for a 750). A 750 PVR
+	 * matches Gestalt 406 / iMac G3, but 9.2.1's 68k ROM only plants the
+	 * FPU/VMX context mask at EDP+232 after Gestalt 'ppcf' bit 4
+	 * (AltiVec). The 750 then SystemCrashes (NanoKernel trap 15) when the
+	 * 68k emulator tries to allocate a slot. Keep the 7400 default: that
+	 * is the QEMU golden, and 9.2.1 QuickDraw uses AltiVec. See
+	 * NEWWORLD-BOOT-PLAN.md S4 step 9. */
+	if (const char *nw_pvr = getenv("NW_PVR"))
+		PVR = (uint32)strtoul(nw_pvr, NULL, 16);
 	int pref_cpu_clock = PrefsFindInt32("cpuclock");
 	if (pref_cpu_clock) CPUClockSpeed = 1000000 * pref_cpu_clock;
 #elif defined(__APPLE__) && defined(__MACH__)

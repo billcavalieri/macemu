@@ -698,7 +698,8 @@ cursor tried while chasing the freeze.
 
 Open: XPRAM/NVRAM persistence (the startup-disk choice), PMU
 restart/shutdown, Keylargo GPIO details, BAT range 1 overlap; the −29208
-"Apple Monitor Plugins" alert (not a gate).
+"Apple Monitor Plugins" alert (not a gate). A 750 PVR (`NW_PVR=00080202`)
+is documented, not the default — see below.
 
 Found while using it (commit `350e1e4b`): a highlighted menu item's text
 came out speckled black. The frame buffer already held those pixels
@@ -713,9 +714,28 @@ aliased with a source. kpx_cpu's merge (and pack, unpack,
 `vsldoi`/`vslo`/`vsro`, `vsl`/`vsr`, `vperm`, the sums) wrote `vD` element
 by element while reading the inputs by reference, so the register was
 zeroed. Old World SheepShaver never ran 9.1+, whose QuickDraw uses
-AltiVec here. Inputs are copied now. (A 750 PVR was tried first to take
-the scalar path: the NanoKernel stalls in its 750 init at `5032571c` —
-noted, not pursued; the golden is a 7400 too.)
+AltiVec here. Inputs are copied now.
+
+**750 PVR (`0x00080202`).** The T-sample loop at `5032571c` / `503259dc` /
+`50326660` is not 750 L2CR init. The NanoKernel debugger-wait at
+`50326420` (`crset 6`) heartbeats `lwz`/`addi`/`stw` at 0 then `bl 503259c0`
+(serial get-char); with no UART that returns −1 and `b 5032665c` forever.
+Entry is `50312960 b 50326420` from `503146ac` (unhandled exception, panic
+code 2). The fault is a program exception at `6806e8fc`: `twi 31,r31,15`
+(`0x0fff000f`), NanoKernel KCall 15 = SystemCrash (`Defines.s`). The 68k
+emulator reached that from `6806e2a0`, which does `lwz r6,232(r31)` /
+`lwz r7,236(r31)` / `andc` / `cntlzw` / `cmplwi 32` / `bt cr7, trap15`.
+`r31` is EDP `68fff000`. On a 7400 those words are `+232=fe000000`
+`+236=0` (seven free slots); on a 750 they stay 0, `cntlzw` of 0 is 32,
+crash. The 7400 store is 68k ROM at `ffc01198` `move.l #$fe000000,$e8(a2)`
+after `_Gestalt('ppcf')` bit 4 (`gestaltPowerPCHasVectorInstructions`) and
+`_HWPriv($2000)` succeed (`r24=ffc011a0` on the 7400 run). A 750 has no
+AltiVec, so that path is skipped — correct for the Gestalt bit. HID0 and
+L2CR are 0 at first FPU-unavail on both CPUs; the 750 L2I/L2IP poll at
+`5031954c` (`mfspr 1017` / `rlwinm. r8,r8,31,0,0` / `bne .-8`, wait while
+L2IP set) never ran before the crash, and ignored L2CR writes would read
+L2IP=0 and not spin. Default PVR stays 7400 (QEMU golden; 9.2.1 QuickDraw
+AltiVec). `NW_PVR` in `main_unix.cpp` overrides it for experiments.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
