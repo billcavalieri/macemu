@@ -353,8 +353,10 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		use_jit = false;
 #endif
 #ifdef SHEEPSHAVER
-	if (on)
+	if (on) {
 		nw_jit_set_host_mem(powerpc_cpu::jit_host_lwz, powerpc_cpu::jit_host_stw);
+		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
+	}
 #endif
 }
 
@@ -1325,6 +1327,50 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 	vm_write_memory_4(pa, val);
 }
 
+uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	uint32 pa;
+	(void)pc;
+	if (!ppc->guest_data_probe(ea, 2, false, &pa)) {
+		*fault = 1;
+		return 0;
+	}
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
+		return 0;
+	}
+	if (kind == NW_PA_NONE) {
+		*fault = 1;
+		return 0;
+	}
+	return vm_read_memory_2(pa);
+}
+
+void powerpc_cpu::jit_host_sth(void *host, uint32 ea, uint32 val, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	uint32 pa;
+	(void)pc;
+	if (!ppc->guest_data_probe(ea, 2, true, &pa)) {
+		*fault = 1;
+		return;
+	}
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
+		return;
+	}
+	if (kind == NW_PA_ROM)
+		return;
+	if (!nw_pa_writable(pa)) {
+		*fault = 1;
+		return;
+	}
+	vm_write_memory_2(pa, val);
+}
+
 static int nw_jit_pa_ok(uint32 pa, int is_st)
 {
 	const int kind = nw_pa_kind(pa);
@@ -1338,15 +1384,25 @@ static int nw_jit_pa_ok(uint32 pa, int is_st)
 static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 {
 	const int prim = (int)(op >> 26);
-	if (prim != 32 && prim != 36)
+	int width = 4, is_st = 0;
+	if (prim == 32)
+		;
+	else if (prim == 36)
+		is_st = 1;
+	else if (prim == 40 || prim == 42 || prim == 43)
+		width = 2;
+	else if (prim == 44) {
+		width = 2;
+		is_st = 1;
+	} else
 		return 1;
 	const int ra = (int)((op >> 16) & 0x1f);
 	const int simm = (int16_t)(op & 0xffffu);
 	const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
 	uint32 pa;
-	if (!ppc->guest_data_probe(ea, 4, prim == 36, &pa))
+	if (!ppc->guest_data_probe(ea, (unsigned)width, is_st, &pa))
 		return 0;
-	return nw_jit_pa_ok(pa, prim == 36);
+	return nw_jit_pa_ok(pa, is_st);
 }
 
 static uint32 nw_jit_rotl32(uint32 x, uint32 n)
@@ -1372,6 +1428,12 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 	const int simm = (int16_t)(op & 0xffffu);
 	if (prim == 14) {
 		sg[rd] = (ra ? sg[ra] : 0) + (uint32)simm;
+		return;
+	}
+	if (prim == 20) {
+		const int sh = rb, mb = (int)((op >> 6) & 0x1f), me = (int)((op >> 1) & 0x1f);
+		const uint32 m = nw_jit_mask((uint32)mb, (uint32)me);
+		sg[ra] = (nw_jit_rotl32(sg[rd], (uint32)sh) & m) | (sg[ra] & ~m);
 		return;
 	}
 	if (prim == 21) {
@@ -1485,32 +1547,6 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	jc.host = this;
 	fn(&jc);
 
-	unsigned stbits = 0;
-	{
-		uint32 sg2[32];
-		for (int i = 0; i < 32; i++)
-			sg2[i] = gpr(i);
-		int si = 0;
-		for (int i = 0; i < n; i++) {
-			const uint32 op = ops[i];
-			const int prim = (int)(op >> 26);
-			if (prim == 36) {
-				const int rd = (int)((op >> 21) & 0x1f);
-				const int ra = (int)((op >> 16) & 0x1f);
-				const int simm = (int16_t)(op & 0xffffu);
-				const uint32 ea = (ra ? sg2[ra] : 0) + (uint32)simm;
-				const uint32 val = sg2[rd];
-				if (si >= jc.nstore || jc.store_ea[si] != ea || jc.store_val[si] != val)
-					stbits |= 256u;
-				si++;
-			} else {
-				nw_jit_sg_apply(this, sg2, op);
-			}
-		}
-		if (si != jc.nstore)
-			stbits |= 256u;
-	}
-
 	if (jc.fault) {
 		static unsigned nskip_log;
 		nskip_log++;
@@ -1539,7 +1575,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			break;
 	}
 
-	unsigned bits = stbits;
+	unsigned bits = 0;
 	if (jc.pc != pc())
 		bits |= 2u;
 	if (jc.cr != cr().get())

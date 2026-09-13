@@ -93,7 +93,10 @@ void nw_jit_pc_hot_dump(const char *why);
 
 typedef uint32_t (*nw_jit_host_lwz)(void *host, uint32_t ea, uint32_t pc, int *fault);
 typedef void (*nw_jit_host_stw)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
+typedef uint32_t (*nw_jit_host_lh)(void *host, uint32_t ea, uint32_t pc, int *fault);
+typedef void (*nw_jit_host_sth16)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
 void nw_jit_set_host_mem(nw_jit_host_lwz lwz, nw_jit_host_stw stw);
+void nw_jit_set_host_half(nw_jit_host_lh lh, nw_jit_host_sth16 sth);
 
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 			  uint32_t msr_ir, uint32_t endian, int *n_out);
@@ -123,8 +126,12 @@ uint64_t nw_jit_flush_count(void);
 uint32_t nw_ppc_addi(int rd, int ra, int simm);
 uint32_t nw_ppc_add(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_rlwinm(int ra, int rs, int sh, int mb, int me);
+uint32_t nw_ppc_rlwimi(int ra, int rs, int sh, int mb, int me);
 uint32_t nw_ppc_lwz(int rd, int ra, int d);
 uint32_t nw_ppc_stw(int rs, int ra, int d);
+uint32_t nw_ppc_lha(int rd, int ra, int d);
+uint32_t nw_ppc_sth(int rs, int ra, int d);
+uint32_t nw_ppc_bclr(int bo, int bi);
 uint32_t nw_ppc_cmp(int ra, int rb);
 uint32_t nw_ppc_cmpi(int ra, int simm);
 uint32_t nw_ppc_b(int disp, int lk);
@@ -133,6 +140,13 @@ uint32_t nw_ppc_blr(void);
 uint32_t nw_ppc_mfspr(int rd, int spr);
 uint32_t nw_ppc_mtspr(int spr, int rs);
 
-enum { NW_PPC_SPR_DEC = 22, NW_PPC_BO_TRUE = 12, NW_PPC_BO_FALSE = 4 };
+enum {
+	NW_PPC_SPR_XER = 1,
+	NW_PPC_SPR_LR = 8,
+	NW_PPC_SPR_CTR = 9,
+	NW_PPC_SPR_DEC = 22,
+	NW_PPC_BO_TRUE = 12,
+	NW_PPC_BO_FALSE = 4
+};
 
 #endif

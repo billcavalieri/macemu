@@ -1770,6 +1770,52 @@ int main()
 		CHECK(fn != NULL);
 		fn(&a);
 		CHECK(a.fault == 1 && a.pc == 0x1800u && a.lr == 0x2000u);
+
+		/* rlwimi r4, r3, 8, 0, 7  insert top byte; mtlr; bclr not taken */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x12u;
+		a.gpr[4] = 0xaabbccddu;
+		ops[0] = nw_ppc_rlwimi(4, 3, 24, 0, 7);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1900u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1900u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0x12bbccddu && b.gpr[4] == a.gpr[4] && b.pc == a.pc);
+
+		memset(&a, 0, sizeof(a));
+		a.gpr[29] = 0x3000u;
+		a.cr = 0;	/* CR bit 8 = 0 → bclr BO=5 (false) taken */
+		ops[0] = nw_ppc_mtspr(NW_PPC_SPR_LR, 29);
+		ops[1] = nw_ppc_bclr(5, 8);
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1a00u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1a00u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.pc == 0x3000u && b.pc == a.pc && b.lr == 0x3000u);
+
+		uint8_t half[8];
+		memset(half, 0, sizeof(half));
+		half[2] = 0xfe; half[3] = 0xed;
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.mem = half;
+		a.mem_base = 0;
+		a.mem_size = sizeof(half);
+		a.gpr[1] = 2;
+		ops[0] = nw_ppc_lha(3, 1, 0);
+		ops[1] = nw_ppc_sth(3, 1, 4);
+		ops[2] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 3, 0x1b00u) == 1);
+		fn = nw_jit_compile(ops, 3, 0x1b00u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[3] == 0xfffffeed && b.gpr[3] == a.gpr[3]);
+		CHECK(half[6] == 0xfe && half[7] == 0xed);
 	}
 
 	/* WP3 4b: fall-through PC after a 4-insn ALU block with no terminator. */
