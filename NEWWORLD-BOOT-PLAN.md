@@ -10,8 +10,9 @@ Finder (Mac OS Setup Assistant, Control Strip) in ≈ 140 s, interpreter. The
 SDL window shows the guest display through SheepShaver's own video ndrv
 with a real VBL interrupt (S4 step 8); the cursor tracks the ADB mouse.
 PRAM persists across runs through a model of the boot flash's NVRAM
-blocks (S4 step 9 addendum). Next: PMU restart/shutdown, then G5 polish
-and G6 JIT.
+blocks (S4 step 9 addendum). Special → Restart and Shut Down go through
+the PMU model (S4 step 10): restart re-executes the process (one log,
+two boots), shut down exits 0. Next: G5 polish and G6 JIT.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -697,7 +698,8 @@ expectations carry the flag bits). Removed on the way: a `cscSetInterrupt`
 override ("keeping VBL") that never fired, and a composited hardware
 cursor tried while chasing the freeze.
 
-Open: PMU restart/shutdown, Keylargo GPIO details, BAT range 1 overlap.
+Open: Keylargo GPIO details, BAT range 1 overlap. PMU restart/shutdown
+is done (S4 step 10 below).
 XPRAM/NVRAM persistence is done (NVRAM flash model, addendum below). A
 750 PVR (`NW_PVR=00080202`) is documented, not the default — see below.
 The Apple Monitor Plugins dialog is not a gate; see the addendum.
@@ -882,11 +884,73 @@ XPRAM byte 0x08 changed 0x1b → 0x03, nothing else. nv6, a fresh boot —
 fresh layout, aliases, erase/program/status sequence, file round trip,
 Trampoline carve). No `IO page ff004000 first` line any more.
 
-Not done: the restart itself — after the commit the guest blanks the
-screen and waits for the PMU (the open PMU restart/shutdown item), so
-the proof used a new run per boot. The `common` partition is empty;
+Not done at the time: the restart itself — after the commit the guest
+blanked the screen and waited for the PMU, so the proof used a new run
+per boot (S4 step 10 closes that). The `common` partition is empty;
 Startup Disk's OF `boot-device` write into it is not exercised. The
 dead `nvram1` patch is left as is.
+
+#### S4 step 10 — PMU restart and shut down
+
+Rule kept: no `_ShutDown` (`a895`) intercept and no ROM reset patch (Old
+World's `shutdown_dat` / `M68K_EMUL_OP_RESET` trick); the guest talks to
+the PMU and the host acts on what the PMU received.
+
+1. **What the guest does** (probe `/tmp/g6/pmu-a.log`, TEMP command
+   trace, removed). Special → Restart, after the NVRAM commit: `PMU cmd
+   d0 len 0 ->` (PMU_RESET, no data, no response — the model's length
+   table already said `{0,0}`), then five mac-io GPIO byte writes
+   (`80000062`, `65`, `77`, `78` ← 0, `79` ← 4) and read-modify-write
+   pairs on the Keylargo feature control registers, each "set bits, then
+   clear" (`80000038` FCR0 ← `0000cc10` then 0; `80000034` ← `00100000`;
+   `8000003c` ← 0; `80000040` ← 2 then 0; `80000044` ← `0e000000` then
+   0; reads all 0, unclaimed). Then the screen goes black and the guest
+   idles — on hardware the PMU has already pulled reset. Special → Shut
+   Down (`pmu-b.log`): `0x7e` with data `'M','A','T','T'`, one status
+   byte back, then the same wait. Nothing else waits on the FCRs, so
+   they are not modelled (step 6 of the brief not needed).
+2. **Model** (`nw_devices.cpp`, `nw_devices.h`): `pmu_dispatch` logs
+   `NW-BOOT G1: PMU reset (0xd0)` (only with no data) and `PMU shutdown
+   (0x7e %02x…)` (only with 4 data bytes; the byte reply stays) and
+   queues a power event; `nw_devices_tick()` delivers it to the hook
+   installed with `nw_pmu_set_power_hook()` on the next coarse tick, so
+   the VIA handshake for the command completes first. No hook: log only.
+   Harness: hook fires once after the tick, not from the dispatch, for
+   both commands (450 pass, +6).
+3. **Host, shut down** (`main_unix.cpp`): OFF → `nw_nvram_flush()`,
+   `QuitEmulator()` — the window-close path. Proof `pmu-b.log`: click at
+   176 s, `PMU shutdown (0x7e 4d415454)`, exit 0 (not the alarm's 142).
+   The install and boot runs of 13 Sep (`/tmp/g7/install.log`,
+   `boot2.log`) end the same way.
+4. **Host, restart.** A PMU reset restarts the whole machine including
+   Open Firmware, and on this branch "Open Firmware" is process start,
+   so RESTART sets a flag and calls `QuitEmulator()`; at the end of
+   `Quit()` — after `ExitAll()` closed the disks (their `O_EXLOCK`s) and
+   the NVRAM/XPRAM files were written — the process `execv()`s its saved
+   `argv` (copied at the top of `main()`, before consumed entries are
+   nulled). fd 1 survives the exec, so one log holds both boots; so does
+   the `perl alarm`, hence `alarm 480` for a two-boot run. An operator
+   script would replay from t=0 and select Restart again: the second
+   boot gets `NW_SCRIPT_RESTART` as its `NW_SCRIPT` (or none). An
+   earlier version exec'd straight from the hook, without `Quit()`: the
+   new image inherited the locked disk fds and booted to the "?" floppy
+   (`Cannot open … Resource temporarily unavailable`) — do not do that.
+5. **Proof** (`/tmp/g6/pmu-c.log`, scripts `pmu-c.nws` / `pmu-c2.nws`,
+   fresh NVRAM in `/tmp/g6/home2`, installed volume, one log, exit 0):
+   boot (`bank A gen 1, bank B gen 0`), Mouse control panel, tracking to
+   Very Slow (`pmu-c-before.png`), close, Special → Restart at 195 s →
+   `erase bank B` … `bank B programmed 8192 bytes, generation 2` → `PMU
+   reset (0xd0)` → the next line is the second banner; second boot reads
+   `bank A gen 1, bank B gen 2`, reaches the Finder, the Mouse panel
+   opens at Very Slow (`pmu-c2-after.png`), Special → Shut Down → `PMU
+   shutdown (0x7e 4d415454)` → exit 0. The `IO page … first` lines of
+   the second boot are the three of the first (`80012000`, `80020000`,
+   `80021000`); nothing new.
+
+Left: Sleep (`0x7f`) untouched; the FCR/GPIO writes before the reset
+stay unclaimed; the exec restarts with the same command line, so a
+prefs change made by the guest (Startup Disk) is picked up only through
+the files it wrote.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
