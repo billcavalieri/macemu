@@ -9,8 +9,9 @@ installer put 9.2.1 on the 2 GB volume and the installed System boots to the
 Finder (Mac OS Setup Assistant, Control Strip) in ≈ 140 s, interpreter. The
 SDL window shows the guest display through SheepShaver's own video ndrv
 with a real VBL interrupt (S4 step 8); the cursor tracks the ADB mouse.
-Next: New World input mode (guest cursor vs host pointer), XPRAM/NVRAM,
-then G5 polish and G6 JIT.
+PRAM persists across runs through a model of the boot flash's NVRAM
+blocks (S4 step 9 addendum). Next: PMU restart/shutdown, then G5 polish
+and G6 JIT.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -696,10 +697,10 @@ expectations carry the flag bits). Removed on the way: a `cscSetInterrupt`
 override ("keeping VBL") that never fired, and a composited hardware
 cursor tried while chasing the freeze.
 
-Open: XPRAM/NVRAM persistence (the startup-disk choice), PMU
-restart/shutdown, Keylargo GPIO details, BAT range 1 overlap. A 750 PVR
-(`NW_PVR=00080202`) is documented, not the default — see below. The
-Apple Monitor Plugins dialog is not a gate; see the addendum.
+Open: PMU restart/shutdown, Keylargo GPIO details, BAT range 1 overlap.
+XPRAM/NVRAM persistence is done (NVRAM flash model, addendum below). A
+750 PVR (`NW_PVR=00080202`) is documented, not the default — see below.
+The Apple Monitor Plugins dialog is not a gate; see the addendum.
 
 Found while using it (commit `350e1e4b`): a highlighted menu item's text
 came out speckled black. The frame buffer already held those pixels
@@ -808,6 +809,84 @@ timing-dependent or otherwise not deterministic, and the paragraph
 above is an inference from the selector log, not from a caught
 failure. When it next shows, read the OSErr off the shot and match it
 against the `NW-BOOT VIDEO` probe before deciding anything.
+
+**XPRAM/NVRAM persistence (`nw_nvram.{h,cpp}`).** Where PRAM goes on
+this ROM, from two probe runs (TEMP counters in `EmulOp` and on every
+`nw_io` access ≥ `0xff000000`, removed): `_WriteXPRam` (`a052`) is
+called 74 times per boot, SheepShaver's classic XPRAM/NVRAM `EMUL_OP`s
+fire **0** times (`/tmp/g6/nv1.log`), and `~/.sheepshaver_nvram` is never
+written. Only `nvram1` of the classic New World patch set matches this
+ROM (at 0x7510; `nvram2`–`7` patterns are absent, hence `patch_68k
+incomplete`), and that routine is unreachable: the live ProductInfo copy
+(`UnivInfoPtr` = 0x45e00, `/tmp/g6/nv2-ram0.bin`) has `ClockPRAMPtr`
+(+0x44) → ROM 0x7824, a table whose entries are `jmp (a6)` / `moveq
+#0,d0; rts` / `rts` (0x7864–0x7868); the OS trap table has `a051` →
+ROM `ffc08102`, `a052` → System code at `0012b0d0`. The PRAM bytes end
+up in the RAM shadow of the ROM's `nvram,flash` ndrv by a route not
+traced here.
+
+That ndrv is the whole hardware contract (parcel PEF, code base 0x57f10
+in RAM, `/tmp/g6/nvram-ndrv.dis`). It never reads the tree's `reg`:
+`addis r4,r3,-256` puts the flash at **0xff000000** and the two 8 KiB
+banks at +0x4000/+0x6000 (`nvram@fff04000` is the same chip — the
+bridge decodes the 16 MiB ROM window onto the 1 MiB boot flash, 16
+aliases). A bank is valid when byte 0 = 0x5a, the CHRP checksum of the
+16-byte header (byte 1 taken as 0, 8-bit end-around carry) matches byte
+1, and adler32 (mod 65521, seed 1) of [0x14..0x2000) matches +0x10; the
+value is the generation at +0x14 (+0x1f4/+0x20c). Init (+0x2b8) picks
+the higher generation, ties to A, copies 8192 bytes. Commit (+0x6e8):
+if adler of the shadow equals the stored one, nothing; else generation
++1, new adler, erase the *other* bank (+0x540: 0x20, 0xd0 at its first
+byte, poll, 0xff at 0xff004000, verify all 0xff), program every byte
+(+0x614: 0x40 then the byte, poll each, 0xff, verify), swap. The poll
+(+0x444) reads 0xff004000 for up to 5 s: 0x80 done, 0x38 error (−604),
+timeout −2415. Intel/Sharp boot-block flash command set, 8 KiB
+parameter blocks exactly where the two banks sit. Before the model:
+`/tmp/g6/nv2.log` 3425153 — Special → Restart wrote `20` and `d0` at
+`ff006000`, then 356 K reads of `ff004000` from t=180 to 185
+(`pc 0005839c` = +0x444+0x48), no program cycle: the erase timed out.
+
+Above the chip: the Trampoline (Mac OS ROM file 0x6300–0x6620, strings
+0x15c98–0x15f2b) walks the 16-byte CHRP partition headers of the bank
+OF hands it, looks for sig 0xa0 `APL,MacOS75`, and if absent carves one
+of 0x50 units out of the first 0x7f free partition of ≥ 0x51 units,
+writing through OF; failing that it tells Mac OS the constant 0x1400.
+`nw_nvram_init` does the same on the current bank. With no image file
+it presents what a fresh machine has: bank A generation 1 with the 0x5a
+header (name `nvram` — chosen, not observed on hardware), `common`
+(0x20, 0x13d units, empty = OF defaults), `APL,MacOS75` at 0x13f0
+(data 0x1400, 0x50 units), free 0x7f (0x71 units); bank B erased. The
+model claims 0x4000 bytes at 0xff004000 and the 15 other aliases
+(`NW_IO_MAX_DEVICES` 16 → 32); state machine as above, erase/program
+complete at once, status read at any address in command mode, program
+only clears bits, a bad sequence sets 0x30 until 0x50. The image (both
+banks, 16 KiB) is written to `<XPRAM file>.flash` (`XPRAMFilePath()`,
+new in `xpram_unix.cpp`; `~/.sheepshaver_nvram.flash` here) after each
+completed sequence (the driver's 0xff) and at exit; runs killed by the
+200 s alarm keep their commit.
+
+Result, four runs on one image file (`/tmp/g6/nv3.log`…`nv6.log`,
+`HOME=/tmp/g6/home` so the file is `/tmp/g6/home/.sheepshaver_nvram.flash`):
+nv3 fresh — `nvram flash …: bank A gen 1, bank B gen 0, APL,MacOS75
+data at 0x1400`; Special → Restart → `erase bank B`, then the program
+cycle byte by byte (`W1 ff006000 40`, `W1 ff006000 5a`, `W1 ff006001
+40`, `W1 ff006001 82`, …) → `bank B programmed 8192 bytes, generation
+2`; the file's bank B carries `NuMc` at 0x140c and a PRAM image at
+0x1400. nv4 — `bank A gen 1, bank B gen 2`; the ndrv checks both banks
+and its copy loop (`pc 0005825c`) now reads `ff006000…` (bank B). nv5 — Mouse control panel,
+tracking slider dragged to Very Slow (`nv5-mouse-veryslow.png`), close,
+Restart → `erase bank A` … `bank A programmed 8192 bytes, generation 3`;
+XPRAM byte 0x08 changed 0x1b → 0x03, nothing else. nv6, a fresh boot —
+`bank A gen 3, bank B gen 2` and the Mouse panel opens at Very Slow
+(`nv6-mouse-panel.png`). Harness 444 pass (33 new: adler32 vector,
+fresh layout, aliases, erase/program/status sequence, file round trip,
+Trampoline carve). No `IO page ff004000 first` line any more.
+
+Not done: the restart itself — after the commit the guest blanks the
+screen and waits for the PMU (the open PMU restart/shutdown item), so
+the proof used a new run per boot. The `common` partition is empty;
+Startup Disk's OF `boot-device` write into it is not exercised. The
+dead `nvram1` patch is left as is.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
