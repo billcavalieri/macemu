@@ -17,8 +17,11 @@ menu bar, About This Computer reads Mac OS 9.2.1. Interpreter baseline
 (S4 step 12): ≈ 80–110 s to Finder, ≈ 31.6 Mops/s during boot, ≈ 23.7 Mops/s
 and 60 presents/s at idle. **WP4 reached** (S4 step 13): one physical
 decode (`nw_pa_kind`), bank map at boot, ROM stores dropped. WP3 4a
-(S4 step 14): ARM64 integer-subset JIT matches the C oracle. Next: WP3 4b
-dispatcher / WP5 damage / G6.
+(S4 step 14): ARM64 integer-subset JIT matches the C oracle. **WP3 4b
+dispatcher** (S4 step 15): fallback boot identical, not faster;
+`NW_JIT=verify` block-shadow vs kpx is 0-miss on the integer subset
+(copy-out gated until `lwz`/`stw` helpers are vs-kpx’d). Next: WP3 4b-2
+idle translate / WP5 damage / G6.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -1082,6 +1085,30 @@ the same subset is the oracle. Translation cache keyed by
 Not wired into `powerpc_cpu::execute` yet (4b). Harness 548 passed, 0
 failed (+27). Branch `arm64-jit` (reset from `newworld-boot` after
 WP4; the old G0–G2 `arm64-jit` tip is an ancestor).
+
+#### S4 step 15 — WP3 4b dispatcher and vs-kpx verify
+
+Block cache (4096 slots, 8-probe) keyed `(phys_page, guest_pc, msr_ir, endian)`.
+Modes: `off` / `fallback` / `on` / `verify`. Env `NW_JIT=` overrides; `jit true`
+pref selects fallback. `NW_JIT_FALLBACK` never runs compiled code. Fast path:
+mode not on/verify → return 0 (no cache walk). Boot `/tmp/g8/4b-fb2.log`
+exit 0, `PMU shutdown`, `blocks 0`, ~155 s vs ~140 s interpreter; not faster.
+
+`NW_JIT=verify` compiles the same N-insn block the live path would (max 16,
+stop at unsupported / page / branch / Altivec / FP), runs it on a shadow
+CPU, then kpx interprets; the guest follows kpx. Per-op histogram is permanent
+(`G1: jit verify`). 20 s `/tmp/g8/4b-ver.log`: `cmp 97000000 miss 0 fail 0`;
+`blr 3182391`, `mfspr 17`, `mtspr 7522`; blocklen 16 seen; rfi `503113c4`.
+`lwz`/`stw` stay off `nw_jit_op_dispatch` until their helpers go through the
+same check. `NW_JIT=on` is still that shadow (copy-out gated).
+
+Emitter vs-kpx misses that were fixed (quoted from `/tmp/g8/4b-kpx.log`
+and `4b-kpx2.log`): `rlwinm.` CR0, `cmpi`/`cmp` `crfD≠0`, `blrl` LR,
+`cmp` signed (`INT_MIN` vs 1), `blr` NIA = `LR & ~3`. C oracle matching
+JIT was a false clean. Guess-phase ON boots (`4b-on3`/`4b-on4`) are
+negative controls (`/tmp/g8/README-4b-negative.txt`).
+
+Harness 579 passed, 0 failed. Branch `arm64-jit`.
 
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
