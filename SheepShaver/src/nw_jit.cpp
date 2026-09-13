@@ -47,6 +47,7 @@ struct nw_jit_entry {
 static uint8_t *g_code;
 static size_t g_code_used;
 static struct nw_jit_entry g_cache[NW_JIT_CACHE];
+static uint8_t g_pagebit[512];	/* 4096 bits: (phys>>12)&4095 may have compiled code */
 static uint64_t g_flush;
 static uint64_t g_exec_blocks, g_exec_insns;
 static int g_mode = -1;
@@ -100,6 +101,18 @@ static int cache_slot(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir, ui
 	return (int)(h & (NW_JIT_CACHE - 1));
 }
 
+static void pagebit_set(uint32_t phys_page)
+{
+	const unsigned i = (phys_page >> 12) & 4095u;
+	g_pagebit[i >> 3] |= (uint8_t)(1u << (i & 7u));
+}
+
+static int pagebit_get(uint32_t phys_page)
+{
+	const unsigned i = (phys_page >> 12) & 4095u;
+	return g_pagebit[i >> 3] & (uint8_t)(1u << (i & 7u));
+}
+
 static int code_ready(void)
 {
 	if (g_code)
@@ -117,6 +130,7 @@ static int code_ready(void)
 void nw_jit_reset(void)
 {
 	memset(g_cache, 0, sizeof(g_cache));
+	memset(g_pagebit, 0, sizeof(g_pagebit));
 	g_code_used = 0;
 	g_flush = 0;
 	g_exec_blocks = 0;
@@ -131,12 +145,26 @@ void nw_jit_reset(void)
 
 void nw_jit_invalidate_page(uint32_t phys_page)
 {
+	phys_page &= ~0xfffu;
+	if (!pagebit_get(phys_page))
+		return;
 	for (int i = 0; i < NW_JIT_CACHE; i++) {
 		if (g_cache[i].used && g_cache[i].phys_page == phys_page) {
 			g_cache[i].used = 0;
 			g_flush++;
 		}
 	}
+}
+
+void nw_jit_invalidate_all(void)
+{
+	for (int i = 0; i < NW_JIT_CACHE; i++) {
+		if (g_cache[i].used) {
+			g_cache[i].used = 0;
+			g_flush++;
+		}
+	}
+	memset(g_pagebit, 0, sizeof(g_pagebit));
 }
 
 uint64_t nw_jit_flush_count(void)
@@ -447,7 +475,7 @@ nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 	for (int n = 0; n < NW_JIT_PROBE; n++) {
 		int j = (i + n) & (NW_JIT_CACHE - 1);
 		if (!g_cache[j].used)
-			return NULL;
+			continue;
 		if (g_cache[j].phys_page == phys_page && g_cache[j].guest_pc == guest_pc &&
 		    g_cache[j].msr_ir == msr_ir && g_cache[j].endian == endian) {
 			if (n_out)
@@ -479,6 +507,7 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 	g_cache[slot].fn = fn;
 	g_cache[slot].used = 1;
 	g_cache[slot].n = (uint8_t)(n < 0 ? 0 : n > 255 ? 255 : n);
+	pagebit_set(phys_page);
 }
 
 uint32_t nw_ppc_addi(int rd, int ra, int simm)
@@ -1505,6 +1534,7 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 	if (g_code_used + 8192 > NW_JIT_CODE_SIZE) {
 		g_code_used = 0;
 		memset(g_cache, 0, sizeof(g_cache));
+		memset(g_pagebit, 0, sizeof(g_pagebit));
 		g_flush++;
 	}
 #ifdef __APPLE__

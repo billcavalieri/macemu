@@ -1718,6 +1718,23 @@ int main()
 		nw_jit_invalidate_page(0x1000u);
 		CHECK(nw_jit_flush_count() > fl);
 		CHECK(nw_jit_compile(ops, 4, 0x1500u, 0x1000u, 0, 0) != fn);
+
+		/* 4c: invalidate_page drops only that phys page; all drops both */
+		nw_jit_reset();
+		ops[0] = nw_ppc_addi(3, 0, 1);
+		ops[1] = nw_ppc_blr();
+		nw_jit_fn pa = nw_jit_compile(ops, 2, 0x1000u, 0x1000u, 0, 0);
+		nw_jit_fn pb = nw_jit_compile(ops, 2, 0x2000u, 0x2000u, 0, 0);
+		CHECK(pa != NULL && pb != NULL && pa != pb);
+		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == pa);
+		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == pb);
+		nw_jit_invalidate_page(0x1000u);
+		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == NULL);
+		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == pb);
+		fl = nw_jit_flush_count();
+		nw_jit_invalidate_all();
+		CHECK(nw_jit_flush_count() > fl);
+		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
 	}
 
 	/* WP3 4b: dispatcher cache sentinels, mode, op filter. */

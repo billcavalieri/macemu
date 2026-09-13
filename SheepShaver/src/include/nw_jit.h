@@ -35,7 +35,9 @@
  * runs compiled code. NW_JIT_VERIFY compiles the same N-insn block the
  * live path would, runs it on a shadow CPU, then kpx interprets; the
  * guest follows kpx. NW_JIT_ON copy-out commits the shadow; mtspr DEC
- * goes through the same 0→1 / tb_base path as kpx mtspr_oea.
+ * goes through the same 0→1 / tb_base path as kpx mtspr_oea. 4c: the
+ * cache drops on tlbie (invalidate_cache), mtsr/BAT/SDR1, icbi, and
+ * a live stw/sth of a translated page.
  */
 enum { NW_JIT_MAX_BLOCK = 16 };
 
@@ -121,6 +123,7 @@ nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
 			uint32_t phys_page, uint32_t msr_ir, uint32_t endian);
 
 void nw_jit_invalidate_page(uint32_t phys_page);
+void nw_jit_invalidate_all(void);
 uint64_t nw_jit_flush_count(void);
 
 /* PPC instruction constructors for the harness. */

@@ -42,6 +42,7 @@
 #include "prefs.h"
 #include "nw_boot_contract.h"
 #include "nw_io.h"
+#include "nw_jit.h"
 #endif
 
 #if ENABLE_MON
@@ -1316,9 +1317,13 @@ void powerpc_cpu::execute_mfsr(uint32 opcode)
 
 void powerpc_cpu::execute_mtsr(uint32 opcode)
 {
-	if (ppc32_guest_mmu_enabled())
+	if (ppc32_guest_mmu_enabled()) {
 		ppc32_guest_mmu().set_sr(rA_field::extract(opcode) & 0xfu,
 					 operand_RS::get(this, opcode));
+#ifdef SHEEPSHAVER
+		nw_jit_invalidate_all();
+#endif
+	}
 	increment_pc(4);
 }
 
@@ -1339,6 +1344,9 @@ void powerpc_cpu::execute_mtsrin(uint32 opcode)
 		const uint32 ea = operand_RB::get(this, opcode);
 		ppc32_guest_mmu().set_sr((ea >> 28) & 0xfu,
 					 operand_RS::get(this, opcode));
+#ifdef SHEEPSHAVER
+		nw_jit_invalidate_all();
+#endif
 	}
 	increment_pc(4);
 }
@@ -1506,6 +1514,21 @@ void powerpc_cpu::execute_invalidate_cache_range()
 {
 	if (cache_range.start != cache_range.end) {
 		invalidate_cache_range(cache_range.start, cache_range.end);
+#ifdef SHEEPSHAVER
+		if (ppc32_guest_mmu_enabled()) {
+			uint32 ea = cache_range.start & ~0xfffu;
+			const uint32 last = (cache_range.end - 1u) & ~0xfffu;
+			for (;;) {
+				const ppc32_xlate_result r =
+					ppc32_guest_mmu().translate(ea, PPC32_XLATE_IR, 4);
+				if (r.ok)
+					nw_jit_invalidate_page(r.pa);
+				if (ea == last)
+					break;
+				ea += 0x1000u;
+			}
+		}
+#endif
 		cache_range.start = cache_range.end = 0;
 	}
 }

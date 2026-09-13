@@ -984,6 +984,7 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 	case powerpc_registers::SPR_SDR1:
 #ifdef SHEEPSHAVER
 		nw_note_mtsdr1();
+		nw_jit_invalidate_all();
 #endif
 		mmu.set_sdr1(value); return true;
 	case powerpc_registers::SPR_SRR0:	srr0_ = value; return true;
@@ -1011,6 +1012,9 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		else
 			u = value;
 		mmu.set_ibat(i, u, l);
+#ifdef SHEEPSHAVER
+		nw_jit_invalidate_all();
+#endif
 		return true;
 	}
 	if (spr >= powerpc_registers::SPR_DBAT0U && spr <= powerpc_registers::SPR_DBAT3L) {
@@ -1022,6 +1026,9 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		else
 			u = value;
 		mmu.set_dbat(i, u, l);
+#ifdef SHEEPSHAVER
+		nw_jit_invalidate_all();
+#endif
 		return true;
 	}
 	return false;
@@ -1325,6 +1332,7 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 		return;
 	}
 	vm_write_memory_4(pa, val);
+	nw_jit_invalidate_page(pa);
 }
 
 uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)
@@ -1369,6 +1377,7 @@ void powerpc_cpu::jit_host_sth(void *host, uint32 ea, uint32 val, uint32 pc, int
 		return;
 	}
 	vm_write_memory_2(pa, val);
+	nw_jit_invalidate_page(pa);
 }
 
 static int nw_jit_pa_ok(uint32 pa, int is_st)
@@ -1956,6 +1965,9 @@ void powerpc_cpu::invalidate_cache()
 #endif
 #if PPC_DECODE_CACHE
 	decode_cache_p = decode_cache;
+#endif
+#ifdef SHEEPSHAVER
+	nw_jit_invalidate_all();
 #endif
 }
 
