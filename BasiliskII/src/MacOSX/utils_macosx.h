@@ -25,6 +25,7 @@
 #if SDL_VERSION_ATLEAST(2,0,0)
 void disable_SDL2_macosx_menu_bar_keyboard_shortcuts();
 bool is_fullscreen_osx(SDL_Window * window);
+void macosx_set_window_title(SDL_Window *window, const char *title);
 #endif
 #endif
 
@@ -33,5 +34,7 @@ void set_menu_bar_visible_osx(bool visible);
 void set_current_directory();
 
 bool MetalIsAvailable();
+
+void macosx_force_host_cursor(bool show);
 
 #endif

@@ -418,9 +418,15 @@ void nw_script_tick(void)
 		active = false;
 }
 
+int nw_script_active(void)
+{
+	return active ? 1 : 0;
+}
+
 #else
 
 void nw_script_init(void) {}
 void nw_script_tick(void) {}
+int nw_script_active(void) { return 0; }
 
 #endif

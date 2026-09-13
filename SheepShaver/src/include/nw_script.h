@@ -54,6 +54,7 @@ extern "C" {
 
 void nw_script_init(void);	/* reads NW_SCRIPT; no-op when unset */
 void nw_script_tick(void);	/* from the CPU thread's coarse tick */
+int nw_script_active(void);	/* 1 while a Debug operator script is running */
 
 #ifdef __cplusplus
 }

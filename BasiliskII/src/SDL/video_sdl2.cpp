@@ -24,7 +24,10 @@
  *      Ctrl-Tab = suspend DGA mode (TODO)
  *      Ctrl-Esc = emergency quit
  *      Ctrl-F1 = mount floppy
- *      Ctrl-F5 = grab mouse (in windowed mode)
+ *      Ctrl-G  = grab mouse (in windowed mode; F5 also, where the host
+ *                delivers Fn keys). New World grabs while the window has
+ *                focus (software cursor, relative ADB); Ctrl+G releases
+ *                and stays released until Ctrl+G or a click in the window.
  *
  *  FIXMEs and TODOs:
  *  - Windows requires an extra mouse event to update the actual cursor image?
@@ -72,6 +75,8 @@
 #include "cdrom.h"
 #ifdef SHEEPSHAVER
 #include "nw_devices.h"
+#include "rom_patches.h"
+#include "nw_script.h"
 #endif
 
 #define DEBUG 0
@@ -164,6 +169,38 @@ static bool toggle_fullscreen = false;
 static bool did_add_event_watch = false;
 
 static bool mouse_grabbed = false;
+
+#ifdef SHEEPSHAVER
+/* New World interactive input: relative grab while the window has focus.
+ * Operator scripts inject ADB themselves. Ctrl+G (and Ctrl+F5 where the
+ * host delivers Fn keys) releases; that ungrab is not undone by a focus
+ * event. A click in the window captures again (the click itself is not
+ * forwarded to the guest). */
+static bool nw_grab_held_off;
+static bool nw_swallow_capture_up;
+static uint32 nw_grab_settle_until;
+static bool nw_relative_input(void)
+{
+	return ROMType == ROMTYPE_NEWWORLD && !nw_script_active();
+}
+static bool nw_window_focused(void)
+{
+	return sdl_window && (SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_INPUT_FOCUS);
+}
+static void nw_host_cursor(bool show)
+{
+	if (show) {
+		SDL_Cursor *def = SDL_GetDefaultCursor();
+		if (def)
+			SDL_SetCursor(def);
+		for (int i = 0; i < 8 && SDL_ShowCursor(SDL_QUERY) == 0; i++)
+			SDL_ShowCursor(SDL_ENABLE);
+		macosx_force_host_cursor(true);
+	} else {
+		SDL_ShowCursor(SDL_DISABLE);
+	}
+}
+#endif
 
 // Mutex to protect SDL events
 static SDL_mutex *sdl_events_lock = NULL;
@@ -568,9 +605,18 @@ static void set_window_name() {
 		if (hotkey & 1) s += GetString(STR_WINDOW_TITLE_GRABBED1);
         if (hotkey & 2) s += GetString(STR_WINDOW_TITLE_GRABBED2);
         if (hotkey & 4) s += GetString(STR_WINDOW_TITLE_GRABBED4);
+#ifdef SHEEPSHAVER
+		if (ROMType == ROMTYPE_NEWWORLD)
+			s += "G to release)";
+		else
+#endif
         s += GetString(STR_WINDOW_TITLE_GRABBED_POST);
 	}
+#ifdef __MACOSX__
+	macosx_set_window_title(sdl_window, s.c_str());
+#else
 	SDL_SetWindowTitle(sdl_window, s.c_str());
+#endif
 }
 
 // Migrate preferences items (XXX to be handled in MigratePrefs())
@@ -759,6 +805,9 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
 	}
 	
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, PrefsFindBool("scale_nearest") ? "nearest" : "linear");
+#ifdef SHEEPSHAVER
+	SDL_SetHint("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1");
+#endif
 	
 #if defined(__MACOSX__) && SDL_VERSION_ATLEAST(2,0,14)
 	if (MetalIsAvailable()) window_flags |= SDL_WINDOW_METAL;
@@ -1104,7 +1153,13 @@ void driver_base::init()
 	sdl_palette->colors[1] = (SDL_Color){ .r = 0, .g = 0, .b = 0, .a = 255 };
 	SDL_SetSurfacePalette(s, sdl_palette);
 
-	if (PrefsFindBool("init_grab") && !PrefsFindBool("hardcursor")) grab_mouse();
+	bool want_grab = PrefsFindBool("init_grab") && !PrefsFindBool("hardcursor");
+#ifdef SHEEPSHAVER
+	if (nw_relative_input() && nw_window_focused())
+		want_grab = true;
+#endif
+	if (want_grab)
+		grab_mouse();
 }
 
 void driver_base::adapt_to_video_mode() {
@@ -1146,7 +1201,11 @@ void driver_base::adapt_to_video_mode() {
 	sdl_update_video_rect.h = VIDEO_MODE_Y;
 	SDL_UnlockMutex(sdl_update_video_mutex);
 	
-	// Hide cursor
+#ifdef SHEEPSHAVER
+	if (ROMType == ROMTYPE_NEWWORLD)
+		nw_host_cursor(!mouse_grabbed);
+	else
+#endif
 	SDL_ShowCursor(hardware_cursor);
 
 	// Set window name/class
@@ -1229,10 +1288,18 @@ void driver_base::restore_mouse_accel(void)
 // Toggle mouse grab
 void driver_base::toggle_mouse_grab(void)
 {
-	if (mouse_grabbed)
+	if (mouse_grabbed) {
 		ungrab_mouse();
-	else
+#ifdef SHEEPSHAVER
+		if (ROMType == ROMTYPE_NEWWORLD)
+			nw_grab_held_off = true;
+#endif
+	} else {
+#ifdef SHEEPSHAVER
+		nw_grab_held_off = false;
+#endif
 		grab_mouse();
+	}
 }
 
 static void update_mouse_grab()
@@ -1250,6 +1317,11 @@ void driver_base::grab_mouse(void)
 	if (!mouse_grabbed) {
 		mouse_grabbed = true;
 		update_mouse_grab();
+#ifdef SHEEPSHAVER
+		nw_grab_settle_until = SDL_GetTicks() + 250;
+		if (ROMType == ROMTYPE_NEWWORLD)
+			nw_host_cursor(false);
+#endif
 		set_window_name();
 		disable_mouse_accel();
 		ADBSetRelMouseMode(true);
@@ -1262,6 +1334,10 @@ void driver_base::ungrab_mouse(void)
 	if (mouse_grabbed) {
 		mouse_grabbed = false;
 		update_mouse_grab();
+#ifdef SHEEPSHAVER
+		if (ROMType == ROMTYPE_NEWWORLD)
+			nw_host_cursor(true);
+#endif
 		set_window_name();
 		restore_mouse_accel();
 		ADBSetRelMouseMode(false);
@@ -2071,6 +2147,10 @@ void SDL_monitor_desc::switch_to_current_mode(void)
 #ifdef SHEEPSHAVER
 bool video_can_change_cursor(void)
 {
+	/* New World: the host pointer is not the Mac cursor (no MTemp/RawMouse
+	 * write). The driver reports a software cursor regardless of hardcursor. */
+	if (ROMType == ROMTYPE_NEWWORLD)
+		return false;
 	return PrefsFindBool("hardcursor");
 }
 #endif
@@ -2131,6 +2211,19 @@ static bool is_hotkey_down(SDL_Keysym const & ks)
 	return (ctrl_down || (ks.mod & KMOD_CTRL) || !(hotkey & 1)) &&
 			(opt_down || (ks.mod & KMOD_ALT) || !(hotkey & 2)) &&
 			(cmd_down || (ks.mod & KMOD_GUI) || !(hotkey & 4));
+}
+
+static bool is_grab_hotkey(SDL_Keysym const & ks)
+{
+	if (!is_hotkey_down(ks))
+		return false;
+#ifdef SHEEPSHAVER
+	if (ROMType == ROMTYPE_NEWWORLD)
+		return ks.sym == SDLK_g || ks.sym == SDLK_F5;
+	return ks.sym == SDLK_F5 && !video_can_change_cursor();
+#else
+	return ks.sym == SDLK_F5 && !PrefsFindBool("hardcursor");
+#endif
 }
 
 static int modify_opt_cmd(int code) {
@@ -2316,18 +2409,29 @@ enum {
 static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event)
 {
 	switch (event->type) {
+		case SDL_KEYDOWN:
 		case SDL_KEYUP: {
 			SDL_Keysym const & ks = event->key.keysym;
-			switch (ks.sym) {
-				case SDLK_F5: {
-					if (is_hotkey_down(ks) && !PrefsFindBool("hardcursor")) {
-						drv->toggle_mouse_grab();
-						return EVENT_DROP_FROM_QUEUE;
-					}
-				} break;
+			/* Ctrl+G (and Ctrl+F5 where the host delivers Fn keys). Both
+			 * down and up are dropped so the guest does not see G. */
+			if (is_grab_hotkey(ks)) {
+				if (event->type == SDL_KEYUP && drv)
+					drv->toggle_mouse_grab();
+				return EVENT_DROP_FROM_QUEUE;
 			}
 		} break;
 			
+		case SDL_MOUSEBUTTONDOWN:
+#ifdef SHEEPSHAVER
+			if (nw_relative_input() && drv && !mouse_grabbed) {
+				nw_grab_held_off = false;
+				nw_swallow_capture_up = true;
+				drv->grab_mouse();
+				return EVENT_DROP_FROM_QUEUE;
+			}
+#endif
+			break;
+
 		case SDL_DROPFILE:
 			CDROMDrop(event->drop.file);
 			SDL_free(event->drop.file);
@@ -2336,6 +2440,20 @@ static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event)
 
 		case SDL_WINDOWEVENT: {
 			switch (event->window.event) {
+#ifdef SHEEPSHAVER
+				case SDL_WINDOWEVENT_FOCUS_GAINED:
+					if (nw_relative_input() && !nw_grab_held_off && drv)
+						drv->grab_mouse();
+					break;
+				case SDL_WINDOWEVENT_FOCUS_LOST:
+					/* SetRelativeMouseMode often synthesizes a focus-lost
+					 * on macOS while the window still has input focus. */
+					if (ROMType == ROMTYPE_NEWWORLD && drv
+					    && SDL_GetTicks() >= nw_grab_settle_until
+					    && !nw_window_focused())
+						drv->ungrab_mouse();
+					break;
+#endif
 				case SDL_WINDOWEVENT_RESIZED: {
 					if (!redraw_thread_active) break;
 					// Handle changes of fullscreen.  This is done here, in
@@ -2393,6 +2511,12 @@ static void handle_events(void)
 				break;
 			}
 			case SDL_MOUSEBUTTONUP: {
+#ifdef SHEEPSHAVER
+				if (nw_swallow_capture_up) {
+					nw_swallow_capture_up = false;
+					break;
+				}
+#endif
 				unsigned int button = event.button.button;
 				if (button == SDL_BUTTON_LEFT)
 					ADBMouseUp(0);
@@ -2405,6 +2529,10 @@ static void handle_events(void)
 
 			// Mouse moved
 			case SDL_MOUSEMOTION:
+#ifdef SHEEPSHAVER
+				if (ROMType == ROMTYPE_NEWWORLD && !mouse_grabbed)
+					break;
+#endif
 				if (mouse_grabbed) {
 					drv->mouse_moved(event.motion.xrel, event.motion.yrel);
 				} else {

@@ -19,6 +19,7 @@
  */
 
 #include <Cocoa/Cocoa.h>
+#include <ApplicationServices/ApplicationServices.h>
 #include "sysdeps.h"
 #include <SDL.h>
 #include "utils_macosx.h"
@@ -80,6 +81,27 @@ bool is_fullscreen_osx(SDL_Window * window)
 	return (styleMask & NSWindowStyleMaskFullScreen) != 0;
 }
 
+void macosx_set_window_title(SDL_Window *window, const char *title)
+{
+	if (!window || !title)
+		return;
+	NSWindow *nsw = get_nswindow(window);
+	if (!nsw) {
+		SDL_SetWindowTitle(window, title);
+		return;
+	}
+	NSString *t = [[NSString alloc] initWithUTF8String:title];
+	if ([NSThread isMainThread]) {
+		[nsw setTitle:t];
+		[t release];
+		return;
+	}
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[nsw setTitle:t];
+		[t release];
+	});
+}
+
 #endif // SDL_VERSION_ATLEAST(2, 0, 0)
 
 #if SDL_VERSION_ATLEAST(3, 0, 0) && defined(VIDEO_CHROMAKEY)
@@ -132,4 +154,17 @@ void set_current_directory()
 	NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
 	chdir([[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] UTF8String]);
 	[pool release];
+}
+
+void macosx_force_host_cursor(bool show)
+{
+	if (!show)
+		return;
+	/* SDL_SetRelativeMouseMode hides via a Cocoa counter SDL_ShowCursor
+	 * does not always drain. Unhide until the pointer is actually back. */
+	CGAssociateMouseAndMouseCursorPosition(true);
+	for (int i = 0; i < 8; i++) {
+		[NSCursor unhide];
+		CGDisplayShowCursor(kCGDirectMainDisplay);
+	}
 }
