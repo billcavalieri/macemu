@@ -365,6 +365,9 @@ void nw_script_tick(void)
 		case ST_MOUSE_TO: {
 			int cx, cy;
 			guest_cursor(&cx, &cy);
+			if (mouse_tries == 0)
+				printf("NW-BOOT SCRIPT t=%.1f mouse from %d,%d (MTemp %d,%d) toward %d,%d\n",
+				       el / 1e6, cx, cy, (int)(int16)ReadMacInt16(0x828), (int)(int16)ReadMacInt16(0x82a), s.a, s.b);
 			if (cx - s.a <= MOUSE_TOL && s.a - cx <= MOUSE_TOL && cy - s.b <= MOUSE_TOL && s.b - cy <= MOUSE_TOL) {
 				printf("NW-BOOT SCRIPT t=%.1f mouse at %d,%d (%d steps)\n", el / 1e6, cx, cy, mouse_tries);
 				mouse_tries = 0;
@@ -373,7 +376,8 @@ void nw_script_tick(void)
 				return;
 			}
 			if (++mouse_tries > MOUSE_MAX_TRIES) {
-				printf("NW-BOOT SCRIPT t=%.1f mouse gave up at %d,%d (target %d,%d)\n", el / 1e6, cx, cy, s.a, s.b);
+				printf("NW-BOOT SCRIPT t=%.1f mouse gave up at %d,%d (MTemp %d,%d, target %d,%d)\n",
+				       el / 1e6, cx, cy, (int)(int16)ReadMacInt16(0x828), (int)(int16)ReadMacInt16(0x82a), s.a, s.b);
 				mouse_tries = 0;
 				head++;
 				return;
