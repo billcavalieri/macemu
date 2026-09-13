@@ -20,8 +20,8 @@ decode (`nw_pa_kind`), bank map at boot, ROM stores dropped. WP3 4a
 (S4 step 14): ARM64 integer-subset JIT matches the C oracle. **WP3 4b
 dispatcher** (S4 step 15): fallback boot identical, not faster;
 `NW_JIT=verify` block-shadow vs kpx is 0-miss on the integer subset
-(copy-out gated until `lwz`/`stw` helpers are vs-kpx’d). Next: WP3 4b-2
-idle translate / WP5 damage / G6.
+(copy-out gated until `lwz`/`stw` helpers are vs-kpx’d). Next: WP3 4b-2 (`lwz`/`stw` vs-kpx, idle translate), then 4c, 4d,
+the three-run G6 table; WP5 after G6.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
