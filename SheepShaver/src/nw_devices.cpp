@@ -1525,6 +1525,19 @@ static void via_tick(void)
 	}
 }
 
+/* Absent: reads 0, writes dropped. The guest still probes SCC and both
+ * keylargo-ata buses (and RMW's Keylargo FCR0..4 on PMU reset); the tree
+ * presents no escc, and the ATA ndrv deletes empty buses. Claiming the
+ * pages keeps `IO page … first` for surprises. */
+static uint32_t absent_io_read(void *, uint32_t, int)
+{
+	return 0;
+}
+
+static void absent_io_write(void *, uint32_t, int, uint32_t)
+{
+}
+
 void nw_devices_init(const struct nw_devices_clock *tb)
 {
 	g_tb = *tb;
@@ -1542,6 +1555,10 @@ void nw_devices_init(const struct nw_devices_clock *tb)
 		{ "pci-config-addr", NW_IO_PCI_CONFIG_ADDR, NW_IO_PCI_CONFIG_SIZE, pci_addr_io_read, pci_addr_io_write, NULL },
 		{ "pci-config-data", NW_IO_PCI_CONFIG_DATA, NW_IO_PCI_CONFIG_SIZE, pci_data_io_read, pci_data_io_write, NULL },
 		{ "gpio", NW_IO_MACIO_GPIO_BASE, NW_IO_MACIO_GPIO_SIZE, gpio_io_read, gpio_io_write, NULL },
+		{ "keylargo-fcr", NW_IO_KEYLARGO_FCR_BASE, NW_IO_KEYLARGO_FCR_SIZE, absent_io_read, absent_io_write, NULL },
+		{ "scc", NW_IO_SCC_LEGACY_BASE, NW_IO_SCC_SIZE, absent_io_read, absent_io_write, NULL },
+		{ "ata-3-0", NW_IO_ATA0_BASE, NW_IO_ATA_SIZE, absent_io_read, absent_io_write, NULL },
+		{ "ata-3-1", NW_IO_ATA1_BASE, NW_IO_ATA_SIZE, absent_io_read, absent_io_write, NULL },
 		{ "via-pmu", NW_IO_VIA_PMU_BASE, NW_IO_VIA_PMU_SIZE, via_io_read, via_io_write, NULL },
 	};
 	for (size_t i = 0; i < sizeof(devs) / sizeof(devs[0]); i++)

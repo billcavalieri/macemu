@@ -1119,6 +1119,16 @@ int main()
 		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 5, 1, 0) == 0);
 		nw_io_write(NW_IO_MACIO_GPIO_BASE + 2, 1, 0xff, 0);
 		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 2, 1, 0) == 0);
+		/* Absent SCC / ATA / FCR: same as the unclaimed default (0, writes dropped). */
+		CHECK(nw_io_read(NW_IO_SCC_LEGACY_BASE, 1, 0) == 0);
+		nw_io_write(NW_IO_SCC_LEGACY_BASE, 1, 0xa0, 0);
+		CHECK(nw_io_read(NW_IO_SCC_LEGACY_BASE, 1, 0) == 0);
+		CHECK(nw_io_read(NW_IO_ATA0_BASE + 0x60, 1, 0) == 0);
+		nw_io_write(NW_IO_ATA0_BASE + 0x60, 1, 0xa0, 0);
+		CHECK(nw_io_read(NW_IO_ATA0_BASE + 0x60, 1, 0) == 0);
+		CHECK(nw_io_read(NW_IO_ATA1_BASE + 0x60, 1, 0) == 0);
+		nw_io_write(NW_IO_KEYLARGO_FCR_BASE, 4, 0x0000cc10u, 0);
+		CHECK(nw_io_read(NW_IO_KEYLARGO_FCR_BASE, 4, 0) == 0);
 
 		g_test_pmu_power_ev = -1;
 		nw_pmu_set_power_hook(test_pmu_power_hook, NULL);

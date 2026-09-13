@@ -44,6 +44,12 @@ enum {
 	NW_IO_VIA_PMU_SIZE = 0x2000u,
 	NW_IO_SCC_LEGACY_BASE = 0x80012000u,
 	NW_IO_SCC_BASE = 0x80013000u,
+	NW_IO_SCC_SIZE = 0x2000u,			/* legacy 0x12000 and escc 0x13000; tree has no escc */
+	NW_IO_ATA0_BASE = 0x80020000u,			/* mac-io ata-3 bus 0 (AAPL,address); ndrv finds nothing */
+	NW_IO_ATA1_BASE = 0x80021000u,
+	NW_IO_ATA_SIZE = 0x1000u,
+	NW_IO_KEYLARGO_FCR_BASE = 0x80000038u,		/* FCR0..FCR4; abuts GPIO at 0x50 */
+	NW_IO_KEYLARGO_FCR_SIZE = 0x18u,
 	NW_IO_KEYLARGO_TIMER_BASE = 0x80015000u,	/* free-running 18.432 MHz counter at +0x38/+0x3c */
 	NW_IO_KEYLARGO_TIMER_SIZE = 0x1000u,
 	NW_IO_OPENPIC_BASE = 0x80040000u,
