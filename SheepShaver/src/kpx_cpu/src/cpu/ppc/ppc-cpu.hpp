@@ -260,6 +260,9 @@ private:
 	uint64 dec_tb_base_;	/* timebase when dec_ was last sampled */
 	bool dec_pending_;
 	int64 tb_offset_;		/* mtspr TBL/TBU: guest TB = host ticks + offset */
+#ifdef SHEEPSHAVER
+	uint32 last_fetch_pa_;
+#endif
 
 	/* MPC7400 (G4) implementation SPRs modelled as plain storage
 	 * (HID0/1, IABR, DABR, MSSCRx, L2CR, ICTC, THRMx, PIR, EAR, BAMR and the
@@ -344,6 +347,11 @@ public:
 	bool guest_mmu_enabled() const { return ppc32_guest_mmu_enabled(); }
 	bool guest_fetch(uint32 *opcode);
 	bool guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa);
+#ifdef SHEEPSHAVER
+	int nw_jit_try(uint32 first_opcode);
+	static uint32 jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault);
+	static void jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int *fault);
+#endif
 
 	// Interrupts handling
 	void trigger_interrupt();

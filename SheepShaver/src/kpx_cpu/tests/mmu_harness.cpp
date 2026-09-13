@@ -1549,6 +1549,57 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[4] == 0x00001100u && b.gpr[4] == a.gpr[4]);
 
+		/* rlwinm. records CR0 (vs-kpx miss: 540006f7) */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0;
+		ops[0] = nw_ppc_rlwinm(4, 3, 0, 0, 31) | 1u;
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1000u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1210u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK((a.cr >> 28) == 2 && b.cr == a.cr && b.gpr[4] == 0);
+
+		/* blrl: LR = pc+4, PC = old LR (vs-kpx miss: 4e800021) */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		ops[0] = nw_ppc_blr() | 1u;
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 1, 0x1220u) == 1);
+		fn = nw_jit_compile(ops, 1, 0x1220u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.pc == 0x2000u && a.lr == 0x1224u);
+		CHECK(b.pc == a.pc && b.lr == a.lr);
+		CHECK(!nw_jit_op_supported(nw_ppc_cmpi(3, 0) | (7u << 23))); /* cmpwi cr7 */
+
+		/* vs-kpx 4e800020: NIA = LR & ~3 */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2002u;
+		ops[0] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 1, 0x1230u) == 1);
+		fn = nw_jit_compile(ops, 1, 0x1230u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.pc == 0x2000u && b.pc == a.pc && b.lr == 0x2002u);
+
+		/* vs-kpx 7c13a000: cmp is signed; wrapped sub of INT_MIN-1 is GT */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x80000000u;
+		a.gpr[4] = 1;
+		ops[0] = nw_ppc_cmp(3, 4);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1240u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1240u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK((a.cr >> 28) == 8 && b.cr == a.cr);
+
 		/* stw / lwz through a BE buffer */
 		uint8_t ram[64];
 		memset(ram, 0, sizeof(ram));
@@ -1615,6 +1666,47 @@ int main()
 		nw_jit_invalidate_page(0x1000u);
 		CHECK(nw_jit_flush_count() > fl);
 		CHECK(nw_jit_compile(ops, 4, 0x1500u, 0x1000u, 0, 0) != fn);
+	}
+
+	/* WP3 4b: dispatcher cache sentinels, mode, op filter. */
+	{
+		nw_jit_reset();
+		nw_jit_set_mode(NW_JIT_FALLBACK);
+		CHECK(nw_jit_mode() == NW_JIT_FALLBACK);
+		CHECK(strcmp(nw_jit_mode_name(), "fallback") == 0);
+		CHECK(nw_jit_op_supported(nw_ppc_addi(3, 0, 1)));
+		CHECK(nw_jit_op_supported(nw_ppc_lwz(3, 1, 0)));
+		CHECK(nw_jit_op_dispatch(nw_ppc_addi(3, 0, 1)));
+		CHECK(!nw_jit_op_dispatch(nw_ppc_lwz(3, 1, 0)));
+		CHECK(nw_jit_op_ends_block(nw_ppc_blr()));
+		CHECK(nw_jit_op_ends_block(nw_ppc_bc(NW_PPC_BO_TRUE, 0, 8)));
+		CHECK(!nw_jit_op_supported(0x60000000u));	/* ori r0,r0,0 nop is not in the 4a subset */
+		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
+		nw_jit_cache_put(0x2000u, 0x2000u, 0, 0, NW_JIT_INTERPRET, 0);
+		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NW_JIT_INTERPRET);
+		nw_jit_set_mode(NW_JIT_VERIFY);
+		CHECK(nw_jit_mode() == NW_JIT_VERIFY);
+		CHECK(strcmp(nw_jit_mode_name(), "verify") == 0);
+		nw_jit_set_mode(NW_JIT_OFF);
+		CHECK(nw_jit_mode() == NW_JIT_OFF);
+	}
+
+	/* WP3 4b: fall-through PC after a 4-insn ALU block with no terminator. */
+	{
+		nw_jit_reset();
+		struct nw_jit_cpu a, b;
+		uint32_t ops[4];
+		memset(&a, 0, sizeof(a));
+		ops[0] = nw_ppc_addi(3, 0, 1);
+		ops[1] = nw_ppc_addi(3, 3, 1);
+		ops[2] = nw_ppc_addi(3, 3, 1);
+		ops[3] = nw_ppc_addi(3, 3, 1);
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 4, 0x1600u) == 0);
+		nw_jit_fn fn = nw_jit_compile(ops, 4, 0x1600u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.pc == 0x1610u && b.pc == a.pc && a.gpr[3] == 4 && b.gpr[3] == 4);
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);

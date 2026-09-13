@@ -20,6 +20,7 @@
 
 #include "sysdeps.h"
 #include <stdlib.h>
+#include <string.h>
 #include <assert.h>
 #include "vm_alloc.h"
 #include "cpu/vm.hpp"
@@ -42,6 +43,7 @@
 #include "nw_io.h"
 #include "nw_devices.h"
 #include "nw_script.h"
+#include "nw_jit.h"
 #endif
 
 #define DEBUG 0
@@ -287,6 +289,9 @@ void powerpc_cpu::initialize()
 	tb_offset_ = 0;
 	dec_tb_base_ = tb_ticks();
 	dec_pending_ = false;
+#ifdef SHEEPSHAVER
+	last_fetch_pa_ = 0;
+#endif
 	for (int i = 0; i < 4; i++)
 		sprg_[i] = 0;
 	for (int i = 0; i < SPR_IMPL_COUNT; i++)
@@ -346,6 +351,10 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 #if PPC_ENABLE_JIT
 	if (on)
 		use_jit = false;
+#endif
+#ifdef SHEEPSHAVER
+	if (on)
+		nw_jit_set_host_mem(powerpc_cpu::jit_host_lwz, powerpc_cpu::jit_host_stw);
 #endif
 }
 
@@ -858,6 +867,9 @@ void powerpc_cpu::take_async_exception()
 bool powerpc_cpu::guest_fetch(uint32 *opcode)
 {
 	if (!ppc32_guest_mmu_enabled()) {
+#ifdef SHEEPSHAVER
+		last_fetch_pa_ = pc();
+#endif
 		*opcode = vm_read_memory_4(pc());
 		return true;
 	}
@@ -868,6 +880,7 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 	}
 #ifdef SHEEPSHAVER
 	{
+		last_fetch_pa_ = r.pa;
 		/* Fetch outside guest RAM/ROM (and SheepShaver's thunk area, which
 		 * the guest is handed by identity mapping) would read host memory.
 		 * Report it as a machine check so the log names the PA; do not
@@ -1252,6 +1265,207 @@ void * PF_CONVENTION powerpc_cpu::compile_chain_block(block_info *sbi)
 }
 #endif
 
+#ifdef SHEEPSHAVER
+uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	ppc->pc() = pc;
+	uint32 pa;
+	if (!ppc->guest_data_xlate(ea, 4, false, &pa)) {
+		*fault = 1;
+		return 0;
+	}
+	if (nw_pa_kind(pa) == NW_PA_IO)
+		return nw_io_read(pa, 4, pc);
+	return vm_read_memory_4(pa);
+}
+
+void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	ppc->pc() = pc;
+	uint32 pa;
+	if (!ppc->guest_data_xlate(ea, 4, true, &pa)) {
+		*fault = 1;
+		return;
+	}
+	if (nw_pa_kind(pa) == NW_PA_IO) {
+		nw_io_write(pa, 4, val, pc);
+		return;
+	}
+	if (nw_pa_kind(pa) != NW_PA_ROM)
+		vm_write_memory_4(pa, val);
+}
+
+static bool nw_jit_peek(uint32 ea, uint32 *opcode)
+{
+	if (!ppc32_guest_mmu_enabled()) {
+		*opcode = vm_read_memory_4(ea);
+		return true;
+	}
+	ppc32_xlate_result r = ppc32_guest_mmu().translate(ea, PPC32_XLATE_IR, 4);
+	if (!r.ok)
+		return false;
+	*opcode = vm_read_memory_4(r.pa);
+	return true;
+}
+
+int powerpc_cpu::nw_jit_try(uint32 first_opcode)
+{
+	const int mode = nw_jit_mode();
+	if (mode != NW_JIT_ON && mode != NW_JIT_VERIFY)
+		return 0;
+
+	if (!nw_jit_op_supported(first_opcode)) {
+		nw_jit_verify_skip(0);
+		return 0;
+	}
+	if (!nw_jit_op_dispatch(first_opcode)) {
+		nw_jit_verify_skip(1);
+		return 0;
+	}
+
+	const uint32 guest_pc = pc();
+	const uint32 phys_page = last_fetch_pa_ & ~0xfffu;
+	const uint32 msr_ir = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_IR) ? 1u : 0u;
+
+	uint32 ops[NW_JIT_MAX_BLOCK];
+	ops[0] = first_opcode;
+	int n = 1;
+	while (n < NW_JIT_MAX_BLOCK && !nw_jit_op_ends_block(ops[n - 1])) {
+		const uint32 ea = guest_pc + (uint32)n * 4u;
+		if ((ea & ~0xfffu) != (guest_pc & ~0xfffu))
+			break;
+		uint32 op;
+		if (!nw_jit_peek(ea, &op))
+			break;
+		if (is_altivec_insn(op) || is_fp_insn(op))
+			break;
+		if (!nw_jit_op_dispatch(op))
+			break;
+		ops[n++] = op;
+	}
+
+	nw_jit_fn fn = nw_jit_compile(ops, n, guest_pc, phys_page, msr_ir, 0);
+	if (!fn) {
+		nw_jit_verify_fail();
+		static unsigned nfail_log;
+		if (nfail_log < 8u) {
+			nfail_log++;
+			printf("NW-BOOT JIT verify compile-fail #%u pc=%08x n=%d op=%08x\n",
+			       nfail_log, (unsigned)guest_pc, n, (unsigned)first_opcode);
+			fflush(stdout);
+		}
+		return 0;
+	}
+
+	nw_jit_cpu jc;
+	memset(&jc, 0, sizeof(jc));
+	for (int i = 0; i < 32; i++)
+		jc.gpr[i] = gpr(i);
+	jc.cr = cr().get();
+	jc.xer = xer().get();
+	jc.lr = lr();
+	jc.ctr = ctr();
+	jc.pc = pc();
+	jc.dec = dec_;
+	jc.msr = ppc32_guest_mmu().msr();
+	jc.host = this;
+	fn(&jc);
+
+	for (int i = 0; i < n; i++) {
+		const instr_info_t *ii = decode(ops[i]);
+		ii->execute(this, ops[i]);
+#if NW_BOOT_LOG
+		nw_event_insn();
+#endif
+		if (nw_jit_op_ends_block(ops[i]))
+			break;
+	}
+
+	unsigned bits = 0;
+	if (jc.fault)
+		bits |= 1u;
+	if (jc.pc != pc())
+		bits |= 2u;
+	if (jc.cr != cr().get())
+		bits |= 4u;
+	if (jc.xer != xer().get())
+		bits |= 8u;
+	if (jc.lr != lr())
+		bits |= 16u;
+	if (jc.ctr != ctr())
+		bits |= 32u;
+	if (jc.dec != dec_)
+		bits |= 64u;
+	int dg = -1;
+	for (int i = 0; i < 32; i++) {
+		if (jc.gpr[i] != gpr(i)) {
+			bits |= 128u;
+			if (dg < 0)
+				dg = i;
+		}
+	}
+	nw_jit_verify_note(ops, n, bits != 0);
+
+	struct uniq_miss { uint32 op; unsigned n, bits; uint32 pc0; };
+	static uniq_miss uniq[48];
+	static unsigned nuniq, nmiss, ncmp;
+	ncmp++;
+
+	if (bits) {
+		nmiss++;
+		int slot = -1;
+		for (unsigned i = 0; i < nuniq; i++) {
+			if (uniq[i].op == first_opcode) {
+				slot = (int)i;
+				break;
+			}
+		}
+		if (slot < 0 && nuniq < 48u) {
+			slot = (int)nuniq++;
+			uniq[slot].op = first_opcode;
+			uniq[slot].n = 0;
+			uniq[slot].bits = 0;
+			uniq[slot].pc0 = guest_pc;
+		}
+		if (slot >= 0) {
+			uniq[slot].n++;
+			uniq[slot].bits |= bits;
+		}
+		const int first_of_op = (slot >= 0 && uniq[slot].n == 1);
+		if (first_of_op || nmiss <= 8u) {
+			printf("NW-BOOT JIT verify miss #%u uniq=%d n=%u ninsns=%d pc=%08x op=%08x bits=%x\n",
+			       nmiss, slot + 1, slot >= 0 ? uniq[slot].n : 0u, n,
+			       (unsigned)guest_pc, (unsigned)first_opcode, bits);
+			printf("NW-BOOT JIT verify jit pc=%08x cr=%08x xer=%08x lr=%08x ctr=%08x dec=%08x\n",
+			       (unsigned)jc.pc, (unsigned)jc.cr, (unsigned)jc.xer,
+			       (unsigned)jc.lr, (unsigned)jc.ctr, (unsigned)jc.dec);
+			printf("NW-BOOT JIT verify kpx pc=%08x cr=%08x xer=%08x lr=%08x ctr=%08x dec=%08x\n",
+			       (unsigned)pc(), (unsigned)cr().get(), (unsigned)xer().get(),
+			       (unsigned)lr(), (unsigned)ctr(), (unsigned)dec_);
+			if (dg >= 0)
+				printf("NW-BOOT JIT verify gpr%d jit=%08x kpx=%08x\n",
+				       dg, (unsigned)jc.gpr[dg], (unsigned)gpr(dg));
+			if (bits & 4u) {
+				const int ra = (int)((first_opcode >> 16) & 0x1f);
+				const int rb = (int)((first_opcode >> 11) & 0x1f);
+				printf("NW-BOOT JIT verify cr-ops ra=%d %08x rb=%d %08x\n",
+				       ra, (unsigned)jc.gpr[ra], rb, (unsigned)jc.gpr[rb]);
+			}
+			fflush(stdout);
+		}
+	} else if (ncmp <= 16u) {
+		printf("NW-BOOT JIT verify ok #%u ninsns=%d pc=%08x op=%08x -> pc=%08x\n",
+		       ncmp, n, (unsigned)guest_pc, (unsigned)first_opcode, (unsigned)pc());
+		fflush(stdout);
+	}
+	if ((ncmp % 100000u) == 0)
+		nw_jit_verify_dump((ncmp % 1000000u) == 0 ? "hist" : "periodic");
+	return 1;
+}
+#endif
+
 void powerpc_cpu::execute(uint32 entry)
 {
 	bool invalidated_cache = false;
@@ -1428,6 +1642,13 @@ void powerpc_cpu::execute(uint32 entry)
 			take_fpu();
 			continue;
 		}
+#ifdef SHEEPSHAVER
+		if (nw_jit_try(opcode)) {
+			if (!spcflags().empty() && !check_spcflags())
+				goto return_site;
+			continue;
+		}
+#endif
 		const instr_info_t *ii = decode(opcode);
 #if PPC_EXECUTE_DUMP_STATE
 		if (dump_state)

@@ -27,9 +27,15 @@
 
 /*
  * Translation cache key: (phys_page, guest_pc, msr_ir, endian).
- * endian 0 = guest big-endian (the only mode 4a emits).
+ * endian 0 = guest big-endian (the only mode 4a/4b emits).
  * The C interpreter is the oracle; the ARM64 emitter must match it
  * on GPR/CR/XER/LR/CTR/PC/DEC. dyngen is not used.
+ *
+ * 4b: powerpc_cpu::execute consults the cache. NW_JIT_FALLBACK never
+ * runs compiled code. NW_JIT_VERIFY compiles the same N-insn block the
+ * live path would, runs it on a shadow CPU, then kpx interprets; the
+ * guest follows kpx. NW_JIT_ON is still that shadow (copy-out is gated
+ * until verify is clean per-op including lwz/stw helpers).
  */
 struct nw_jit_cpu {
 	uint32_t gpr[32];
@@ -40,15 +46,56 @@ struct nw_jit_cpu {
 	uint32_t pc;
 	uint32_t dec;
 	uint32_t msr;
-	uint32_t pad;
+	uint32_t fault;
 	uint8_t *mem;
 	uint32_t mem_base;
 	uint32_t mem_size;
+	void *host;
 };
 
 typedef void (*nw_jit_fn)(struct nw_jit_cpu *cpu);
 
+/* Cache miss is NULL. A stored "run the interpreter" sentinel is this
+ * pointer; it is never called. */
+#define NW_JIT_INTERPRET ((nw_jit_fn)(uintptr_t)1)
+
+enum {
+	NW_JIT_OFF = 0,
+	NW_JIT_FALLBACK = 1,
+	NW_JIT_ON = 2,
+	NW_JIT_VERIFY = 3
+};
+
+enum { NW_JIT_MAX_BLOCK = 16 };
+
 void nw_jit_reset(void);
+
+int nw_jit_mode(void);
+void nw_jit_set_mode(int mode);
+const char *nw_jit_mode_name(void);
+
+int nw_jit_op_supported(uint32_t op);
+/* Live path: supported minus lwz/stw until helpers are vs-kpx clean. */
+int nw_jit_op_dispatch(uint32_t op);
+int nw_jit_op_ends_block(uint32_t op);
+
+void nw_jit_verify_note(const uint32_t *ops, int n, int miss);
+void nw_jit_verify_fail(void);
+void nw_jit_verify_skip(int mem);
+void nw_jit_verify_dump(const char *why);
+
+typedef uint32_t (*nw_jit_host_lwz)(void *host, uint32_t ea, uint32_t pc, int *fault);
+typedef void (*nw_jit_host_stw)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
+void nw_jit_set_host_mem(nw_jit_host_lwz lwz, nw_jit_host_stw stw);
+
+nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
+			  uint32_t msr_ir, uint32_t endian, int *n_out);
+void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
+		      uint32_t endian, nw_jit_fn fn, int n);
+
+uint64_t nw_jit_exec_blocks(void);
+uint64_t nw_jit_exec_insns(void);
+void nw_jit_note_exec(int n);
 
 /* C oracle: execute one opcode at cpu->pc. 0 = pc advanced, 1 = block
  * ended (b/blr), -1 = not in the 4a subset. */
@@ -60,7 +107,7 @@ int nw_jit_interp_n(struct nw_jit_cpu *cpu, const uint32_t *ops, int n, uint32_t
  * unless the caller has a translated page. NULL if an opcode is unsupported
  * or the host cannot emit. */
 nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
-                        uint32_t phys_page, uint32_t msr_ir, uint32_t endian);
+			uint32_t phys_page, uint32_t msr_ir, uint32_t endian);
 
 void nw_jit_invalidate_page(uint32_t phys_page);
 uint64_t nw_jit_flush_count(void);

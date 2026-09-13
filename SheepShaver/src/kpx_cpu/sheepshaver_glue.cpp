@@ -37,6 +37,7 @@
 #include "nw_devices.h"
 #include "nw_io.h"
 #include "nw_script.h"
+#include "nw_jit.h"
 
 // Used for NativeOp trampolines
 #include "video.h"
@@ -931,6 +932,22 @@ void init_emul_ppc(void)
 		clk.hz = (uint32)TimebaseSpeed;
 		nw_devices_init(&clk);
 		nw_io_log_banks();
+		{
+			const char *e = getenv("NW_JIT");
+			if (e && (strcmp(e, "on") == 0 || strcmp(e, "1") == 0))
+				nw_jit_set_mode(NW_JIT_ON);
+			else if (e && strcmp(e, "verify") == 0)
+				nw_jit_set_mode(NW_JIT_VERIFY);
+			else if (e && strcmp(e, "off") == 0)
+				nw_jit_set_mode(NW_JIT_OFF);
+			else if (e && strcmp(e, "fallback") == 0)
+				nw_jit_set_mode(NW_JIT_FALLBACK);
+			else if (PrefsFindBool("jit"))
+				nw_jit_set_mode(NW_JIT_FALLBACK);
+			else
+				nw_jit_set_mode(NW_JIT_OFF);
+			printf("NW-BOOT G1: jit %s\n", nw_jit_mode_name());
+		}
 		/* The Trampoline programs the OpenPIC sources (priority, vector,
 		 * sense, destination) before the NK runs; the 68k StartInit only
 		 * toggles their mask bits afterwards. */
