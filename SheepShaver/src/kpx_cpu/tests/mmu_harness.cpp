@@ -1706,8 +1706,8 @@ int main()
 		fn = nw_jit_compile(ops, 4, 0x1500u, 0x1000u, 0, 0);
 		CHECK(fn != NULL);
 		fn(&b);
-		CHECK(a.dec == 0x55 && a.gpr[4] == 0x55);
-		CHECK(b.dec == a.dec && b.gpr[4] == a.gpr[4]);
+		CHECK(a.dec == 0x55 && a.gpr[4] == 0x55 && a.dec_wr == 1);
+		CHECK(b.dec == a.dec && b.gpr[4] == a.gpr[4] && b.dec_wr == 1);
 
 		/* cache key: same (page, pc, ir, endian) hits; msr_ir distinguishes */
 		nw_jit_fn fn2 = nw_jit_compile(ops, 4, 0x1500u, 0x1000u, 0, 0);

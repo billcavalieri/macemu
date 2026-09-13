@@ -34,8 +34,8 @@
  * 4b: powerpc_cpu::execute consults the cache. NW_JIT_FALLBACK never
  * runs compiled code. NW_JIT_VERIFY compiles the same N-insn block the
  * live path would, runs it on a shadow CPU, then kpx interprets; the
- * guest follows kpx. NW_JIT_ON is still that shadow (copy-out is gated
- * until verify is clean per-op including lwz/stw helpers — 4b-2).
+ * guest follows kpx. NW_JIT_ON copy-out commits the shadow; mtspr DEC
+ * goes through the same 0→1 / tb_base path as kpx mtspr_oea.
  */
 enum { NW_JIT_MAX_BLOCK = 16 };
 
@@ -49,6 +49,7 @@ struct nw_jit_cpu {
 	uint32_t dec;
 	uint32_t msr;
 	uint32_t fault;
+	uint32_t dec_wr;	/* 1 if this block executed mtspr DEC */
 	uint8_t *mem;
 	uint32_t mem_base;
 	uint32_t mem_size;

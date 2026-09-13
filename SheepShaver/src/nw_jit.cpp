@@ -850,8 +850,10 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 	}
 	if (prim == 31 && xo == 467) {
 		const uint32_t spr = spr_num(op);
-		if (spr == NW_PPC_SPR_DEC)
+		if (spr == NW_PPC_SPR_DEC) {
 			cpu->dec = cpu->gpr[rd];
+			cpu->dec_wr = 1;
+		}
 		else if (spr == NW_PPC_SPR_LR)
 			cpu->lr = cpu->gpr[rd];
 		else if (spr == NW_PPC_SPR_CTR)
@@ -1458,7 +1460,15 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		}
 		if (!emit_load_gpr(e, W8, rd))
 			return 0;
-		return emit_w(e, a64_str_w(W8, X0, off));
+		if (!emit_w(e, a64_str_w(W8, X0, off)))
+			return 0;
+		if (spr == NW_PPC_SPR_DEC) {
+			if (!emit_imm32(e, W8, 1))
+				return 0;
+			if (!emit_w(e, a64_str_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, dec_wr))))
+				return 0;
+		}
+		return 1;
 	}
 	if (prim == 32) {
 		return emit_call_lwz(e, pc, rd, ra, simm);

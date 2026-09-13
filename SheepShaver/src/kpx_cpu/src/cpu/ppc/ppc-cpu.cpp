@@ -1570,7 +1570,13 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		lr() = jc.lr;
 		ctr() = jc.ctr;
 		pc() = jc.pc;
-		dec_ = jc.dec;
+		if (jc.dec_wr) {
+			/* Same edge as mtspr_oea: 0→1 MSB latches DEC, tb_base = now. */
+			if ((dec_ & 0x80000000u) == 0 && (jc.dec & 0x80000000u))
+				dec_pending_ = true;
+			dec_ = jc.dec;
+			dec_tb_base_ = tb_ticks();
+		}
 		nw_jit_note_exec(n);
 #if NW_BOOT_LOG
 		{
