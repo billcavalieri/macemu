@@ -14,6 +14,7 @@
 #include "nw_bootinfo.h"
 #include "nw_io.h"
 #include "nw_devices.h"
+#include "nw_nvram.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -1279,6 +1280,117 @@ int main()
 		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);
 		CHECK(nw_io_ext_irq == 0);
 		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0xff);
+	}
+
+	/* S4 step 9: NVRAM flash (nw_nvram) as the ROM's nvram,flash ndrv drives it. */
+	{
+		static const uint8_t wiki[] = "Wikipedia";
+		CHECK(nw_nvram_adler32(wiki, 9) == 0x11e60398u);
+
+		nw_io_reset();
+		nw_nvram_init(NULL);
+		const uint8_t *img = nw_nvram_image();
+		/* a fresh machine: OF's image in bank A, bank B erased */
+		CHECK(nw_nvram_bank_generation(img) == 1);
+		CHECK(nw_nvram_bank_generation(img + NW_NVRAM_BANK_SIZE) == 0);
+		CHECK(img[NW_NVRAM_BANK_SIZE] == 0xff && img[NW_NVRAM_SIZE - 1] == 0xff);
+		CHECK(img[0] == NW_NVRAM_SIG_CORE99 && img[1] == nw_nvram_chrp_checksum(img));
+		CHECK(img[0x20] == NW_NVRAM_SIG_COMMON && memcmp(img + 0x24, "common", 7) == 0);
+		CHECK(img[0x13f0] == NW_NVRAM_SIG_MACOS75 && memcmp(img + 0x13f4, "APL,MacOS75", 12) == 0);
+		CHECK(img[0x13f0 + 2] == 0x00 && img[0x13f0 + 3] == 0x50);		/* the Trampoline's 0x50 units */
+		CHECK(img[0x18f0] == NW_NVRAM_SIG_FREE && img[0x18f0 + 2] == 0x00 && img[0x18f0 + 3] == 0x71);
+		/* the whole 16 MiB ROM window aliases the chip: reg and the driver's address agree */
+		CHECK(nw_io_read(0xff004000u, 1, 0) == NW_NVRAM_SIG_CORE99);
+		CHECK(nw_io_read(0xfff04000u, 1, 0) == NW_NVRAM_SIG_CORE99);
+		CHECK(nw_io_read(0xff104000u, 4, 0) == 0x5a000000u + (img[1] << 16) + 0x0002u);
+		CHECK(nw_io_read(0xff003fffu, 1, 0) == 0);						/* rest of the chip: not modelled */
+		CHECK(nw_io_read(0xff006000u, 1, 0) == 0xff);
+		/* erase bank B as the driver does: 0x20 0xd0 at its first byte, poll at 0xff004000, 0xff */
+		nw_io_write(0xff006000u, 1, NW_FLASH_CMD_ERASE_SETUP, 0);
+		nw_io_write(0xff006000u, 1, NW_FLASH_CMD_ERASE_CONFIRM, 0);
+		CHECK(nw_io_read(0xff004000u, 1, 0) == NW_FLASH_STATUS_READY);
+		nw_io_write(0xff004000u, 1, NW_FLASH_CMD_READ_ARRAY, 0);
+		CHECK(nw_io_read(0xff004000u, 1, 0) == NW_NVRAM_SIG_CORE99);	/* bank A untouched */
+		CHECK(nw_io_read(0xff006000u, 1, 0) == 0xff && nw_io_read(0xff007fffu, 1, 0) == 0xff);
+		/* program: 0x40 <data>, bits only clear */
+		nw_io_write(0xff006001u, 1, NW_FLASH_CMD_PROGRAM, 0);
+		nw_io_write(0xff006001u, 1, 0xf0, 0);
+		CHECK(nw_io_read(0xff006001u, 1, 0) == NW_FLASH_STATUS_READY);
+		nw_io_write(0xff006001u, 1, NW_FLASH_CMD_PROGRAM, 0);
+		nw_io_write(0xff006001u, 1, 0x0f, 0);
+		nw_io_write(0xff004000u, 1, NW_FLASH_CMD_READ_ARRAY, 0);
+		CHECK(nw_io_read(0xff006001u, 1, 0) == 0x00);
+		/* a broken sequence reports, clear status recovers */
+		nw_io_write(0xff006000u, 1, NW_FLASH_CMD_ERASE_SETUP, 0);
+		nw_io_write(0xff006000u, 1, 0x55, 0);
+		CHECK(nw_io_read(0xff004000u, 1, 0) == (NW_FLASH_STATUS_READY | NW_FLASH_STATUS_ERASE_ERR | NW_FLASH_STATUS_PROGRAM_ERR));
+		nw_io_write(0xff004000u, 1, NW_FLASH_CMD_CLEAR_STATUS, 0);
+		CHECK(nw_io_read(0xff004000u, 1, 0) == NW_FLASH_STATUS_READY);
+		nw_io_write(0xff004000u, 1, NW_FLASH_CMD_READ_ARRAY, 0);
+
+		/* a commit: erase bank B, program a generation-5 image, persist, come back */
+		static const char *path = "/tmp/nw-nvram-harness.flash";
+		remove(path);
+		nw_io_reset();
+		nw_nvram_init(path);
+		img = nw_nvram_image();
+		uint8_t gen5[NW_NVRAM_BANK_SIZE];
+		nw_nvram_format_bank(gen5, 5);
+		gen5[0x1400] = 0x03;	/* an XPRAM byte */
+		{
+			uint8_t hdr[16];
+			memcpy(hdr, gen5, 16);
+			CHECK(nw_nvram_chrp_checksum(hdr) == gen5[1]);
+			CHECK(nw_nvram_bank_generation(gen5) == 0);	/* adler stale after the poke */
+			uint32_t adler = nw_nvram_adler32(gen5 + 0x14, NW_NVRAM_BANK_SIZE - 0x14);
+			gen5[0x10] = adler >> 24; gen5[0x11] = adler >> 16; gen5[0x12] = adler >> 8; gen5[0x13] = adler;
+			CHECK(nw_nvram_bank_generation(gen5) == 5);
+		}
+		nw_io_write(0xff006000u, 1, NW_FLASH_CMD_ERASE_SETUP, 0);
+		nw_io_write(0xff006000u, 1, NW_FLASH_CMD_ERASE_CONFIRM, 0);
+		nw_io_write(0xff004000u, 1, NW_FLASH_CMD_READ_ARRAY, 0);
+		for (uint32_t i = 0; i < NW_NVRAM_BANK_SIZE; i++) {
+			nw_io_write(0xff006000u + i, 1, NW_FLASH_CMD_PROGRAM, 0);
+			nw_io_write(0xff006000u + i, 1, gen5[i], 0);
+		}
+		nw_io_write(0xff004000u, 1, NW_FLASH_CMD_READ_ARRAY, 0);
+		CHECK(memcmp(img + NW_NVRAM_BANK_SIZE, gen5, NW_NVRAM_BANK_SIZE) == 0);
+		CHECK(nw_nvram_bank_generation(img + NW_NVRAM_BANK_SIZE) == 5);
+		nw_io_reset();
+		nw_nvram_init(path);		/* next start: the file has both banks */
+		img = nw_nvram_image();
+		CHECK(nw_nvram_bank_generation(img) == 1 && nw_nvram_bank_generation(img + NW_NVRAM_BANK_SIZE) == 5);
+		CHECK(nw_io_read(0xff007400u, 1, 0) == 0x03);
+
+		/* an image without APL,MacOS75 (OF alone): carved out of the free partition as the Trampoline does */
+		{
+			uint8_t bank[NW_NVRAM_BANK_SIZE];
+			nw_nvram_format_bank(bank, 7);
+			/* fold APL,MacOS75 back into the free partition: 0x50 + 0x71 units */
+			memset(bank + 0x13f0, 0, 16);
+			bank[0x13f0] = NW_NVRAM_SIG_FREE; bank[0x13f0 + 2] = 0x00; bank[0x13f0 + 3] = 0xc1;
+			bank[0x13f0 + 1] = nw_nvram_chrp_checksum(bank + 0x13f0);
+			memset(bank + 0x1400, 0, NW_NVRAM_BANK_SIZE - 0x1400);
+			uint32_t adler = nw_nvram_adler32(bank + 0x14, NW_NVRAM_BANK_SIZE - 0x14);
+			bank[0x10] = adler >> 24; bank[0x11] = adler >> 16; bank[0x12] = adler >> 8; bank[0x13] = adler;
+			CHECK(nw_nvram_bank_generation(bank) == 7);
+			FILE *f = fopen(path, "wb");
+			CHECK(f != NULL);
+			if (f) {
+				fwrite(bank, 1, NW_NVRAM_BANK_SIZE, f);
+				memset(bank, 0xff, NW_NVRAM_BANK_SIZE);
+				fwrite(bank, 1, NW_NVRAM_BANK_SIZE, f);
+				fclose(f);
+			}
+			nw_io_reset();
+			nw_nvram_init(path);
+			img = nw_nvram_image();
+			CHECK(nw_nvram_bank_generation(img) == 7);
+			CHECK(img[0x13f0] == NW_NVRAM_SIG_MACOS75 && memcmp(img + 0x13f4, "APL,MacOS75", 12) == 0);
+			CHECK(img[0x13f0 + 3] == 0x50 && img[0x18f0] == NW_NVRAM_SIG_FREE && img[0x18f0 + 3] == 0x71);
+		}
+		nw_nvram_exit();
+		remove(path);
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);

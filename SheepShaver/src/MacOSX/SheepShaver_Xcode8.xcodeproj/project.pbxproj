@@ -94,6 +94,8 @@
 		A10F9210BC10000000000023 /* nw_io.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000021 /* nw_io.cpp */; };
 		A10F9210BC10000000000042 /* nw_devices.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000041 /* nw_devices.cpp */; };
 		A10F9210BC10000000000043 /* nw_devices.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000041 /* nw_devices.cpp */; };
+		A10F9210BC10000000000062 /* nw_nvram.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000061 /* nw_nvram.cpp */; };
+		A10F9210BC10000000000063 /* nw_nvram.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000061 /* nw_nvram.cpp */; };
 		A10F9210BC10000000000052 /* nw_script.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000051 /* nw_script.cpp */; };
 		A7B1921418C35D4700791D8D /* DiskType.m in Sources */ = {isa = PBXBuildFile; fileRef = A7B1921318C35D4700791D8D /* DiskType.m */; };
 		E413A40320CF7E6D00FBE967 /* video_sdl2.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */; };
@@ -363,6 +365,8 @@
 		A10F9210BC10000000000031 /* nw_bootinfo.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_bootinfo.cpp; path = ../nw_bootinfo.cpp; sourceTree = SOURCE_ROOT; };
 		A10F9210BC10000000000040 /* nw_devices.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_devices.h; sourceTree = "<group>"; };
 		A10F9210BC10000000000041 /* nw_devices.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_devices.cpp; path = ../nw_devices.cpp; sourceTree = SOURCE_ROOT; };
+		A10F9210BC10000000000060 /* nw_nvram.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_nvram.h; sourceTree = "<group>"; };
+		A10F9210BC10000000000061 /* nw_nvram.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_nvram.cpp; path = ../nw_nvram.cpp; sourceTree = SOURCE_ROOT; };
 		A10F9210BC10000000000050 /* nw_script.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_script.h; sourceTree = "<group>"; };
 		A10F9210BC10000000000051 /* nw_script.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_script.cpp; path = ../nw_script.cpp; sourceTree = SOURCE_ROOT; };
 		A7B1921218C35D4700791D8D /* DiskType.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DiskType.h; sourceTree = "<group>"; };
@@ -523,6 +527,7 @@
 				A10F9210BC10000000000021 /* nw_io.cpp */,
 				A10F9210BC10000000000031 /* nw_bootinfo.cpp */,
 				A10F9210BC10000000000041 /* nw_devices.cpp */,
+				A10F9210BC10000000000061 /* nw_nvram.cpp */,
 				A10F9210BC10000000000051 /* nw_script.cpp */,
 				0856CE0614A99EEF000B1711 /* MacOSX */,
 				0856CE8814A99EF0000B1711 /* main.cpp */,
@@ -583,6 +588,7 @@
 				A10F9210BC10000000000020 /* nw_io.h */,
 				A10F9210BC10000000000030 /* nw_bootinfo.h */,
 				A10F9210BC10000000000040 /* nw_devices.h */,
+				A10F9210BC10000000000060 /* nw_nvram.h */,
 				A10F9210BC10000000000050 /* nw_script.h */,
 				0879BD5B15A88F6300DC277D /* pict.h */,
 				0856CDA014A99EEF000B1711 /* prefs.h */,
@@ -1173,6 +1179,7 @@
 				A10F9210BC10000000000022 /* nw_io.cpp in Sources */,
 				A10F9210BC10000000000032 /* nw_bootinfo.cpp in Sources */,
 				A10F9210BC10000000000042 /* nw_devices.cpp in Sources */,
+				A10F9210BC10000000000062 /* nw_nvram.cpp in Sources */,
 				A10F9210BC10000000000052 /* nw_script.cpp in Sources */,
 				0856D02514A99EF0000B1711 /* extfs_macosx.cpp in Sources */,
 				0856D05014A99EF1000B1711 /* prefs_macosx.mm in Sources */,
@@ -1247,6 +1254,7 @@
 				A10F9210BC10000000000033 /* nw_bootinfo.cpp in Sources */,
 				A10F9210BC10000000000023 /* nw_io.cpp in Sources */,
 				A10F9210BC10000000000043 /* nw_devices.cpp in Sources */,
+				A10F9210BC10000000000063 /* nw_nvram.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

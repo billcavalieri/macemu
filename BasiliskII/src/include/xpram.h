@@ -36,5 +36,6 @@ extern void XPRAMExit(void);
 extern void LoadXPRAM(const char *vmdir);
 extern void SaveXPRAM(void);
 extern void ZapPRAM(void);
+extern const char *XPRAMFilePath(void);	// Unix: where XPRAM is kept, so siblings (NVRAM flash image) can sit next to it
 
 #endif

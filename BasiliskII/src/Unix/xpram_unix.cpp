@@ -79,6 +79,16 @@ void ZapPRAM(void)
 }
 
 
+/*
+ *  Path of the XPRAM file (valid after LoadPrefs())
+ */
+
+const char *XPRAMFilePath(void)
+{
+	return xpram_name.c_str();
+}
+
+
 #else	// __linux__
 
 
@@ -154,6 +164,16 @@ void ZapPRAM(void)
 
 	// Delete file
 	unlink(xpram_path);
+}
+
+
+/*
+ *  Path of the XPRAM file (valid after LoadXPRAM())
+ */
+
+const char *XPRAMFilePath(void)
+{
+	return xpram_path;
 }
 
 

@@ -103,6 +103,7 @@
 #include "emul_op.h"
 #include "xlowmem.h"
 #include "xpram.h"
+#include "nw_nvram.h"
 #include "timer.h"
 #include "adb.h"
 #include "video.h"
@@ -1170,6 +1171,14 @@ int main(int argc, char **argv)
 		goto quit;
 	D(bug("Initialization complete\n"));
 
+#if EMULATED_PPC
+	// New World: PRAM goes through the ROM's nvram,flash ndrv into the boot
+	// flash (the classic XPRAM EMUL_OPs never fire on that ROM); the flash
+	// image sits next to the XPRAM file
+	if (ROMType == ROMTYPE_NEWWORLD)
+		nw_nvram_init((std::string(XPRAMFilePath()) + ".flash").c_str());
+#endif
+
 	// Clear caches (as we loaded and patched code) and write protect ROM
 #if !EMULATED_PPC
 	flush_icache_range(ROMBase, ROMBase + ROM_AREA_SIZE);
@@ -1276,6 +1285,10 @@ static void Quit(void)
 #endif
 
 	// Deinitialize everything
+#if EMULATED_PPC
+	if (ROMType == ROMTYPE_NEWWORLD)
+		nw_nvram_exit();
+#endif
 	ExitAll();
 
 	// Delete SheepShaver globals

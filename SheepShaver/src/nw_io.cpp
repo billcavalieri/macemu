@@ -23,7 +23,7 @@
 #include <string.h>
 #include "nw_io.h"
 
-enum { NW_IO_MAX_DEVICES = 16, NW_IO_LOG_MAX = 64, NW_IO_PAGES_MAX = 128 };
+enum { NW_IO_MAX_DEVICES = 32, NW_IO_LOG_MAX = 64, NW_IO_PAGES_MAX = 128 };	/* 7 models + 16 flash aliases */
 
 static struct nw_io_device g_devs[NW_IO_MAX_DEVICES];
 static int g_ndevs;
