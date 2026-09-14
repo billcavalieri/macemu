@@ -1692,6 +1692,52 @@ int main()
 			CHECK(a.gpr[3] == 0xaabbccddu && b.gpr[3] == a.gpr[3]);
 		}
 
+		/* addc sets CA on 0xffffffff+1 */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0xffffffffu;
+		a.gpr[5] = 1;
+		ops[0] = nw_ppc_addc(4, 3, 5, 0);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1370u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1370u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0 && (a.xer & 0x20000000u) && b.gpr[4] == 0 &&
+		      (b.xer & 0x20000000u));
+
+		/* addc no carry */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.xer = 0x20000000u;
+		a.gpr[3] = 1;
+		a.gpr[5] = 1;
+		ops[0] = nw_ppc_addc(4, 3, 5, 0);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1380u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1380u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 2 && !(a.xer & 0x20000000u) &&
+		      b.gpr[4] == 2 && !(b.xer & 0x20000000u));
+
+		/* addic. r4, r3, -1 records CR0 and CA */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0;
+		ops[0] = nw_ppc_addic(4, 3, -1, 1);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1390u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1390u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0xffffffffu && (a.cr >> 28) == 8 &&
+		      b.gpr[4] == a.gpr[4] && b.cr == a.cr &&
+		      !(a.xer & 0x20000000u) && !(b.xer & 0x20000000u));
+
 		/* rlwinm r4, r3, 8, 0, 23  (shift left 8) */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -1901,6 +1947,8 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_bcctr(20, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_stwu(3, 1, -4)));
 		CHECK(nw_jit_op_supported(nw_ppc_lwzx(3, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_addc(4, 3, 5, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_addic(4, 3, -1, 1)));
 		{
 			uint32_t blk[4];
 			blk[0] = nw_ppc_addi(3, 0, 1);
@@ -1914,7 +1962,7 @@ int main()
 			CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, &bn) == bf);
 			CHECK(bn == 4);
 		}
-		CHECK(!nw_jit_op_supported(0x34000000u));	/* addic. still unsup */
+		CHECK(!nw_jit_op_supported(0x7c000414u));	/* addco still unsup */
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
 		nw_jit_cache_put(0x2000u, 0x2000u, 0, 0, NW_JIT_INTERPRET, 0);
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NW_JIT_INTERPRET);

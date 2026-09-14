@@ -160,7 +160,9 @@ void nw_jit_stats_print(const char *why);
 
 /* PPC instruction constructors for the harness. */
 uint32_t nw_ppc_addi(int rd, int ra, int simm);
+uint32_t nw_ppc_addic(int rd, int ra, int simm, int rc);
 uint32_t nw_ppc_add(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_addc(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_rlwinm(int ra, int rs, int sh, int mb, int me);
 uint32_t nw_ppc_rlwimi(int ra, int rs, int sh, int mb, int me);
 uint32_t nw_ppc_lwz(int rd, int ra, int d);
