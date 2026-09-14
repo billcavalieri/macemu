@@ -97,6 +97,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 954, "extsb", 0, 0, 0},
 	{31, 24, "slw", 0, 0, 0},
 	{31, 536, "srw", 0, 0, 0},
+	{31, 598, "sync", 0, 0, 0},
 	{21, -1, "rlwinm", 0, 0, 0},
 	{20, -1, "rlwimi", 0, 0, 0},
 	{16, -1, "bc", 0, 0, 0},
@@ -367,6 +368,8 @@ void nw_jit_stats_print(const char *why)
 				nm = "subfe";
 			else if (p == 31 && x == 954)
 				nm = "extsb";
+			else if (p == 31 && x == 598)
+				nm = "sync";
 			else if (p == 31 && x == 144)
 				nm = "mtcrf";
 			else if (p == 31 && x == 87)
@@ -573,6 +576,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* slw */
 	if (prim == 31 && xo == 536)
 		return 1;	/* srw */
+	if (prim == 31 && xo == 598)
+		return 1;	/* sync */
 	if (prim == 11)
 		return (rd & 3) == 0;	/* cmpi L=0, any crfD */
 	if (prim == 20 || prim == 21)
@@ -938,6 +943,11 @@ uint32_t nw_ppc_srw(int ra, int rs, int rb, int rc)
 {
 	return (31u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
 	       ((uint32_t)rb << 11) | (536u << 1) | (rc ? 1u : 0);
+}
+
+uint32_t nw_ppc_sync(void)
+{
+	return (31u << 26) | (598u << 1);
 }
 
 uint32_t nw_ppc_add(int rd, int ra, int rb, int rc)
@@ -1610,6 +1620,10 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->gpr[ra] = (sh >= 32u) ? 0 : (cpu->gpr[rd] >> sh);
 		if (op & 1)
 			record_cr0(cpu, (int32_t)cpu->gpr[ra]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 598) {
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -2978,6 +2992,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return emit_cr0_from_w8(e);
 		return 1;
 	}
+	if (prim == 31 && xo == 598)
+		return emit_w(e, 0xd5033f9fu);	/* DMB SY */
 	if (prim == 31 && xo == 144) {
 		const uint32_t m = mtcrf_mask(op);
 		if (!emit_load_gpr(e, W8, rd))
