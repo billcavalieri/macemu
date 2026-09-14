@@ -1637,6 +1637,10 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 		sg[rd] = ~sg[ra] + sg[rb];
 		return;
 	}
+	if (prim == 31 && xo == 40) {
+		sg[rd] = sg[rb] - sg[ra];
+		return;
+	}
 	if (prim == 28) {
 		sg[ra] = sg[rd] & (op & 0xffffu);
 		return;

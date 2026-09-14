@@ -90,6 +90,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 522, "addco", 0, 0, 0},
 	{31, 520, "subfco", 0, 0, 0},
 	{31, 136, "subfe", 0, 0, 0},
+	{31, 40, "subf", 0, 0, 0},
 	{11, -1, "cmpi", 0, 0, 0},
 	{10, -1, "cmpli", 0, 0, 0},
 	{28, -1, "andi.", 0, 0, 0},
@@ -372,6 +373,8 @@ void nw_jit_stats_print(const char *why)
 				nm = "subfco";
 			else if (p == 31 && x == 136)
 				nm = "subfe";
+			else if (p == 31 && x == 40)
+				nm = "subf";
 			else if (p == 31 && x == 954)
 				nm = "extsb";
 			else if (p == 31 && x == 598)
@@ -574,6 +577,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* subfco */
 	if (prim == 31 && xo == 136)
 		return 1;	/* subfe */
+	if (prim == 31 && xo == 40)
+		return 1;	/* subf */
 	if (prim == 28)
 		return 1;	/* andi. */
 	if (prim == 10)
@@ -924,6 +929,12 @@ uint32_t nw_ppc_subfe(int rd, int ra, int rb, int rc)
 {
 	return (31u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) |
 	       ((uint32_t)rb << 11) | (136u << 1) | (rc ? 1u : 0);
+}
+
+uint32_t nw_ppc_subf(int rd, int ra, int rb, int rc)
+{
+	return (31u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | (40u << 1) | (rc ? 1u : 0);
 }
 
 uint32_t nw_ppc_cmpli(int crfd, int ra, unsigned uimm)
@@ -1745,6 +1756,13 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 	}
 	if (prim == 31 && xo == 266) {
 		cpu->gpr[rd] = cpu->gpr[ra] + cpu->gpr[rb];
+		if (op & 1)
+			record_cr0(cpu, (int32_t)cpu->gpr[rd]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 40) {
+		cpu->gpr[rd] = cpu->gpr[rb] - cpu->gpr[ra];
 		if (op & 1)
 			record_cr0(cpu, (int32_t)cpu->gpr[rd]);
 		cpu->pc = pc + 4;
@@ -2990,6 +3008,19 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_load_gpr(e, W9, rb))
 			return 0;
 		if (!emit_w(e, a64_add_reg(W8, W8, W9)))
+			return 0;
+		if (!emit_store_gpr(e, W8, rd))
+			return 0;
+		if (op & 1)
+			return emit_cr0_from_w8(e);
+		return 1;
+	}
+	if (prim == 31 && xo == 40) {
+		if (!emit_load_gpr(e, W8, ra))
+			return 0;
+		if (!emit_load_gpr(e, W9, rb))
+			return 0;
+		if (!emit_w(e, a64_sub_reg(W8, W9, W8)))	/* rB - rA */
 			return 0;
 		if (!emit_store_gpr(e, W8, rd))
 			return 0;
