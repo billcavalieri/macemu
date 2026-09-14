@@ -531,7 +531,7 @@ int nw_jit_op_supported(uint32_t op)
 	if (prim == 31 && xo == 144)
 		return 1;	/* mtcrf */
 	if (prim == 11)
-		return rd == 0;	/* cmpwi cr0; L=0. crfD!=0 was vs-kpx miss */
+		return (rd & 3) == 0;	/* cmpi L=0, any crfD */
 	if (prim == 20 || prim == 21)
 		return 1;	/* rlwimi / rlwinm */
 	if (prim == 16)
@@ -917,6 +917,11 @@ uint32_t nw_ppc_cmpi(int ra, int simm)
 	return (11u << 26) | ((uint32_t)ra << 16) | ((uint32_t)simm & 0xffffu);
 }
 
+uint32_t nw_ppc_cmpi_cr(int crfd, int ra, int simm)
+{
+	return nw_ppc_cmpi(ra, simm) | ((uint32_t)(crfd & 7) << 23);
+}
+
 uint32_t nw_ppc_b(int disp, int lk)
 {
 	return (18u << 26) | (((uint32_t)disp) & 0x03fffffcu) | (lk ? 1u : 0);
@@ -1065,18 +1070,25 @@ static void record_cr0(struct nw_jit_cpu *cpu, int32_t v)
 
 /* Signed compare, not wrapped subtract. vs-kpx 7c13a000: INT_MIN vs 1
  * is LT; a-b wraps to positive and would record GT. */
+static void record_cr_s(struct nw_jit_cpu *cpu, int crfd, int32_t a, int32_t b)
+{
+	uint32_t f;
+	if (a < b)
+		f = 8;
+	else if (a > b)
+		f = 4;
+	else
+		f = 2;
+	if (cpu->xer & 0x80000000u)
+		f |= 1;
+	const int sh = 28 - 4 * crfd;
+	const uint32_t mask = 0xfu << sh;
+	cpu->cr = (cpu->cr & ~mask) | (f << sh);
+}
+
 static void record_cr0_cmp(struct nw_jit_cpu *cpu, int32_t a, int32_t b)
 {
-	uint32_t cr0;
-	if (a < b)
-		cr0 = 8;
-	else if (a > b)
-		cr0 = 4;
-	else
-		cr0 = 2;
-	if (cpu->xer & 0x80000000u)
-		cr0 |= 1;
-	cpu->cr = (cpu->cr & 0x0fffffffu) | (cr0 << 28);
+	record_cr_s(cpu, 0, a, b);
 }
 
 static uint32_t ra_or_0(const struct nw_jit_cpu *cpu, int ra)
@@ -1390,9 +1402,9 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		return 0;
 	}
 	if (prim == 11) {
-		if (rd != 0)
+		if (rd & 3)
 			return -1;
-		record_cr0_cmp(cpu, (int32_t)cpu->gpr[ra], simm);
+		record_cr_s(cpu, rd >> 2, (int32_t)cpu->gpr[ra], simm);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -2353,13 +2365,15 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		return emit_cr_field_from_flags(e, rd >> 2, 0x54000083u); /* B.CC +4 */
 	}
 	if (prim == 11) {
-		if (rd != 0)
+		if (rd & 3)
 			return 0;
 		if (!emit_load_gpr(e, W8, ra))
 			return 0;
 		if (!emit_imm32(e, W9, (uint32_t)simm))
 			return 0;
-		return emit_cr0_from_cmp_w8_w9(e);
+		if (!emit_w(e, a64_cmp_w(W8, W9)))
+			return 0;
+		return emit_cr_field_from_flags(e, rd >> 2, 0x5400008bu); /* B.LT +4 */
 	}
 	if (prim == 16) {
 		const int bo = rd, bi = ra;

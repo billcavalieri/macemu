@@ -1973,6 +1973,19 @@ int main()
 		fn(&b);
 		CHECK(((a.cr >> 16) & 0xf) == 8 && b.cr == a.cr);
 
+		/* cmpi cr7: INT_MIN vs 1 is LT, not wrapped GT */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x80000000u;
+		ops[0] = nw_ppc_cmpi_cr(7, 3, 1);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1460u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1460u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK((a.cr & 0xf) == 8 && b.cr == a.cr);
+
 		/* mtcrf CR0 from rS */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -2076,7 +2089,7 @@ int main()
 		fn(&b);
 		CHECK(a.pc == 0x2000u && a.lr == 0x1224u);
 		CHECK(b.pc == a.pc && b.lr == a.lr);
-		CHECK(!nw_jit_op_supported(nw_ppc_cmpi(3, 0) | (7u << 23))); /* cmpwi cr7 */
+		CHECK(nw_jit_op_supported(nw_ppc_cmpi_cr(7, 3, 0))); /* cmpwi cr7 */
 
 		/* vs-kpx 4e800020: NIA = LR & ~3 */
 		memset(&a, 0, sizeof(a));
