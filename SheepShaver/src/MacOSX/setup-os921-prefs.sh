@@ -5,7 +5,7 @@
 #
 # Usage:
 #   SheepShaver/src/MacOSX/setup-os921-prefs.sh
-#   Open SheepShaver/src/MacOSX/SheepShaver_Xcode8.xcodeproj, scheme SheepShaver, Run.
+#   Open SheepShaver/src/MacOSX/SheepShaver.xcodeproj, scheme SheepShaver, Run.
 # CLI still accepts:
 #   SheepShaver --config "$HOME/Library/Application Support/SheepShaver/os921/prefs"
 #
@@ -87,6 +87,6 @@ fi
 } > "$PREFS"
 
 echo "Wrote $PREFS"
-echo "Xcode: open SheepShaver/src/MacOSX/SheepShaver_Xcode8.xcodeproj, scheme SheepShaver, click Run."
+echo "Xcode: open SheepShaver/src/MacOSX/SheepShaver.xcodeproj, scheme SheepShaver, click Run."
 echo "CLI: SheepShaver --config \"$PREFS\""
 echo "ROM and .toast stay in Downloads; they are not copied into git."

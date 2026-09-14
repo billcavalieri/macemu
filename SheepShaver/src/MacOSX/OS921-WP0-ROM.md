@@ -62,7 +62,7 @@ The helper writes a filled-in prefs **outside the repo** (never a ROM or `.toast
 
 ```sh
 SheepShaver/src/MacOSX/setup-os921-prefs.sh
-# Xcode: SheepShaver_Xcode8.xcodeproj → scheme SheepShaver → Run
+# Xcode: SheepShaver.xcodeproj → scheme SheepShaver → Run
 # or:
 SheepShaver --config "$HOME/Library/Application Support/SheepShaver/os921/prefs"
 ```

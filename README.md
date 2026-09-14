@@ -81,7 +81,7 @@ $ make
 about changing Deployment Target: see BasiliskII
 ```
 $ cd macemu/SheepShaver/src/MacOSX
-$ xcodebuild build -project SheepShaver_Xcode8.xcodeproj -configuration Release
+$ xcodebuild build -project SheepShaver.xcodeproj -configuration Release
 ```
 or same as Linux
 

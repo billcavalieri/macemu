@@ -26,15 +26,18 @@ SheepShaver/src/MacOSX/build/Debug or SheepShaver/src/MacOSX/build/Release
 directories, depending if you do a Debug or Release build.
 
 
-There is also an Xcode 8 project file for use with Xcode 8 and newer
-(e.g. 8.2 on 10.11 or 10.12). The main differences are:
+The current Xcode project is SheepShaver.xcodeproj (Xcode 26 format).
+Open that, scheme SheepShaver. SheepShaver_Xcode8.xcodeproj is a symlink
+to it so older xcodebuild -project lines still work.
 
-1. This builds a i386 version of SheepShaver instead of Universal Binary.
-This is because since PPC is not supported by Xcode 8 and newer versions of
-OS X disallow having memory mapped at page zero for 64-bit applications,
-which SheepShaver requires.
+SheepShaver_Xcode3.xcodeproj is the original Xcode 3.2 Universal Binary
+project (i386/x86_64/ppc). It is not the mill-lane macOS build.
 
-2. Since the SheepShaver JIT-generation compilation does not support Clang,
-this build uses prebuilt and checked-in dyngen source files, rather than
-building dyngen and generating them with it, as is done normally during the
-SheepShaver build process.
+The current project:
+
+1. Builds arm64 and x86_64. 64-bit macOS cannot map page zero the way
+classic SheepShaver did on i386; New World boot uses the mill-lane JIT
+instead of that mapping.
+
+2. Uses prebuilt and checked-in dyngen source files rather than building
+dyngen at compile time, because that path does not support Clang.
