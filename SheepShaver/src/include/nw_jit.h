@@ -226,6 +226,7 @@ uint32_t nw_ppc_sthu(int rs, int ra, int d);
 uint32_t nw_ppc_bclr(int bo, int bi);
 uint32_t nw_ppc_bcctr(int bo, int bi);
 uint32_t nw_ppc_or(int ra, int rs, int rb);
+uint32_t nw_ppc_cntlzw(int ra, int rs, int rc);
 uint32_t nw_ppc_ori(int ra, int rs, unsigned uimm);
 uint32_t nw_ppc_cmp(int ra, int rb);
 uint32_t nw_ppc_cmp_cr(int crfd, int ra, int rb);
