@@ -170,7 +170,7 @@ bool DecodeROM(uint8 *data, uint32 size)
 	/* New World ROM files carry the driver/library parcels ('prcl') after
 	 * the ROM image; keep them for the boot-info device tree (PatchROM). */
 	nw_parcels_keep(data, size);
-	nw_log_g0_decode(ROMBaseHost, ROM_SIZE);
+	nw_log_g0_decode(ROMBaseHost, ROM_SIZE, data, size);
 	IdentifyROMType();
 	return true;
 }
@@ -714,7 +714,7 @@ bool PatchROM(void)
 			printf("PatchROM: patch_68k failed\n");
 			return false;
 		}
-		printf("PatchROM: patch_68k incomplete (New World, continuing)\n");
+		printf("NW-BOOT G1: patch_68k incomplete (New World, continuing)\n");
 	}
 
 #ifdef M68K_BREAK_POINT

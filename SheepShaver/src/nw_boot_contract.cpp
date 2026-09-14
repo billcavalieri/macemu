@@ -851,7 +851,7 @@ int nw_htab_gate_pass(const struct nw_htab_gate *gate)
 
 const char *nw_boot_line_credits(void)
 {
-	return "NewWorld boot by Bill Cavalieri";
+	return "NewWorld Boot by Bill Cavalieri";
 }
 
 const char *nw_boot_line_g0_newworld(void)
@@ -912,11 +912,59 @@ void nw_boot_log(const char *line)
 #endif
 }
 
-void nw_log_g0_decode(const uint8_t *rom, size_t size)
+static const char *nw_rom_wrap_name(const uint8_t *file, size_t file_size)
 {
-	if (nw_detect_decoded_rom(rom, size) == NW_DECODED_NEWWORLD) {
+	if (file_size == (size_t)NW_ROM_SIZE)
+		return "4 MiB";
+	if (file == NULL || file_size < 11 || memcmp(file, "<CHRP-BOOT>", 11) != 0)
+		return "unknown";
+	uint32_t off = 0, sz = 0;
+	if (nw_chrp_hex_constant(file, file_size, "lzss-offset", &off) &&
+	    nw_chrp_hex_constant(file, file_size, "lzss-size", &sz))
+		return "CHRP lzss";
+	if (nw_chrp_hex_constant(file, file_size, "parcels-offset", &off) &&
+	    nw_chrp_hex_constant(file, file_size, "parcels-size", &sz))
+		return "CHRP parcels";
+	return "CHRP";
+}
+
+void nw_format_g0_rom_line(char *buf, size_t bufn,
+			   const uint8_t *decoded, size_t decoded_size,
+			   const uint8_t *file, size_t file_size)
+{
+	unsigned ver = 0;
+	char id[16];
+	id[0] = 0;
+	if (decoded != NULL && decoded_size >= 10)
+		ver = ((unsigned)decoded[8] << 8) | decoded[9];
+	if (decoded != NULL && decoded_size > (size_t)NW_NEWWORLD_SIG_OFFSET + 14) {
+		size_t i;
+		for (i = 0; i < 15; i++) {
+			const unsigned char c = decoded[NW_NEWWORLD_SIG_OFFSET + i];
+			if (c == 0)
+				break;
+			id[i] = (c >= 32 && c < 127) ? (char)c : '?';
+		}
+		id[i] = 0;
+	}
+	if (id[0])
+		snprintf(buf, bufn, "G0: ROM %s version %04x %s",
+			 nw_rom_wrap_name(file, file_size), ver, id);
+	else
+		snprintf(buf, bufn, "G0: ROM %s version %04x",
+			 nw_rom_wrap_name(file, file_size), ver);
+}
+
+void nw_log_g0_decode(const uint8_t *decoded, size_t decoded_size,
+		      const uint8_t *file, size_t file_size)
+{
+	if (nw_detect_decoded_rom(decoded, decoded_size) == NW_DECODED_NEWWORLD) {
+		char rom_line[96];
 		nw_boot_log(nw_boot_line_credits());
 		nw_boot_log(nw_boot_line_g0_newworld());
+		nw_format_g0_rom_line(rom_line, sizeof(rom_line),
+				      decoded, decoded_size, file, file_size);
+		nw_boot_log(rom_line);
 	}
 }
 

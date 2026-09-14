@@ -476,7 +476,19 @@ int main()
 
 	/* Debug log needles Grok Build greps (NW-BOOT prefix on SheepShaver Debug). */
 	{
-		CHECK(strcmp(nw_boot_line_credits(), "NewWorld boot by Bill Cavalieri") == 0);
+		CHECK(strcmp(nw_boot_line_credits(), "NewWorld Boot by Bill Cavalieri") == 0);
+		{
+			std::vector<uint8_t> img(NW_ROM_SIZE, 0);
+			img[8] = 0x07;
+			img[9] = 0x7d;
+			memcpy(&img[NW_NEWWORLD_SIG_OFFSET], "NewWorld v1.0", 14);
+			char line[96];
+			nw_format_g0_rom_line(line, sizeof(line), img.data(), img.size(),
+					     img.data(), img.size());
+			CHECK(strstr(line, "4 MiB") != NULL);
+			CHECK(strstr(line, "077d") != NULL);
+			CHECK(strstr(line, "NewWorld v1.0") != NULL);
+		}
 		CHECK(strcmp(nw_boot_line_g0_newworld(),
 			"G0: DecodeROM 4 MiB NewWorld +0x30d064 NK +0x310000") == 0);
 		CHECK(strcmp(nw_boot_line_g1_tree(),

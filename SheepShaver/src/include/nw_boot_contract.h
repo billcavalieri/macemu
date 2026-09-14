@@ -345,7 +345,12 @@ const char *nw_boot_line_g2_first_dsi(void);
 const char *nw_boot_line_g2_translator_off(void);
 
 void nw_boot_log(const char *line);
-void nw_log_g0_decode(const uint8_t *rom, size_t size);
+/* decoded = 4 MiB after DecodeROM; file = the ROM prefs bytes (CHRP or 4 MiB). */
+void nw_log_g0_decode(const uint8_t *decoded, size_t decoded_size,
+		      const uint8_t *file, size_t file_size);
+void nw_format_g0_rom_line(char *buf, size_t bufn,
+			   const uint8_t *decoded, size_t decoded_size,
+			   const uint8_t *file, size_t file_size);
 void nw_log_g1_tree(void);
 void nw_log_g1_kdp(const uint8_t *page);
 void nw_log_g1_hwinit(void);
