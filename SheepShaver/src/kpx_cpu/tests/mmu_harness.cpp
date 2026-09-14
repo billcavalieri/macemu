@@ -1791,6 +1791,28 @@ int main()
 			      b.gpr[3] == a.gpr[3] && b.gpr[1] == 12);
 		}
 
+		/* lhaux r3, r3, r2: rD=rA ends as EA, not the loaded halfword */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			ram[12] = 0x80; ram[13] = 0x00;
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[3] = 8;
+			a.gpr[2] = 4;
+			ops[0] = nw_ppc_lhaux(3, 3, 2);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x14d0u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x14d0u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[3] == 12 && b.gpr[3] == 12);
+		}
+
 		/* dtlb: C lookup, fill, store needs WRITE, flush */
 		{
 			uint32_t pa = 0;

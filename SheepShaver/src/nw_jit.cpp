@@ -2262,15 +2262,19 @@ static int emit_call_lhx(struct emit *e, uint32_t pc, int rd, int ra, int rb, in
 		return 0;
 	if (!emit_w(e, a64_sxth(W9, W9)))
 		return 0;
-	if (!emit_store_gpr(e, W9, rd))
-		return 0;
 	if (upd && ra) {
+		/* rA = original EA, even if rD = rA (Mac uses that form). */
+		if (!emit_w(e, a64_orr_reg(W10, 31, W9)))
+			return 0;
 		if (!emit_helper_ea_idx(e, ra, rb))
+			return 0;
+		if (!emit_store_gpr(e, W10, rd))
 			return 0;
 		if (!emit_store_gpr(e, W8, ra))
 			return 0;
+		return 1;
 	}
-	return 1;
+	return emit_store_gpr(e, W9, rd);
 }
 
 static int emit_call_lh(struct emit *e, uint32_t pc, int rd, int ra, int simm, int sext, int upd)
