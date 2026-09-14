@@ -2174,6 +2174,33 @@ int main()
 		CHECK(a.gpr[4] == 0xffffff80u && (a.cr >> 28) == 8 &&
 		      b.gpr[4] == a.gpr[4] && b.cr == a.cr);
 
+		/* slw: 1<<4 = 16; shift count with bit5 set is 0 */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[8] = 1;
+		a.gpr[9] = 4;
+		ops[0] = nw_ppc_slw(4, 8, 9, 0);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1560u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1560u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 16 && b.gpr[4] == 16);
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[8] = 1;
+		a.gpr[9] = 32;
+		ops[0] = nw_ppc_slw(4, 8, 9, 1);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1570u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1570u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0 && (a.cr >> 28) == 2 &&
+		      b.gpr[4] == a.gpr[4] && b.cr == a.cr);
+
 		/* mfspr TBL via host helper */
 		{
 			static uint32_t tbl_val;
@@ -2534,6 +2561,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_mfspr(3, NW_PPC_SPR_TBL)));
 		CHECK(nw_jit_op_supported(nw_ppc_extsh(4, 8, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_extsb(4, 8, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_slw(4, 8, 9, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_lhax(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lhaux(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_cmpl(0, 3, 4)));

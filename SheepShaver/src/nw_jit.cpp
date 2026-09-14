@@ -95,6 +95,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 144, "mtcrf", 0, 0, 0},
 	{31, 922, "extsh", 0, 0, 0},
 	{31, 954, "extsb", 0, 0, 0},
+	{31, 24, "slw", 0, 0, 0},
 	{21, -1, "rlwinm", 0, 0, 0},
 	{20, -1, "rlwimi", 0, 0, 0},
 	{16, -1, "bc", 0, 0, 0},
@@ -567,6 +568,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* extsh */
 	if (prim == 31 && xo == 954)
 		return 1;	/* extsb */
+	if (prim == 31 && xo == 24)
+		return 1;	/* slw */
 	if (prim == 11)
 		return (rd & 3) == 0;	/* cmpi L=0, any crfD */
 	if (prim == 20 || prim == 21)
@@ -920,6 +923,12 @@ uint32_t nw_ppc_extsb(int ra, int rs, int rc)
 {
 	return (31u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
 	       (954u << 1) | (rc ? 1u : 0);
+}
+
+uint32_t nw_ppc_slw(int ra, int rs, int rb, int rc)
+{
+	return (31u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | (24u << 1) | (rc ? 1u : 0);
 }
 
 uint32_t nw_ppc_add(int rd, int ra, int rb, int rc)
@@ -1579,6 +1588,14 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
+	if (prim == 31 && xo == 24) {
+		const uint32_t sh = cpu->gpr[rb] & 0x3fu;
+		cpu->gpr[ra] = (sh >= 32u) ? 0 : (cpu->gpr[rd] << sh);
+		if (op & 1)
+			record_cr0(cpu, (int32_t)cpu->gpr[ra]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
 	if (prim == 16) {
 		const int bo = rd, bi = ra;
 		const int32_t disp = (int16_t)(op & 0xfffcu);
@@ -1902,6 +1919,17 @@ static uint32_t a64_sxth(int rd, int rn)
 static uint32_t a64_sxtb(int rd, int rn)
 {
 	return 0x13001c00u | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t a64_lslv(int rd, int rn, int rm)
+{
+	return 0x1ac02000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t a64_csel(int rd, int rn, int rm, int cond)
+{
+	return 0x1a800000u | ((uint32_t)cond << 12) | ((uint32_t)rm << 16) |
+	       ((uint32_t)rn << 5) | (uint32_t)rd;
 }
 
 static uint32_t a64_orr_reg(int rd, int rn, int rm)
@@ -2879,6 +2907,27 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_load_gpr(e, W8, rd))
 			return 0;
 		if (!emit_w(e, a64_sxtb(W8, W8)))
+			return 0;
+		if (!emit_store_gpr(e, W8, ra))
+			return 0;
+		if (op & 1)
+			return emit_cr0_from_w8(e);
+		return 1;
+	}
+	if (prim == 31 && xo == 24) {
+		if (!emit_load_gpr(e, W8, rd))
+			return 0;
+		if (!emit_load_gpr(e, W9, rb))
+			return 0;
+		if (!emit_w(e, a64_lsr(W10, W9, 5)))
+			return 0;
+		if (!emit_w(e, a64_and_imm1(W10, W10)))
+			return 0;
+		if (!emit_w(e, a64_lslv(W8, W8, W9)))
+			return 0;
+		if (!emit_w(e, a64_cmp_imm1(W10)))
+			return 0;
+		if (!emit_w(e, a64_csel(W8, 31, W8, 0)))	/* EQ → 0 if rB bit5 */
 			return 0;
 		if (!emit_store_gpr(e, W8, ra))
 			return 0;

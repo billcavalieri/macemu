@@ -230,6 +230,7 @@ uint32_t nw_ppc_cmpl(int crfd, int ra, int rb);
 uint32_t nw_ppc_mtcrf(int crm, int rs);
 uint32_t nw_ppc_extsh(int ra, int rs, int rc);
 uint32_t nw_ppc_extsb(int ra, int rs, int rc);
+uint32_t nw_ppc_slw(int ra, int rs, int rb, int rc);
 uint32_t nw_ppc_b(int disp, int lk);
 uint32_t nw_ppc_bc(int bo, int bi, int disp);
 uint32_t nw_ppc_blr(void);
