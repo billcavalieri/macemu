@@ -355,6 +355,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 #ifdef SHEEPSHAVER
 	if (on) {
 		nw_jit_set_host_mem(powerpc_cpu::jit_host_lwz, powerpc_cpu::jit_host_stw);
+		nw_jit_set_host_pa(powerpc_cpu::jit_host_lwz_pa, powerpc_cpu::jit_host_stw_pa);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
 		nw_jit_set_host_byte(powerpc_cpu::jit_host_lb, powerpc_cpu::jit_host_stb);
 	}
@@ -993,7 +994,9 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		nw_note_mtsdr1();
 		/* Cache key is phys_page; a new HTAB misses, no flush-all. */
 #endif
-		mmu.set_sdr1(value); return true;
+		mmu.set_sdr1(value);
+		nw_jit_dtlb_flush();
+		return true;
 	case powerpc_registers::SPR_SRR0:	srr0_ = value; return true;
 	case powerpc_registers::SPR_SRR1:	srr1_ = value; return true;
 	case powerpc_registers::SPR_DEC:
@@ -1019,6 +1022,7 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		else
 			u = value;
 		mmu.set_ibat(i, u, l);
+		nw_jit_dtlb_flush();
 		return true;
 	}
 	if (spr >= powerpc_registers::SPR_DBAT0U && spr <= powerpc_registers::SPR_DBAT3L) {
@@ -1030,6 +1034,7 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		else
 			u = value;
 		mmu.set_dbat(i, u, l);
+		nw_jit_dtlb_flush();
 		return true;
 	}
 	return false;
@@ -1309,6 +1314,9 @@ uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
 		*fault = 1;
 		return 0;
 	}
+	if (ppc32_guest_mmu_enabled() &&
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
+		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM);
 	return vm_read_memory_4(pa);
 }
 
@@ -1321,6 +1329,47 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 		*fault = 1;
 		return;
 	}
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
+		return;
+	}
+	if (kind == NW_PA_ROM)
+		return;
+	if (!nw_pa_writable(pa)) {
+		*fault = 1;
+		return;
+	}
+	vm_write_memory_4(pa, val);
+	if (ppc32_guest_mmu_enabled() &&
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
+		nw_jit_dtlb_fill(ea, pa, 1);
+	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
+		*fault = NW_JIT_FAULT_SMC;
+}
+
+uint32 powerpc_cpu::jit_host_lwz_pa(void *host, uint32 pa, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	(void)pc;
+	(void)ppc;
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
+		return 0;
+	}
+	if (kind == NW_PA_NONE) {
+		*fault = 1;
+		return 0;
+	}
+	return vm_read_memory_4(pa);
+}
+
+void powerpc_cpu::jit_host_stw_pa(void *host, uint32 pa, uint32 val, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	(void)pc;
 	const int kind = nw_pa_kind(pa);
 	if (kind == NW_PA_IO) {
 		*fault = 2;

@@ -87,6 +87,15 @@ static void harness_jit_stw(void *, uint32_t ea, uint32_t val, uint32_t, int *fa
 	g_jit_hram[ea + 3] = (uint8_t)val;
 }
 
+static uint32_t harness_jit_lwz_pa(void *h, uint32_t pa, uint32_t pc, int *fault)
+{
+	return harness_jit_lwz(h, pa, pc, fault);
+}
+static void harness_jit_stw_pa(void *h, uint32_t pa, uint32_t val, uint32_t pc, int *fault)
+{
+	harness_jit_stw(h, pa, val, pc, fault);
+}
+
 static int g_test_pmu_power_ev = -1;
 static void test_pmu_power_hook(int ev, void *ctx)
 {
@@ -1737,6 +1746,49 @@ int main()
 			CHECK(a.gpr[3] == 0xaabbccddu && b.gpr[3] == a.gpr[3]);
 		}
 
+		/* dtlb: C lookup, fill, store needs WRITE, flush */
+		{
+			uint32_t pa = 0;
+			nw_jit_dtlb_flush();
+			CHECK(nw_jit_dtlb_lookup(0x1004u, 0, &pa) == 0);
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 0);
+			CHECK(nw_jit_dtlb_lookup(0x1004u, 0, &pa) == 1);
+			CHECK(pa == 0x2004u);
+			CHECK(nw_jit_dtlb_lookup(0x1004u, 1, &pa) == 0);
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1);
+			CHECK(nw_jit_dtlb_lookup(0x1000u, 1, &pa) == 1);
+			CHECK(pa == 0x2000u);
+			nw_jit_dtlb_flush();
+			CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa) == 0);
+		}
+
+		/* two lwz same EA: first miss fills, second hits */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			ram[8] = 0x11; ram[9] = 0x22; ram[10] = 0x33; ram[11] = 0x44;
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 8;
+			a.msr = 0x10u;	/* MSR[DR] so the inlined dtlb runs */
+			ops[0] = nw_ppc_lwz(3, 1, 0);
+			ops[1] = nw_ppc_lwz(4, 1, 0);
+			ops[2] = nw_ppc_blr();
+			nw_jit_dtlb_flush();
+			{
+				const uint64_t mh = nw_jit_dtlb_hits(), mm = nw_jit_dtlb_misses();
+				fn = nw_jit_compile(ops, 3, 0x1370u, 0x1000u, 0, 0);
+				CHECK(fn != NULL);
+				fn(&a);
+				CHECK(a.gpr[3] == 0x11223344u && a.gpr[4] == a.gpr[3]);
+				CHECK(nw_jit_dtlb_misses() > mm);
+				CHECK(nw_jit_dtlb_hits() > mh);
+			}
+		}
+
 		/* lwzx DSI must not clobber rD (kpx xlate fail leaves rD). */
 		{
 			uint8_t ram[64];
@@ -2170,6 +2222,7 @@ int main()
 
 		memset(g_jit_hram, 0, sizeof(g_jit_hram));
 		nw_jit_set_host_mem(harness_jit_lwz, harness_jit_stw);
+		nw_jit_set_host_pa(harness_jit_lwz_pa, harness_jit_stw_pa);
 
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;

@@ -157,6 +157,33 @@ void nw_jit_invalidate_page_src(uint32_t phys_page, int src);
 void nw_jit_invalidate_range_src(uint32_t pa, uint32_t nbytes, int src);
 void nw_jit_invalidate_all(void);
 void nw_jit_invalidate_all_src(int src);
+
+/*
+ * JIT data TLB: same EA→PA map as ppc32_mmu::translate (filled only after
+ * a successful probe). Direct-mapped, 256 entries. Not a second translator.
+ * Hit is inlined; miss calls the C helper, which walks and fills.
+ * Flush on tlbie/tlbia/mtsr/BAT/SDR1. MSR[DR] off skips the cache.
+ */
+enum { NW_JIT_DTLB_N = 256 };
+enum {
+	NW_JIT_DTLB_VALID = 1u,
+	NW_JIT_DTLB_WRITE = 2u
+};
+struct nw_jit_dtlb_ent {
+	uint32_t ea_page;
+	uint32_t pa_page;
+	uint32_t flags;
+	uint32_t pad;
+};
+void nw_jit_dtlb_flush(void);
+void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable);
+int nw_jit_dtlb_lookup(uint32_t ea, int is_store, uint32_t *pa);
+uint64_t nw_jit_dtlb_hits(void);
+uint64_t nw_jit_dtlb_misses(void);
+
+typedef uint32_t (*nw_jit_host_lwz_pa)(void *host, uint32_t pa, uint32_t pc, int *fault);
+typedef void (*nw_jit_host_stw_pa)(void *host, uint32_t pa, uint32_t val, uint32_t pc, int *fault);
+void nw_jit_set_host_pa(nw_jit_host_lwz_pa lwz, nw_jit_host_stw_pa stw);
 uint64_t nw_jit_flush_count(void);
 uint64_t nw_jit_compile_count(void);
 void nw_jit_stats_print(const char *why);
