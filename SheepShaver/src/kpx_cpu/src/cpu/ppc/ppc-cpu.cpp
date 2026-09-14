@@ -1443,6 +1443,14 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 		sg[rd] = (ra ? sg[ra] : 0) + (uint32)simm;
 		return;
 	}
+	if (prim == 24) {
+		sg[ra] = sg[rd] | (op & 0xffffu);
+		return;
+	}
+	if (prim == 31 && xo == 444) {
+		sg[ra] = sg[rd] | sg[rb];
+		return;
+	}
 	if (prim == 20) {
 		const int sh = rb, mb = (int)((op >> 6) & 0x1f), me = (int)((op >> 1) & 0x1f);
 		const uint32 m = nw_jit_mask((uint32)mb, (uint32)me);

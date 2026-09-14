@@ -74,7 +74,10 @@ static struct nw_jit_hist g_hist[] = {
 	{16, -1, "bc", 0, 0, 0},
 	{18, -1, "b", 0, 0, 0},
 	{19, 16, "blr", 0, 0, 0},
+	{19, 528, "bcctr", 0, 0, 0},
 	{31, 266, "add", 0, 0, 0},
+	{31, 444, "or", 0, 0, 0},
+	{24, -1, "ori", 0, 0, 0},
 	{31, 0, "cmp", 0, 0, 0},
 	{31, 339, "mfspr", 0, 0, 0},
 	{31, 467, "mtspr", 0, 0, 0},
@@ -442,10 +445,14 @@ int nw_jit_op_supported(uint32_t op)
 		return bo_is_cr(rd) && (op & 3) == 0;
 	if (prim == 18)
 		return (op & 2) == 0;
-	if (prim == 19 && xo == 16 && (rd == 20 || bo_is_cr(rd)))
-		return 1;	/* blr / bclr (CR true/false, likely ignored) */
+	if (prim == 19 && (xo == 16 || xo == 528) && (rd == 20 || bo_is_cr(rd)))
+		return 1;	/* blr / bclr / bcctr (CR true/false, likely ignored) */
 	if (prim == 31 && xo == 266)
 		return 1;
+	if (prim == 31 && xo == 444)
+		return 1;	/* or / mr */
+	if (prim == 24)
+		return 1;	/* ori */
 	if (prim == 31 && xo == 0)
 		return rd == 0;	/* cmp cr0 */
 	if (prim == 31 && (xo == 339 || xo == 467) && spr_is_user(spr_num(op)))
@@ -650,7 +657,7 @@ int nw_jit_op_ends_block(uint32_t op)
 {
 	const int prim = (int)(op >> 26);
 	const int xo = (int)((op >> 1) & 0x3ff);
-	return prim == 16 || prim == 18 || (prim == 19 && xo == 16);
+	return prim == 16 || prim == 18 || (prim == 19 && (xo == 16 || xo == 528));
 }
 
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
@@ -765,6 +772,23 @@ uint32_t nw_ppc_blr(void)
 uint32_t nw_ppc_bclr(int bo, int bi)
 {
 	return (19u << 26) | ((uint32_t)bo << 21) | ((uint32_t)bi << 16) | (16u << 1);
+}
+
+uint32_t nw_ppc_bcctr(int bo, int bi)
+{
+	return (19u << 26) | ((uint32_t)bo << 21) | ((uint32_t)bi << 16) | (528u << 1);
+}
+
+uint32_t nw_ppc_or(int ra, int rs, int rb)
+{
+	return (31u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | (444u << 1);
+}
+
+uint32_t nw_ppc_ori(int ra, int rs, unsigned uimm)
+{
+	return (24u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
+	       (uimm & 0xffffu);
 }
 
 uint32_t nw_ppc_mfspr(int rd, int spr)
@@ -1024,7 +1048,7 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = (uint32_t)(pc + disp);
 		return 1;
 	}
-	if (prim == 19 && xo == 16) {
+	if (prim == 19 && (xo == 16 || xo == 528)) {
 		int take = 1;
 		if (rd != 20) {
 			if (!bo_is_cr(rd))
@@ -1032,13 +1056,18 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 			const int crbit = (int)((cpu->cr >> (31 - ra)) & 1);
 			take = ((rd & ~1) == NW_PPC_BO_TRUE) ? crbit : !crbit;
 		}
-		const uint32_t t = cpu->lr;
+		const uint32_t t = (xo == 16) ? cpu->lr : cpu->ctr;
 		if (op & 1)
 			cpu->lr = pc + 4;
 		if (take) {
 			cpu->pc = t & ~3u;
 			return 1;
 		}
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 24) {
+		cpu->gpr[ra] = cpu->gpr[rd] | (op & 0xffffu);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -1063,6 +1092,13 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->gpr[rd] = cpu->gpr[ra] + cpu->gpr[rb];
 		if (op & 1)
 			record_cr0(cpu, (int32_t)cpu->gpr[rd]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 444) {
+		cpu->gpr[ra] = cpu->gpr[rd] | cpu->gpr[rb];
+		if (op & 1)
+			record_cr0(cpu, (int32_t)cpu->gpr[ra]);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -1517,6 +1553,15 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return emit_store_gpr(e, W8, rd);
 	}
+	if (prim == 24) {
+		if (!emit_load_gpr(e, W8, rd))
+			return 0;
+		if (!emit_imm32(e, W9, op & 0xffffu))
+			return 0;
+		if (!emit_w(e, a64_orr_reg(W8, W8, W9)))
+			return 0;
+		return emit_store_gpr(e, W8, ra);
+	}
 	if (prim == 11) {
 		if (rd != 0)
 			return 0;
@@ -1562,8 +1607,11 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return emit_ret(e);
 	}
-	if (prim == 19 && xo == 16) {
+	if (prim == 19 && (xo == 16 || xo == 528)) {
 		int always = (rd == 20);
+		const uint32_t spr_off = (xo == 16)
+			? (uint32_t)offsetof(struct nw_jit_cpu, lr)
+			: (uint32_t)offsetof(struct nw_jit_cpu, ctr);
 		if (!always && !bo_is_cr(rd))
 			return 0;
 		if (!always) {
@@ -1576,7 +1624,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			uint32_t *cb = e->p;
 			if (!emit_w(e, a64_cbz(W8, 0)))
 				return 0;
-			if (!emit_w(e, a64_ldr_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, lr))))
+			if (!emit_w(e, a64_ldr_w(W8, X0, spr_off)))
 				return 0;
 			if (op & 1) {
 				if (!emit_imm32(e, W9, pc + 4))
@@ -1598,7 +1646,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 				return emit_set_pc(e, pc + 4);
 			return 1;
 		}
-		if (!emit_w(e, a64_ldr_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, lr))))
+		if (!emit_w(e, a64_ldr_w(W8, X0, spr_off)))
 			return 0;
 		if (op & 1) {
 			if (!emit_imm32(e, W9, pc + 4))
@@ -1671,6 +1719,19 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return emit_cr0_from_w8(e);
 		return 1;
 	}
+	if (prim == 31 && xo == 444) {
+		if (!emit_load_gpr(e, W8, rd))
+			return 0;
+		if (!emit_load_gpr(e, W9, rb))
+			return 0;
+		if (!emit_w(e, a64_orr_reg(W8, W8, W9)))
+			return 0;
+		if (!emit_store_gpr(e, W8, ra))
+			return 0;
+		if (op & 1)
+			return emit_cr0_from_w8(e);
+		return 1;
+	}
 	if (prim == 31 && xo == 0) {
 		if (rd != 0)
 			return 0;
@@ -1735,7 +1796,7 @@ static int is_term(uint32_t op)
 	(void)ra;
 	/* Only unconditional transfers always emit ret. Conditional bclr
 	 * must fall through to the epilogue ret (ON SIGILL at 4b2-on2). */
-	return prim == 18 || (prim == 19 && xo == 16 && rd == 20);
+	return prim == 18 || (prim == 19 && (xo == 16 || xo == 528) && rd == 20);
 }
 
 static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)

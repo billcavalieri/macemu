@@ -1582,6 +1582,72 @@ int main()
 		CHECK(a.gpr[4] == (uint32_t)-2 && (a.cr >> 28) == 8);
 		CHECK(b.gpr[4] == a.gpr[4] && b.cr == a.cr);
 
+		/* or r4, r3, r5 (skip_unsup 26.7 M) */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x00ff00ffu;
+		a.gpr[5] = 0xff00ff00u;
+		ops[0] = nw_ppc_or(4, 3, 5);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1300u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1300u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0xffffffffu && b.gpr[4] == a.gpr[4]);
+
+		/* ori r4, r3, 0x00ff */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x11000000u;
+		ops[0] = nw_ppc_ori(4, 3, 0x00ffu);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1310u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1310u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0x110000ffu && b.gpr[4] == a.gpr[4]);
+
+		/* or. records CR0 */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		ops[0] = nw_ppc_or(4, 3, 5) | 1u;
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1320u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1320u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK((a.cr >> 28) == 2 && b.cr == a.cr);
+
+		/* bcctr always: NIA = CTR & ~3 */
+		memset(&a, 0, sizeof(a));
+		a.ctr = 0x3002u;
+		a.lr = 0x2000u;
+		ops[0] = nw_ppc_bcctr(20, 0);
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 1, 0x1330u) == 1);
+		fn = nw_jit_compile(ops, 1, 0x1330u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.pc == 0x3000u && b.pc == a.pc && a.ctr == 0x3002u);
+
+		/* bcctr not taken (CR bit 8 set, BO=5) falls through */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.ctr = 0x3000u;
+		a.cr = 0x00800000u;
+		ops[0] = nw_ppc_bcctr(5, 8);
+		ops[1] = nw_ppc_addi(4, 0, 7);
+		ops[2] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 3, 0x1340u) == 1);
+		fn = nw_jit_compile(ops, 3, 0x1340u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 7 && b.gpr[4] == 7 && a.pc == 0x2000u && b.pc == a.pc);
+
 		/* rlwinm r4, r3, 8, 0, 23  (shift left 8) */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -1783,8 +1849,12 @@ int main()
 		CHECK(nw_jit_op_dispatch(nw_ppc_lwz(3, 1, 0)));
 		CHECK(nw_jit_op_dispatch(nw_ppc_stw(3, 1, 0)));
 		CHECK(nw_jit_op_ends_block(nw_ppc_blr()));
+		CHECK(nw_jit_op_ends_block(nw_ppc_bcctr(20, 0)));
 		CHECK(!nw_jit_op_ends_block(nw_ppc_stw(3, 1, 0)));
 		CHECK(nw_jit_op_ends_block(nw_ppc_bc(NW_PPC_BO_TRUE, 0, 8)));
+		CHECK(nw_jit_op_supported(nw_ppc_or(4, 3, 5)));
+		CHECK(nw_jit_op_supported(nw_ppc_ori(4, 3, 1)));
+		CHECK(nw_jit_op_supported(nw_ppc_bcctr(20, 0)));
 		{
 			uint32_t blk[4];
 			blk[0] = nw_ppc_addi(3, 0, 1);
@@ -1798,7 +1868,7 @@ int main()
 			CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, &bn) == bf);
 			CHECK(bn == 4);
 		}
-		CHECK(!nw_jit_op_supported(0x60000000u));	/* ori r0,r0,0 nop is not in the 4a subset */
+		CHECK(!nw_jit_op_supported(0x34000000u));	/* addic. still unsup */
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
 		nw_jit_cache_put(0x2000u, 0x2000u, 0, 0, NW_JIT_INTERPRET, 0);
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NW_JIT_INTERPRET);
