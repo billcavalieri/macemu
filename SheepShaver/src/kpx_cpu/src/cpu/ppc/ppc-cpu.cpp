@@ -1400,8 +1400,17 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 	int width = 4, is_st = 0;
 	if (prim == 32)
 		;
-	else if (prim == 36)
+	else if (prim == 36 || prim == 37)
 		is_st = 1;
+	else if (prim == 31 && ((op >> 1) & 0x3ff) == 23) {
+		const int ra = (int)((op >> 16) & 0x1f);
+		const int rb = (int)((op >> 11) & 0x1f);
+		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
+		uint32 pa;
+		if (!ppc->guest_data_probe(ea, 4, false, &pa))
+			return 0;
+		return nw_jit_pa_ok(pa, 0);
+	}
 	else if (prim == 40 || prim == 42 || prim == 43)
 		width = 2;
 	else if (prim == 44) {
@@ -1468,6 +1477,17 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 	}
 	if (prim == 32) {
 		const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
+		uint32 pa;
+		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0))
+			sg[rd] = vm_read_memory_4(pa);
+		return;
+	}
+	if (prim == 37 && ra) {
+		sg[ra] = (ra ? sg[ra] : 0) + (uint32)simm;
+		return;
+	}
+	if (prim == 31 && xo == 23) {
+		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
 		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0))
 			sg[rd] = vm_read_memory_4(pa);

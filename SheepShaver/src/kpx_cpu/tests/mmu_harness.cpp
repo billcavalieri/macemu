@@ -1648,6 +1648,50 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[4] == 7 && b.gpr[4] == 7 && a.pc == 0x2000u && b.pc == a.pc);
 
+		/* stwu r3, -4(r1): store and update r1 */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 16;
+			a.gpr[3] = 0x11223344u;
+			ops[0] = nw_ppc_stwu(3, 1, -4);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x1350u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x1350u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[1] == 12 && b.gpr[1] == 12);
+			CHECK(ram[12] == 0x11 && ram[15] == 0x44);
+		}
+
+		/* lwzx r3, r1, r2 */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			ram[12] = 0xaa; ram[13] = 0xbb; ram[14] = 0xcc; ram[15] = 0xdd;
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 8;
+			a.gpr[2] = 4;
+			ops[0] = nw_ppc_lwzx(3, 1, 2);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x1360u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x1360u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[3] == 0xaabbccddu && b.gpr[3] == a.gpr[3]);
+		}
+
 		/* rlwinm r4, r3, 8, 0, 23  (shift left 8) */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -1855,6 +1899,8 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_or(4, 3, 5)));
 		CHECK(nw_jit_op_supported(nw_ppc_ori(4, 3, 1)));
 		CHECK(nw_jit_op_supported(nw_ppc_bcctr(20, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_stwu(3, 1, -4)));
+		CHECK(nw_jit_op_supported(nw_ppc_lwzx(3, 1, 2)));
 		{
 			uint32_t blk[4];
 			blk[0] = nw_ppc_addi(3, 0, 1);
