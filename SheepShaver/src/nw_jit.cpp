@@ -88,6 +88,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 10, "addc", 0, 0, 0},
 	{31, 522, "addco", 0, 0, 0},
 	{31, 520, "subfco", 0, 0, 0},
+	{31, 136, "subfe", 0, 0, 0},
 	{11, -1, "cmpi", 0, 0, 0},
 	{10, -1, "cmpli", 0, 0, 0},
 	{28, -1, "andi.", 0, 0, 0},
@@ -359,6 +360,8 @@ void nw_jit_stats_print(const char *why)
 				nm = "subfc";
 			else if (p == 31 && x == 520)
 				nm = "subfco";
+			else if (p == 31 && x == 136)
+				nm = "subfe";
 			else if (p == 31 && x == 144)
 				nm = "mtcrf";
 			else if (p == 31 && x == 87)
@@ -549,6 +552,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* addc / addco */
 	if (prim == 31 && xo == 520)
 		return 1;	/* subfco */
+	if (prim == 31 && xo == 136)
+		return 1;	/* subfe */
 	if (prim == 28)
 		return 1;	/* andi. */
 	if (prim == 10)
@@ -874,6 +879,12 @@ uint32_t nw_ppc_subfco(int rd, int ra, int rb, int rc)
 {
 	return (31u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) |
 	       ((uint32_t)rb << 11) | (1u << 10) | (8u << 1) | (rc ? 1u : 0);
+}
+
+uint32_t nw_ppc_subfe(int rd, int ra, int rb, int rc)
+{
+	return (31u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | (136u << 1) | (rc ? 1u : 0);
 }
 
 uint32_t nw_ppc_cmpli(int crfd, int ra, unsigned uimm)
@@ -1523,6 +1534,20 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
+	if (prim == 31 && xo == 136) {
+		const uint32_t a = cpu->gpr[ra], b = cpu->gpr[rb];
+		const uint32_t ca = (cpu->xer >> 29) & 1u;
+		const uint64_t s = (uint64_t)(~a) + (uint64_t)b + ca;
+		if (s >> 32)
+			cpu->xer |= 0x20000000u;
+		else
+			cpu->xer &= ~0x20000000u;
+		cpu->gpr[rd] = (uint32_t)s;
+		if (op & 1)
+			record_cr0(cpu, (int32_t)cpu->gpr[rd]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
 	if (prim == 31 && xo == 144) {
 		const uint32_t m = mtcrf_mask(op);
 		cpu->cr = (cpu->gpr[rd] & m) | (cpu->cr & ~m);
@@ -1824,6 +1849,16 @@ static uint32_t a64_adds_reg(int rd, int rn, int rm)
 static uint32_t a64_subs_reg(int rd, int rn, int rm)
 {
 	return 0x6b000000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t a64_sbcs_reg(int rd, int rn, int rm)
+{
+	return 0x7a000000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t a64_cmp_imm1(int rn)
+{
+	return 0x7100041fu | ((uint32_t)rn << 5);
 }
 
 static uint32_t a64_sub_reg(int rd, int rn, int rm)
@@ -2776,6 +2811,29 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_xer_ca_from_cs(e))
 			return 0;
 		if (!emit_xer_ov_from_vs(e))
+			return 0;
+		if (!emit_store_gpr(e, W8, rd))
+			return 0;
+		if (op & 1)
+			return emit_cr0_from_w8(e);
+		return 1;
+	}
+	if (prim == 31 && xo == 136) {
+		if (!emit_load_gpr(e, W8, ra))
+			return 0;
+		if (!emit_load_gpr(e, W9, rb))
+			return 0;
+		if (!emit_w(e, a64_ldr_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, xer))))
+			return 0;
+		if (!emit_w(e, a64_lsr(W10, W10, 29)))
+			return 0;
+		if (!emit_w(e, a64_and_imm1(W10, W10)))
+			return 0;
+		if (!emit_w(e, a64_cmp_imm1(W10)))	/* C = XER[CA] */
+			return 0;
+		if (!emit_w(e, a64_sbcs_reg(W8, W9, W8)))	/* rB + ~rA + CA */
+			return 0;
+		if (!emit_xer_ca_from_cs(e))
 			return 0;
 		if (!emit_store_gpr(e, W8, rd))
 			return 0;
