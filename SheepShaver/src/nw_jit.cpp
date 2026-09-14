@@ -621,7 +621,7 @@ int nw_jit_op_supported(uint32_t op)
 	if (prim == 24)
 		return 1;	/* ori */
 	if (prim == 31 && xo == 0)
-		return rd == 0;	/* cmp cr0 */
+		return (rd & 3) == 0;	/* cmp L=0, any crfD */
 	if (prim == 31 && xo == 32)
 		return (rd & 3) == 0;	/* cmpl L=0, any crfD */
 	if (prim == 31 && xo == 339 &&
@@ -1101,6 +1101,11 @@ uint32_t nw_ppc_sth(int rs, int ra, int d)
 uint32_t nw_ppc_cmp(int ra, int rb)
 {
 	return 0x7c000000u | ((uint32_t)ra << 16) | ((uint32_t)rb << 11);
+}
+
+uint32_t nw_ppc_cmp_cr(int crfd, int ra, int rb)
+{
+	return nw_ppc_cmp(ra, rb) | ((uint32_t)(crfd & 7) << 23);
 }
 
 uint32_t nw_ppc_cmpi(int ra, int simm)
@@ -1807,9 +1812,9 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		return 0;
 	}
 	if (prim == 31 && xo == 0) {
-		if (rd != 0)
+		if (rd & 3)
 			return -1;
-		record_cr0_cmp(cpu, (int32_t)cpu->gpr[ra], (int32_t)cpu->gpr[rb]);
+		record_cr_s(cpu, rd >> 2, (int32_t)cpu->gpr[ra], (int32_t)cpu->gpr[rb]);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -3240,13 +3245,15 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		return 1;
 	}
 	if (prim == 31 && xo == 0) {
-		if (rd != 0)
+		if (rd & 3)
 			return 0;
 		if (!emit_load_gpr(e, W8, ra))
 			return 0;
 		if (!emit_load_gpr(e, W9, rb))
 			return 0;
-		return emit_cr0_from_cmp_w8_w9(e);
+		if (!emit_w(e, a64_cmp_w(W8, W9)))
+			return 0;
+		return emit_cr_field_from_flags(e, rd >> 2, 0x5400008bu); /* B.LT +4 */
 	}
 	if (prim == 31 && xo == 32) {
 		if (rd & 3)
