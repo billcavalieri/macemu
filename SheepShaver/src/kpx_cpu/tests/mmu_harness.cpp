@@ -482,12 +482,24 @@ int main()
 			img[8] = 0x07;
 			img[9] = 0x7d;
 			memcpy(&img[NW_NEWWORLD_SIG_OFFSET], "NewWorld v1.0", 14);
-			char line[96];
+			char line[128];
 			nw_format_g0_rom_line(line, sizeof(line), img.data(), img.size(),
 					     img.data(), img.size());
-			CHECK(strstr(line, "4 MiB") != NULL);
+			CHECK(strstr(line, "4 MiB unpacked") != NULL);
 			CHECK(strstr(line, "077d") != NULL);
 			CHECK(strstr(line, "NewWorld v1.0") != NULL);
+			const char lzss[] =
+				"<CHRP-BOOT>\nh# 000100 constant lzss-offset\nh# 000200 constant lzss-size\n";
+			nw_format_g0_rom_line(line, sizeof(line), img.data(), img.size(),
+					     (const uint8_t *)lzss, sizeof(lzss) - 1);
+			CHECK(strstr(line, "lzss") != NULL);
+			CHECK(strstr(line, "1.6") != NULL);
+			const char prcl[] =
+				"<CHRP-BOOT>\nh# 000100 constant parcels-offset\nh# 000200 constant parcels-size\n";
+			nw_format_g0_rom_line(line, sizeof(line), img.data(), img.size(),
+					     (const uint8_t *)prcl, sizeof(prcl) - 1);
+			CHECK(strstr(line, "parcels") != NULL);
+			CHECK(strstr(line, "9.2.1 tbxi") != NULL);
 		}
 		CHECK(strcmp(nw_boot_line_g0_newworld(),
 			"G0: DecodeROM 4 MiB NewWorld +0x30d064 NK +0x310000") == 0);

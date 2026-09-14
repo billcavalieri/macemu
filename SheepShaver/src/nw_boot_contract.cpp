@@ -915,16 +915,18 @@ void nw_boot_log(const char *line)
 static const char *nw_rom_wrap_name(const uint8_t *file, size_t file_size)
 {
 	if (file_size == (size_t)NW_ROM_SIZE)
-		return "4 MiB";
+		return "4 MiB unpacked";
 	if (file == NULL || file_size < 11 || memcmp(file, "<CHRP-BOOT>", 11) != 0)
 		return "unknown";
 	uint32_t off = 0, sz = 0;
+	/* Operator names from OS921-WP0-ROM.md. CHRP <DESCRIPTION> is
+	 * "MacROM for NewWorld." on both 1.6 and the 9.2.1 tbxi. */
 	if (nw_chrp_hex_constant(file, file_size, "lzss-offset", &off) &&
 	    nw_chrp_hex_constant(file, file_size, "lzss-size", &sz))
-		return "CHRP lzss";
+		return "CHRP lzss (ROM 1.6)";
 	if (nw_chrp_hex_constant(file, file_size, "parcels-offset", &off) &&
 	    nw_chrp_hex_constant(file, file_size, "parcels-size", &sz))
-		return "CHRP parcels";
+		return "CHRP parcels (9.2.1 tbxi)";
 	return "CHRP";
 }
 
@@ -959,7 +961,7 @@ void nw_log_g0_decode(const uint8_t *decoded, size_t decoded_size,
 		      const uint8_t *file, size_t file_size)
 {
 	if (nw_detect_decoded_rom(decoded, decoded_size) == NW_DECODED_NEWWORLD) {
-		char rom_line[96];
+		char rom_line[128];
 		nw_boot_log(nw_boot_line_credits());
 		nw_boot_log(nw_boot_line_g0_newworld());
 		nw_format_g0_rom_line(rom_line, sizeof(rom_line),
