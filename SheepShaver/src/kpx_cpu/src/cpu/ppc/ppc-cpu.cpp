@@ -1316,7 +1316,8 @@ uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
 	}
 	if (ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
-		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM);
+		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM,
+			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu));
 	return vm_read_memory_4(pa);
 }
 
@@ -1343,7 +1344,8 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 	vm_write_memory_4(pa, val);
 	if (ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
-		nw_jit_dtlb_fill(ea, pa, 1);
+		nw_jit_dtlb_fill(ea, pa, 1,
+			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu));
 	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
 		*fault = NW_JIT_FAULT_SMC;

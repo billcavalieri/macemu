@@ -1751,11 +1751,11 @@ int main()
 			uint32_t pa = 0;
 			nw_jit_dtlb_flush();
 			CHECK(nw_jit_dtlb_lookup(0x1004u, 0, &pa) == 0);
-			nw_jit_dtlb_fill(0x1000u, 0x2000u, 0);
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 0, 0);
 			CHECK(nw_jit_dtlb_lookup(0x1004u, 0, &pa) == 1);
 			CHECK(pa == 0x2004u);
 			CHECK(nw_jit_dtlb_lookup(0x1004u, 1, &pa) == 0);
-			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1);
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0);
 			CHECK(nw_jit_dtlb_lookup(0x1000u, 1, &pa) == 1);
 			CHECK(pa == 0x2000u);
 			nw_jit_dtlb_flush();

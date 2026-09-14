@@ -68,6 +68,7 @@ static nw_jit_host_lb g_host_lb;
 static nw_jit_host_stb8 g_host_stb;
 
 static struct nw_jit_dtlb_ent g_dtlb[NW_JIT_DTLB_N];
+static_assert(sizeof(struct nw_jit_dtlb_ent) == 32, "dtlb entry is 32 bytes");
 static uint64_t g_dtlb_hit, g_dtlb_miss;
 
 struct nw_jit_hist {
@@ -441,12 +442,18 @@ void nw_jit_dtlb_flush(void)
 	memset(g_dtlb, 0, sizeof(g_dtlb));
 }
 
-void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable)
+void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host)
 {
 	const unsigned i = (ea >> 12) & (NW_JIT_DTLB_N - 1u);
 	g_dtlb[i].ea_page = ea & ~0xfffu;
 	g_dtlb[i].pa_page = pa & ~0xfffu;
-	g_dtlb[i].flags = NW_JIT_DTLB_VALID | (writable ? NW_JIT_DTLB_WRITE : 0);
+	g_dtlb[i].host = host;
+	uint32_t flags = NW_JIT_DTLB_VALID;
+	if (writable)
+		flags |= NW_JIT_DTLB_WRITE;
+	if (host)
+		flags |= NW_JIT_DTLB_HOST;
+	g_dtlb[i].flags = flags;
 }
 
 int nw_jit_dtlb_lookup(uint32_t ea, int is_store, uint32_t *pa)
@@ -1029,7 +1036,8 @@ uint32_t nw_jit_helper_lwz(struct nw_jit_cpu *cpu, uint32_t ea)
 			cpu->fault_ea = ea;
 			return 0;
 		}
-		nw_jit_dtlb_fill(ea, ea, 1);
+		nw_jit_dtlb_fill(ea, ea, 1,
+			(uint64_t)(uintptr_t)(cpu->mem + ((ea - cpu->mem_base) & ~0xfffu)));
 		g_dtlb_miss++;
 		return mem_ld_be(cpu, ea);
 	}
@@ -1186,7 +1194,8 @@ void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 			return;
 		}
 		mem_st_be(cpu, ea, val);
-		nw_jit_dtlb_fill(ea, ea, 1);
+		nw_jit_dtlb_fill(ea, ea, 1,
+			(uint64_t)(uintptr_t)(cpu->mem + ((ea - cpu->mem_base) & ~0xfffu)));
 		g_dtlb_miss++;
 		if ((ea & ~0xfffu) == (cpu->pc & ~0xfffu))
 			cpu->fault = NW_JIT_FAULT_SMC;
@@ -1518,7 +1527,7 @@ int nw_jit_interp_n(struct nw_jit_cpu *cpu, const uint32_t *ops, int n, uint32_t
 
 enum {
 	W0 = 0, W1 = 1, W2 = 2, W8 = 8, W9 = 9, W10 = 10, W12 = 12, W13 = 13,
-	X0 = 0, X9 = 9, X10 = 10, X11 = 11, X19 = 19
+	X0 = 0, X9 = 9, X10 = 10, X11 = 11, X12 = 12, X13 = 13, X19 = 19
 };
 
 struct emit {
@@ -1675,7 +1684,7 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 		return 0;
 	if (!emit_w(e, a64_and_imm8(W9, W9)))
 		return 0;
-	if (!emit_w(e, a64_add_x_lsl(X11, X10, 9, 4)))
+	if (!emit_w(e, a64_add_x_lsl(X11, X10, 9, 5)))
 		return 0;
 	if (!emit_w(e, a64_ldr_w(W12, X11, 0)))
 		return 0;
@@ -1707,14 +1716,14 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 		return 0;
 	if (!emit_w(e, a64_orr_reg(W1, W1, W12)))
 		return 0;
-	uint32_t *to_hit = e->p;
+	uint32_t *to_inline = e->p;
 	if (!emit_w(e, a64_b(0)))
 		return 0;
 	/* MSR[DR] off: PA = EA, no translated cache. */
 	uint32_t *ident_p = e->p;
 	if (!emit_w(e, a64_orr_reg(W1, 31, W8)))
 		return 0;
-	uint32_t *ident_to_hit = e->p;
+	uint32_t *ident_to_pa = e->p;
 	if (!emit_w(e, a64_b(0)))
 		return 0;
 	uint32_t *miss_p = e->p;
@@ -1727,6 +1736,40 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 	if (!emit_w(e, 0xd63f0120u))
 		return 0;
 	uint32_t *to_join = e->p;
+	if (!emit_w(e, a64_b(0)))
+		return 0;
+	uint32_t *inline_p = e->p;
+	if (!emit_w(e, 0xf940096cu))			/* LDR X12, [X11, #16] host */
+		return 0;
+	uint32_t *no_host = e->p;
+	if (!emit_w(e, 0xb400000cu))			/* CBZ X12, helper_pa */
+		return 0;
+	if (!emit_imm32(e, W13, 0xfffu))
+		return 0;
+	if (!emit_w(e, a64_and_reg(W13, W8, W13)))
+		return 0;
+	if (!emit_w(e, 0x8b2d418cu))			/* ADD X12, X12, W13, UXTW */
+		return 0;
+	if (is_store) {
+		if (!emit_w(e, 0x5ac00840u))		/* REV W0, W2 */
+			return 0;
+		if (!emit_w(e, a64_str_w(W0, X12, 0)))
+			return 0;
+	} else {
+		if (!emit_w(e, a64_ldr_w(W0, X12, 0)))
+			return 0;
+		if (!emit_w(e, 0x5ac00800u))		/* REV W0, W0 */
+			return 0;
+	}
+	if (!emit_imm64(e, X10, (uint64_t)(uintptr_t)&g_dtlb_hit))
+		return 0;
+	if (!emit_w(e, 0xf940014du))			/* LDR X13, [X10] */
+		return 0;
+	if (!emit_w(e, 0x910005adu))			/* ADD X13, X13, #1 */
+		return 0;
+	if (!emit_w(e, 0xf900014du))			/* STR X13, [X10] */
+		return 0;
+	uint32_t *inline_join = e->p;
 	if (!emit_w(e, a64_b(0)))
 		return 0;
 	uint32_t *hit_p = e->p;
@@ -1742,9 +1785,11 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 	*nv = a64_tbz(W12, 0, (int)(miss_p - nv));
 	if (nw)
 		*nw = a64_tbz(W12, 1, (int)(miss_p - nw));
-	*to_hit = a64_b((int)(hit_p - to_hit));
-	*ident_to_hit = a64_b((int)(hit_p - ident_to_hit));
+	*to_inline = a64_b((int)(inline_p - to_inline));
+	*ident_to_pa = a64_b((int)(hit_p - ident_to_pa));
 	*to_join = a64_b((int)(join - to_join));
+	*no_host = 0xb4000000u | (((uint32_t)(hit_p - no_host) & 0x7ffffu) << 5) | 12u;
+	*inline_join = a64_b((int)(join - inline_join));
 	(void)join;
 	return 1;
 }

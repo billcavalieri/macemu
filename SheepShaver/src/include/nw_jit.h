@@ -167,16 +167,19 @@ void nw_jit_invalidate_all_src(int src);
 enum { NW_JIT_DTLB_N = 256 };
 enum {
 	NW_JIT_DTLB_VALID = 1u,
-	NW_JIT_DTLB_WRITE = 2u
+	NW_JIT_DTLB_WRITE = 2u,
+	NW_JIT_DTLB_HOST = 4u	/* host page pointer is live; ARM ldr/str */
 };
 struct nw_jit_dtlb_ent {
 	uint32_t ea_page;
 	uint32_t pa_page;
 	uint32_t flags;
 	uint32_t pad;
+	uint64_t host;		/* host pointer to the page, 0 if not inlineable */
+	uint64_t pad2;		/* 32-byte entry, index << 5 */
 };
 void nw_jit_dtlb_flush(void);
-void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable);
+void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host);
 int nw_jit_dtlb_lookup(uint32_t ea, int is_store, uint32_t *pa);
 uint64_t nw_jit_dtlb_hits(void);
 uint64_t nw_jit_dtlb_misses(void);
