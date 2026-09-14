@@ -1575,6 +1575,10 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 	else if (prim == 44 || prim == 45) {
 		width = 2;
 		is_st = 1;
+	} else if (prim == 46 || prim == 47) {
+		const int rd = (int)((op >> 21) & 0x1f);
+		width = 4 * (32 - rd);
+		is_st = (prim == 47);
 	} else
 		return 1;
 	const int ra = (int)((op >> 16) & 0x1f);

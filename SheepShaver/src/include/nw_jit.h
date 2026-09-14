@@ -205,6 +205,8 @@ uint32_t nw_ppc_subfe(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_subf(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_rlwinm(int ra, int rs, int sh, int mb, int me);
 uint32_t nw_ppc_rlwnm(int ra, int rs, int rb, int mb, int me);
+uint32_t nw_ppc_lmw(int rd, int ra, int d);
+uint32_t nw_ppc_stmw(int rs, int ra, int d);
 uint32_t nw_ppc_rlwimi(int ra, int rs, int sh, int mb, int me);
 uint32_t nw_ppc_lwz(int rd, int ra, int d);
 uint32_t nw_ppc_lwzu(int rd, int ra, int d);

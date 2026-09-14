@@ -40,6 +40,8 @@ void nw_jit_helper_sth(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val);
 uint32_t nw_jit_helper_lb(struct nw_jit_cpu *cpu, uint32_t ea);
 void nw_jit_helper_stb(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val);
 uint32_t nw_jit_helper_sraw(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t rb);
+void nw_jit_helper_lmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rd);
+void nw_jit_helper_stmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rs);
 
 enum { NW_JIT_CODE_SIZE = 1 << 20, NW_JIT_CACHE = 4096, NW_JIT_PROBE = 8 };
 
@@ -108,6 +110,8 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 598, "sync", 0, 0, 0},
 	{21, -1, "rlwinm", 0, 0, 0},
 	{23, -1, "rlwnm", 0, 0, 0},
+	{46, -1, "lmw", 0, 0, 0},
+	{47, -1, "stmw", 0, 0, 0},
 	{20, -1, "rlwimi", 0, 0, 0},
 	{16, -1, "bc", 0, 0, 0},
 	{18, -1, "b", 0, 0, 0},
@@ -413,6 +417,10 @@ void nw_jit_stats_print(const char *why)
 				nm = "addis";
 			else if (p == 23)
 				nm = "rlwnm";
+			else if (p == 46)
+				nm = "lmw";
+			else if (p == 47)
+				nm = "stmw";
 			else if (p == 24)
 				nm = "ori";
 			else if (p == 25)
@@ -621,6 +629,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* rlwimi / rlwinm */
 	if (prim == 23)
 		return 1;	/* rlwnm */
+	if (prim == 46 || prim == 47)
+		return 1;	/* lmw / stmw */
 	if (prim == 16)
 		return bo_is_cr(rd) && (op & 3) == 0;
 	if (prim == 18)
@@ -1056,6 +1066,16 @@ uint32_t nw_ppc_rlwnm(int ra, int rs, int rb, int mb, int me)
 	       ((uint32_t)rb << 11) | ((uint32_t)mb << 6) | ((uint32_t)me << 1);
 }
 
+uint32_t nw_ppc_lmw(int rd, int ra, int d)
+{
+	return (46u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
+uint32_t nw_ppc_stmw(int rs, int ra, int d)
+{
+	return (47u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
 uint32_t nw_ppc_rlwimi(int ra, int rs, int sh, int mb, int me)
 {
 	return (20u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
@@ -1456,6 +1476,24 @@ uint32_t nw_jit_helper_sraw(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t rb)
 	else
 		cpu->xer &= ~0x20000000u;
 	return res;
+}
+
+void nw_jit_helper_lmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rd)
+{
+	for (uint32_t r = rd; r < 32; r++, ea += 4) {
+		cpu->gpr[r] = nw_jit_helper_lwz(cpu, ea);
+		if (cpu->fault)
+			return;
+	}
+}
+
+void nw_jit_helper_stmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rs)
+{
+	for (uint32_t r = rs; r < 32; r++, ea += 4) {
+		nw_jit_helper_stw(cpu, ea, cpu->gpr[r]);
+		if (cpu->fault)
+			return;
+	}
 }
 
 void nw_jit_helper_stb(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
@@ -2048,6 +2086,24 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		p[1] = (uint8_t)cpu->gpr[rd];
 		if (prim == 45 && ra)
 			cpu->gpr[ra] = ea;
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 46) {
+		uint32_t ea = ra_or_0(cpu, ra) + (uint32_t)simm;
+		const uint32_t n = 4u * (32u - (uint32_t)rd);
+		if (!mem_ok_n(cpu, ea, n))
+			return -1;
+		nw_jit_helper_lmw(cpu, ea, (uint32_t)rd);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 47) {
+		uint32_t ea = ra_or_0(cpu, ra) + (uint32_t)simm;
+		const uint32_t n = 4u * (32u - (uint32_t)rd);
+		if (!mem_ok_n(cpu, ea, n))
+			return -1;
+		nw_jit_helper_stmw(cpu, ea, (uint32_t)rd);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -3530,6 +3586,25 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	}
 	if (prim == 44 || prim == 45) {
 		return emit_call_sth(e, pc, rd, ra, simm, prim == 45);
+	}
+	if (prim == 46 || prim == 47) {
+		if (!emit_set_pc(e, pc))
+			return 0;
+		if (!emit_helper_ea(e, ra, simm))
+			return 0;
+		if (!emit_w(e, a64_orr_reg(W1, 31, W8)))
+			return 0;
+		if (!emit_imm32(e, W2, (uint32_t)rd))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)(prim == 46 ? nw_jit_helper_lmw : nw_jit_helper_stmw)))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		return emit_fault_check(e);
 	}
 	(void)is_last;
 	return 0;
