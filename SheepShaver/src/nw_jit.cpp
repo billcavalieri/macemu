@@ -75,6 +75,7 @@ static struct nw_jit_hist g_hist[] = {
 	{12, -1, "addic", 0, 0, 0},
 	{13, -1, "addic.", 0, 0, 0},
 	{31, 10, "addc", 0, 0, 0},
+	{31, 522, "addco", 0, 0, 0},
 	{11, -1, "cmpi", 0, 0, 0},
 	{21, -1, "rlwinm", 0, 0, 0},
 	{20, -1, "rlwimi", 0, 0, 0},
@@ -455,8 +456,8 @@ int nw_jit_op_supported(uint32_t op)
 	const int xo = (int)((op >> 1) & 0x3ff);
 	if (prim == 14 || prim == 12 || prim == 13)
 		return 1;	/* addi / addic / addic. */
-	if (prim == 31 && xo == 10)
-		return 1;	/* addc, not addco (xo 522) */
+	if (prim == 31 && (xo == 10 || xo == 522))
+		return 1;	/* addc / addco */
 	if (prim == 11)
 		return rd == 0;	/* cmpwi cr0; L=0. crfD!=0 was vs-kpx miss */
 	if (prim == 20 || prim == 21)
@@ -743,6 +744,11 @@ uint32_t nw_ppc_addc(int rd, int ra, int rb, int rc)
 	       ((uint32_t)rb << 11) | (10u << 1) | (rc ? 1u : 0);
 }
 
+uint32_t nw_ppc_addco(int rd, int ra, int rb, int rc)
+{
+	return nw_ppc_addc(rd, ra, rb, rc) | (1u << 10);
+}
+
 uint32_t nw_ppc_add(int rd, int ra, int rb, int rc)
 {
 	return 0x7c000214u | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) | ((uint32_t)rb << 11) | (rc ? 1u : 0);
@@ -890,6 +896,16 @@ static void record_ca(struct nw_jit_cpu *cpu, uint32_t a, uint32_t b)
 		cpu->xer |= 0x20000000u;
 	else
 		cpu->xer &= ~0x20000000u;
+}
+
+/* Signed overflow of a+b as 32-bit. OV is replaced; SO is sticky. */
+static void record_ov(struct nw_jit_cpu *cpu, uint32_t a, uint32_t b)
+{
+	const int64_t s = (int64_t)(int32_t)a + (int64_t)(int32_t)b;
+	const int ov = (int)((((uint64_t)s) >> 63) ^ (((uint32_t)s) >> 31));
+	cpu->xer &= ~0x40000000u;
+	if (ov)
+		cpu->xer |= 0xc0000000u;
 }
 
 static void record_cr0(struct nw_jit_cpu *cpu, int32_t v)
@@ -1234,9 +1250,12 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
-	if (prim == 31 && xo == 10) {
-		record_ca(cpu, cpu->gpr[ra], cpu->gpr[rb]);
-		cpu->gpr[rd] = cpu->gpr[ra] + cpu->gpr[rb];
+	if (prim == 31 && (xo == 10 || xo == 522)) {
+		const uint32_t a = cpu->gpr[ra], b = cpu->gpr[rb];
+		record_ca(cpu, a, b);
+		if (xo == 522)
+			record_ov(cpu, a, b);
+		cpu->gpr[rd] = a + b;
 		if (op & 1)
 			record_cr0(cpu, (int32_t)cpu->gpr[rd]);
 		cpu->pc = pc + 4;
@@ -1793,7 +1812,7 @@ static int emit_cr0_from_flags(struct emit *e, uint32_t b_lt)
 
 static int emit_xer_ca_from_cs(struct emit *e)
 {
-	/* CS from ADDS. Leaves W8 (sum) alone. */
+	/* CS from ADDS. Leaves W8 (sum) alone. NZCV unchanged. */
 	if (!emit_w(e, a64_ldr_w(W9, X0, (uint32_t)offsetof(struct nw_jit_cpu, xer))))
 		return 0;
 	if (!emit_imm32(e, W10, ~0x20000000u))
@@ -1803,6 +1822,28 @@ static int emit_xer_ca_from_cs(struct emit *e)
 	if (!emit_w(e, 0x1a9f37eau))			/* CSET W10, CS */
 		return 0;
 	if (!emit_w(e, a64_lsl(W10, W10, 29)))
+		return 0;
+	if (!emit_w(e, a64_orr_reg(W9, W9, W10)))
+		return 0;
+	return emit_w(e, a64_str_w(W9, X0, (uint32_t)offsetof(struct nw_jit_cpu, xer)));
+}
+
+static int emit_xer_ov_from_vs(struct emit *e)
+{
+	/* VS from ADDS (still live after CA). OV replaced, SO sticky. */
+	if (!emit_w(e, a64_ldr_w(W9, X0, (uint32_t)offsetof(struct nw_jit_cpu, xer))))
+		return 0;
+	if (!emit_imm32(e, W10, ~0x40000000u))
+		return 0;
+	if (!emit_w(e, a64_and_reg(W9, W9, W10)))
+		return 0;
+	if (!emit_w(e, 0x1a9f77eau))			/* CSET W10, VS */
+		return 0;
+	if (!emit_w(e, a64_lsl(W10, W10, 30)))
+		return 0;
+	if (!emit_w(e, a64_orr_reg(W9, W9, W10)))
+		return 0;
+	if (!emit_w(e, a64_lsl(W10, W10, 1)))
 		return 0;
 	if (!emit_w(e, a64_orr_reg(W9, W9, W10)))
 		return 0;
@@ -2024,7 +2065,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return emit_cr0_from_w8(e);
 		return 1;
 	}
-	if (prim == 31 && xo == 10) {
+	if (prim == 31 && (xo == 10 || xo == 522)) {
 		if (!emit_load_gpr(e, W8, ra))
 			return 0;
 		if (!emit_load_gpr(e, W9, rb))
@@ -2032,6 +2073,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_w(e, a64_adds_reg(W8, W8, W9)))
 			return 0;
 		if (!emit_xer_ca_from_cs(e))
+			return 0;
+		if (xo == 522 && !emit_xer_ov_from_vs(e))
 			return 0;
 		if (!emit_store_gpr(e, W8, rd))
 			return 0;
