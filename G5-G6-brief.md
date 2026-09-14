@@ -1,13 +1,13 @@
 # Next steps: WP5 video damage
 
-Branch **`arm64-jit`** at **`a64942bf`**. **G6 reached:** three
-interpreter and three `NW_JIT=on` G5-script boots, PMU shutdown each,
-table in `NEWWORLD-BOOT-PLAN.md` S4 step 17 and `OS921-BOOT-PLAN.md`
-Measurement. JIT is on and slower (210 s vs 130 s to Finder; ≈ 190 k
-flush/s). Harness 613.
+Branch **`arm64-jit`** at **`2406db34`**. **G6 reached** (table at
+`a64942bf`). Post-G6 emitters through `addco`. Splash type 10 was
+`lwzx` DSI clobbering rD; `stwu` SMC now updates RA. JIT ON Finder at
+170 s (`/tmp/g8/jit-finder/016.png`). Shut Down was clicked; log-cap
+SIGTERM at 249 s, not PMU exit 0. Harness 698.
 
-**Next:** WP5 video damage (`video-damage`). Do not grow the emitter
-until flush/s drops. Follow `NEWWORLD-BOOT-PLAN.md` conventions.
+**Next:** WP5 video damage (`video-damage`). Follow
+`NEWWORLD-BOOT-PLAN.md` conventions.
 
 Deferred (unchanged): Sleep (`0x7f`), Startup Disk / OF `boot-device`.
 

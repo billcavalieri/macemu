@@ -28,8 +28,9 @@ in the 4a subset; those four are emitted and copy-out is ON
 loads/stores (`7f7661bf`). **G6 reached** (S4 step 17): three
 interpreter and three `NW_JIT=on` G5-script boots, each PMU shutdown
 exit 0, G2 HIT, About 9.2.1. JIT is on and slower (≈ 210 s to Finder
-vs ≈ 130 s; ≈ 190 k flush/s). WP5 video damage is next; do not grow
-the emitter until flush/s drops.
+vs ≈ 130 s; ≈ 190 k flush/s). Post-G6 emitters through `addco`; splash
+type 10 was `lwzx` writing rD before DSI (`2406db34`). JIT ON Finder
+again at 170 s (`/tmp/g8/jit-finder/016.png`). WP5 video damage is next.
 
 **Base:** `g3` @ `f9c0ef0a`, tagged `g3-mill-frozen`. G0–G2 from that branch
 (ROM decode, `MacRISC2` tree, NK v2 with MMU on, first DSI correct) are kept.
@@ -1198,10 +1199,23 @@ Interpreter `NW_JIT=off`:
 JIT is not faster. G6 is the table, not a speed gate. Branch `arm64-jit`
 @ `a64942bf`. Harness 613 passed, 0 failed.
 
+#### S4 step 17 addendum — post-G6 emitters, splash type 10, Finder
+
+Grew the integer subset after G6 (flush-all drop, cache-first, stores
+in-block, `or`/`ori`/`bcctr`, `stwu`/`lwzx`, `addc`/`addic`, `lbz`/`stb`/`lwzu`,
+`addco`). First splash bomb is `8e1c73c6` (`stwu`/`lwzx`); last good
+`88a675c5`. Isolation: `stwu` alone reaches Disk First Aid; `lwzx`
+wrote rD before the fault check so a DSI left rD=0. Also: `stwu` SMC
+must still update RA. Fix `2406db34`. Harness 698.
+
+JIT ON Finder (`/tmp/g8/jit-finder.log`, `NW_JIT=on`, `--config
+/tmp/prefs-hd`): Disk First Aid Done at 105 s, menu bar + Macintosh HD
+at 170 s (`016.png`). Special → Shut Down was clicked; a 150 MB log cap
+SIGTERM'd at 249 s (script shutdown at 255 s). Not PMU exit 0.
+
 ### S5 — Rest of `OS921-BOOT-PLAN.md`
 
-WP5 video damage after G6. Flush/s is the next CPU cost; do not grow
-the emitter until that drops.
+WP5 video damage after G6. Flush/s is still the next CPU cost.
 
 ---
 

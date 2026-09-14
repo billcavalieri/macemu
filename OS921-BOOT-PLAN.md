@@ -196,6 +196,11 @@ Interpreter `NW_JIT=off` (`/tmp/g8/g6-iN.log`), idle t=140–169:
 
 Filled at G6 (`arm64-jit` `a64942bf`). JIT is on and slower.
 
+Post-G6: emitters through `addco`; splash type 10 fixed in `2406db34`
+(`lwzx` DSI must not write rD; `stwu` SMC still updates RA). JIT ON
+Finder at 170 s (`/tmp/g8/jit-finder/016.png`). Shut Down clicked;
+log-cap SIGTERM at 249 s, not PMU exit 0. Harness 698.
+
 ## Out of scope
 
 Basilisk II / 68k. A third emulator tree. Merging NewSheep as a subtree (read it; reimplement here). Committing ROMs, .smi, .toast, or disk images.
