@@ -36,9 +36,10 @@
  * live path would, runs it on a shadow CPU, then kpx interprets; the
  * guest follows kpx. NW_JIT_ON copy-out commits the shadow; mtspr DEC
  * goes through the same 0→1 / tb_base path as kpx mtspr_oea. 4c: the
- * cache drops on tlbie (invalidate_cache), mtsr/BAT/SDR1, icbi, and
- * a live stw/sth of a translated page. 4d: ON DSI from a helper takes
- * the exception with SRR0 = the faulting PC (same as kpx), not kpx replay.
+ * cache is keyed by phys_page, so mtsr/BAT/SDR1/tlbie do not flush-all
+ * (a remap misses). icbi, compiled stw/sth, interpreter pa_write, and
+ * host writes into guest RAM drop that page. 4d: ON DSI from a helper
+ * takes the exception with SRR0 = the faulting PC (same as kpx).
  */
 enum { NW_JIT_MAX_BLOCK = 16 };
 
@@ -134,11 +135,14 @@ enum {
 	NW_JIT_FL_BAT,		/* mtibat/mtdbat */
 	NW_JIT_FL_SDR1,		/* mtsdr1 */
 	NW_JIT_FL_WRAP,		/* code buffer wrap */
+	NW_JIT_FL_ISTORE,	/* interpreter pa_write into a code page */
+	NW_JIT_FL_HOST,		/* Host2Mac / WriteMacInt into guest RAM */
 	NW_JIT_FL_OTHER,
 	NW_JIT_FL_N
 };
 void nw_jit_invalidate_page(uint32_t phys_page);
 void nw_jit_invalidate_page_src(uint32_t phys_page, int src);
+void nw_jit_invalidate_range_src(uint32_t pa, uint32_t nbytes, int src);
 void nw_jit_invalidate_all(void);
 void nw_jit_invalidate_all_src(int src);
 uint64_t nw_jit_flush_count(void);

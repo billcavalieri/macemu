@@ -572,6 +572,12 @@ void powerpc_cpu::execute_fp_arith(uint32 opcode)
  *		RX		Reverse operand
  **/
 
+#ifdef SHEEPSHAVER
+#define PA_JIT_STORE(PA, N) nw_jit_invalidate_range_src((PA), (N), NW_JIT_FL_ISTORE)
+#else
+#define PA_JIT_STORE(PA, N) ((void)0)
+#endif
+
 template< int SZ, bool RX >
 struct memory_helper;
 
@@ -584,6 +590,7 @@ struct memory_helper<SIZE, RX>																	\
 	}																							\
 	static inline void store(uint32 ea, uint32 value) {											\
 		RX ? vm_write_memory_##SIZE##_reversed(ea, value) : vm_write_memory_##SIZE(ea, value);	\
+		PA_JIT_STORE(ea, SIZE);																	\
 	}																							\
 }
 
@@ -619,9 +626,9 @@ static inline uint64 pa_read_8(uint32 pa, uint32 pc)
 		return vm_read_memory_8(pa);
 	return ((uint64)PA_IO_READ(pa, 4, pc) << 32) | PA_IO_READ(pa + 4, 4, pc);
 }
-static inline void pa_write_1(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 1, v & 0xffu, pc); else if (!pa_is_rom(pa)) vm_write_memory_1(pa, v); }
-static inline void pa_write_2(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 2, v & 0xffffu, pc); else if (!pa_is_rom(pa)) vm_write_memory_2(pa, v); }
-static inline void pa_write_4(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 4, v, pc); else if (!pa_is_rom(pa)) vm_write_memory_4(pa, v); }
+static inline void pa_write_1(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 1, v & 0xffu, pc); else if (!pa_is_rom(pa)) { vm_write_memory_1(pa, v); PA_JIT_STORE(pa, 1); } }
+static inline void pa_write_2(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 2, v & 0xffffu, pc); else if (!pa_is_rom(pa)) { vm_write_memory_2(pa, v); PA_JIT_STORE(pa, 2); } }
+static inline void pa_write_4(uint32 pa, uint32 v, uint32 pc) { if (pa_is_io(pa)) PA_IO_WRITE(pa, 4, v, pc); else if (!pa_is_rom(pa)) { vm_write_memory_4(pa, v); PA_JIT_STORE(pa, 4); } }
 static inline void pa_write_8(uint32 pa, uint64 v, uint32 pc)
 {
 	if (pa_is_io(pa)) {
@@ -629,8 +636,10 @@ static inline void pa_write_8(uint32 pa, uint64 v, uint32 pc)
 		PA_IO_WRITE(pa + 4, 4, (uint32)v, pc);
 		return;
 	}
-	if (!pa_is_rom(pa))
+	if (!pa_is_rom(pa)) {
 		vm_write_memory_8(pa, v);
+		PA_JIT_STORE(pa, 8);
+	}
 }
 
 template< class OP, class RA, class RB, bool LD, int SZ, bool UP, bool RX >
@@ -723,8 +732,12 @@ void powerpc_cpu::execute_loadstore_multiple(uint32 opcode)
 #endif
 		if (LD)
 			gpr(r) = vm_read_memory_4(pa);
-		else
+		else {
 			vm_write_memory_4(pa, gpr(r));
+#ifdef SHEEPSHAVER
+			nw_jit_invalidate_page_src(pa, NW_JIT_FL_ISTORE);
+#endif
+		}
 		r++;
 		ea += 4;
 	}
@@ -1320,9 +1333,6 @@ void powerpc_cpu::execute_mtsr(uint32 opcode)
 	if (ppc32_guest_mmu_enabled()) {
 		ppc32_guest_mmu().set_sr(rA_field::extract(opcode) & 0xfu,
 					 operand_RS::get(this, opcode));
-#ifdef SHEEPSHAVER
-		nw_jit_invalidate_all_src(NW_JIT_FL_SR);
-#endif
 	}
 	increment_pc(4);
 }
@@ -1344,9 +1354,6 @@ void powerpc_cpu::execute_mtsrin(uint32 opcode)
 		const uint32 ea = operand_RB::get(this, opcode);
 		ppc32_guest_mmu().set_sr((ea >> 28) & 0xfu,
 					 operand_RS::get(this, opcode));
-#ifdef SHEEPSHAVER
-		nw_jit_invalidate_all_src(NW_JIT_FL_SR);
-#endif
 	}
 	increment_pc(4);
 }

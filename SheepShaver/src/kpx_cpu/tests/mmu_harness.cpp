@@ -1735,6 +1735,16 @@ int main()
 		nw_jit_invalidate_all();
 		CHECK(nw_jit_flush_count() > fl);
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
+
+		/* interpreter/host store src drops only that page */
+		nw_jit_reset();
+		pa = nw_jit_compile(ops, 2, 0x1000u, 0x1000u, 0, 0);
+		pb = nw_jit_compile(ops, 2, 0x2000u, 0x2000u, 0, 0);
+		nw_jit_invalidate_page_src(0x1000u, NW_JIT_FL_ISTORE);
+		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == NULL);
+		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == pb);
+		nw_jit_invalidate_range_src(0x2000u, 4, NW_JIT_FL_HOST);
+		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
 	}
 
 	/* WP3 4b: dispatcher cache sentinels, mode, op filter. */

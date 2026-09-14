@@ -990,7 +990,7 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 	case powerpc_registers::SPR_SDR1:
 #ifdef SHEEPSHAVER
 		nw_note_mtsdr1();
-		nw_jit_invalidate_all_src(NW_JIT_FL_SDR1);
+		/* Cache key is phys_page; a new HTAB misses, no flush-all. */
 #endif
 		mmu.set_sdr1(value); return true;
 	case powerpc_registers::SPR_SRR0:	srr0_ = value; return true;
@@ -1018,9 +1018,6 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		else
 			u = value;
 		mmu.set_ibat(i, u, l);
-#ifdef SHEEPSHAVER
-		nw_jit_invalidate_all_src(NW_JIT_FL_BAT);
-#endif
 		return true;
 	}
 	if (spr >= powerpc_registers::SPR_DBAT0U && spr <= powerpc_registers::SPR_DBAT3L) {
@@ -1032,9 +1029,6 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		else
 			u = value;
 		mmu.set_dbat(i, u, l);
-#ifdef SHEEPSHAVER
-		nw_jit_invalidate_all_src(NW_JIT_FL_BAT);
-#endif
 		return true;
 	}
 	return false;
@@ -2002,9 +1996,7 @@ void powerpc_cpu::invalidate_cache()
 #if PPC_DECODE_CACHE
 	decode_cache_p = decode_cache;
 #endif
-#ifdef SHEEPSHAVER
-	nw_jit_invalidate_all_src(NW_JIT_FL_TLB);
-#endif
+	/* tlbie/tlbia drop TLB entries only. NW JIT is keyed by phys_page. */
 }
 
 void powerpc_block_info::invalidate()

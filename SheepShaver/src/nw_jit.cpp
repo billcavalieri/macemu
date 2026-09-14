@@ -171,6 +171,20 @@ void nw_jit_invalidate_page(uint32_t phys_page)
 	nw_jit_invalidate_page_src(phys_page, NW_JIT_FL_OTHER);
 }
 
+void nw_jit_invalidate_range_src(uint32_t pa, uint32_t nbytes, int src)
+{
+	if (nbytes == 0)
+		return;
+	uint32_t a = pa & ~0xfffu;
+	const uint32_t last = (pa + nbytes - 1u) & ~0xfffu;
+	for (;;) {
+		nw_jit_invalidate_page_src(a, src);
+		if (a == last)
+			break;
+		a += 0x1000u;
+	}
+}
+
 void nw_jit_invalidate_all_src(int src)
 {
 	if (src < 0 || src >= NW_JIT_FL_N)
@@ -237,7 +251,8 @@ void nw_jit_stats_print(const char *why)
 	if (!g_exec_blocks && nw_jit_mode() == NW_JIT_OFF)
 		return;
 	static const char *const src_name[NW_JIT_FL_N] = {
-		"store", "icbi", "tlb", "sr", "bat", "sdr1", "wrap", "other"
+		"store", "icbi", "tlb", "sr", "bat", "sdr1", "wrap",
+		"istore", "host", "other"
 	};
 	printf("NW-BOOT G1: jit stats %s mode %s blocks %llu insns %llu flush %llu compiles %llu\n",
 	       why, nw_jit_mode_name(),
