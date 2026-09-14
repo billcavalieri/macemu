@@ -34,6 +34,8 @@ uint32_t nw_jit_helper_lwz(struct nw_jit_cpu *cpu, uint32_t ea);
 void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val);
 uint32_t nw_jit_helper_lh(struct nw_jit_cpu *cpu, uint32_t ea);
 void nw_jit_helper_sth(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val);
+uint32_t nw_jit_helper_lb(struct nw_jit_cpu *cpu, uint32_t ea);
+void nw_jit_helper_stb(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val);
 
 enum { NW_JIT_CODE_SIZE = 1 << 20, NW_JIT_CACHE = 4096, NW_JIT_PROBE = 8 };
 
@@ -58,6 +60,8 @@ static nw_jit_host_lwz g_host_lwz;
 static nw_jit_host_stw g_host_stw;
 static nw_jit_host_lh g_host_lh;
 static nw_jit_host_sth16 g_host_sth16;
+static nw_jit_host_lb g_host_lb;
+static nw_jit_host_stb8 g_host_stb;
 
 struct nw_jit_hist {
 	int prim;
@@ -85,6 +89,9 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 339, "mfspr", 0, 0, 0},
 	{31, 467, "mtspr", 0, 0, 0},
 	{32, -1, "lwz", 0, 0, 0},
+	{33, -1, "lwzu", 0, 0, 0},
+	{34, -1, "lbz", 0, 0, 0},
+	{38, -1, "stb", 0, 0, 0},
 	{36, -1, "stw", 0, 0, 0},
 	{37, -1, "stwu", 0, 0, 0},
 	{31, 23, "lwzx", 0, 0, 0},
@@ -394,6 +401,12 @@ void nw_jit_set_host_half(nw_jit_host_lh lh, nw_jit_host_sth16 sth)
 	g_host_sth16 = sth;
 }
 
+void nw_jit_set_host_byte(nw_jit_host_lb lb, nw_jit_host_stb8 stb)
+{
+	g_host_lb = lb;
+	g_host_stb = stb;
+}
+
 void nw_jit_set_host_mem(nw_jit_host_lwz lwz, nw_jit_host_stw stw)
 {
 	static int once;
@@ -464,8 +477,10 @@ int nw_jit_op_supported(uint32_t op)
 		return rd == 0;	/* cmp cr0 */
 	if (prim == 31 && (xo == 339 || xo == 467) && spr_is_user(spr_num(op)))
 		return 1;
-	if (prim == 32 || prim == 36 || prim == 37)
-		return 1;	/* lwz / stw / stwu */
+	if (prim == 32 || prim == 33 || prim == 36 || prim == 37)
+		return 1;	/* lwz / lwzu / stw / stwu */
+	if (prim == 34 || prim == 38)
+		return 1;	/* lbz / stb */
 	if (prim == 31 && xo == 23)
 		return 1;	/* lwzx */
 	if (prim == 40 || prim == 42 || prim == 43 || prim == 44)
@@ -750,6 +765,21 @@ uint32_t nw_ppc_lwz(int rd, int ra, int d)
 	return (32u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
 }
 
+uint32_t nw_ppc_lwzu(int rd, int ra, int d)
+{
+	return (33u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
+uint32_t nw_ppc_lbz(int rd, int ra, int d)
+{
+	return (34u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
+uint32_t nw_ppc_stb(int rs, int ra, int d)
+{
+	return (38u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
 uint32_t nw_ppc_stw(int rs, int ra, int d)
 {
 	return (36u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
@@ -969,6 +999,66 @@ uint32_t nw_jit_helper_lh(struct nw_jit_cpu *cpu, uint32_t ea)
 	cpu->fault = 1;
 	cpu->fault_ea = ea;
 	return 0;
+}
+
+uint32_t nw_jit_helper_lb(struct nw_jit_cpu *cpu, uint32_t ea)
+{
+	if (cpu->mem) {
+		if (!mem_ok_n(cpu, ea, 1)) {
+			cpu->fault = 1;
+			cpu->fault_ea = ea;
+			return 0;
+		}
+		return cpu->mem[ea - cpu->mem_base];
+	}
+	if (g_host_lb && cpu->host) {
+		int f = 0;
+		uint32_t v = g_host_lb(cpu->host, ea, cpu->pc, &f);
+		if (f) {
+			cpu->fault = f;
+			cpu->fault_ea = ea;
+		}
+		return v;
+	}
+	cpu->fault = 1;
+	cpu->fault_ea = ea;
+	return 0;
+}
+
+void nw_jit_helper_stb(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
+{
+	if (cpu->nstore < NW_JIT_MAX_BLOCK) {
+		cpu->store_ea[cpu->nstore] = ea;
+		cpu->store_val[cpu->nstore] = val & 0xffu;
+		cpu->nstore++;
+	}
+	if (cpu->mem) {
+		if (!mem_ok_n(cpu, ea, 1)) {
+			cpu->fault = 1;
+			cpu->fault_ea = ea;
+			cpu->fault_st = 1;
+			return;
+		}
+		cpu->mem[ea - cpu->mem_base] = (uint8_t)val;
+		if ((ea & ~0xfffu) == (cpu->pc & ~0xfffu))
+			cpu->fault = NW_JIT_FAULT_SMC;
+		return;
+	}
+	if (nw_jit_mode() == NW_JIT_VERIFY)
+		return;
+	if (g_host_stb && cpu->host) {
+		int f = 0;
+		g_host_stb(cpu->host, ea, val & 0xffu, cpu->pc, &f);
+		if (f) {
+			cpu->fault = f;
+			cpu->fault_ea = ea;
+			cpu->fault_st = 1;
+		}
+		return;
+	}
+	cpu->fault = 1;
+	cpu->fault_ea = ea;
+	cpu->fault_st = 1;
 }
 
 void nw_jit_helper_sth(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
@@ -1198,11 +1288,29 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
-	if (prim == 32) {
+	if (prim == 32 || prim == 33) {
 		const uint32_t ea = ra_or_0(cpu, ra) + (uint32_t)simm;
 		if (!mem_ok(cpu, ea))
 			return -1;
 		cpu->gpr[rd] = mem_ld_be(cpu, ea);
+		if (prim == 33 && ra)
+			cpu->gpr[ra] = ea;
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 34) {
+		const uint32_t ea = ra_or_0(cpu, ra) + (uint32_t)simm;
+		if (!mem_ok_n(cpu, ea, 1))
+			return -1;
+		cpu->gpr[rd] = cpu->mem[ea - cpu->mem_base];
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 38) {
+		const uint32_t ea = ra_or_0(cpu, ra) + (uint32_t)simm;
+		if (!mem_ok_n(cpu, ea, 1))
+			return -1;
+		cpu->mem[ea - cpu->mem_base] = (uint8_t)cpu->gpr[rd];
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -1461,7 +1569,7 @@ static int emit_helper_ea(struct emit *e, int ra, int simm)
 	return emit_w(e, a64_add_reg(W8, W8, W9));
 }
 
-static int emit_call_lwz(struct emit *e, uint32_t pc, int rd, int ra, int simm)
+static int emit_call_lwz(struct emit *e, uint32_t pc, int rd, int ra, int simm, int upd)
 {
 	if (!emit_set_pc(e, pc))
 		return 0;
@@ -1480,6 +1588,58 @@ static int emit_call_lwz(struct emit *e, uint32_t pc, int rd, int ra, int simm)
 	if (!emit_w(e, 0xaa1303e0u))			/* mov x0, x19 */
 		return 0;
 	if (!emit_store_gpr(e, W8, rd))
+		return 0;
+	if (!emit_fault_check(e))
+		return 0;
+	if (upd && ra) {
+		if (!emit_helper_ea(e, ra, simm))
+			return 0;
+		if (!emit_store_gpr(e, W8, ra))
+			return 0;
+	}
+	return 1;
+}
+
+static int emit_call_lb(struct emit *e, uint32_t pc, int rd, int ra, int simm)
+{
+	if (!emit_set_pc(e, pc))
+		return 0;
+	if (!emit_helper_ea(e, ra, simm))
+		return 0;
+	if (!emit_w(e, a64_orr_reg(W1, 31, W8)))
+		return 0;
+	if (!emit_w(e, 0xaa1303e0u))
+		return 0;
+	if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_lb))
+		return 0;
+	if (!emit_w(e, 0xd63f0120u))
+		return 0;
+	if (!emit_w(e, a64_orr_reg(W8, 31, W0)))
+		return 0;
+	if (!emit_w(e, 0xaa1303e0u))
+		return 0;
+	if (!emit_store_gpr(e, W8, rd))
+		return 0;
+	return emit_fault_check(e);
+}
+
+static int emit_call_stb(struct emit *e, uint32_t pc, int rs, int ra, int simm)
+{
+	if (!emit_set_pc(e, pc))
+		return 0;
+	if (!emit_helper_ea(e, ra, simm))
+		return 0;
+	if (!emit_load_gpr(e, W2, rs))
+		return 0;
+	if (!emit_w(e, a64_orr_reg(W1, 31, W8)))
+		return 0;
+	if (!emit_w(e, 0xaa1303e0u))
+		return 0;
+	if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_stb))
+		return 0;
+	if (!emit_w(e, 0xd63f0120u))
+		return 0;
+	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
 	return emit_fault_check(e);
 }
@@ -1931,8 +2091,14 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		}
 		return 1;
 	}
-	if (prim == 32) {
-		return emit_call_lwz(e, pc, rd, ra, simm);
+	if (prim == 32 || prim == 33) {
+		return emit_call_lwz(e, pc, rd, ra, simm, prim == 33);
+	}
+	if (prim == 34) {
+		return emit_call_lb(e, pc, rd, ra, simm);
+	}
+	if (prim == 38) {
+		return emit_call_stb(e, pc, rd, ra, simm);
 	}
 	if (prim == 36 || prim == 37) {
 		return emit_call_stw(e, pc, rd, ra, simm, prim == 37);

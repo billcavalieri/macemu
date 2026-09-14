@@ -356,6 +356,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 	if (on) {
 		nw_jit_set_host_mem(powerpc_cpu::jit_host_lwz, powerpc_cpu::jit_host_stw);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
+		nw_jit_set_host_byte(powerpc_cpu::jit_host_lb, powerpc_cpu::jit_host_stb);
 	}
 #endif
 }
@@ -1384,6 +1385,53 @@ void powerpc_cpu::jit_host_sth(void *host, uint32 ea, uint32 val, uint32 pc, int
 		*fault = NW_JIT_FAULT_SMC;
 }
 
+uint32 powerpc_cpu::jit_host_lb(void *host, uint32 ea, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	uint32 pa;
+	(void)pc;
+	if (!ppc->guest_data_probe(ea, 1, false, &pa)) {
+		*fault = 1;
+		return 0;
+	}
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
+		return 0;
+	}
+	if (kind == NW_PA_NONE) {
+		*fault = 1;
+		return 0;
+	}
+	return vm_read_memory_1(pa);
+}
+
+void powerpc_cpu::jit_host_stb(void *host, uint32 ea, uint32 val, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	uint32 pa;
+	(void)pc;
+	if (!ppc->guest_data_probe(ea, 1, true, &pa)) {
+		*fault = 1;
+		return;
+	}
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
+		return;
+	}
+	if (kind == NW_PA_ROM)
+		return;
+	if (!nw_pa_writable(pa)) {
+		*fault = 1;
+		return;
+	}
+	vm_write_memory_1(pa, val);
+	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
+		*fault = NW_JIT_FAULT_SMC;
+}
+
 static int nw_jit_pa_ok(uint32 pa, int is_st)
 {
 	const int kind = nw_pa_kind(pa);
@@ -1411,7 +1459,14 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 			return 0;
 		return nw_jit_pa_ok(pa, 0);
 	}
-	else if (prim == 40 || prim == 42 || prim == 43)
+	else if (prim == 33)
+		;
+	else if (prim == 34)
+		width = 1;
+	else if (prim == 38) {
+		width = 1;
+		is_st = 1;
+	} else if (prim == 40 || prim == 42 || prim == 43)
 		width = 2;
 	else if (prim == 44) {
 		width = 2;
@@ -1483,11 +1538,20 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 		sg[rd] = sg[ra] + sg[rb];
 		return;
 	}
-	if (prim == 32) {
+	if (prim == 32 || prim == 33) {
 		const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
 		uint32 pa;
 		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0))
 			sg[rd] = vm_read_memory_4(pa);
+		if (prim == 33 && ra)
+			sg[ra] = ea;
+		return;
+	}
+	if (prim == 34) {
+		const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
+		uint32 pa;
+		if (ppc->guest_data_probe(ea, 1, false, &pa) && nw_jit_pa_ok(pa, 0))
+			sg[rd] = vm_read_memory_1(pa);
 		return;
 	}
 	if (prim == 37 && ra) {

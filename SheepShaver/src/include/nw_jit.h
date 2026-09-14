@@ -111,8 +111,11 @@ typedef uint32_t (*nw_jit_host_lwz)(void *host, uint32_t ea, uint32_t pc, int *f
 typedef void (*nw_jit_host_stw)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
 typedef uint32_t (*nw_jit_host_lh)(void *host, uint32_t ea, uint32_t pc, int *fault);
 typedef void (*nw_jit_host_sth16)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
+typedef uint32_t (*nw_jit_host_lb)(void *host, uint32_t ea, uint32_t pc, int *fault);
+typedef void (*nw_jit_host_stb8)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
 void nw_jit_set_host_mem(nw_jit_host_lwz lwz, nw_jit_host_stw stw);
 void nw_jit_set_host_half(nw_jit_host_lh lh, nw_jit_host_sth16 sth);
+void nw_jit_set_host_byte(nw_jit_host_lb lb, nw_jit_host_stb8 stb);
 
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 			  uint32_t msr_ir, uint32_t endian, int *n_out);
@@ -166,6 +169,9 @@ uint32_t nw_ppc_addc(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_rlwinm(int ra, int rs, int sh, int mb, int me);
 uint32_t nw_ppc_rlwimi(int ra, int rs, int sh, int mb, int me);
 uint32_t nw_ppc_lwz(int rd, int ra, int d);
+uint32_t nw_ppc_lwzu(int rd, int ra, int d);
+uint32_t nw_ppc_lbz(int rd, int ra, int d);
+uint32_t nw_ppc_stb(int rs, int ra, int d);
 uint32_t nw_ppc_stw(int rs, int ra, int d);
 uint32_t nw_ppc_stwu(int rs, int ra, int d);
 uint32_t nw_ppc_lwzx(int rd, int ra, int rb);

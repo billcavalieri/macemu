@@ -1738,6 +1738,58 @@ int main()
 		      b.gpr[4] == a.gpr[4] && b.cr == a.cr &&
 		      !(a.xer & 0x20000000u) && !(b.xer & 0x20000000u));
 
+		/* lbz / stb */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			ram[8] = 0xab;
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 8;
+			ops[0] = nw_ppc_lbz(3, 1, 0);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x13a0u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x13a0u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[3] == 0xabu && b.gpr[3] == 0xabu);
+			a.gpr[4] = 0xcd;
+			b = a;
+			ops[0] = nw_ppc_stb(4, 1, 1);
+			ops[1] = nw_ppc_blr();
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x13b0u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x13b0u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(ram[9] == 0xcd);
+		}
+
+		/* lwzu r3, 4(r1) */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			ram[12] = 0x11; ram[13] = 0x22; ram[14] = 0x33; ram[15] = 0x44;
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 8;
+			ops[0] = nw_ppc_lwzu(3, 1, 4);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x13c0u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x13c0u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[1] == 12 && a.gpr[3] == 0x11223344u &&
+			      b.gpr[1] == 12 && b.gpr[3] == a.gpr[3]);
+		}
+
 		/* rlwinm r4, r3, 8, 0, 23  (shift left 8) */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -1949,6 +2001,9 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_lwzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_addc(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_addic(4, 3, -1, 1)));
+		CHECK(nw_jit_op_supported(nw_ppc_lbz(3, 1, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_stb(3, 1, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_lwzu(3, 1, 4)));
 		{
 			uint32_t blk[4];
 			blk[0] = nw_ppc_addi(3, 0, 1);
