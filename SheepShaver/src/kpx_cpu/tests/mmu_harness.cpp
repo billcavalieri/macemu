@@ -1768,6 +1768,29 @@ int main()
 			CHECK(a.gpr[3] == 0xffff8000u && b.gpr[3] == a.gpr[3]);
 		}
 
+		/* lhaux r3, r1, r2: load and r1 = EA */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			ram[12] = 0x80; ram[13] = 0x00;
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 8;
+			a.gpr[2] = 4;
+			ops[0] = nw_ppc_lhaux(3, 1, 2);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x14a0u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x14a0u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[3] == 0xffff8000u && a.gpr[1] == 12 &&
+			      b.gpr[3] == a.gpr[3] && b.gpr[1] == 12);
+		}
+
 		/* dtlb: C lookup, fill, store needs WRITE, flush */
 		{
 			uint32_t pa = 0;
@@ -2346,6 +2369,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_mfspr(3, NW_PPC_SPR_TBL)));
 		CHECK(nw_jit_op_supported(nw_ppc_extsh(4, 8, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_lhax(3, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_lhaux(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_mfspr(3, NW_PPC_SPR_TBU)));
 		CHECK(!nw_jit_op_supported(nw_ppc_mfspr(3, 18)));	/* DSISR still kpx */
 		CHECK(!nw_jit_op_supported(0x7c000278u));	/* xor still unsup */
