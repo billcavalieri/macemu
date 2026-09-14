@@ -39,8 +39,10 @@
 	<string>@PACKAGE_VERSION@</string>
 	<key>CSResourcesFileMapped</key>
 	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.entertainment</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>10.7.0</string>
+	<string>10.13</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>
