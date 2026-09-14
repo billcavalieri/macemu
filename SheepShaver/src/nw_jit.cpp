@@ -523,11 +523,7 @@ int nw_jit_op_ends_block(uint32_t op)
 {
 	const int prim = (int)(op >> 26);
 	const int xo = (int)((op >> 1) & 0x3ff);
-	const int rd = (int)((op >> 21) & 0x1f);
-	const int ra = (int)((op >> 16) & 0x1f);
-	(void)ra;
-	return prim == 16 || prim == 18 || prim == 36 || prim == 44 ||
-	       (prim == 19 && xo == 16);
+	return prim == 16 || prim == 18 || (prim == 19 && xo == 16);
 }
 
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
@@ -801,6 +797,8 @@ void nw_jit_helper_sth(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 		uint8_t *p = cpu->mem + (ea - cpu->mem_base);
 		p[0] = (uint8_t)(val >> 8);
 		p[1] = (uint8_t)val;
+		if ((ea & ~0xfffu) == (cpu->pc & ~0xfffu))
+			cpu->fault = NW_JIT_FAULT_SMC;
 		return;
 	}
 	if (nw_jit_mode() == NW_JIT_VERIFY)
@@ -835,6 +833,8 @@ void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 			return;
 		}
 		mem_st_be(cpu, ea, val);
+		if ((ea & ~0xfffu) == (cpu->pc & ~0xfffu))
+			cpu->fault = NW_JIT_FAULT_SMC;
 		return;
 	}
 	/* Shadow: record only. A live write before kpx replay makes

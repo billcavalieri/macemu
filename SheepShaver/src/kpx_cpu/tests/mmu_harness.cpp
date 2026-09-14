@@ -1783,8 +1783,21 @@ int main()
 		CHECK(nw_jit_op_dispatch(nw_ppc_lwz(3, 1, 0)));
 		CHECK(nw_jit_op_dispatch(nw_ppc_stw(3, 1, 0)));
 		CHECK(nw_jit_op_ends_block(nw_ppc_blr()));
-		CHECK(nw_jit_op_ends_block(nw_ppc_stw(3, 1, 0)));
+		CHECK(!nw_jit_op_ends_block(nw_ppc_stw(3, 1, 0)));
 		CHECK(nw_jit_op_ends_block(nw_ppc_bc(NW_PPC_BO_TRUE, 0, 8)));
+		{
+			uint32_t blk[4];
+			blk[0] = nw_ppc_addi(3, 0, 1);
+			blk[1] = nw_ppc_stw(3, 1, 0);
+			blk[2] = nw_ppc_addi(4, 0, 2);
+			blk[3] = nw_ppc_blr();
+			nw_jit_reset();
+			nw_jit_fn bf = nw_jit_compile(blk, 4, 0x1000u, 0x1000u, 0, 0);
+			int bn = 0;
+			CHECK(bf != NULL);
+			CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, &bn) == bf);
+			CHECK(bn == 4);
+		}
 		CHECK(!nw_jit_op_supported(0x60000000u));	/* ori r0,r0,0 nop is not in the 4a subset */
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
 		nw_jit_cache_put(0x2000u, 0x2000u, 0, 0, NW_JIT_INTERPRET, 0);

@@ -1333,6 +1333,8 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 	}
 	vm_write_memory_4(pa, val);
 	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
+		*fault = NW_JIT_FAULT_SMC;
 }
 
 uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)
@@ -1378,6 +1380,8 @@ void powerpc_cpu::jit_host_sth(void *host, uint32 ea, uint32 val, uint32 pc, int
 	}
 	vm_write_memory_2(pa, val);
 	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
+		*fault = NW_JIT_FAULT_SMC;
 }
 
 static int nw_jit_pa_ok(uint32 pa, int is_st)
@@ -1568,6 +1572,27 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	fn(&jc);
 
 	if (jc.fault) {
+		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_SMC) {
+			for (int i = 0; i < 32; i++)
+				gpr(i) = jc.gpr[i];
+			cr().set(jc.cr);
+			xer().set(jc.xer);
+			lr() = jc.lr;
+			ctr() = jc.ctr;
+			pc() = jc.pc + 4u;
+			if (jc.dec_wr) {
+				if ((dec_ & 0x80000000u) == 0 && (jc.dec & 0x80000000u))
+					dec_pending_ = true;
+				dec_ = jc.dec;
+				dec_tb_base_ = tb_ticks();
+			}
+			nw_jit_note_exec(n);
+#if NW_BOOT_LOG
+			for (int i = 0; i < n; i++)
+				nw_event_insn();
+#endif
+			return 1;
+		}
 		if (mode == NW_JIT_ON && jc.fault == 1 && ppc32_guest_mmu_enabled()) {
 			const ppc32_xlate_result xr = ppc32_guest_mmu().translate(
 				jc.fault_ea, PPC32_XLATE_DR, 4, jc.fault_st != 0);

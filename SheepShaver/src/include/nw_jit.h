@@ -88,7 +88,15 @@ int nw_jit_op_supported(uint32_t op);
 /* Live path: supported ops whose EA is a writable/readable bank (NONE/IO
  * mem ops stay on kpx — 4b-2 fill at 50310490). */
 int nw_jit_op_dispatch(uint32_t op);
+/* Branches (bc/b/bclr). Stores do not end the block; a store into the
+ * executing page sets fault SMC and the ON path commits pc = store+4. */
 int nw_jit_op_ends_block(uint32_t op);
+
+enum {
+	NW_JIT_FAULT_DSI = 1,
+	NW_JIT_FAULT_IO = 2,
+	NW_JIT_FAULT_SMC = 3	/* store into the executing code page */
+};
 
 void nw_jit_verify_note(const uint32_t *ops, int n, int miss);
 void nw_jit_verify_fail(void);
