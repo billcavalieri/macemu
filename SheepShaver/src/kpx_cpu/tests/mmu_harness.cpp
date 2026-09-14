@@ -1670,6 +1670,51 @@ int main()
 			CHECK(ram[12] == 0x11 && ram[15] == 0x44);
 		}
 
+		/* stwu then addi in one block: RA update must be visible. */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 16;
+			a.gpr[3] = 0x11223344u;
+			ops[0] = nw_ppc_stwu(3, 1, -4);
+			ops[1] = nw_ppc_addi(4, 1, 0);
+			ops[2] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 3, 0x1358u) == 1);
+			fn = nw_jit_compile(ops, 3, 0x1358u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[1] == 12 && a.gpr[4] == 12);
+			CHECK(b.gpr[1] == 12 && b.gpr[4] == 12);
+		}
+
+		/* stwu into the executing page: SMC, RA still updates. */
+		{
+			uint8_t ram[0x2000];
+			memset(ram, 0, sizeof(ram));
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 0x2000;
+			a.gpr[1] = 0x1010u;
+			a.gpr[3] = 0xa5a5a5a5u;
+			ops[0] = nw_ppc_stwu(3, 1, -4);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x1000u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x1000u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[1] == 0x100cu && b.gpr[1] == 0x100cu);
+			CHECK(b.fault == NW_JIT_FAULT_SMC);
+		}
+
 		/* lwzx r3, r1, r2 */
 		{
 			uint8_t ram[64];
@@ -1690,6 +1735,27 @@ int main()
 			CHECK(fn != NULL);
 			fn(&b);
 			CHECK(a.gpr[3] == 0xaabbccddu && b.gpr[3] == a.gpr[3]);
+		}
+
+		/* lwzx DSI must not clobber rD (kpx xlate fail leaves rD). */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 0x100;
+			a.gpr[2] = 0x100;
+			a.gpr[3] = 0xdeadbeefu;
+			ops[0] = nw_ppc_lwzx(3, 1, 2);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			fn = nw_jit_compile(ops, 2, 0x1368u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(b.fault == 1 && b.gpr[3] == 0xdeadbeefu);
 		}
 
 		/* addc sets CA on 0xffffffff+1 */

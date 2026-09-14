@@ -1499,6 +1499,11 @@ static uint32_t a64_cbnz(int rt, int imm19)
 	return 0x35000000u | (((uint32_t)imm19 & 0x7ffffu) << 5) | (uint32_t)rt;
 }
 
+static uint32_t a64_b_cond(int cond, int imm19)
+{
+	return 0x54000000u | (((uint32_t)imm19 & 0x7ffffu) << 5) | (uint32_t)(cond & 15);
+}
+
 static int emit_imm32(struct emit *e, int rd, uint32_t v)
 {
 	if (!emit_w(e, a64_movz(rd, v & 0xffffu, 0)))
@@ -1690,15 +1695,36 @@ static int emit_call_stw(struct emit *e, uint32_t pc, int rs, int ra, int simm, 
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))			/* mov x0, x19 */
 		return 0;
-	if (!emit_fault_check(e))
+	if (!upd || !ra)
+		return emit_fault_check(e);
+	/*
+	 * stwu writes before RA update. DSI/IO (fault 1/2) must not
+	 * update RA. SMC (3) is a successful store into the executing
+	 * page: RA still updates, then the block stops. Skipping RA on
+	 * SMC left r1 stale after a stack push (splash type 10).
+	 */
+	if (!emit_w(e, a64_ldr_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, fault))))
 		return 0;
-	if (upd && ra) {
-		if (!emit_helper_ea(e, ra, simm))
-			return 0;
-		if (!emit_store_gpr(e, W8, ra))
-			return 0;
-	}
-	return 1;
+	uint32_t *cbz_p = e->p;
+	if (!emit_w(e, a64_cbz(W10, 0)))
+		return 0;
+	if (!emit_w(e, 0x71000d1fu))			/* CMP W10, #3 */
+		return 0;
+	uint32_t *bne_p = e->p;
+	if (!emit_w(e, a64_b_cond(1, 0)))		/* B.NE skip_upd */
+		return 0;
+	uint32_t *upd_p = e->p;
+	if (!emit_helper_ea(e, ra, simm))
+		return 0;
+	if (!emit_store_gpr(e, W8, ra))
+		return 0;
+	uint32_t *after_p = e->p;
+	*cbz_p = a64_cbz(W10, (int)(upd_p - cbz_p));
+	*bne_p = a64_b_cond(1, (int)(after_p - bne_p));
+	if (e->nfault >= NW_JIT_MAX_BLOCK)
+		return 0;
+	e->fault_br[e->nfault++] = e->p;
+	return emit_w(e, a64_cbnz(W10, 0));
 }
 
 static int emit_call_lwzx(struct emit *e, uint32_t pc, int rd, int ra, int rb)
@@ -1715,13 +1741,13 @@ static int emit_call_lwzx(struct emit *e, uint32_t pc, int rd, int ra, int rb)
 		return 0;
 	if (!emit_w(e, 0xd63f0120u))
 		return 0;
-	if (!emit_w(e, a64_orr_reg(W8, 31, W0)))
+	if (!emit_w(e, a64_orr_reg(W9, 31, W0)))	/* value; fault_check uses W8 */
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
-	if (!emit_store_gpr(e, W8, rd))
+	if (!emit_fault_check(e))
 		return 0;
-	return emit_fault_check(e);
+	return emit_store_gpr(e, W9, rd);
 }
 
 static int emit_call_lh(struct emit *e, uint32_t pc, int rd, int ra, int simm, int sext, int upd)
@@ -2218,7 +2244,8 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 		}
 		for (int i = 0; i < e.nfault; i++) {
 			int32_t delta = (int32_t)(epilogue - e.fault_br[i]);
-			*e.fault_br[i] = a64_cbnz(W8, delta);
+			const int rt = (int)(*e.fault_br[i] & 31u);
+			*e.fault_br[i] = a64_cbnz(rt, delta);
 		}
 	} else if (e.nfault) {
 		/* Terminator already emitted ret. Faults must not fall into it
@@ -2232,7 +2259,8 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 		}
 		for (int i = 0; i < e.nfault; i++) {
 			int32_t delta = (int32_t)(fault_ep - e.fault_br[i]);
-			*e.fault_br[i] = a64_cbnz(W8, delta);
+			const int rt = (int)(*e.fault_br[i] & 31u);
+			*e.fault_br[i] = a64_cbnz(rt, delta);
 		}
 	}
 	size_t bytes = (size_t)((uint8_t *)e.p - (g_code + g_code_used));
