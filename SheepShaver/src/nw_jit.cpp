@@ -89,6 +89,12 @@ static struct nw_jit_hist g_hist[] = {
 static uint64_t g_v_cmp, g_v_miss, g_v_fail, g_v_skip_unsup, g_v_skip_mem;
 static uint64_t g_v_skip_dsi, g_v_skip_io, g_v_other, g_v_other_miss;
 
+enum { NW_JIT_SKIPN = 256, NW_JIT_SKIPTOP = 12 };
+static struct {
+	int prim, xo;
+	uint64_t n;
+} g_skip[NW_JIT_SKIPN];
+
 enum { NW_JIT_PCHOT = 1024, NW_JIT_PCPROBE = 8, NW_JIT_PCTOP = 12 };
 static struct {
 	uint32_t pc, op;
@@ -147,6 +153,7 @@ void nw_jit_reset(void)
 	for (size_t i = 0; i < sizeof(g_hist) / sizeof(g_hist[0]); i++)
 		g_hist[i].n = g_hist[i].miss = g_hist[i].insns = 0;
 	memset(g_pchot, 0, sizeof(g_pchot));
+	memset(g_skip, 0, sizeof(g_skip));
 }
 
 void nw_jit_invalidate_page_src(uint32_t phys_page, int src)
@@ -266,6 +273,103 @@ void nw_jit_stats_print(const char *why)
 			       src_name[i],
 			       (unsigned long long)g_flush_calls[i],
 			       (unsigned long long)g_flush_src[i]);
+	}
+	{
+		int top[NW_JIT_SKIPTOP];
+		int ntop = 0;
+		for (int i = 0; i < NW_JIT_SKIPN; i++) {
+			if (!g_skip[i].n)
+				continue;
+			int k = ntop;
+			while (k > 0 && g_skip[i].n > g_skip[top[k - 1]].n)
+				k--;
+			if (k >= NW_JIT_SKIPTOP)
+				continue;
+			int n = ntop < NW_JIT_SKIPTOP ? ntop : NW_JIT_SKIPTOP - 1;
+			for (int j = n; j > k; j--)
+				top[j] = top[j - 1];
+			top[k] = i;
+			if (ntop < NW_JIT_SKIPTOP)
+				ntop++;
+		}
+		for (int i = 0; i < ntop; i++) {
+			const int j = top[i];
+			const char *nm = NULL;
+			const int p = g_skip[j].prim, x = g_skip[j].xo;
+			if (p == 19 && x == 528)
+				nm = "bcctr";
+			else if (p == 19 && x == 16)
+				nm = "bclr";
+			else if (p == 37)
+				nm = "stwu";
+			else if (p == 13)
+				nm = "addic.";
+			else if (p == 12)
+				nm = "addic";
+			else if (p == 31 && x == 151)
+				nm = "stwx";
+			else if (p == 31 && x == 23)
+				nm = "lwzx";
+			else if (p == 31 && x == 10)
+				nm = "addc";
+			else if (p == 31 && x == 522)
+				nm = "addco";
+			else if (p == 31 && x == 8)
+				nm = "subfc";
+			else if (p == 31 && x == 520)
+				nm = "subfco";
+			else if (p == 31 && x == 144)
+				nm = "mtcrf";
+			else if (p == 31 && x == 87)
+				nm = "lbzx";
+			else if (p == 31 && x == 215)
+				nm = "stbx";
+			else if (p == 31 && x == 790)
+				nm = "lhax";
+			else if (p == 10)
+				nm = "cmpli";
+			else if (p == 15)
+				nm = "addis";
+			else if (p == 24)
+				nm = "ori";
+			else if (p == 25)
+				nm = "oris";
+			else if (p == 26)
+				nm = "xori";
+			else if (p == 28)
+				nm = "andi.";
+			else if (p == 8)
+				nm = "subfic";
+			else if (p == 7)
+				nm = "mulli";
+			else if (p == 34)
+				nm = "lbz";
+			else if (p == 38)
+				nm = "stb";
+			else if (p == 33)
+				nm = "lwzu";
+			else if (p == 31 && x == 40)
+				nm = "subf";
+			else if (p == 31 && x == 104)
+				nm = "neg";
+			else if (p == 31 && x == 444)
+				nm = "or";
+			else if (p == 31 && x == 316)
+				nm = "xor";
+			else if (p == 31 && x == 28)
+				nm = "and";
+			else if (p == 31 && x == 24)
+				nm = "slw";
+			else if (p == 31 && x == 536)
+				nm = "srw";
+			else if (p == 31 && x == 792)
+				nm = "sraw";
+			else if (p == 31 && x == 824)
+				nm = "srawi";
+			printf("NW-BOOT G1: jit skip_unsup %s prim=%d xo=%d n=%llu\n",
+			       nm ? nm : "?", p, x,
+			       (unsigned long long)g_skip[j].n);
+		}
 	}
 	fflush(stdout);
 }
@@ -405,6 +509,29 @@ void nw_jit_verify_skip(int mem)
 		g_v_skip_mem++;
 	else
 		g_v_skip_unsup++;
+}
+
+void nw_jit_note_skip_unsup(uint32_t op)
+{
+	g_v_skip_unsup++;
+	const int prim = (int)(op >> 26);
+	const int xo = (prim == 19 || prim == 31 || prim == 59 || prim == 63)
+			       ? (int)((op >> 1) & 0x3ff) : -1;
+	const uint32_t h = (uint32_t)prim * 0x9e3779b1u ^ (uint32_t)(xo + 1) * 0x85ebca6bu;
+	int i = (int)(h & (NW_JIT_SKIPN - 1));
+	for (int n = 0; n < 8; n++) {
+		int j = (i + n) & (NW_JIT_SKIPN - 1);
+		if (g_skip[j].n == 0 ||
+		    (g_skip[j].prim == prim && g_skip[j].xo == xo)) {
+			g_skip[j].prim = prim;
+			g_skip[j].xo = xo;
+			g_skip[j].n++;
+			return;
+		}
+	}
+	g_skip[i].prim = prim;
+	g_skip[i].xo = xo;
+	g_skip[i].n = 1;
 }
 
 void nw_jit_verify_uncompared(int fault)

@@ -101,6 +101,7 @@ enum {
 void nw_jit_verify_note(const uint32_t *ops, int n, int miss);
 void nw_jit_verify_fail(void);
 void nw_jit_verify_skip(int mem);
+void nw_jit_note_skip_unsup(uint32_t op);
 void nw_jit_verify_uncompared(int fault);	/* 1 = DSI probe, 2 = I/O skip */
 void nw_jit_verify_dump(const char *why);
 void nw_jit_pc_hot(uint32_t pc, uint32_t op);

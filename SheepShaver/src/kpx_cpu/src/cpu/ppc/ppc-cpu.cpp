@@ -1501,7 +1501,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	} else {
 		fn = NULL;
 		if (!nw_jit_op_supported(first_opcode)) {
-			nw_jit_verify_skip(0);
+			nw_jit_note_skip_unsup(first_opcode);
 			return 0;
 		}
 		if (!nw_jit_op_dispatch(first_opcode)) {
