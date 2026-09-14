@@ -2439,6 +2439,19 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[3] == 0x1111u && b.gpr[3] == 0x1111u);
 
+		/* isync is a barrier; GPRs unchanged */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x2222u;
+		ops[0] = nw_ppc_isync();
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1710u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1710u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[3] == 0x2222u && b.gpr[3] == 0x2222u);
+
 		/* mfspr TBL via host helper */
 		{
 			static uint32_t tbl_val;
@@ -2923,6 +2936,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_sraw(4, 8, 9, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_srawi(4, 8, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_sync()));
+		CHECK(nw_jit_op_supported(nw_ppc_isync()));
 		CHECK(nw_jit_op_supported(nw_ppc_lhax(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lhaux(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_cmpl(0, 3, 4)));

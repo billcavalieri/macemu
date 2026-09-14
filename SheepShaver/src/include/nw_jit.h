@@ -252,6 +252,7 @@ uint32_t nw_ppc_srw(int ra, int rs, int rb, int rc);
 uint32_t nw_ppc_sraw(int ra, int rs, int rb, int rc);
 uint32_t nw_ppc_srawi(int ra, int rs, int sh, int rc);
 uint32_t nw_ppc_sync(void);
+uint32_t nw_ppc_isync(void);
 uint32_t nw_ppc_b(int disp, int lk);
 uint32_t nw_ppc_bc(int bo, int bi, int disp);
 uint32_t nw_ppc_blr(void);
