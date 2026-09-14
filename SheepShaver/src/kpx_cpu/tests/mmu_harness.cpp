@@ -2317,6 +2317,21 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[4] == 0 && b.gpr[4] == 0);
 
+		/* sraw: -1 >> 1 = -1, CA set (1 shifted out) */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[8] = (uint32_t)-1;
+		a.gpr[9] = 1;
+		ops[0] = nw_ppc_sraw(4, 8, 9, 1);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1650u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1650u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == (uint32_t)-1 && (a.xer & 0x20000000u) &&
+		      b.gpr[4] == a.gpr[4] && b.xer == a.xer && b.cr == a.cr);
+
 		/* sync is a barrier; GPRs unchanged */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -2742,6 +2757,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_extsb(4, 8, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_slw(4, 8, 9, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_srw(4, 8, 9, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_sraw(4, 8, 9, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_sync()));
 		CHECK(nw_jit_op_supported(nw_ppc_lhax(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lhaux(3, 1, 2)));
