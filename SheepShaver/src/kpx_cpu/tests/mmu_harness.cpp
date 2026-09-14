@@ -2700,6 +2700,28 @@ int main()
 		CHECK(ram[12] == 0xaa && ram[15] == 0xdd);
 		CHECK(ram2[12] == 0xaa && ram2[15] == 0xdd);
 
+		/* sthx r3, r1, r2 */
+		memset(ram, 0, sizeof(ram));
+		memset(ram2, 0, sizeof(ram2));
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.mem = ram;
+		a.mem_base = 0;
+		a.mem_size = sizeof(ram);
+		a.gpr[3] = 0xaabb;
+		a.gpr[1] = 8;
+		a.gpr[2] = 4;
+		ops[0] = nw_ppc_sthx(3, 1, 2);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		b.mem = ram2;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x16d0u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x16d0u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(ram[12] == 0xaa && ram[13] == 0xbb);
+		CHECK(ram2[12] == 0xaa && ram2[13] == 0xbb);
+
 		/* cmp / bc not taken: blt does not fire, both addi run */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -2829,6 +2851,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_stwu(3, 1, -4)));
 		CHECK(nw_jit_op_supported(nw_ppc_lwzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stwx(3, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_sthx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_addc(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_addic(4, 3, -1, 1)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbz(3, 1, 0)));

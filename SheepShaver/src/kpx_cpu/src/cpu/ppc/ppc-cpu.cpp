@@ -1553,6 +1553,15 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 			return 0;
 		return nw_jit_pa_ok(pa, 1);
 	}
+	else if (prim == 31 && ((op >> 1) & 0x3ff) == 407) {
+		const int ra = (int)((op >> 16) & 0x1f);
+		const int rb = (int)((op >> 11) & 0x1f);
+		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
+		uint32 pa;
+		if (!ppc->guest_data_probe(ea, 2, true, &pa))
+			return 0;
+		return nw_jit_pa_ok(pa, 1);
+	}
 	else if (prim == 31 && (((op >> 1) & 0x3ff) == 343 ||
 				 ((op >> 1) & 0x3ff) == 375)) {
 		const int ra = (int)((op >> 16) & 0x1f);
