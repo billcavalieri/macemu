@@ -237,6 +237,7 @@ static void (*video_refresh)(void);
 // Prototypes
 static int redraw_func(void *arg);
 static int present_sdl_video();
+static void handle_events(void);
 static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event);
 static bool is_fullscreen(SDL_Window *);
 
@@ -1889,6 +1890,14 @@ void VideoHostPresent(void)
 	if (toggle_fullscreen)
 		do_toggle_fullscreen();
 
+	/* Old World pumps in VideoInterrupt on this thread (SetVideoMode).
+	 * New World HandleInterrupt returns after a PumpEvents that almost
+	 * never runs (no 60 Hz host IRQ). present_sdl_video also returns
+	 * immediately when the FB is unchanged, so an idle Finder stopped
+	 * draining Cocoa events: grab stayed on, ADB never saw motion/keys.
+	 * Debug hid that (tty-blocked CPU + dirty presents during boot log). */
+	SDL_PumpEvents();
+	handle_events();
 	present_sdl_video();
 #if NW_BOOT_LOG
 	nw_event_frame();
@@ -2628,6 +2637,12 @@ static void handle_events(void)
 			// Window "close" widget clicked
 			case SDL_QUIT:
 				if (SDL_GetModState() & (KMOD_LALT | KMOD_RALT)) break;
+#ifdef SHEEPSHAVER
+				if (ROMType == ROMTYPE_NEWWORLD) {
+					emerg_quit = true;
+					break;
+				}
+#endif
 				ADBKeyDown(0x7f);	// Power key
 				ADBKeyUp(0x7f);
 				break;
@@ -2989,7 +3004,11 @@ static void VideoRefreshInit(void)
 
 static inline void do_video_refresh(void)
 {
-	// Handle SDL events
+	/* New World drains the queue in VideoHostPresent (CPU / SetVideoMode
+	 * thread). Do not PeepEvents on the redraw thread as well. */
+#ifdef SHEEPSHAVER
+	if (ROMType != ROMTYPE_NEWWORLD)
+#endif
 	handle_events();
 
 	// Update display
