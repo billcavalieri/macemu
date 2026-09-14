@@ -116,6 +116,7 @@ static struct nw_jit_hist g_hist[] = {
 	{34, -1, "lbz", 0, 0, 0},
 	{31, 87, "lbzx", 0, 0, 0},
 	{38, -1, "stb", 0, 0, 0},
+	{39, -1, "stbu", 0, 0, 0},
 	{36, -1, "stw", 0, 0, 0},
 	{37, -1, "stwu", 0, 0, 0},
 	{31, 23, "lwzx", 0, 0, 0},
@@ -348,6 +349,8 @@ void nw_jit_stats_print(const char *why)
 				nm = "bclr";
 			else if (p == 37)
 				nm = "stwu";
+			else if (p == 39)
+				nm = "stbu";
 			else if (p == 13)
 				nm = "addic.";
 			else if (p == 12)
@@ -607,6 +610,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* lwz / lwzu / stw / stwu */
 	if (prim == 34 || prim == 38)
 		return 1;	/* lbz / stb */
+	if (prim == 39)
+		return 1;	/* stbu */
 	if (prim == 31 && xo == 87)
 		return 1;	/* lbzx */
 	if (prim == 31 && xo == 23)
@@ -991,6 +996,11 @@ uint32_t nw_ppc_lbzx(int rd, int ra, int rb)
 uint32_t nw_ppc_stb(int rs, int ra, int d)
 {
 	return (38u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
+uint32_t nw_ppc_stbu(int rs, int ra, int d)
+{
+	return (39u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
 }
 
 uint32_t nw_ppc_stw(int rs, int ra, int d)
@@ -1784,11 +1794,13 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
-	if (prim == 38) {
+	if (prim == 38 || prim == 39) {
 		const uint32_t ea = ra_or_0(cpu, ra) + (uint32_t)simm;
 		if (!mem_ok_n(cpu, ea, 1))
 			return -1;
 		cpu->mem[ea - cpu->mem_base] = (uint8_t)cpu->gpr[rd];
+		if (prim == 39 && ra)
+			cpu->gpr[ra] = ea;
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -2322,7 +2334,7 @@ static int emit_call_lb(struct emit *e, uint32_t pc, int rd, int ra, int simm)
 	return emit_fault_check(e);
 }
 
-static int emit_call_stb(struct emit *e, uint32_t pc, int rs, int ra, int simm)
+static int emit_call_stb(struct emit *e, uint32_t pc, int rs, int ra, int simm, int upd)
 {
 	if (!emit_set_pc(e, pc))
 		return 0;
@@ -2340,7 +2352,30 @@ static int emit_call_stb(struct emit *e, uint32_t pc, int rs, int ra, int simm)
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
-	return emit_fault_check(e);
+	if (!upd || !ra)
+		return emit_fault_check(e);
+	if (!emit_w(e, a64_ldr_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, fault))))
+		return 0;
+	uint32_t *cbz_p = e->p;
+	if (!emit_w(e, a64_cbz(W10, 0)))
+		return 0;
+	if (!emit_w(e, 0x71000d1fu))
+		return 0;
+	uint32_t *bne_p = e->p;
+	if (!emit_w(e, a64_b_cond(1, 0)))
+		return 0;
+	uint32_t *upd_p = e->p;
+	if (!emit_helper_ea(e, ra, simm))
+		return 0;
+	if (!emit_store_gpr(e, W8, ra))
+		return 0;
+	uint32_t *after_p = e->p;
+	*cbz_p = a64_cbz(W10, (int)(upd_p - cbz_p));
+	*bne_p = a64_b_cond(1, (int)(after_p - bne_p));
+	if (e->nfault >= NW_JIT_MAX_BLOCK)
+		return 0;
+	e->fault_br[e->nfault++] = e->p;
+	return emit_w(e, a64_cbnz(W10, 0));
 }
 
 static int emit_helper_ea_idx(struct emit *e, int ra, int rb)
@@ -3096,8 +3131,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	if (prim == 31 && xo == 87) {
 		return emit_call_lbx(e, pc, rd, ra, rb);
 	}
-	if (prim == 38) {
-		return emit_call_stb(e, pc, rd, ra, simm);
+	if (prim == 38 || prim == 39) {
+		return emit_call_stb(e, pc, rd, ra, simm, prim == 39);
 	}
 	if (prim == 36 || prim == 37) {
 		return emit_call_stw(e, pc, rd, ra, simm, prim == 37);

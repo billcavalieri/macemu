@@ -2292,6 +2292,27 @@ int main()
 			CHECK(ram[9] == 0xcd);
 		}
 
+		/* stbu r4, 4(r1): store then r1 = EA */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 8;
+			a.gpr[4] = 0xab;
+			ops[0] = nw_ppc_stbu(4, 1, 4);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x15b0u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x15b0u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(ram[12] == 0xab && a.gpr[1] == 12 && b.gpr[1] == 12);
+		}
+
 		/* lbzx r3, r1, r2 */
 		{
 			uint8_t ram[64];
@@ -2576,6 +2597,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_lbz(3, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stb(3, 1, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_stbu(4, 1, 4)));
 		CHECK(nw_jit_op_supported(nw_ppc_lwzu(3, 1, 4)));
 		CHECK(nw_jit_op_supported(nw_ppc_addco(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(0x7c000414u));	/* addco r0,r0,r0 */

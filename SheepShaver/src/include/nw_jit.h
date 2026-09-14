@@ -208,6 +208,7 @@ uint32_t nw_ppc_lwzu(int rd, int ra, int d);
 uint32_t nw_ppc_lbz(int rd, int ra, int d);
 uint32_t nw_ppc_lbzx(int rd, int ra, int rb);
 uint32_t nw_ppc_stb(int rs, int ra, int d);
+uint32_t nw_ppc_stbu(int rs, int ra, int d);
 uint32_t nw_ppc_stw(int rs, int ra, int d);
 uint32_t nw_ppc_stwu(int rs, int ra, int d);
 uint32_t nw_ppc_stwx(int rs, int ra, int rb);
