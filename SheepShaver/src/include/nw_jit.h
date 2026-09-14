@@ -245,6 +245,7 @@ uint32_t nw_ppc_mfcr(int rd);
 uint32_t nw_ppc_crnor(int crbd, int crba, int crbb);
 uint32_t nw_ppc_crxor(int crbd, int crba, int crbb);
 uint32_t nw_ppc_creqv(int crbd, int crba, int crbb);
+uint32_t nw_ppc_cror(int crbd, int crba, int crbb);
 uint32_t nw_ppc_extsh(int ra, int rs, int rc);
 uint32_t nw_ppc_extsb(int ra, int rs, int rc);
 uint32_t nw_ppc_slw(int ra, int rs, int rb, int rc);
