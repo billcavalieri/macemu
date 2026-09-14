@@ -95,6 +95,7 @@ static struct nw_jit_hist g_hist[] = {
 	{28, -1, "andi.", 0, 0, 0},
 	{31, 144, "mtcrf", 0, 0, 0},
 	{31, 19, "mfcr", 0, 0, 0},
+	{19, 33, "crnor", 0, 0, 0},
 	{31, 922, "extsh", 0, 0, 0},
 	{31, 954, "extsb", 0, 0, 0},
 	{31, 24, "slw", 0, 0, 0},
@@ -379,6 +380,8 @@ void nw_jit_stats_print(const char *why)
 				nm = "mtcrf";
 			else if (p == 31 && x == 19)
 				nm = "mfcr";
+			else if (p == 19 && x == 33)
+				nm = "crnor";
 			else if (p == 31 && x == 87)
 				nm = "lbzx";
 			else if (p == 31 && x == 215)
@@ -597,6 +600,8 @@ int nw_jit_op_supported(uint32_t op)
 		return bo_is_cr(rd) && (op & 3) == 0;
 	if (prim == 18)
 		return (op & 2) == 0;
+	if (prim == 19 && xo == 33)
+		return 1;	/* crnor */
 	if (prim == 19 && (xo == 16 || xo == 528) && (rd == 20 || bo_is_cr(rd)))
 		return 1;	/* blr / bclr / bcctr (CR true/false, likely ignored) */
 	if (prim == 31 && xo == 266)
@@ -942,6 +947,12 @@ uint32_t nw_ppc_mtcrf(int crm, int rs)
 uint32_t nw_ppc_mfcr(int rd)
 {
 	return (31u << 26) | ((uint32_t)rd << 21) | (19u << 1);
+}
+
+uint32_t nw_ppc_crnor(int crbd, int crba, int crbb)
+{
+	return (19u << 26) | ((uint32_t)crbd << 21) | ((uint32_t)crba << 16) |
+	       ((uint32_t)crbb << 11) | (33u << 1);
 }
 
 uint32_t nw_ppc_extsh(int ra, int rs, int rc)
@@ -1683,6 +1694,15 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = (uint32_t)(pc + disp);
 		return 1;
 	}
+	if (prim == 19 && xo == 33) {
+		const uint32_t a = (cpu->cr >> (31 - ra)) & 1u;
+		const uint32_t b = (cpu->cr >> (31 - rb)) & 1u;
+		const uint32_t bit = 31u - (uint32_t)rd;
+		const uint32_t r = (a | b) ^ 1u;
+		cpu->cr = (cpu->cr & ~(1u << bit)) | (r << bit);
+		cpu->pc = pc + 4;
+		return 0;
+	}
 	if (prim == 19 && (xo == 16 || xo == 528)) {
 		int take = 1;
 		if (rd != 20) {
@@ -2053,6 +2073,11 @@ static uint32_t a64_lsl(int rd, int rn, int n)
 static uint32_t a64_and_imm1(int rd, int rn)
 {
 	return 0x12000000u | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t a64_eor_imm1(int rd, int rn)
+{
+	return 0x52000000u | ((uint32_t)rn << 5) | (uint32_t)rd;
 }
 
 static uint32_t a64_cbz(int rt, int imm19)
@@ -2830,6 +2855,35 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_set_pc(e, (uint32_t)(pc + disp)))
 			return 0;
 		return emit_ret(e);
+	}
+	if (prim == 19 && xo == 33) {
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_w(e, a64_ldr_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr))))
+			return 0;
+		if (!emit_w(e, a64_lsr(W9, W8, 31 - ra)))
+			return 0;
+		if (!emit_w(e, a64_and_imm1(W9, W9)))
+			return 0;
+		if (!emit_w(e, a64_lsr(W10, W8, 31 - rb)))
+			return 0;
+		if (!emit_w(e, a64_and_imm1(W10, W10)))
+			return 0;
+		if (!emit_w(e, a64_orr_reg(W9, W9, W10)))
+			return 0;
+		if (!emit_w(e, a64_eor_imm1(W9, W9)))
+			return 0;
+		if (!emit_imm32(e, W10, 1u << (31 - rd)))
+			return 0;
+		if (!emit_w(e, a64_bic(W8, W8, W10)))
+			return 0;
+		if (!emit_w(e, a64_cmp_imm1(W9)))
+			return 0;
+		if (!emit_w(e, a64_csel(W12, W10, 31, 0)))	/* EQ → mask */
+			return 0;
+		if (!emit_w(e, a64_orr_reg(W8, W8, W12)))
+			return 0;
+		return emit_w(e, a64_str_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr)));
 	}
 	if (prim == 19 && (xo == 16 || xo == 528)) {
 		int always = (rd == 20);
