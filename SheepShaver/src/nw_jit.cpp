@@ -107,6 +107,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 792, "sraw", 0, 0, 0},
 	{31, 598, "sync", 0, 0, 0},
 	{21, -1, "rlwinm", 0, 0, 0},
+	{23, -1, "rlwnm", 0, 0, 0},
 	{20, -1, "rlwimi", 0, 0, 0},
 	{16, -1, "bc", 0, 0, 0},
 	{18, -1, "b", 0, 0, 0},
@@ -410,6 +411,8 @@ void nw_jit_stats_print(const char *why)
 				nm = "cmpl";
 			else if (p == 15)
 				nm = "addis";
+			else if (p == 23)
+				nm = "rlwnm";
 			else if (p == 24)
 				nm = "ori";
 			else if (p == 25)
@@ -616,6 +619,8 @@ int nw_jit_op_supported(uint32_t op)
 		return (rd & 3) == 0;	/* cmpi L=0, any crfD */
 	if (prim == 20 || prim == 21)
 		return 1;	/* rlwimi / rlwinm */
+	if (prim == 23)
+		return 1;	/* rlwnm */
 	if (prim == 16)
 		return bo_is_cr(rd) && (op & 3) == 0;
 	if (prim == 18)
@@ -1043,6 +1048,12 @@ uint32_t nw_ppc_rlwinm(int ra, int rs, int sh, int mb, int me)
 {
 	return (21u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
 	       ((uint32_t)sh << 11) | ((uint32_t)mb << 6) | ((uint32_t)me << 1);
+}
+
+uint32_t nw_ppc_rlwnm(int ra, int rs, int rb, int mb, int me)
+{
+	return (23u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | ((uint32_t)mb << 6) | ((uint32_t)me << 1);
 }
 
 uint32_t nw_ppc_rlwimi(int ra, int rs, int sh, int mb, int me)
@@ -1848,6 +1859,15 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
+	if (prim == 23) {
+		const int mb = (int)((op >> 6) & 0x1f), me = (int)((op >> 1) & 0x1f);
+		cpu->gpr[ra] = rotl32(cpu->gpr[rd], cpu->gpr[rb] & 31u) &
+			       ppc_mask((uint32_t)mb, (uint32_t)me);
+		if (op & 1)
+			record_cr0(cpu, (int32_t)cpu->gpr[ra]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
 	if (prim == 31 && xo == 266) {
 		cpu->gpr[rd] = cpu->gpr[ra] + cpu->gpr[rb];
 		if (op & 1)
@@ -2134,6 +2154,11 @@ static uint32_t a64_lslv(int rd, int rn, int rm)
 static uint32_t a64_lsrv(int rd, int rn, int rm)
 {
 	return 0x1ac02400u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t a64_rorv(int rd, int rn, int rm)
+{
+	return 0x1ac02c00u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
 }
 
 static uint32_t a64_csel(int rd, int rn, int rm, int cond)
@@ -3172,6 +3197,26 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (sh)
 			if (!emit_w(e, a64_extr(W8, W8, W8, 32 - sh)))
 				return 0;
+		if (!emit_imm32(e, W9, ppc_mask((uint32_t)mb, (uint32_t)me)))
+			return 0;
+		if (!emit_w(e, a64_and_reg(W8, W8, W9)))
+			return 0;
+		if (!emit_store_gpr(e, W8, ra))
+			return 0;
+		if (op & 1)
+			return emit_cr0_from_w8(e);
+		return 1;
+	}
+	if (prim == 23) {
+		const int mb = (int)((op >> 6) & 0x1f), me = (int)((op >> 1) & 0x1f);
+		if (!emit_load_gpr(e, W8, rd))
+			return 0;
+		if (!emit_load_gpr(e, W9, rb))
+			return 0;
+		if (!emit_w(e, a64_sub_reg(W9, 31, W9)))	/* -n → ror amount */
+			return 0;
+		if (!emit_w(e, a64_rorv(W8, W8, W9)))
+			return 0;
 		if (!emit_imm32(e, W9, ppc_mask((uint32_t)mb, (uint32_t)me)))
 			return 0;
 		if (!emit_w(e, a64_and_reg(W8, W8, W9)))
