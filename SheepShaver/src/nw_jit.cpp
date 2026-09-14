@@ -102,6 +102,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 444, "or", 0, 0, 0},
 	{24, -1, "ori", 0, 0, 0},
 	{31, 0, "cmp", 0, 0, 0},
+	{31, 32, "cmpl", 0, 0, 0},
 	{31, 339, "mfspr", 0, 0, 0},
 	{31, 467, "mtspr", 0, 0, 0},
 	{32, -1, "lwz", 0, 0, 0},
@@ -365,6 +366,8 @@ void nw_jit_stats_print(const char *why)
 				nm = "lhax";
 			else if (p == 10)
 				nm = "cmpli";
+			else if (p == 31 && x == 32)
+				nm = "cmpl";
 			else if (p == 15)
 				nm = "addis";
 			else if (p == 24)
@@ -567,6 +570,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* ori */
 	if (prim == 31 && xo == 0)
 		return rd == 0;	/* cmp cr0 */
+	if (prim == 31 && xo == 32)
+		return (rd & 3) == 0;	/* cmpl L=0, any crfD */
 	if (prim == 31 && xo == 339 &&
 	    (spr_is_user(spr_num(op)) || spr_is_mfspr_ext(spr_num(op))))
 		return 1;
@@ -860,6 +865,12 @@ uint32_t nw_ppc_cmpli(int crfd, int ra, unsigned uimm)
 {
 	return (10u << 26) | ((uint32_t)(crfd & 7) << 23) | ((uint32_t)ra << 16) |
 	       (uimm & 0xffffu);
+}
+
+uint32_t nw_ppc_cmpl(int crfd, int ra, int rb)
+{
+	return (31u << 26) | ((uint32_t)(crfd & 7) << 23) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | (32u << 1);
 }
 
 uint32_t nw_ppc_mtcrf(int crm, int rs)
@@ -1580,6 +1591,13 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		if (rd != 0)
 			return -1;
 		record_cr0_cmp(cpu, (int32_t)cpu->gpr[ra], (int32_t)cpu->gpr[rb]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 32) {
+		if (rd & 3)
+			return -1;
+		record_cr_u(cpu, rd >> 2, cpu->gpr[ra], cpu->gpr[rb]);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -2708,6 +2726,17 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_load_gpr(e, W9, rb))
 			return 0;
 		return emit_cr0_from_cmp_w8_w9(e);
+	}
+	if (prim == 31 && xo == 32) {
+		if (rd & 3)
+			return 0;
+		if (!emit_load_gpr(e, W8, ra))
+			return 0;
+		if (!emit_load_gpr(e, W9, rb))
+			return 0;
+		if (!emit_w(e, a64_cmp_w(W8, W9)))
+			return 0;
+		return emit_cr_field_from_flags(e, rd >> 2, 0x54000083u); /* B.CC +4 */
 	}
 	if (prim == 31 && (xo == 339 || xo == 467)) {
 		const uint32_t spr = spr_num(op);

@@ -222,6 +222,7 @@ uint32_t nw_ppc_cmpi_cr(int crfd, int ra, int simm);
 uint32_t nw_ppc_andi_dot(int ra, int rs, unsigned uimm);
 uint32_t nw_ppc_subfco(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_cmpli(int crfd, int ra, unsigned uimm);
+uint32_t nw_ppc_cmpl(int crfd, int ra, int rb);
 uint32_t nw_ppc_mtcrf(int crm, int rs);
 uint32_t nw_ppc_extsh(int ra, int rs, int rc);
 uint32_t nw_ppc_b(int disp, int lk);
