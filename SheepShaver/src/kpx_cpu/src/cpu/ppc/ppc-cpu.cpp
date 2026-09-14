@@ -1572,7 +1572,7 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		is_st = 1;
 	} else if (prim == 40 || prim == 42 || prim == 43)
 		width = 2;
-	else if (prim == 44) {
+	else if (prim == 44 || prim == 45) {
 		width = 2;
 		is_st = 1;
 	} else
@@ -1709,7 +1709,7 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 			sg[rd] = vm_read_memory_1(pa);
 		return;
 	}
-	if ((prim == 37 || prim == 39) && ra) {
+	if ((prim == 37 || prim == 39 || prim == 45) && ra) {
 		sg[ra] = (ra ? sg[ra] : 0) + (uint32)simm;
 		return;
 	}
