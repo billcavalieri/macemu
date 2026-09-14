@@ -120,6 +120,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 266, "add", 0, 0, 0},
 	{31, 444, "or", 0, 0, 0},
 	{31, 26, "cntlzw", 0, 0, 0},
+	{31, 104, "neg", 0, 0, 0},
 	{24, -1, "ori", 0, 0, 0},
 	{31, 0, "cmp", 0, 0, 0},
 	{31, 32, "cmpl", 0, 0, 0},
@@ -448,6 +449,8 @@ void nw_jit_stats_print(const char *why)
 				nm = "or";
 			else if (p == 31 && x == 26)
 				nm = "cntlzw";
+			else if (p == 31 && x == 104)
+				nm = "neg";
 			else if (p == 31 && x == 316)
 				nm = "xor";
 			else if (p == 31 && x == 28)
@@ -652,6 +655,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* or / mr */
 	if (prim == 31 && xo == 26)
 		return 1;	/* cntlzw */
+	if (prim == 31 && xo == 104)
+		return 1;	/* neg */
 	if (prim == 24)
 		return 1;	/* ori */
 	if (prim == 31 && xo == 0)
@@ -1222,6 +1227,12 @@ uint32_t nw_ppc_cntlzw(int ra, int rs, int rc)
 {
 	return (31u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
 	       (26u << 1) | (rc ? 1u : 0);
+}
+
+uint32_t nw_ppc_neg(int rd, int ra, int rc)
+{
+	return (31u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) |
+	       (104u << 1) | (rc ? 1u : 0);
 }
 
 uint32_t nw_ppc_ori(int ra, int rs, unsigned uimm)
@@ -1954,6 +1965,13 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->gpr[ra] = v ? (uint32_t)__builtin_clz(v) : 32u;
 		if (op & 1)
 			record_cr0(cpu, (int32_t)cpu->gpr[ra]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 104) {
+		cpu->gpr[rd] = 0u - cpu->gpr[ra];
+		if (op & 1)
+			record_cr0(cpu, (int32_t)cpu->gpr[rd]);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -3521,6 +3539,17 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_w(e, a64_clz(W8, W8)))
 			return 0;
 		if (!emit_store_gpr(e, W8, ra))
+			return 0;
+		if (op & 1)
+			return emit_cr0_from_w8(e);
+		return 1;
+	}
+	if (prim == 31 && xo == 104) {
+		if (!emit_load_gpr(e, W8, ra))
+			return 0;
+		if (!emit_w(e, a64_sub_reg(W8, 31, W8)))	/* 0 - rA */
+			return 0;
+		if (!emit_store_gpr(e, W8, rd))
 			return 0;
 		if (op & 1)
 			return emit_cr0_from_w8(e);
