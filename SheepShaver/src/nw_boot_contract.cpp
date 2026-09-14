@@ -881,7 +881,7 @@ const char *nw_boot_line_g1_hwinit(void)
 
 const char *nw_boot_line_g1_patch_skip(void)
 {
-	return "G1: NewWorld patch skip";
+	return "G1: NewWorld patched (68k EMUL_OP + drivers); skip Old World 68k boot";
 }
 
 const char *nw_boot_line_g2_first_dsi(void)

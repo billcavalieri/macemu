@@ -500,7 +500,7 @@ int main()
 		CHECK(strcmp(nw_boot_line_g1_hwinit(),
 			"G1: HardwareInit handoff NK +0x310000 ConfigInfo +0x30d000") == 0);
 		CHECK(strcmp(nw_boot_line_g1_patch_skip(),
-			"G1: NewWorld patch skip") == 0);
+			"G1: NewWorld patched (68k EMUL_OP + drivers); skip Old World 68k boot") == 0);
 		CHECK(strcmp(nw_boot_line_g2_first_dsi(),
 			"G2: first DSI SRR0=PC DR on HIT no second DSI") == 0);
 		CHECK(strcmp(nw_boot_line_g2_translator_off(),
