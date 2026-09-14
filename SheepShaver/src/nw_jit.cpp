@@ -112,6 +112,7 @@ static struct nw_jit_hist g_hist[] = {
 	{36, -1, "stw", 0, 0, 0},
 	{37, -1, "stwu", 0, 0, 0},
 	{31, 23, "lwzx", 0, 0, 0},
+	{31, 151, "stwx", 0, 0, 0},
 	{31, 343, "lhax", 0, 0, 0},
 	{31, 375, "lhaux", 0, 0, 0},
 	{40, -1, "lhz", 0, 0, 0},
@@ -583,6 +584,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* lbz / stb */
 	if (prim == 31 && xo == 23)
 		return 1;	/* lwzx */
+	if (prim == 31 && xo == 151)
+		return 1;	/* stwx */
 	if (prim == 31 && (xo == 343 || xo == 375))
 		return 1;	/* lhax / lhaux */
 	if (prim == 40 || prim == 42 || prim == 43 || prim == 44)
@@ -930,6 +933,12 @@ uint32_t nw_ppc_stw(int rs, int ra, int d)
 uint32_t nw_ppc_stwu(int rs, int ra, int d)
 {
 	return (37u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
+uint32_t nw_ppc_stwx(int rs, int ra, int rb)
+{
+	return (31u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | (151u << 1);
 }
 
 uint32_t nw_ppc_lwzx(int rd, int ra, int rb)
@@ -1679,6 +1688,14 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
+	if (prim == 31 && xo == 151) {
+		const uint32_t ea = ra_or_0(cpu, ra) + cpu->gpr[rb];
+		if (!mem_ok(cpu, ea))
+			return -1;
+		mem_st_be(cpu, ea, cpu->gpr[rd]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
 	if (prim == 31 && (xo == 343 || xo == 375)) {
 		const uint32_t ea = (xo == 375 ? cpu->gpr[ra] : ra_or_0(cpu, ra)) + cpu->gpr[rb];
 		if (!mem_ok_n(cpu, ea, 2))
@@ -2220,6 +2237,22 @@ static int emit_call_stw(struct emit *e, uint32_t pc, int rs, int ra, int simm, 
 		return 0;
 	e->fault_br[e->nfault++] = e->p;
 	return emit_w(e, a64_cbnz(W10, 0));
+}
+
+static int emit_call_stwx(struct emit *e, uint32_t pc, int rs, int ra, int rb)
+{
+	if (!emit_set_pc(e, pc))
+		return 0;
+	if (!emit_helper_ea_idx(e, ra, rb))
+		return 0;
+	if (!emit_load_gpr(e, W2, rs))
+		return 0;
+	if (!emit_dtlb_and_helpers(e, 1, (void *)nw_jit_helper_stw,
+				   (void *)nw_jit_helper_stw_pa))
+		return 0;
+	if (!emit_w(e, 0xaa1303e0u))
+		return 0;
+	return emit_fault_check(e);
 }
 
 static int emit_call_lwzx(struct emit *e, uint32_t pc, int rd, int ra, int rb)
@@ -2800,6 +2833,9 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	}
 	if (prim == 31 && xo == 23) {
 		return emit_call_lwzx(e, pc, rd, ra, rb);
+	}
+	if (prim == 31 && xo == 151) {
+		return emit_call_stwx(e, pc, rd, ra, rb);
 	}
 	if (prim == 31 && (xo == 343 || xo == 375)) {
 		return emit_call_lhx(e, pc, rd, ra, rb, xo == 375);
