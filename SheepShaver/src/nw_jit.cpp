@@ -84,7 +84,11 @@ static struct nw_jit_hist g_hist[] = {
 	{13, -1, "addic.", 0, 0, 0},
 	{31, 10, "addc", 0, 0, 0},
 	{31, 522, "addco", 0, 0, 0},
+	{31, 520, "subfco", 0, 0, 0},
 	{11, -1, "cmpi", 0, 0, 0},
+	{10, -1, "cmpli", 0, 0, 0},
+	{28, -1, "andi.", 0, 0, 0},
+	{31, 144, "mtcrf", 0, 0, 0},
 	{21, -1, "rlwinm", 0, 0, 0},
 	{20, -1, "rlwimi", 0, 0, 0},
 	{16, -1, "bc", 0, 0, 0},
@@ -518,6 +522,14 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* addi / addic / addic. */
 	if (prim == 31 && (xo == 10 || xo == 522))
 		return 1;	/* addc / addco */
+	if (prim == 31 && xo == 520)
+		return 1;	/* subfco */
+	if (prim == 28)
+		return 1;	/* andi. */
+	if (prim == 10)
+		return (rd & 3) == 0;	/* cmpli L=0, any crfD */
+	if (prim == 31 && xo == 144)
+		return 1;	/* mtcrf */
 	if (prim == 11)
 		return rd == 0;	/* cmpwi cr0; L=0. crfD!=0 was vs-kpx miss */
 	if (prim == 20 || prim == 21)
@@ -809,6 +821,29 @@ uint32_t nw_ppc_addco(int rd, int ra, int rb, int rc)
 	return nw_ppc_addc(rd, ra, rb, rc) | (1u << 10);
 }
 
+uint32_t nw_ppc_andi_dot(int ra, int rs, unsigned uimm)
+{
+	return (28u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) | (uimm & 0xffffu);
+}
+
+uint32_t nw_ppc_subfco(int rd, int ra, int rb, int rc)
+{
+	return (31u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | (1u << 10) | (8u << 1) | (rc ? 1u : 0);
+}
+
+uint32_t nw_ppc_cmpli(int crfd, int ra, unsigned uimm)
+{
+	return (10u << 26) | ((uint32_t)(crfd & 7) << 23) | ((uint32_t)ra << 16) |
+	       (uimm & 0xffffu);
+}
+
+uint32_t nw_ppc_mtcrf(int crm, int rs)
+{
+	return (31u << 26) | ((uint32_t)rs << 21) | (((uint32_t)crm & 0xffu) << 12) |
+	       (144u << 1);
+}
+
 uint32_t nw_ppc_add(int rd, int ra, int rb, int rc)
 {
 	return 0x7c000214u | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) | ((uint32_t)rb << 11) | (rc ? 1u : 0);
@@ -966,6 +1001,52 @@ static void record_ov(struct nw_jit_cpu *cpu, uint32_t a, uint32_t b)
 	cpu->xer &= ~0x40000000u;
 	if (ov)
 		cpu->xer |= 0xc0000000u;
+}
+
+static void record_ca_sub(struct nw_jit_cpu *cpu, uint32_t a, uint32_t b)
+{
+	if (b >= a)
+		cpu->xer |= 0x20000000u;
+	else
+		cpu->xer &= ~0x20000000u;
+}
+
+static void record_ov_sub(struct nw_jit_cpu *cpu, uint32_t a, uint32_t b)
+{
+	const int64_t s = (int64_t)(int32_t)b - (int64_t)(int32_t)a;
+	const int ov = (int)((((uint64_t)s) >> 63) ^ (((uint32_t)s) >> 31));
+	cpu->xer &= ~0x40000000u;
+	if (ov)
+		cpu->xer |= 0xc0000000u;
+}
+
+static uint32_t mtcrf_mask(uint32_t op)
+{
+	const uint32_t crm = (op >> 12) & 0xffu;
+	uint32_t m = 0;
+	if (crm & 0x80u) m |= 0xf0000000u;
+	if (crm & 0x40u) m |= 0x0f000000u;
+	if (crm & 0x20u) m |= 0x00f00000u;
+	if (crm & 0x10u) m |= 0x000f0000u;
+	if (crm & 0x08u) m |= 0x0000f000u;
+	if (crm & 0x04u) m |= 0x00000f00u;
+	if (crm & 0x02u) m |= 0x000000f0u;
+	if (crm & 0x01u) m |= 0x0000000fu;
+	return m;
+}
+
+static void record_cr_u(struct nw_jit_cpu *cpu, int crfd, uint32_t a, uint32_t b)
+{
+	uint32_t f = 2;
+	if (a < b)
+		f = 8;
+	else if (a > b)
+		f = 4;
+	if (cpu->xer & 0x80000000u)
+		f |= 1;
+	const int sh = 28 - 4 * crfd;
+	const uint32_t mask = 0xfu << sh;
+	cpu->cr = (cpu->cr & ~mask) | (f << sh);
 }
 
 static void record_cr0(struct nw_jit_cpu *cpu, int32_t v)
@@ -1315,6 +1396,35 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
+	if (prim == 10) {
+		if (rd & 3)
+			return -1;
+		record_cr_u(cpu, rd >> 2, cpu->gpr[ra], op & 0xffffu);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 28) {
+		cpu->gpr[ra] = cpu->gpr[rd] & (op & 0xffffu);
+		record_cr0(cpu, (int32_t)cpu->gpr[ra]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 520) {
+		const uint32_t a = cpu->gpr[ra], b = cpu->gpr[rb];
+		record_ca_sub(cpu, a, b);
+		record_ov_sub(cpu, a, b);
+		cpu->gpr[rd] = b - a;
+		if (op & 1)
+			record_cr0(cpu, (int32_t)cpu->gpr[rd]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 144) {
+		const uint32_t m = mtcrf_mask(op);
+		cpu->cr = (cpu->gpr[rd] & m) | (cpu->cr & ~m);
+		cpu->pc = pc + 4;
+		return 0;
+	}
 	if (prim == 16) {
 		const int bo = rd, bi = ra;
 		const int32_t disp = (int16_t)(op & 0xfffcu);
@@ -1556,6 +1666,11 @@ static uint32_t a64_add_reg(int rd, int rn, int rm)
 static uint32_t a64_adds_reg(int rd, int rn, int rm)
 {
 	return 0x2b000000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t a64_subs_reg(int rd, int rn, int rm)
+{
+	return 0x6b000000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
 }
 
 static uint32_t a64_sub_reg(int rd, int rn, int rm)
@@ -2077,20 +2192,21 @@ static int emit_call_sth(struct emit *e, uint32_t pc, int rs, int ra, int simm)
 	return emit_fault_check(e);
 }
 
-static int emit_cr0_from_flags(struct emit *e, uint32_t b_lt)
+static int emit_cr_field_from_flags(struct emit *e, int crfd, uint32_t b_lt)
 {
-	/* Flags already set. CR0 in w9: LT=8, GT=4, EQ=2, SO from XER[31]. */
+	const int sh = 28 - 4 * crfd;
+	const uint32_t keep = ~(0xfu << sh);
 	if (!emit_w(e, a64_movz(W9, 2, 0)))
 		return 0;
-	if (!emit_w(e, b_lt))				/* B.MI or B.LT +4 → LT */
+	if (!emit_w(e, b_lt))
 		return 0;
-	if (!emit_w(e, 0x54000080u))			/* B.EQ +4 → join */
+	if (!emit_w(e, 0x54000080u))
 		return 0;
-	if (!emit_w(e, a64_movz(W9, 4, 0)))		/* GT */
+	if (!emit_w(e, a64_movz(W9, 4, 0)))
 		return 0;
-	if (!emit_w(e, 0x14000002u))			/* B +2 → join */
+	if (!emit_w(e, 0x14000002u))
 		return 0;
-	if (!emit_w(e, a64_movz(W9, 8, 0)))		/* LT */
+	if (!emit_w(e, a64_movz(W9, 8, 0)))
 		return 0;
 	if (!emit_w(e, a64_ldr_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, xer))))
 		return 0;
@@ -2100,15 +2216,20 @@ static int emit_cr0_from_flags(struct emit *e, uint32_t b_lt)
 		return 0;
 	if (!emit_w(e, a64_ldr_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr))))
 		return 0;
-	if (!emit_imm32(e, W8, 0x0fffffffu))
+	if (!emit_imm32(e, W8, keep))
 		return 0;
 	if (!emit_w(e, a64_and_reg(W10, W10, W8)))
 		return 0;
-	if (!emit_w(e, a64_lsl(W9, W9, 28)))
+	if (sh && !emit_w(e, a64_lsl(W9, W9, sh)))
 		return 0;
 	if (!emit_w(e, a64_orr_reg(W10, W10, W9)))
 		return 0;
 	return emit_w(e, a64_str_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr)));
+}
+
+static int emit_cr0_from_flags(struct emit *e, uint32_t b_lt)
+{
+	return emit_cr_field_from_flags(e, 0, b_lt);
 }
 
 static int emit_xer_ca_from_cs(struct emit *e)
@@ -2208,6 +2329,28 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_w(e, a64_orr_reg(W8, W8, W9)))
 			return 0;
 		return emit_store_gpr(e, W8, ra);
+	}
+	if (prim == 28) {
+		if (!emit_load_gpr(e, W8, rd))
+			return 0;
+		if (!emit_imm32(e, W9, op & 0xffffu))
+			return 0;
+		if (!emit_w(e, a64_and_reg(W8, W8, W9)))
+			return 0;
+		if (!emit_store_gpr(e, W8, ra))
+			return 0;
+		return emit_cr0_from_w8(e);
+	}
+	if (prim == 10) {
+		if (rd & 3)
+			return 0;
+		if (!emit_load_gpr(e, W8, ra))
+			return 0;
+		if (!emit_imm32(e, W9, op & 0xffffu))
+			return 0;
+		if (!emit_w(e, a64_cmp_w(W8, W9)))
+			return 0;
+		return emit_cr_field_from_flags(e, rd >> 2, 0x54000083u); /* B.CC +4 */
 	}
 	if (prim == 11) {
 		if (rd != 0)
@@ -2382,6 +2525,39 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (op & 1)
 			return emit_cr0_from_w8(e);
 		return 1;
+	}
+	if (prim == 31 && xo == 520) {
+		if (!emit_load_gpr(e, W8, ra))
+			return 0;
+		if (!emit_load_gpr(e, W9, rb))
+			return 0;
+		if (!emit_w(e, a64_subs_reg(W8, W9, W8)))	/* rB - rA */
+			return 0;
+		if (!emit_xer_ca_from_cs(e))
+			return 0;
+		if (!emit_xer_ov_from_vs(e))
+			return 0;
+		if (!emit_store_gpr(e, W8, rd))
+			return 0;
+		if (op & 1)
+			return emit_cr0_from_w8(e);
+		return 1;
+	}
+	if (prim == 31 && xo == 144) {
+		const uint32_t m = mtcrf_mask(op);
+		if (!emit_load_gpr(e, W8, rd))
+			return 0;
+		if (!emit_imm32(e, W9, m))
+			return 0;
+		if (!emit_w(e, a64_and_reg(W8, W8, W9)))
+			return 0;
+		if (!emit_w(e, a64_ldr_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr))))
+			return 0;
+		if (!emit_w(e, a64_bic(W10, W10, W9)))
+			return 0;
+		if (!emit_w(e, a64_orr_reg(W10, W10, W8)))
+			return 0;
+		return emit_w(e, a64_str_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr)));
 	}
 	if (prim == 31 && xo == 444) {
 		if (!emit_load_gpr(e, W8, rd))

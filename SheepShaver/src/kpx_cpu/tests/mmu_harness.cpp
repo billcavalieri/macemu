@@ -1902,6 +1902,91 @@ int main()
 		CHECK(a.gpr[4] == 0x80000000u && (a.cr >> 28) == 9 &&
 		      b.gpr[4] == a.gpr[4] && b.cr == a.cr);
 
+		/* andi. */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[4] = 0x1234u;
+		ops[0] = nw_ppc_andi_dot(3, 4, 0xff);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1400u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1400u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[3] == 0x34u && (a.cr >> 28) == 4 &&
+		      b.gpr[3] == a.gpr[3] && b.cr == a.cr);
+
+		/* subfco: 0-1, CA clear, OV clear */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 1;
+		a.gpr[5] = 0;
+		ops[0] = nw_ppc_subfco(4, 3, 5, 0);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1410u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1410u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0xffffffffu && !(a.xer & 0x20000000u) &&
+		      !(a.xer & 0x40000000u) && b.gpr[4] == a.gpr[4] && b.xer == a.xer);
+
+		/* subfco 0x80000000-1 sets OV */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 1;
+		a.gpr[5] = 0x80000000u;
+		ops[0] = nw_ppc_subfco(4, 3, 5, 1);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1420u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1420u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0x7fffffffu && (a.xer & 0xc0000000u) == 0xc0000000u &&
+		      (a.cr >> 28) == 5 && b.gpr[4] == a.gpr[4] && b.xer == a.xer &&
+		      b.cr == a.cr);
+
+		/* cmpli unsigned: 0xffffffff vs 1 is GT, not LT */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0xffffffffu;
+		ops[0] = nw_ppc_cmpli(0, 3, 1);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1430u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1430u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK((a.cr >> 28) == 4 && b.cr == a.cr);
+
+		/* cmpli cr3 */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0;
+		ops[0] = nw_ppc_cmpli(3, 3, 1);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1440u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1440u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(((a.cr >> 16) & 0xf) == 8 && b.cr == a.cr);
+
+		/* mtcrf CR0 from rS */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.cr = 0x12345678u;
+		a.gpr[4] = 0xa0000000u;
+		ops[0] = nw_ppc_mtcrf(0x80, 4);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1450u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1450u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.cr == 0xa2345678u && b.cr == a.cr);
+
 		/* lbz / stb */
 		{
 			uint8_t ram[64];
@@ -2183,7 +2268,11 @@ int main()
 			CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, &bn) == bf);
 			CHECK(bn == 4);
 		}
-		CHECK(!nw_jit_op_supported(0x7c000410u));	/* subfco still unsup */
+		CHECK(nw_jit_op_supported(nw_ppc_andi_dot(3, 4, 0xff)));
+		CHECK(nw_jit_op_supported(nw_ppc_subfco(4, 3, 5, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_cmpli(0, 3, 1)));
+		CHECK(nw_jit_op_supported(nw_ppc_mtcrf(0x80, 4)));
+		CHECK(!nw_jit_op_supported(0x7c000278u));	/* xor still unsup */
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
 		nw_jit_cache_put(0x2000u, 0x2000u, 0, 0, NW_JIT_INTERPRET, 0);
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NW_JIT_INTERPRET);
