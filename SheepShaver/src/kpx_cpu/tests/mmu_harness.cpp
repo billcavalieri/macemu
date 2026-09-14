@@ -1577,6 +1577,30 @@ int main()
 		fn(&b);
 		CHECK(b.gpr[3] == a.gpr[3] && b.gpr[4] == a.gpr[4] && b.pc == a.pc && b.lr == a.lr);
 
+		/* mulli r4, r3, 6 and a negative SIMM */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 7;
+		ops[0] = nw_ppc_mulli(4, 3, 6);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1500u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1500u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 42 && b.gpr[4] == 42);
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 5;
+		ops[0] = nw_ppc_mulli(4, 3, -3);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1510u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1510u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == (uint32_t)-15 && b.gpr[4] == a.gpr[4]);
+
 		/* add. records CR0 */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -2425,6 +2449,7 @@ int main()
 		CHECK(nw_jit_mode() == NW_JIT_FALLBACK);
 		CHECK(strcmp(nw_jit_mode_name(), "fallback") == 0);
 		CHECK(nw_jit_op_supported(nw_ppc_addi(3, 0, 1)));
+		CHECK(nw_jit_op_supported(nw_ppc_mulli(4, 3, 6)));
 		CHECK(nw_jit_op_supported(nw_ppc_lwz(3, 1, 0)));
 		CHECK(nw_jit_op_dispatch(nw_ppc_addi(3, 0, 1)));
 		CHECK(nw_jit_op_dispatch(nw_ppc_lwz(3, 1, 0)));

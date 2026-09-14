@@ -82,6 +82,7 @@ struct nw_jit_hist {
 
 static struct nw_jit_hist g_hist[] = {
 	{14, -1, "addi", 0, 0, 0},
+	{7, -1, "mulli", 0, 0, 0},
 	{12, -1, "addic", 0, 0, 0},
 	{13, -1, "addic.", 0, 0, 0},
 	{31, 10, "addc", 0, 0, 0},
@@ -542,6 +543,8 @@ int nw_jit_op_supported(uint32_t op)
 	const int xo = (int)((op >> 1) & 0x3ff);
 	if (prim == 14 || prim == 12 || prim == 13)
 		return 1;	/* addi / addic / addic. */
+	if (prim == 7)
+		return 1;	/* mulli */
 	if (prim == 31 && (xo == 10 || xo == 522))
 		return 1;	/* addc / addco */
 	if (prim == 31 && xo == 520)
@@ -837,6 +840,12 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 uint32_t nw_ppc_addi(int rd, int ra, int simm)
 {
 	return (14u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) | ((uint32_t)simm & 0xffffu);
+}
+
+uint32_t nw_ppc_mulli(int rd, int ra, int simm)
+{
+	return (7u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)simm & 0xffffu);
 }
 
 uint32_t nw_ppc_addic(int rd, int ra, int simm, int rc)
@@ -1470,6 +1479,11 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
+	if (prim == 7) {
+		cpu->gpr[rd] = (uint32_t)((int64_t)(int32_t)cpu->gpr[ra] * (int64_t)simm);
+		cpu->pc = pc + 4;
+		return 0;
+	}
 	if (prim == 12 || prim == 13) {
 		const uint32_t a = cpu->gpr[ra], b = (uint32_t)simm;
 		record_ca(cpu, a, b);
@@ -1795,6 +1809,11 @@ static int emit_w(struct emit *e, uint32_t w)
 static uint32_t a64_add_reg(int rd, int rn, int rm)
 {
 	return 0x0b000000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t a64_mul_w(int rd, int rn, int rm)
+{
+	return 0x1b007c00u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
 }
 
 static uint32_t a64_adds_reg(int rd, int rn, int rm)
@@ -2513,6 +2532,15 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_imm32(e, W9, (uint32_t)simm))
 			return 0;
 		if (!emit_w(e, a64_add_reg(W8, W8, W9)))
+			return 0;
+		return emit_store_gpr(e, W8, rd);
+	}
+	if (prim == 7) {
+		if (!emit_load_gpr(e, W8, ra))
+			return 0;
+		if (!emit_imm32(e, W9, (uint32_t)simm))
+			return 0;
+		if (!emit_w(e, a64_mul_w(W8, W8, W9)))
 			return 0;
 		return emit_store_gpr(e, W8, rd);
 	}

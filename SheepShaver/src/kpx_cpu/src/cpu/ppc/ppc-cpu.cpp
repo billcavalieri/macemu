@@ -1611,6 +1611,10 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 		sg[rd] = (ra ? sg[ra] : 0) + (uint32)simm;
 		return;
 	}
+	if (prim == 7) {
+		sg[rd] = (uint32)((int64)(int32)sg[ra] * (int64)simm);
+		return;
+	}
 	if (prim == 12 || prim == 13) {
 		sg[rd] = sg[ra] + (uint32)simm;
 		return;
