@@ -1648,6 +1648,11 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 		sg[ra] = (sh >= 32u) ? 0 : (sg[rd] << sh);
 		return;
 	}
+	if (prim == 31 && xo == 536) {
+		const uint32 sh = sg[rb] & 0x3fu;
+		sg[ra] = (sh >= 32u) ? 0 : (sg[rd] >> sh);
+		return;
+	}
 	if (prim == 24) {
 		sg[ra] = sg[rd] | (op & 0xffffu);
 		return;
