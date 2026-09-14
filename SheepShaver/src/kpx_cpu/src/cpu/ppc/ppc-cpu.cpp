@@ -356,6 +356,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 	if (on) {
 		nw_jit_set_host_mem(powerpc_cpu::jit_host_lwz, powerpc_cpu::jit_host_stw);
 		nw_jit_set_host_pa(powerpc_cpu::jit_host_lwz_pa, powerpc_cpu::jit_host_stw_pa);
+		nw_jit_set_host_mfspr(powerpc_cpu::jit_host_mfspr);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
 		nw_jit_set_host_byte(powerpc_cpu::jit_host_lb, powerpc_cpu::jit_host_stb);
 	}
@@ -1387,6 +1388,30 @@ void powerpc_cpu::jit_host_stw_pa(void *host, uint32 pa, uint32 val, uint32 pc, 
 	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
 		*fault = NW_JIT_FAULT_SMC;
+}
+
+uint32 powerpc_cpu::jit_host_mfspr(void *host, uint32 spr)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	switch (spr) {
+	case powerpc_registers::SPR_TBL_R:
+		return (uint32)ppc->tb_ticks();
+	case powerpc_registers::SPR_TBU_R:
+		return (uint32)(ppc->tb_ticks() >> 32);
+	case powerpc_registers::SPR_PVR: {
+		extern uint32 PVR;
+		return PVR;
+	}
+	case powerpc_registers::SPR_VRSAVE:
+		return ppc->vrsave();
+	case powerpc_registers::SPR_SPRG0:
+	case powerpc_registers::SPR_SPRG1:
+	case powerpc_registers::SPR_SPRG2:
+	case powerpc_registers::SPR_SPRG3:
+		return ppc->sprg(spr - powerpc_registers::SPR_SPRG0);
+	default:
+		return 0;
+	}
 }
 
 uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)

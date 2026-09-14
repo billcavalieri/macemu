@@ -187,6 +187,8 @@ uint64_t nw_jit_dtlb_misses(void);
 typedef uint32_t (*nw_jit_host_lwz_pa)(void *host, uint32_t pa, uint32_t pc, int *fault);
 typedef void (*nw_jit_host_stw_pa)(void *host, uint32_t pa, uint32_t val, uint32_t pc, int *fault);
 void nw_jit_set_host_pa(nw_jit_host_lwz_pa lwz, nw_jit_host_stw_pa stw);
+typedef uint32_t (*nw_jit_host_mfspr)(void *host, uint32_t spr);
+void nw_jit_set_host_mfspr(nw_jit_host_mfspr fn);
 uint64_t nw_jit_flush_count(void);
 uint64_t nw_jit_compile_count(void);
 void nw_jit_stats_print(const char *why);
@@ -230,6 +232,14 @@ enum {
 	NW_PPC_SPR_LR = 8,
 	NW_PPC_SPR_CTR = 9,
 	NW_PPC_SPR_DEC = 22,
+	NW_PPC_SPR_VRSAVE = 256,
+	NW_PPC_SPR_TBL = 268,
+	NW_PPC_SPR_TBU = 269,
+	NW_PPC_SPR_SPRG0 = 272,
+	NW_PPC_SPR_SPRG1 = 273,
+	NW_PPC_SPR_SPRG2 = 274,
+	NW_PPC_SPR_SPRG3 = 275,
+	NW_PPC_SPR_PVR = 287,
 	NW_PPC_BO_TRUE = 12,
 	NW_PPC_BO_FALSE = 4
 };
