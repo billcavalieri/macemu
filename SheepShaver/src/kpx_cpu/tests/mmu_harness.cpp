@@ -2169,6 +2169,19 @@ int main()
 		fn(&b);
 		CHECK(a.cr == 0xa2345678u && b.cr == a.cr);
 
+		/* mfcr copies CR into rD */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.cr = 0xa2345678u;
+		ops[0] = nw_ppc_mfcr(3);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x15e0u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x15e0u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[3] == 0xa2345678u && b.gpr[3] == a.gpr[3]);
+
 		/* extsh 0x8000 → 0xffff8000, CR0 LT */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -2643,6 +2656,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_subfe(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_cmpli(0, 3, 1)));
 		CHECK(nw_jit_op_supported(nw_ppc_mtcrf(0x80, 4)));
+		CHECK(nw_jit_op_supported(nw_ppc_mfcr(3)));
 		CHECK(nw_jit_op_supported(nw_ppc_mfspr(3, NW_PPC_SPR_TBL)));
 		CHECK(nw_jit_op_supported(nw_ppc_extsh(4, 8, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_extsb(4, 8, 0)));

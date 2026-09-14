@@ -94,6 +94,7 @@ static struct nw_jit_hist g_hist[] = {
 	{10, -1, "cmpli", 0, 0, 0},
 	{28, -1, "andi.", 0, 0, 0},
 	{31, 144, "mtcrf", 0, 0, 0},
+	{31, 19, "mfcr", 0, 0, 0},
 	{31, 922, "extsh", 0, 0, 0},
 	{31, 954, "extsb", 0, 0, 0},
 	{31, 24, "slw", 0, 0, 0},
@@ -376,6 +377,8 @@ void nw_jit_stats_print(const char *why)
 				nm = "sync";
 			else if (p == 31 && x == 144)
 				nm = "mtcrf";
+			else if (p == 31 && x == 19)
+				nm = "mfcr";
 			else if (p == 31 && x == 87)
 				nm = "lbzx";
 			else if (p == 31 && x == 215)
@@ -574,6 +577,8 @@ int nw_jit_op_supported(uint32_t op)
 		return (rd & 3) == 0;	/* cmpli L=0, any crfD */
 	if (prim == 31 && xo == 144)
 		return 1;	/* mtcrf */
+	if (prim == 31 && xo == 19)
+		return 1;	/* mfcr */
 	if (prim == 31 && xo == 922)
 		return 1;	/* extsh */
 	if (prim == 31 && xo == 954)
@@ -932,6 +937,11 @@ uint32_t nw_ppc_mtcrf(int crm, int rs)
 {
 	return (31u << 26) | ((uint32_t)rs << 21) | (((uint32_t)crm & 0xffu) << 12) |
 	       (144u << 1);
+}
+
+uint32_t nw_ppc_mfcr(int rd)
+{
+	return (31u << 26) | ((uint32_t)rd << 21) | (19u << 1);
 }
 
 uint32_t nw_ppc_extsh(int ra, int rs, int rc)
@@ -1613,6 +1623,11 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 	if (prim == 31 && xo == 144) {
 		const uint32_t m = mtcrf_mask(op);
 		cpu->cr = (cpu->gpr[rd] & m) | (cpu->cr & ~m);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 19) {
+		cpu->gpr[rd] = cpu->cr;
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -3051,6 +3066,13 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	}
 	if (prim == 31 && xo == 598)
 		return emit_w(e, 0xd5033f9fu);	/* DMB SY */
+	if (prim == 31 && xo == 19) {
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_w(e, a64_ldr_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr))))
+			return 0;
+		return emit_store_gpr(e, W8, rd);
+	}
 	if (prim == 31 && xo == 144) {
 		const uint32_t m = mtcrf_mask(op);
 		if (!emit_load_gpr(e, W8, rd))
