@@ -195,6 +195,7 @@ void nw_jit_stats_print(const char *why);
 
 /* PPC instruction constructors for the harness. */
 uint32_t nw_ppc_addi(int rd, int ra, int simm);
+uint32_t nw_ppc_addis(int rd, int ra, int simm);
 uint32_t nw_ppc_mulli(int rd, int ra, int simm);
 uint32_t nw_ppc_addic(int rd, int ra, int simm, int rc);
 uint32_t nw_ppc_add(int rd, int ra, int rb, int rc);

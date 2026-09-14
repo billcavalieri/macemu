@@ -82,6 +82,7 @@ struct nw_jit_hist {
 
 static struct nw_jit_hist g_hist[] = {
 	{14, -1, "addi", 0, 0, 0},
+	{15, -1, "addis", 0, 0, 0},
 	{7, -1, "mulli", 0, 0, 0},
 	{12, -1, "addic", 0, 0, 0},
 	{13, -1, "addic.", 0, 0, 0},
@@ -557,6 +558,8 @@ int nw_jit_op_supported(uint32_t op)
 	const int xo = (int)((op >> 1) & 0x3ff);
 	if (prim == 14 || prim == 12 || prim == 13)
 		return 1;	/* addi / addic / addic. */
+	if (prim == 15)
+		return 1;	/* addis */
 	if (prim == 7)
 		return 1;	/* mulli */
 	if (prim == 31 && (xo == 10 || xo == 522))
@@ -866,6 +869,11 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 uint32_t nw_ppc_addi(int rd, int ra, int simm)
 {
 	return (14u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) | ((uint32_t)simm & 0xffffu);
+}
+
+uint32_t nw_ppc_addis(int rd, int ra, int simm)
+{
+	return (15u << 26) | ((uint32_t)rd << 21) | ((uint32_t)ra << 16) | ((uint32_t)simm & 0xffffu);
 }
 
 uint32_t nw_ppc_mulli(int rd, int ra, int simm)
@@ -1536,6 +1544,11 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 
 	if (prim == 14) {
 		cpu->gpr[rd] = ra_or_0(cpu, ra) + (uint32_t)simm;
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 15) {
+		cpu->gpr[rd] = ra_or_0(cpu, ra) + ((uint32_t)simm << 16);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -2687,6 +2700,15 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_ra_or_0(e, W8, ra))
 			return 0;
 		if (!emit_imm32(e, W9, (uint32_t)simm))
+			return 0;
+		if (!emit_w(e, a64_add_reg(W8, W8, W9)))
+			return 0;
+		return emit_store_gpr(e, W8, rd);
+	}
+	if (prim == 15) {
+		if (!emit_ra_or_0(e, W8, ra))
+			return 0;
+		if (!emit_imm32(e, W9, (uint32_t)simm << 16))
 			return 0;
 		if (!emit_w(e, a64_add_reg(W8, W8, W9)))
 			return 0;
