@@ -88,8 +88,9 @@ int nw_jit_op_supported(uint32_t op);
 /* Live path: supported ops whose EA is a writable/readable bank (NONE/IO
  * mem ops stay on kpx — 4b-2 fill at 50310490). */
 int nw_jit_op_dispatch(uint32_t op);
-/* Branches (bc/b/bclr). Stores do not end the block; a store into the
- * executing page sets fault SMC and the ON path commits pc = store+4. */
+/* Branches (bc/b/bclr) and isync (flush pending icbi, then leave the
+ * block). Stores do not end the block; a store into the executing page
+ * sets fault SMC and the ON path commits pc = store+4. */
 int nw_jit_op_ends_block(uint32_t op);
 
 enum {
@@ -192,6 +193,10 @@ typedef void (*nw_jit_host_stw_pa)(void *host, uint32_t pa, uint32_t val, uint32
 void nw_jit_set_host_pa(nw_jit_host_lwz_pa lwz, nw_jit_host_stw_pa stw);
 typedef uint32_t (*nw_jit_host_mfspr)(void *host, uint32_t spr);
 void nw_jit_set_host_mfspr(nw_jit_host_mfspr fn);
+/* Same work as kpx execute_isync: flush the pending icbi range (and NW
+ * JIT pages), then the emitter does ISB. No PC bump; the JIT owns PC. */
+typedef void (*nw_jit_host_isync)(void *host);
+void nw_jit_set_host_isync(nw_jit_host_isync fn);
 uint64_t nw_jit_flush_count(void);
 uint64_t nw_jit_compile_count(void);
 void nw_jit_stats_print(const char *why);

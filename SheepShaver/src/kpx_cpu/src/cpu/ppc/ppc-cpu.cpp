@@ -357,6 +357,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_mem(powerpc_cpu::jit_host_lwz, powerpc_cpu::jit_host_stw);
 		nw_jit_set_host_pa(powerpc_cpu::jit_host_lwz_pa, powerpc_cpu::jit_host_stw_pa);
 		nw_jit_set_host_mfspr(powerpc_cpu::jit_host_mfspr);
+		nw_jit_set_host_isync(powerpc_cpu::jit_host_isync);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
 		nw_jit_set_host_byte(powerpc_cpu::jit_host_lb, powerpc_cpu::jit_host_stb);
 	}
@@ -1412,6 +1413,13 @@ uint32 powerpc_cpu::jit_host_mfspr(void *host, uint32 spr)
 	default:
 		return 0;
 	}
+}
+
+void powerpc_cpu::jit_host_isync(void *host)
+{
+	/* Same as execute_isync without the PC bump: apply the pending
+	 * icbi range (kpx decode cache + NW JIT pages). */
+	((powerpc_cpu *)host)->execute_invalidate_cache_range();
 }
 
 uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)

@@ -42,6 +42,7 @@ void nw_jit_helper_stb(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val);
 uint32_t nw_jit_helper_sraw(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t rb);
 void nw_jit_helper_lmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rd);
 void nw_jit_helper_stmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rs);
+void nw_jit_helper_isync(struct nw_jit_cpu *cpu);
 
 enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
@@ -71,6 +72,7 @@ static nw_jit_host_stw g_host_stw;
 static nw_jit_host_lwz_pa g_host_lwz_pa;
 static nw_jit_host_stw_pa g_host_stw_pa;
 static nw_jit_host_mfspr g_host_mfspr;
+static nw_jit_host_isync g_host_isync;
 static nw_jit_host_lh g_host_lh;
 static nw_jit_host_sth16 g_host_sth16;
 static nw_jit_host_lb g_host_lb;
@@ -181,6 +183,12 @@ static int cache_slot(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir, ui
 {
 	uint32_t h = phys_page ^ (guest_pc * 0x9e3779b1u) ^ (msr_ir << 16) ^ endian;
 	return (int)(h & (NW_JIT_CACHE - 1));
+}
+
+void nw_jit_helper_isync(struct nw_jit_cpu *cpu)
+{
+	if (g_host_isync && cpu->host)
+		g_host_isync(cpu->host);
 }
 
 static int page_bit_index(uint32_t phys_page, uint8_t **bits, unsigned *idx)
@@ -598,6 +606,11 @@ void nw_jit_set_host_mfspr(nw_jit_host_mfspr fn)
 	g_host_mfspr = fn;
 }
 
+void nw_jit_set_host_isync(nw_jit_host_isync fn)
+{
+	g_host_isync = fn;
+}
+
 void nw_jit_dtlb_flush(void)
 {
 	memset(g_dtlb, 0, sizeof(g_dtlb));
@@ -718,6 +731,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* srawi */
 	if (prim == 31 && xo == 598)
 		return 1;	/* sync */
+	if (prim == 19 && xo == 150)
+		return 1;	/* isync */
 	if (prim == 11)
 		return (rd & 3) == 0;	/* cmpi L=0, any crfD */
 	if (prim == 20 || prim == 21)
@@ -987,7 +1002,8 @@ int nw_jit_op_ends_block(uint32_t op)
 {
 	const int prim = (int)(op >> 26);
 	const int xo = (int)((op >> 1) & 0x3ff);
-	return prim == 16 || prim == 18 || (prim == 19 && (xo == 16 || xo == 528));
+	return prim == 16 || prim == 18 ||
+	       (prim == 19 && (xo == 16 || xo == 528 || xo == 150));
 }
 
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
@@ -2019,8 +2035,9 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		return 0;
 	}
 	if (prim == 19 && xo == 150) {
+		nw_jit_helper_isync(cpu);
 		cpu->pc = pc + 4;
-		return 0;
+		return 1;	/* end block: icbi range may have dropped later code */
 	}
 	if (prim == 16) {
 		const int bo = rd, bi = ra;
@@ -3936,6 +3953,23 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (op & 1)
 			return emit_cr0_from_w8(e);
 		return 1;
+	}
+	if (prim == 19 && xo == 150) {
+		/* Same as kpx execute_isync: host flushes pending icbi range
+		 * (NW JIT pages included), then ISB; leave the block. */
+		if (!emit_w(e, 0xaa1303e0u))		/* mov x0, x19 */
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_isync))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))		/* blr x9 */
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))		/* mov x0, x19 */
+			return 0;
+		if (!emit_w(e, 0xd5033fdfu))		/* ISB */
+			return 0;
+		if (!emit_set_pc(e, pc + 4))
+			return 0;
+		return emit_ret(e);
 	}
 	if (prim == 31 && xo == 598)
 		return emit_w(e, 0xd5033f9fu);	/* DMB SY */
