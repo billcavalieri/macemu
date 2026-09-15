@@ -10,6 +10,7 @@ JIT stays on. Emulate over skip. Do not retry known-bad emits as-is. After each 
 - [x] `isync` **helper** (`d3019fbe`): `execute_invalidate_cache_range` + ISB + end block. Not a skip.
 - [x] `dss` (31/822) **nop** (`a8eaab1b`): ARM NOP, does not end the block. `xo=822` gone from skip_unsup.
 - [x] Arena 8 MiB / 32k slots, last-probe evict (not home smash)
+- [x] Coldest-of-16-probe evict + ROM/68k hits bias (`/tmp/g8/cache`: splash / Starting Up / Finder+Control Strip). Evict 85% → 55% (2.93 M compiles / 1.62 M evict). DTLB 1024. Host flush calls 6350 → 504 (still 0 entries: host writes are not code pages). FB stores keep a host pointer; FB is not a code page.
 - [x] Page filter: RAM+ROM bits, clear after drop; **FB/IO never scanned** (`20d9fcda`)
 - [x] Host-side Mac OS ROM from volume image (contiguous `<CHRP-BOOT>` scan)
 - [x] `NW_JIT_STATS=1` 10 s ticks in Release; `evict` / `recompile_n` on the stats line

@@ -3291,6 +3291,27 @@ int main()
 		nw_jit_invalidate_page_src(0x50590000u, NW_JIT_FL_STORE);
 		CHECK(nw_jit_flush_count() == fl);
 		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == pa);
+
+		/* coldest-of-probe: a hot block survives a flood of new PCs */
+		nw_jit_reset();
+		nw_jit_set_code_pages(0, 0x1000000u, 0x68000000u, 0x400000u);
+		ops[0] = nw_ppc_addi(3, 0, 1);
+		ops[1] = nw_ppc_blr();
+		nw_jit_fn hot = nw_jit_compile(ops, 2, 0x1000u, 0x1000u, 0, 0);
+		CHECK(hot != NULL);
+		for (int i = 0; i < 64; i++)
+			CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == hot);
+		for (uint32_t pc = 0x1100u; pc < 0x1100u + 64u * 4u; pc += 4u)
+			(void)nw_jit_compile(ops, 2, pc, 0x1000u, 0, 0);
+		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == hot);
+		CHECK(nw_jit_evict_count() > 0 ||
+		      nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == hot);
+
+		/* 68k emulator window gets a hits bias */
+		nw_jit_fn emu = nw_jit_compile(ops, 2, 0x68066084u, 0x68066000u, 0, 0);
+		CHECK(emu != NULL);
+		CHECK(nw_jit_cache_get(0x68066000u, 0x68066084u, 0, 0, NULL) == emu);
+		CHECK(NW_JIT_DTLB_N == 1024);
 	}
 
 	/* WP3 4b: dispatcher cache sentinels, mode, op filter. */

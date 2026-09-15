@@ -167,11 +167,12 @@ int nw_jit_stats_wanted(void);
 
 /*
  * JIT data TLB: same EA→PA map as ppc32_mmu::translate (filled only after
- * a successful probe). Direct-mapped, 256 entries. Not a second translator.
+ * a successful probe). Direct-mapped, 1024 entries (ARM index mask
+ * must match a64_and_dtlb_idx). Not a second translator.
  * Hit is inlined; miss calls the C helper, which walks and fills.
  * Flush on tlbie/tlbia/mtsr/BAT/SDR1. MSR[DR] off skips the cache.
  */
-enum { NW_JIT_DTLB_N = 256 };
+enum { NW_JIT_DTLB_N = 1024 };
 enum {
 	NW_JIT_DTLB_VALID = 1u,
 	NW_JIT_DTLB_WRITE = 2u,
@@ -215,6 +216,7 @@ void nw_jit_set_host_lfd(nw_jit_host_lfd fn);
 typedef void (*nw_jit_host_stfd)(void *host, uint32_t ea, uint64_t val, uint32_t pc, int *fault);
 void nw_jit_set_host_stfd(nw_jit_host_stfd fn);
 uint64_t nw_jit_flush_count(void);
+uint64_t nw_jit_evict_count(void);
 uint64_t nw_jit_compile_count(void);
 void nw_jit_stats_print(const char *why);
 

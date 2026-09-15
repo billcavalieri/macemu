@@ -886,7 +886,7 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 {
 	if (!ppc32_guest_mmu_enabled()) {
 #ifdef SHEEPSHAVER
-		last_fetch_pa_ = pc();
+		last_fetch_pa_ = nw_la_to_pa(pc());
 #endif
 		*opcode = vm_read_memory_4(pc());
 		return true;
@@ -1351,10 +1351,12 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 	}
 	vm_write_memory_4(pa, val);
 	if (ppc32_guest_mmu_enabled() &&
-	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
-		nw_jit_dtlb_fill(ea, pa, 1,
-			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu));
-	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR)) {
+		uint8 *hostp = vm_do_get_real_address(pa & ~0xfffu);
+		nw_jit_dtlb_fill(ea, pa, 1, (uint64_t)(uintptr_t)hostp);
+	}
+	if (kind != NW_PA_FB)
+		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
 		*fault = NW_JIT_FAULT_SMC;
 }
@@ -1392,7 +1394,8 @@ void powerpc_cpu::jit_host_stw_pa(void *host, uint32 pa, uint32 val, uint32 pc, 
 		return;
 	}
 	vm_write_memory_4(pa, val);
-	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	if (kind != NW_PA_FB)
+		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
 		*fault = NW_JIT_FAULT_SMC;
 }
@@ -1581,7 +1584,8 @@ void powerpc_cpu::jit_host_stfd(void *host, uint32 ea, uint64 val, uint32 pc, in
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
 		nw_jit_dtlb_fill(ea, pa, 1,
 			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu));
-	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	if (kind != NW_PA_FB)
+		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
 		*fault = NW_JIT_FAULT_SMC;
 }
@@ -1628,7 +1632,8 @@ void powerpc_cpu::jit_host_sth(void *host, uint32 ea, uint32 val, uint32 pc, int
 		return;
 	}
 	vm_write_memory_2(pa, val);
-	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	if (kind != NW_PA_FB)
+		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
 		*fault = NW_JIT_FAULT_SMC;
 }
@@ -1675,7 +1680,8 @@ void powerpc_cpu::jit_host_stb(void *host, uint32 ea, uint32 val, uint32 pc, int
 		return;
 	}
 	vm_write_memory_1(pa, val);
-	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	if (kind != NW_PA_FB)
+		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
 		*fault = NW_JIT_FAULT_SMC;
 }

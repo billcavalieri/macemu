@@ -52,7 +52,8 @@ void nw_jit_helper_stvx(struct nw_jit_cpu *cpu, uint32_t vs, uint32_t ra, uint32
 void nw_jit_helper_lfd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t ra, uint32_t simm);
 void nw_jit_helper_stfd(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ra, uint32_t simm);
 
-enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
+enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 16 };
+enum { NW_JIT_HITS_ROM = 64, NW_JIT_HITS_AGE = 4096 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
 
 struct nw_jit_entry {
@@ -60,6 +61,7 @@ struct nw_jit_entry {
 	nw_jit_fn fn;
 	uint8_t used;
 	uint8_t n;
+	uint16_t hits;
 };
 
 static uint8_t *g_code;
@@ -421,7 +423,7 @@ static int page_may_have_code(uint32_t phys_page)
 	uint8_t *bits;
 	unsigned i;
 	if (!page_bit_index(phys_page, &bits, &i))
-		return 1;
+		return g_ram_size == 0 && g_rom_size == 0;
 	return bits[i >> 3] & (uint8_t)(1u << (i & 7u));
 }
 
@@ -541,6 +543,11 @@ uint64_t nw_jit_flush_count(void)
 uint64_t nw_jit_compile_count(void)
 {
 	return g_compiles;
+}
+
+uint64_t nw_jit_evict_count(void)
+{
+	return g_evict;
 }
 
 int nw_jit_stats_wanted(void)
@@ -1255,6 +1262,8 @@ nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 			continue;
 		if (g_cache[j].phys_page == phys_page && g_cache[j].guest_pc == guest_pc &&
 		    g_cache[j].msr_ir == msr_ir && g_cache[j].endian == endian) {
+			if (g_cache[j].hits < 0xffffu)
+				g_cache[j].hits++;
 			if (n_out)
 				*n_out = g_cache[j].n;
 			return g_cache[j].fn;
@@ -1281,8 +1290,22 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 			break;
 		}
 	}
-	if (slot < 0)
-		slot = (empty >= 0) ? empty : ((i + NW_JIT_PROBE - 1) & (NW_JIT_CACHE - 1));
+	if (slot < 0) {
+		if (empty >= 0)
+			slot = empty;
+		else {
+			int best = i;
+			uint16_t best_h = 0xffffu;
+			for (int p = 0; p < NW_JIT_PROBE; p++) {
+				int j = (i + p) & (NW_JIT_CACHE - 1);
+				if (g_cache[j].hits < best_h) {
+					best_h = g_cache[j].hits;
+					best = j;
+				}
+			}
+			slot = best;
+		}
+	}
 	const int same = g_cache[slot].used &&
 		g_cache[slot].phys_page == phys_page &&
 		g_cache[slot].guest_pc == guest_pc &&
@@ -1297,6 +1320,15 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 	g_cache[slot].fn = fn;
 	g_cache[slot].used = 1;
 	g_cache[slot].n = (uint8_t)(n < 0 ? 0 : n > 255 ? 255 : n);
+	if (!same) {
+		uint16_t h = 1;
+		if (g_rom_size != 0 && phys_page >= g_rom_base &&
+		    phys_page - g_rom_base < g_rom_size)
+			h = NW_JIT_HITS_ROM;
+		if (guest_pc >= 0x68000000u && guest_pc < 0x68c00000u)
+			h = (uint16_t)(h + NW_JIT_HITS_ROM);
+		g_cache[slot].hits = h;
+	}
 	pagebit_set(phys_page);
 }
 
@@ -3064,9 +3096,10 @@ static uint32_t a64_add_x_lsl(int rd, int rn, int rm, int sh)
 	       ((uint32_t)rn << 5) | (uint32_t)rd;
 }
 
-static uint32_t a64_and_imm8(int rd, int rn)
+static uint32_t a64_and_dtlb_idx(int rd, int rn)
 {
-	return 0x12001c00u | ((uint32_t)rn << 5) | (uint32_t)rd;
+	static_assert(NW_JIT_DTLB_N == 1024, "AND #0x3ff");
+	return 0x12002400u | ((uint32_t)rn << 5) | (uint32_t)rd;
 }
 
 /* W8 = EA. Hit: helper_pa(cpu, pa). Miss: helper_ea(cpu, ea). W2 preserved. */
@@ -3082,7 +3115,7 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 		return 0;
 	if (!emit_w(e, a64_lsr(W9, W8, 12)))
 		return 0;
-	if (!emit_w(e, a64_and_imm8(W9, W9)))
+	if (!emit_w(e, a64_and_dtlb_idx(W9, W9)))
 		return 0;
 	if (!emit_w(e, a64_add_x_lsl(X11, X10, 9, 5)))
 		return 0;
@@ -4874,6 +4907,10 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 		nw_jit_invalidate_all_src(NW_JIT_FL_WRAP);
 	}
 	g_compiles++;
+	if ((g_compiles & (NW_JIT_HITS_AGE - 1u)) == 0) {
+		for (int i = 0; i < NW_JIT_CACHE; i++)
+			g_cache[i].hits >>= 1;
+	}
 #ifdef __APPLE__
 	pthread_jit_write_protect_np(0);
 #endif
