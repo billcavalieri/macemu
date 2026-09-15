@@ -44,6 +44,7 @@ uint32_t nw_jit_helper_sraw(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t rb);
 void nw_jit_helper_lmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rd);
 void nw_jit_helper_stmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rs);
 void nw_jit_helper_isync(struct nw_jit_cpu *cpu);
+void nw_jit_helper_mtmsr(struct nw_jit_cpu *cpu, uint32_t msr);
 
 enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
@@ -74,6 +75,7 @@ static nw_jit_host_lwz_pa g_host_lwz_pa;
 static nw_jit_host_stw_pa g_host_stw_pa;
 static nw_jit_host_mfspr g_host_mfspr;
 static nw_jit_host_isync g_host_isync;
+static nw_jit_host_mtmsr g_host_mtmsr;
 static nw_jit_host_lh g_host_lh;
 static nw_jit_host_sth16 g_host_sth16;
 static nw_jit_host_lb g_host_lb;
@@ -122,6 +124,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 824, "srawi", 0, 0, 0},
 	{31, 598, "sync", 0, 0, 0},
 	{31, 822, "dss", 0, 0, 0},
+	{31, 146, "mtmsr", 0, 0, 0},
 	{19, 150, "isync", 0, 0, 0},
 	{21, -1, "rlwinm", 0, 0, 0},
 	{23, -1, "rlwnm", 0, 0, 0},
@@ -191,6 +194,15 @@ void nw_jit_helper_isync(struct nw_jit_cpu *cpu)
 {
 	if (g_host_isync && cpu->host)
 		g_host_isync(cpu->host);
+}
+
+void nw_jit_helper_mtmsr(struct nw_jit_cpu *cpu, uint32_t msr)
+{
+	cpu->msr = msr;
+	if (g_host_mtmsr && cpu->host)
+		g_host_mtmsr(cpu->host, msr);
+	else
+		nw_jit_dtlb_flush();
 }
 
 static int page_bit_index(uint32_t phys_page, uint8_t **bits, unsigned *idx)
@@ -620,6 +632,11 @@ void nw_jit_set_host_isync(nw_jit_host_isync fn)
 	g_host_isync = fn;
 }
 
+void nw_jit_set_host_mtmsr(nw_jit_host_mtmsr fn)
+{
+	g_host_mtmsr = fn;
+}
+
 void nw_jit_dtlb_flush(void)
 {
 	memset(g_dtlb, 0, sizeof(g_dtlb));
@@ -742,6 +759,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* sync */
 	if (prim == 31 && xo == 822)
 		return 1;	/* dss (kpx nop) */
+	if (prim == 31 && xo == 146)
+		return 1;	/* mtmsr */
 	if (prim == 19 && xo == 150)
 		return 1;	/* isync */
 	if (prim == 11)
@@ -1014,7 +1033,8 @@ int nw_jit_op_ends_block(uint32_t op)
 	const int prim = (int)(op >> 26);
 	const int xo = (int)((op >> 1) & 0x3ff);
 	return prim == 16 || prim == 18 ||
-	       (prim == 19 && (xo == 16 || xo == 528 || xo == 150));
+	       (prim == 19 && (xo == 16 || xo == 528 || xo == 150)) ||
+	       (prim == 31 && xo == 146);
 }
 
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
@@ -1243,6 +1263,11 @@ uint32_t nw_ppc_sync(void)
 uint32_t nw_ppc_dss(void)
 {
 	return (31u << 26) | (16u << 21) | (822u << 1);
+}
+
+uint32_t nw_ppc_mtmsr(int rs)
+{
+	return (31u << 26) | ((uint32_t)rs << 21) | (146u << 1);
 }
 
 uint32_t nw_ppc_isync(void)
@@ -2053,6 +2078,11 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 	if (prim == 31 && xo == 822) {
 		cpu->pc = pc + 4;
 		return 0;
+	}
+	if (prim == 31 && xo == 146) {
+		nw_jit_helper_mtmsr(cpu, cpu->gpr[rd]);
+		cpu->pc = pc + 4;
+		return 1;
 	}
 	if (prim == 19 && xo == 150) {
 		nw_jit_helper_isync(cpu);
@@ -3995,6 +4025,24 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		return emit_w(e, 0xd5033f9fu);	/* DMB SY */
 	if (prim == 31 && xo == 822)
 		return emit_w(e, 0xd503201fu);	/* NOP; kpx dss is a no-op */
+	if (prim == 31 && xo == 146) {
+		/* Same as kpx execute_mtmsr: set_msr(rS), flush DTLB, leave the block. */
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_load_gpr(e, W1, rd))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_mtmsr))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_set_pc(e, pc + 4))
+			return 0;
+		return emit_ret(e);
+	}
 	if (prim == 31 && xo == 19) {
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;

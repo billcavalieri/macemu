@@ -358,6 +358,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_pa(powerpc_cpu::jit_host_lwz_pa, powerpc_cpu::jit_host_stw_pa);
 		nw_jit_set_host_mfspr(powerpc_cpu::jit_host_mfspr);
 		nw_jit_set_host_isync(powerpc_cpu::jit_host_isync);
+		nw_jit_set_host_mtmsr(powerpc_cpu::jit_host_mtmsr);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
 		nw_jit_set_host_byte(powerpc_cpu::jit_host_lb, powerpc_cpu::jit_host_stb);
 	}
@@ -1420,6 +1421,21 @@ void powerpc_cpu::jit_host_isync(void *host)
 	/* Same as execute_isync without the PC bump: apply the pending
 	 * icbi range (kpx decode cache + NW JIT pages). */
 	((powerpc_cpu *)host)->execute_invalidate_cache_range();
+}
+
+void powerpc_cpu::jit_host_mtmsr(void *host, uint32 msr)
+{
+	/* Same as execute_mtmsr without the PC bump. */
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	if (ppc32_guest_mmu_enabled()) {
+		ppc32_guest_mmu().set_msr(msr);
+#ifdef SHEEPSHAVER
+		nw_log_msr_dr(msr);
+		nw_log_msr_write("mtmsr", ppc->pc(), msr);
+#endif
+	}
+	nw_jit_dtlb_flush();
+	(void)ppc;
 }
 
 uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)

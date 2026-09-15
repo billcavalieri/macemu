@@ -197,6 +197,9 @@ void nw_jit_set_host_mfspr(nw_jit_host_mfspr fn);
  * JIT pages), then the emitter does ISB. No PC bump; the JIT owns PC. */
 typedef void (*nw_jit_host_isync)(void *host);
 void nw_jit_set_host_isync(nw_jit_host_isync fn);
+/* Same work as kpx execute_mtmsr: set_msr(rS), no PC bump. */
+typedef void (*nw_jit_host_mtmsr)(void *host, uint32_t msr);
+void nw_jit_set_host_mtmsr(nw_jit_host_mtmsr fn);
 uint64_t nw_jit_flush_count(void);
 uint64_t nw_jit_compile_count(void);
 void nw_jit_stats_print(const char *why);
@@ -266,6 +269,7 @@ uint32_t nw_ppc_sraw(int ra, int rs, int rb, int rc);
 uint32_t nw_ppc_srawi(int ra, int rs, int sh, int rc);
 uint32_t nw_ppc_sync(void);
 uint32_t nw_ppc_dss(void);
+uint32_t nw_ppc_mtmsr(int rs);
 uint32_t nw_ppc_isync(void);
 uint32_t nw_ppc_b(int disp, int lk);
 uint32_t nw_ppc_bc(int bo, int bi, int disp);

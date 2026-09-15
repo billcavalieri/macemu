@@ -356,6 +356,7 @@ public:
 	static void jit_host_stw_pa(void *host, uint32 pa, uint32 val, uint32 pc, int *fault);
 	static uint32 jit_host_mfspr(void *host, uint32 spr);
 	static void jit_host_isync(void *host);
+	static void jit_host_mtmsr(void *host, uint32 msr);
 	static uint32 jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault);
 	static void jit_host_sth(void *host, uint32 ea, uint32 val, uint32 pc, int *fault);
 	static uint32 jit_host_lb(void *host, uint32 ea, uint32 pc, int *fault);
