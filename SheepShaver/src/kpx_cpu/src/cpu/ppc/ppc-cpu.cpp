@@ -362,6 +362,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_mtspr(powerpc_cpu::jit_host_mtspr);
 		nw_jit_set_host_lvx(powerpc_cpu::jit_host_lvx);
 		nw_jit_set_host_stvx(powerpc_cpu::jit_host_stvx);
+		nw_jit_set_host_lfd(powerpc_cpu::jit_host_lfd);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
 		nw_jit_set_host_byte(powerpc_cpu::jit_host_lb, powerpc_cpu::jit_host_stb);
 	}
@@ -1526,6 +1527,34 @@ void powerpc_cpu::jit_host_stvx(void *host, uint32 ea, const uint32 *w, uint32 p
 	jit_host_stw(host, ea + 12, w[3], pc, fault);
 }
 
+void powerpc_cpu::jit_host_lfd(void *host, uint32 fd, uint32 ea, uint32 pc, int *fault, uint64 *out)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	(void)pc;
+	uint32 pa;
+	if (!ppc->guest_data_probe(ea, 8, false, &pa)) {
+		*fault = 1;
+		return;
+	}
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
+		return;
+	}
+	if (kind == NW_PA_NONE) {
+		*fault = 1;
+		return;
+	}
+	if (ppc32_guest_mmu_enabled() &&
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
+		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM,
+			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu));
+	const uint64 v = vm_read_memory_8(pa);
+	ppc->fpr_dw((int)fd) = v;
+	if (out)
+		*out = v;
+}
+
 uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
@@ -1696,7 +1725,9 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 	else if (prim == 44 || prim == 45) {
 		width = 2;
 		is_st = 1;
-	} else if (prim == 46 || prim == 47) {
+	} else if (prim == 50)
+		width = 8;
+	else if (prim == 46 || prim == 47) {
 		const int rd = (int)((op >> 21) & 0x1f);
 		width = 4 * (32 - rd);
 		is_st = (prim == 47);
@@ -1961,6 +1992,8 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		jc.vr[i][2] = vr(i).w[2];
 		jc.vr[i][3] = vr(i).w[3];
 	}
+	for (int i = 0; i < 32; i++)
+		jc.fpr[i] = fpr_dw(i);
 	jc.cr = cr().get();
 	jc.xer = xer().get();
 	jc.lr = lr();
@@ -2060,6 +2093,8 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	if (mode == NW_JIT_ON) {
 		for (int i = 0; i < 32; i++)
 			gpr(i) = jc.gpr[i];
+		for (int i = 0; i < 32; i++)
+			fpr_dw(i) = jc.fpr[i];
 		cr().set(jc.cr);
 		xer().set(jc.xer);
 		lr() = jc.lr;

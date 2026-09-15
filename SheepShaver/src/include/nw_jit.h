@@ -46,6 +46,7 @@ enum { NW_JIT_MAX_BLOCK = 16 };
 struct nw_jit_cpu {
 	uint32_t gpr[32];
 	uint32_t vr[32][4];	/* AltiVec, big-endian word order */
+	uint64_t fpr[32];	/* IEEE754 bits, PowerPC dw order */
 	uint32_t cr;
 	uint32_t xer;
 	uint32_t lr;
@@ -209,6 +210,8 @@ typedef void (*nw_jit_host_lvx)(void *host, uint32_t vd, uint32_t ea, uint32_t p
 void nw_jit_set_host_lvx(nw_jit_host_lvx fn);
 typedef void (*nw_jit_host_stvx)(void *host, uint32_t ea, const uint32_t *w, uint32_t pc, int *fault);
 void nw_jit_set_host_stvx(nw_jit_host_stvx fn);
+typedef void (*nw_jit_host_lfd)(void *host, uint32_t fd, uint32_t ea, uint32_t pc, int *fault, uint64_t *out);
+void nw_jit_set_host_lfd(nw_jit_host_lfd fn);
 uint64_t nw_jit_flush_count(void);
 uint64_t nw_jit_compile_count(void);
 void nw_jit_stats_print(const char *why);
@@ -288,6 +291,7 @@ uint32_t nw_ppc_bc(int bo, int bi, int disp);
 uint32_t nw_ppc_blr(void);
 uint32_t nw_ppc_mfspr(int rd, int spr);
 uint32_t nw_ppc_mtspr(int spr, int rs);
+uint32_t nw_ppc_lfd(int frd, int ra, int d);
 
 enum {
 	NW_PPC_SPR_XER = 1,

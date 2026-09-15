@@ -2742,6 +2742,29 @@ int main()
 			CHECK(ram[32] == 0xa0 && ram[47] == 0xaf);
 		}
 
+		/* lfd f3, 8(r1) */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			ram[8] = 0x40; ram[9] = 0x09; ram[10] = 0x21; ram[11] = 0xfb;
+			ram[12] = 0x54; ram[13] = 0x44; ram[14] = 0x2d; ram[15] = 0x18;
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 0;
+			ops[0] = nw_ppc_lfd(3, 1, 8);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x17f0u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x17f0u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.fpr[3] == 0x400921fb54442d18ull &&
+			      b.fpr[3] == a.fpr[3]);
+		}
+
 		/* stbu r4, 4(r1): store then r1 = EA */
 		{
 			uint8_t ram[64];
@@ -3196,6 +3219,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_lbzu(3, 1, 4)));
 		CHECK(nw_jit_op_supported(nw_ppc_lvx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stvx(3, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_lfd(3, 1, 8)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stb(3, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_stbu(4, 1, 4)));
