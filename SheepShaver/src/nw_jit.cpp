@@ -181,6 +181,7 @@ static struct nw_jit_hist g_hist[] = {
 	{54, -1, "stfd", 0, 0, 0},
 	{31, 235, "mullw", 0, 0, 0},
 	{31, 11, "mulhwu", 0, 0, 0},
+	{31, 60, "andc", 0, 0, 0},
 };
 
 static uint64_t g_v_cmp, g_v_miss, g_v_fail, g_v_skip_unsup, g_v_skip_mem;
@@ -1027,6 +1028,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* mullw */
 	if (prim == 31 && xo == 11)
 		return 1;	/* mulhwu */
+	if (prim == 31 && xo == 60)
+		return 1;	/* andc */
 	return 0;
 }
 
@@ -1687,6 +1690,12 @@ uint32_t nw_ppc_and(int ra, int rs, int rb, int rc)
 {
 	return (31u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
 	       ((uint32_t)rb << 11) | (28u << 1) | (rc ? 1u : 0);
+}
+
+uint32_t nw_ppc_andc(int ra, int rs, int rb, int rc)
+{
+	return (31u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | (60u << 1) | (rc ? 1u : 0);
 }
 
 uint32_t nw_ppc_cntlzw(int ra, int rs, int rc)
@@ -2517,6 +2526,13 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 	}
 	if (prim == 31 && xo == 28) {
 		cpu->gpr[ra] = cpu->gpr[rd] & cpu->gpr[rb];
+		if (op & 1)
+			record_cr0(cpu, (int32_t)cpu->gpr[ra]);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 60) {
+		cpu->gpr[ra] = cpu->gpr[rd] & ~cpu->gpr[rb];
 		if (op & 1)
 			record_cr0(cpu, (int32_t)cpu->gpr[ra]);
 		cpu->pc = pc + 4;
@@ -4463,6 +4479,19 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_load_gpr(e, W9, rb))
 			return 0;
 		if (!emit_w(e, a64_and_reg(W8, W8, W9)))
+			return 0;
+		if (!emit_store_gpr(e, W8, ra))
+			return 0;
+		if (op & 1)
+			return emit_cr0_from_w8(e);
+		return 1;
+	}
+	if (prim == 31 && xo == 60) {
+		if (!emit_load_gpr(e, W8, rd))
+			return 0;
+		if (!emit_load_gpr(e, W9, rb))
+			return 0;
+		if (!emit_w(e, a64_bic(W8, W8, W9)))
 			return 0;
 		if (!emit_store_gpr(e, W8, ra))
 			return 0;

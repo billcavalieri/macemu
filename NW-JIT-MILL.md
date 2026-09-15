@@ -29,7 +29,7 @@ JIT stays on. Emulate over skip. Do not retry known-bad emits as-is. After each 
 | [x] | **54** | **stfd** | **2.87 M** | kpx `guest_data_probe` 8 B store from FPR. `/tmp/g8/stfd` splash/DFA Done. prim=54 gone. |
 | [x] | **31/235** | **mullw** | **2.68 M** | ARM `MUL`. `/tmp/g8/mullw` splash/DFA Done. `xo=235` gone. |
 | [x] | **31/11** | **mulhwu** | **2.37 M** | ARM `UMULL` + `LSR #32`. `/tmp/g8/mulhwu` splash/DFA Done. `xo=11` gone. |
-| [ ] | **31/60** | **andc** | **1.90 M** | `rA = rS AND NOT rB`. Same shape as `and`. Cheapest leftover logical. |
+| [x] | **31/60** | **andc** | **1.90 M** | ARM `BIC`. `/tmp/g8/andc` splash/DFA Done. `xo=60` gone. |
 
 Earlier ticks (not always in the last top-12, still live):
 
