@@ -2553,6 +2553,20 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[3] == 0x1111u && b.gpr[3] == 0x1111u);
 
+		/* dss is a nop; GPRs unchanged; does not end the block */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x3333u;
+		ops[0] = nw_ppc_dss();
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1770u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1770u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[3] == 0x3333u && b.gpr[3] == 0x3333u);
+		CHECK(nw_jit_op_ends_block(nw_ppc_dss()) == 0);
+
 		/* isync: host flushes pending icbi; GPRs unchanged; ends block */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -3066,6 +3080,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_sraw(4, 8, 9, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_srawi(4, 8, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_sync()));
+		CHECK(nw_jit_op_supported(nw_ppc_dss()));
 		CHECK(nw_jit_op_supported(nw_ppc_isync()));
 		CHECK(nw_jit_op_supported(nw_ppc_lhax(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lhaux(3, 1, 2)));

@@ -121,6 +121,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 792, "sraw", 0, 0, 0},
 	{31, 824, "srawi", 0, 0, 0},
 	{31, 598, "sync", 0, 0, 0},
+	{31, 822, "dss", 0, 0, 0},
 	{19, 150, "isync", 0, 0, 0},
 	{21, -1, "rlwinm", 0, 0, 0},
 	{23, -1, "rlwnm", 0, 0, 0},
@@ -739,6 +740,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* srawi */
 	if (prim == 31 && xo == 598)
 		return 1;	/* sync */
+	if (prim == 31 && xo == 822)
+		return 1;	/* dss (kpx nop) */
 	if (prim == 19 && xo == 150)
 		return 1;	/* isync */
 	if (prim == 11)
@@ -1235,6 +1238,11 @@ uint32_t nw_ppc_srawi(int ra, int rs, int sh, int rc)
 uint32_t nw_ppc_sync(void)
 {
 	return (31u << 26) | (598u << 1);
+}
+
+uint32_t nw_ppc_dss(void)
+{
+	return (31u << 26) | (16u << 21) | (822u << 1);
 }
 
 uint32_t nw_ppc_isync(void)
@@ -2039,6 +2047,10 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		return 0;
 	}
 	if (prim == 31 && xo == 598) {
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 822) {
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -3981,6 +3993,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	}
 	if (prim == 31 && xo == 598)
 		return emit_w(e, 0xd5033f9fu);	/* DMB SY */
+	if (prim == 31 && xo == 822)
+		return emit_w(e, 0xd503201fu);	/* NOP; kpx dss is a no-op */
 	if (prim == 31 && xo == 19) {
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
