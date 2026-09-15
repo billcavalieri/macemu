@@ -261,6 +261,8 @@ uint32_t nw_ppc_andc(int ra, int rs, int rb, int rc);
 uint32_t nw_ppc_cntlzw(int ra, int rs, int rc);
 uint32_t nw_ppc_neg(int rd, int ra, int rc);
 uint32_t nw_ppc_ori(int ra, int rs, unsigned uimm);
+uint32_t nw_ppc_xori(int ra, int rs, unsigned uimm);
+uint32_t nw_ppc_xoris(int ra, int rs, unsigned uimm);
 uint32_t nw_ppc_cmp(int ra, int rb);
 uint32_t nw_ppc_cmp_cr(int crfd, int ra, int rb);
 uint32_t nw_ppc_cmpi(int ra, int simm);

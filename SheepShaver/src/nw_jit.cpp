@@ -182,6 +182,8 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 235, "mullw", 0, 0, 0},
 	{31, 11, "mulhwu", 0, 0, 0},
 	{31, 60, "andc", 0, 0, 0},
+	{26, -1, "xori", 0, 0, 0},
+	{27, -1, "xoris", 0, 0, 0},
 };
 
 static uint64_t g_v_cmp, g_v_miss, g_v_fail, g_v_skip_unsup, g_v_skip_mem;
@@ -1030,6 +1032,10 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* mulhwu */
 	if (prim == 31 && xo == 60)
 		return 1;	/* andc */
+	if (prim == 26)
+		return 1;	/* xori */
+	if (prim == 27)
+		return 1;	/* xoris */
 	return 0;
 }
 
@@ -1713,6 +1719,18 @@ uint32_t nw_ppc_neg(int rd, int ra, int rc)
 uint32_t nw_ppc_ori(int ra, int rs, unsigned uimm)
 {
 	return (24u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
+	       (uimm & 0xffffu);
+}
+
+uint32_t nw_ppc_xori(int ra, int rs, unsigned uimm)
+{
+	return (26u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
+	       (uimm & 0xffffu);
+}
+
+uint32_t nw_ppc_xoris(int ra, int rs, unsigned uimm)
+{
+	return (27u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
 	       (uimm & 0xffffu);
 }
 
@@ -2456,6 +2474,16 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 	}
 	if (prim == 24) {
 		cpu->gpr[ra] = cpu->gpr[rd] | (op & 0xffffu);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 26) {
+		cpu->gpr[ra] = cpu->gpr[rd] ^ (op & 0xffffu);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 27) {
+		cpu->gpr[ra] = cpu->gpr[rd] ^ ((op & 0xffffu) << 16);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -3758,6 +3786,24 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_imm32(e, W9, op & 0xffffu))
 			return 0;
 		if (!emit_w(e, a64_orr_reg(W8, W8, W9)))
+			return 0;
+		return emit_store_gpr(e, W8, ra);
+	}
+	if (prim == 26) {
+		if (!emit_load_gpr(e, W8, rd))
+			return 0;
+		if (!emit_imm32(e, W9, op & 0xffffu))
+			return 0;
+		if (!emit_w(e, a64_eor_reg(W8, W8, W9)))
+			return 0;
+		return emit_store_gpr(e, W8, ra);
+	}
+	if (prim == 27) {
+		if (!emit_load_gpr(e, W8, rd))
+			return 0;
+		if (!emit_imm32(e, W9, (op & 0xffffu) << 16))
+			return 0;
+		if (!emit_w(e, a64_eor_reg(W8, W8, W9)))
 			return 0;
 		return emit_store_gpr(e, W8, ra);
 	}
