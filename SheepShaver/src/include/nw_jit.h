@@ -157,6 +157,9 @@ void nw_jit_invalidate_page_src(uint32_t phys_page, int src);
 void nw_jit_invalidate_range_src(uint32_t pa, uint32_t nbytes, int src);
 void nw_jit_invalidate_all(void);
 void nw_jit_invalidate_all_src(int src);
+void nw_jit_set_code_pages(uint32_t ram_base, uint32_t ram_size,
+			   uint32_t rom_base, uint32_t rom_size);
+int nw_jit_stats_wanted(void);
 
 /*
  * JIT data TLB: same EA→PA map as ppc32_mmu::translate (filled only after

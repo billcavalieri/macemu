@@ -1273,25 +1273,34 @@ void nw_event_aline(uint32_t op, uint32_t pc68k, int handler)
 
 void nw_event_tick(uint32_t pc, uint32_t msr)
 {
-#if NW_BOOT_LOG
+	if (!nw_jit_stats_wanted()) {
+#if !NW_BOOT_LOG
+		(void)pc;
+		(void)msr;
+		return;
+#endif
+	}
 	static time_t last;
 	struct timeval tv;
 	gettimeofday(&tv, NULL);
 	if (tv.tv_sec == last)
 		return;
 	last = tv.tv_sec;
+#if NW_BOOT_LOG
 	printf("NW-BOOT T %lld %lu %lu %08x %08x %llu %lu %llu\n",
 	       (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000,
 	       nw_event_nx, nw_event_na, (unsigned)pc, (unsigned)msr,
 	       nw_event_ni, nw_event_nf, (unsigned long long)nw_jit_flush_count());
 	fflush(stdout);
-	static unsigned tsec;
-	if ((++tsec % 10u) == 0) {
-		nw_jit_pc_hot_dump("tick");
-		nw_jit_stats_print("tick");
-	}
 #else
 	(void)pc;
 	(void)msr;
 #endif
+	static unsigned tsec;
+	if ((++tsec % 10u) == 0) {
+#if NW_BOOT_LOG
+		nw_jit_pc_hot_dump("tick");
+#endif
+		nw_jit_stats_print("tick");
+	}
 }

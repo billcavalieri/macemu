@@ -43,7 +43,8 @@ uint32_t nw_jit_helper_sraw(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t rb);
 void nw_jit_helper_lmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rd);
 void nw_jit_helper_stmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rs);
 
-enum { NW_JIT_CODE_SIZE = 1 << 20, NW_JIT_CACHE = 4096, NW_JIT_PROBE = 8 };
+enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
+enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
 
 struct nw_jit_entry {
 	uint32_t phys_page, guest_pc, msr_ir, endian;
@@ -55,11 +56,14 @@ struct nw_jit_entry {
 static uint8_t *g_code;
 static size_t g_code_used;
 static struct nw_jit_entry g_cache[NW_JIT_CACHE];
-static uint8_t g_pagebit[512];	/* 4096 bits: (phys>>12)&4095 may have compiled code */
+static uint16_t g_page_n_ram[NW_JIT_RAM_PAGES];
+static uint16_t g_page_n_rom[NW_JIT_ROM_PAGES];
+static uint32_t g_ram_base, g_ram_size, g_rom_base, g_rom_size;
 static uint64_t g_flush;
 static uint64_t g_flush_src[NW_JIT_FL_N];	/* entries dropped, by cause */
 static uint64_t g_flush_calls[NW_JIT_FL_N];	/* invalidate calls, by cause */
 static uint64_t g_compiles;
+static uint64_t g_evict, g_recompile_n;
 static uint64_t g_exec_blocks, g_exec_insns;
 static int g_mode = -1;
 static nw_jit_host_lwz g_host_lwz;
@@ -179,16 +183,57 @@ static int cache_slot(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir, ui
 	return (int)(h & (NW_JIT_CACHE - 1));
 }
 
-static void pagebit_set(uint32_t phys_page)
+static uint16_t *page_count_ptr(uint32_t phys_page)
 {
-	const unsigned i = (phys_page >> 12) & 4095u;
-	g_pagebit[i >> 3] |= (uint8_t)(1u << (i & 7u));
+	phys_page &= ~0xfffu;
+	if (g_ram_size != 0 && phys_page >= g_ram_base &&
+	    phys_page - g_ram_base < g_ram_size) {
+		const unsigned i = (phys_page - g_ram_base) >> 12;
+		if (i < (unsigned)NW_JIT_RAM_PAGES)
+			return &g_page_n_ram[i];
+		return NULL;
+	}
+	if (g_rom_size != 0 && phys_page >= g_rom_base &&
+	    phys_page - g_rom_base < g_rom_size) {
+		const unsigned i = (phys_page - g_rom_base) >> 12;
+		if (i < (unsigned)NW_JIT_ROM_PAGES)
+			return &g_page_n_rom[i];
+		return NULL;
+	}
+	return NULL;
 }
 
-static int pagebit_get(uint32_t phys_page)
+static int page_may_have_code(uint32_t phys_page)
 {
-	const unsigned i = (phys_page >> 12) & 4095u;
-	return g_pagebit[i >> 3] & (uint8_t)(1u << (i & 7u));
+	uint16_t *c = page_count_ptr(phys_page);
+	if (c == NULL)
+		return 1;
+	return *c != 0;
+}
+
+static void page_count_inc(uint32_t phys_page)
+{
+	uint16_t *c = page_count_ptr(phys_page);
+	if (c != NULL && *c < 0xffffu)
+		(*c)++;
+}
+
+static void page_count_dec(uint32_t phys_page)
+{
+	uint16_t *c = page_count_ptr(phys_page);
+	if (c != NULL && *c > 0)
+		(*c)--;
+}
+
+void nw_jit_set_code_pages(uint32_t ram_base, uint32_t ram_size,
+			   uint32_t rom_base, uint32_t rom_size)
+{
+	g_ram_base = ram_base & ~0xfffu;
+	g_ram_size = ram_size;
+	g_rom_base = rom_base & ~0xfffu;
+	g_rom_size = rom_size;
+	memset(g_page_n_ram, 0, sizeof(g_page_n_ram));
+	memset(g_page_n_rom, 0, sizeof(g_page_n_rom));
 }
 
 static int code_ready(void)
@@ -208,10 +253,13 @@ static int code_ready(void)
 void nw_jit_reset(void)
 {
 	memset(g_cache, 0, sizeof(g_cache));
-	memset(g_pagebit, 0, sizeof(g_pagebit));
+	memset(g_page_n_ram, 0, sizeof(g_page_n_ram));
+	memset(g_page_n_rom, 0, sizeof(g_page_n_rom));
 	g_code_used = 0;
 	g_flush = 0;
 	g_compiles = 0;
+	g_evict = 0;
+	g_recompile_n = 0;
 	memset(g_flush_src, 0, sizeof(g_flush_src));
 	memset(g_flush_calls, 0, sizeof(g_flush_calls));
 	g_exec_blocks = 0;
@@ -232,12 +280,13 @@ void nw_jit_invalidate_page_src(uint32_t phys_page, int src)
 	phys_page &= ~0xfffu;
 	if (src < 0 || src >= NW_JIT_FL_N)
 		src = NW_JIT_FL_OTHER;
-	if (!pagebit_get(phys_page))
+	if (!page_may_have_code(phys_page))
 		return;
 	g_flush_calls[src]++;
 	for (int i = 0; i < NW_JIT_CACHE; i++) {
 		if (g_cache[i].used && g_cache[i].phys_page == phys_page) {
 			g_cache[i].used = 0;
+			page_count_dec(phys_page);
 			g_flush++;
 			g_flush_src[src]++;
 		}
@@ -275,7 +324,8 @@ void nw_jit_invalidate_all_src(int src)
 			g_flush_src[src]++;
 		}
 	}
-	memset(g_pagebit, 0, sizeof(g_pagebit));
+	memset(g_page_n_ram, 0, sizeof(g_page_n_ram));
+	memset(g_page_n_rom, 0, sizeof(g_page_n_rom));
 }
 
 void nw_jit_invalidate_all(void)
@@ -291,6 +341,16 @@ uint64_t nw_jit_flush_count(void)
 uint64_t nw_jit_compile_count(void)
 {
 	return g_compiles;
+}
+
+int nw_jit_stats_wanted(void)
+{
+#if NW_BOOT_LOG
+	return 1;
+#else
+	const char *e = getenv("NW_JIT_STATS");
+	return e && e[0] && strcmp(e, "0") != 0;
+#endif
 }
 
 int nw_jit_mode(void)
@@ -332,12 +392,14 @@ void nw_jit_stats_print(const char *why)
 		"store", "icbi", "tlb", "sr", "bat", "sdr1", "wrap",
 		"istore", "host", "other"
 	};
-	printf("NW-BOOT G1: jit stats %s mode %s blocks %llu insns %llu flush %llu compiles %llu dtlb hit %llu miss %llu\n",
+	printf("NW-BOOT G1: jit stats %s mode %s blocks %llu insns %llu flush %llu compiles %llu evict %llu recompile_n %llu dtlb hit %llu miss %llu\n",
 	       why, nw_jit_mode_name(),
 	       (unsigned long long)g_exec_blocks,
 	       (unsigned long long)g_exec_insns,
 	       (unsigned long long)g_flush,
 	       (unsigned long long)g_compiles,
+	       (unsigned long long)g_evict,
+	       (unsigned long long)g_recompile_n,
 	       (unsigned long long)g_dtlb_hit,
 	       (unsigned long long)g_dtlb_miss);
 	for (int i = 0; i < NW_JIT_FL_N; i++) {
@@ -951,6 +1013,15 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 			break;
 		}
 	}
+	const int same = g_cache[slot].used &&
+		g_cache[slot].phys_page == phys_page &&
+		g_cache[slot].guest_pc == guest_pc &&
+		g_cache[slot].msr_ir == msr_ir &&
+		g_cache[slot].endian == endian;
+	if (g_cache[slot].used && !same) {
+		g_evict++;
+		page_count_dec(g_cache[slot].phys_page);
+	}
 	g_cache[slot].phys_page = phys_page;
 	g_cache[slot].guest_pc = guest_pc;
 	g_cache[slot].msr_ir = msr_ir;
@@ -958,7 +1029,8 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 	g_cache[slot].fn = fn;
 	g_cache[slot].used = 1;
 	g_cache[slot].n = (uint8_t)(n < 0 ? 0 : n > 255 ? 255 : n);
-	pagebit_set(phys_page);
+	if (!same)
+		page_count_inc(phys_page);
 }
 
 uint32_t nw_ppc_addi(int rd, int ra, int simm)
@@ -4160,6 +4232,8 @@ nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
 	nw_jit_fn hit = nw_jit_cache_get(phys_page, guest_pc, msr_ir, endian, &cached_n);
 	if (hit && hit != NW_JIT_INTERPRET && cached_n == n)
 		return hit;
+	if (hit && hit != NW_JIT_INTERPRET && cached_n != n)
+		g_recompile_n++;
 	nw_jit_fn fn = compile_block(ops, n, guest_pc);
 	if (!fn)
 		return NULL;

@@ -947,6 +947,7 @@ void init_emul_ppc(void)
 			else
 				nw_jit_set_mode(NW_JIT_OFF);
 			printf("NW-BOOT G1: jit %s\n", nw_jit_mode_name());
+			nw_jit_set_code_pages(RAMBase, RAMSize, ROMBase, 0x500000u);
 		}
 		/* The Trampoline programs the OpenPIC sources (priority, vector,
 		 * sense, destination) before the NK runs; the 68k StartInit only
