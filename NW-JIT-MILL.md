@@ -32,6 +32,9 @@ JIT stays on. Emulate over skip. Do not retry known-bad emits as-is. After each 
 | [x] | **31/60** | **andc** | **1.90 M** | ARM `BIC`. `/tmp/g8/andc` splash/DFA Done. `xo=60` gone. |
 
 | [x] | **26** | **xori** | **2.31 M** | ARM `EOR`. `/tmp/g8/xori` splash/DFA Done. prim=26 gone. |
+| [x] | **27** | **xoris** | **1.41 M** | ARM `EOR` of `UIMM<<16`. `/tmp/g8/xoris` splash/DFA Done. prim=27 gone. |
+| [x] | **29** | **andis.** | **782 k** | ARM `AND` of `UIMM<<16` + CR0. `/tmp/g8/andis` splash/DFA Done. prim=29 gone. |
+| [x] | **31/8** | **subfc** | **630 k** | ARM `SUBS` + CA, no OV. `/tmp/g8/subfc` splash/DFA Done. `xo=8` gone. |
 
 Earlier ticks (not always in the last top-12, still live):
 

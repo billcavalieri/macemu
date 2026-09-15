@@ -1702,7 +1702,21 @@ int main()
 		fn = nw_jit_compile(ops, 2, 0x1860u, 0x1000u, 0, 0);
 		CHECK(fn != NULL);
 		fn(&b);
-		CHECK(a.gpr[4] == 0x55aa0000u && b.gpr[4] == a.gpr[4]);
+		CHECK(a.gpr[4] == 0x00550000u && b.gpr[4] == a.gpr[4]);
+
+		/* andis. r4, r3, 0x0ff0 */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0xff000000u;
+		ops[0] = nw_ppc_andis_dot(4, 3, 0x0ff0);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1870u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1870u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0x0f000000u && (a.cr >> 28) == 4 &&
+		      b.gpr[4] == a.gpr[4] && b.cr == a.cr);
 
 		/* and. r4, r3, r5 */
 		memset(&a, 0, sizeof(a));
@@ -2245,6 +2259,22 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[4] == 0xffffffffu && !(a.xer & 0x20000000u) &&
 		      !(a.xer & 0x40000000u) && b.gpr[4] == a.gpr[4] && b.xer == a.xer);
+
+		/* subfc: 20-5 = 15, CA set, OV unchanged */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 5;
+		a.gpr[5] = 20;
+		ops[0] = nw_ppc_subfc(4, 3, 5, 1);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1880u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1880u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 15 && (a.xer & 0x20000000u) &&
+		      !(a.xer & 0x40000000u) && (a.cr >> 28) == 4 &&
+		      b.gpr[4] == a.gpr[4] && b.xer == a.xer && b.cr == a.cr);
 
 		/* subfco 0x80000000-1 sets OV */
 		memset(&a, 0, sizeof(a));
@@ -3309,6 +3339,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_andc(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_xori(4, 3, 0xff)));
 		CHECK(nw_jit_op_supported(nw_ppc_xoris(4, 3, 0xff)));
+		CHECK(nw_jit_op_supported(nw_ppc_andis_dot(4, 3, 0x0ff0)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stb(3, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_stbu(4, 1, 4)));
@@ -3331,6 +3362,7 @@ int main()
 		}
 		CHECK(nw_jit_op_supported(nw_ppc_andi_dot(3, 4, 0xff)));
 		CHECK(nw_jit_op_supported(nw_ppc_subfco(4, 3, 5, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_subfc(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_subfe(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_subf(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_cmpli(0, 3, 1)));
