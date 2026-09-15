@@ -15,6 +15,10 @@
 #
 # Darwin load order (prefs_unix.cpp, not Linux): --config PATH, else
 # ~/.sheepshaver_prefs, else a foo.sheepvm/prefs vmdir.
+#
+# rom is optional on New World. If omitted (or the file is missing), G0
+# reads Mac OS ROM from the boot volume image (disk if bootdriver 0,
+# cdrom if -62). No host mount and no extra entitlements.
 
 rom /ABSOLUTE/PATH/TO/Mac OS ROM
 disk /ABSOLUTE/PATH/TO/macos921-blank.hfv

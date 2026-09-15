@@ -112,6 +112,8 @@
 #include "sys.h"
 #include "macos_util.h"
 #include "rom_patches.h"
+#include "nw_boot_contract.h"
+#include "cdrom.h"
 #include "user_strings.h"
 #include "vm_alloc.h"
 #include "sigsegv.h"
@@ -632,42 +634,68 @@ static void get_system_info(void)
 #endif
 }
 
+static bool volume_image_path(const char *p)
+{
+	struct stat st;
+	if (p == NULL || *p == 0)
+		return false;
+	if (stat(p, &st) != 0)
+		return false;
+	return S_ISREG(st.st_mode) && st.st_size >= 11;
+}
+
+static bool load_rom_from_host_file(const char *path)
+{
+	int rom_fd = open(path, O_RDONLY);
+	if (rom_fd < 0)
+		return false;
+	printf("%s", GetString(STR_READING_ROM_FILE));
+	uint8 *rom_tmp = new uint8[ROM_SIZE];
+	uint32 actual = read(rom_fd, (void *)rom_tmp, ROM_SIZE);
+	close(rom_fd);
+	bool ok = DecodeROM(rom_tmp, actual);
+	delete[] rom_tmp;
+	return ok;
+}
+
+static bool load_rom_from_volume_image(const char *path)
+{
+	uint8_t *bytes = NULL;
+	size_t n = 0;
+	if (!volume_image_path(path))
+		return false;
+	if (!nw_rom_bytes_from_volume_file(path, &bytes, &n) || bytes == NULL)
+		return false;
+	printf("G0: Mac OS ROM from volume %s (%zu bytes)\n", path, n);
+	bool ok = DecodeROM(bytes, (uint32)n);
+	free(bytes);
+	return ok;
+}
+
 static bool load_mac_rom(void)
 {
-	uint32 rom_size, actual;
-	uint8 *rom_tmp;
 	const char *rom_path = PrefsFindString("rom");
-	int rom_fd = open(rom_path && *rom_path ? rom_path : ROM_FILE_NAME, O_RDONLY);
-	if (rom_fd < 0) {
-		rom_fd = open(ROM_FILE_NAME2, O_RDONLY);
-		if (rom_fd < 0) {
-			char msg[512];
-			snprintf(msg, sizeof(msg), "%s\n%s",
-				 GetString(STR_NO_ROM_FILE_ERR),
-				 rom_path && *rom_path ? rom_path : "(no 'rom' key in prefs)");
-			ErrorAlert(msg);
-			return false;
-		}
-	}
-	printf("%s", GetString(STR_READING_ROM_FILE));
-	rom_size = lseek(rom_fd, 0, SEEK_END);
-	lseek(rom_fd, 0, SEEK_SET);
-	rom_tmp = new uint8[ROM_SIZE];
-	actual = read(rom_fd, (void *)rom_tmp, ROM_SIZE);
-	close(rom_fd);
-	
-	// Decode Mac ROM
-	if (!DecodeROM(rom_tmp, actual)) {
-		if (rom_size != 4*1024*1024) {
-			ErrorAlert(GetString(STR_ROM_SIZE_ERR));
-			return false;
-		} else {
-			ErrorAlert(GetString(STR_ROM_FILE_READ_ERR));
-			return false;
-		}
-	}
-	delete[] rom_tmp;
-	return true;
+	if (rom_path && *rom_path && load_rom_from_host_file(rom_path))
+		return true;
+	if (load_rom_from_host_file(ROM_FILE_NAME) ||
+	    load_rom_from_host_file(ROM_FILE_NAME2))
+		return true;
+
+	const int32 bootdriver = PrefsFindInt32("bootdriver");
+	const char *primary = (bootdriver == CDROMRefNum)
+		? PrefsFindString("cdrom") : PrefsFindString("disk");
+	const char *fallback = (bootdriver == CDROMRefNum)
+		? PrefsFindString("disk") : PrefsFindString("cdrom");
+	if (load_rom_from_volume_image(primary) ||
+	    load_rom_from_volume_image(fallback))
+		return true;
+
+	char msg[512];
+	snprintf(msg, sizeof(msg), "%s\n%s",
+		 GetString(STR_NO_ROM_FILE_ERR),
+		 rom_path && *rom_path ? rom_path : "(no 'rom' key; no Mac OS ROM in disk/cdrom image)");
+	ErrorAlert(msg);
+	return false;
 }
 
 static bool install_signal_handlers(void)

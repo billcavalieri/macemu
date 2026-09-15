@@ -249,6 +249,151 @@ int nw_decode_rom_image(const uint8_t *src, size_t src_size,
 	return 1;
 }
 
+int nw_chrp_payload_range(const uint8_t *src, size_t src_size,
+			  uint32_t *offset, uint32_t *size)
+{
+	uint32_t off = 0, sz = 0;
+	if (src == NULL || offset == NULL || size == NULL || src_size < 11)
+		return 0;
+	if (memcmp(src, "<CHRP-BOOT>", 11) != 0)
+		return 0;
+	if (nw_chrp_hex_constant(src, src_size, "lzss-offset", &off) &&
+	    nw_chrp_hex_constant(src, src_size, "lzss-size", &sz)) {
+		*offset = off;
+		*size = sz;
+		return 1;
+	}
+	if (nw_chrp_hex_constant(src, src_size, "parcels-offset", &off) &&
+	    nw_chrp_hex_constant(src, src_size, "parcels-size", &sz)) {
+		*offset = off;
+		*size = sz;
+		return 1;
+	}
+	return 0;
+}
+
+int nw_chrp_rom_span(const uint8_t *img, size_t len, size_t *off, size_t *span)
+{
+	if (img == NULL || off == NULL || span == NULL || len < 11)
+		return 0;
+	const uint8_t *p = img;
+	size_t remain = len;
+	while (remain >= 11) {
+		const uint8_t *hit = nw_find_mem(p, remain, "<CHRP-BOOT>");
+		if (hit == NULL)
+			return 0;
+		const size_t at = (size_t)(hit - img);
+		const size_t avail = len - at;
+		size_t hdr = avail;
+		if (hdr > 128u * 1024u)
+			hdr = 128u * 1024u;
+		uint32_t poff = 0, psz = 0;
+		if (nw_chrp_payload_range(hit, hdr, &poff, &psz) &&
+		    psz > 0 && (size_t)poff + (size_t)psz <= avail) {
+			*off = at;
+			*span = (size_t)poff + (size_t)psz;
+			return 1;
+		}
+		p = hit + 11;
+		remain = len - (size_t)(p - img);
+	}
+	return 0;
+}
+
+int nw_rom_bytes_from_volume_file(const char *path, uint8_t **out, size_t *out_len)
+{
+	enum { CHUNK = 1024 * 1024, OVERLAP = 16, HDR = 128 * 1024 };
+	enum { MAX_CHRP = 8 * 1024 * 1024 };
+	static const char kChrp[] = "<CHRP-BOOT>";
+
+	if (path == NULL || path[0] == 0 || out == NULL || out_len == NULL)
+		return 0;
+	*out = NULL;
+	*out_len = 0;
+
+	FILE *f = fopen(path, "rb");
+	if (f == NULL)
+		return 0;
+	if (fseek(f, 0, SEEK_END) != 0) {
+		fclose(f);
+		return 0;
+	}
+	const long nlong = ftell(f);
+	if (nlong < 11 || nlong > (long)0x7fffffff) {
+		fclose(f);
+		return 0;
+	}
+	const size_t n = (size_t)nlong;
+
+	uint8_t *chunk = (uint8_t *)malloc(CHUNK + OVERLAP);
+	if (chunk == NULL) {
+		fclose(f);
+		return 0;
+	}
+
+	size_t pos = 0;
+	size_t carry = 0;
+	int found = 0;
+	while (pos < n && !found) {
+		const size_t want = (n - pos > (size_t)CHUNK) ? (size_t)CHUNK : (n - pos);
+		if (fseek(f, (long)pos, SEEK_SET) != 0)
+			break;
+		if (fread(chunk + carry, 1, want, f) != want)
+			break;
+		const size_t view = carry + want;
+		const uint8_t *hit = nw_find_mem(chunk, view, kChrp);
+		if (hit != NULL) {
+			const size_t abs_off = pos - carry + (size_t)(hit - chunk);
+			uint8_t hdr[HDR];
+			size_t hdrn = (n - abs_off > (size_t)HDR) ? (size_t)HDR : (n - abs_off);
+			uint32_t poff = 0, psz = 0;
+			if (fseek(f, (long)abs_off, SEEK_SET) == 0 &&
+			    fread(hdr, 1, hdrn, f) == hdrn &&
+			    nw_chrp_payload_range(hdr, hdrn, &poff, &psz)) {
+				const size_t span = (size_t)poff + (size_t)psz;
+				if (span >= 11 && span <= (size_t)MAX_CHRP &&
+				    abs_off + span <= n) {
+					uint8_t *buf = (uint8_t *)malloc(span);
+					uint8_t *decoded = (uint8_t *)malloc(NW_ROM_SIZE);
+					if (buf != NULL && decoded != NULL &&
+					    fseek(f, (long)abs_off, SEEK_SET) == 0 &&
+					    fread(buf, 1, span, f) == span &&
+					    nw_decode_rom_image(buf, span, decoded,
+								NW_ROM_SIZE) &&
+					    nw_g0_unpacked_ok(decoded, NW_ROM_SIZE)) {
+						*out = buf;
+						*out_len = span;
+						found = 1;
+						buf = NULL;
+					}
+					free(decoded);
+					free(buf);
+				}
+			}
+		}
+		if (found)
+			break;
+		if (hit != NULL) {
+			const size_t abs_off = pos - carry + (size_t)(hit - chunk);
+			pos = abs_off + 11;
+			carry = 0;
+			continue;
+		}
+		if (want < (size_t)CHUNK)
+			break;
+		if (view >= OVERLAP) {
+			memmove(chunk, chunk + view - OVERLAP, OVERLAP);
+			carry = OVERLAP;
+		} else {
+			carry = 0;
+		}
+		pos += want;
+	}
+	free(chunk);
+	fclose(f);
+	return found;
+}
+
 const struct nw_of_node_spec *nw_of_tree_spec(size_t *count)
 {
 	if (count)

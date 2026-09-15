@@ -140,6 +140,17 @@ int nw_decode_rom_image(const uint8_t *src, size_t src_size,
 			uint8_t *dest, size_t dest_size);
 int nw_g0_unpacked_ok(const uint8_t *rom, size_t size);
 
+/*
+ * Host-side Mac OS ROM from a boot volume image (option 1).
+ * Finds a contiguous <CHRP-BOOT> tbxi (lzss or parcels) inside an HFS
+ * .toast / .hfv. No mount, no entitlements. off/span are byte offsets
+ * into img. nw_rom_bytes_from_volume_file mallocs the span; caller frees.
+ */
+int nw_chrp_payload_range(const uint8_t *src, size_t src_size,
+			  uint32_t *offset, uint32_t *size);
+int nw_chrp_rom_span(const uint8_t *img, size_t len, size_t *off, size_t *span);
+int nw_rom_bytes_from_volume_file(const char *path, uint8_t **out, size_t *out_len);
+
 const struct nw_of_node_spec *nw_of_tree_spec(size_t *count);
 int nw_of_tree_has_required_nodes(void);
 

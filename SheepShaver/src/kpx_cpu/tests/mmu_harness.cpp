@@ -19,6 +19,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <vector>
@@ -512,6 +513,54 @@ int main()
 		}
 		CHECK(strcmp(nw_boot_line_g0_newworld(),
 			"G0: DecodeROM 4 MiB NewWorld +0x30d064 NK +0x310000") == 0);
+		{
+			/* Contiguous CHRP tbxi inside a fake volume image. */
+			std::vector<uint8_t> img(512, 0xaa);
+			const char hdr[] =
+				"<CHRP-BOOT>\rh# 000080 constant parcels-offset\r"
+				"h# 000010 constant parcels-size\r";
+			const size_t at = 64;
+			memcpy(&img[at], hdr, sizeof(hdr) - 1);
+			img[at + 0x80] = 'p';
+			img[at + 0x81] = 'r';
+			img[at + 0x82] = 'c';
+			img[at + 0x83] = 'l';
+			size_t off = 0, span = 0;
+			CHECK(nw_chrp_rom_span(img.data(), img.size(), &off, &span));
+			CHECK(off == at);
+			CHECK(span == 0x90u);
+			uint32_t poff = 0, psz = 0;
+			CHECK(nw_chrp_payload_range(&img[at], img.size() - at, &poff, &psz));
+			CHECK(poff == 0x80u && psz == 0x10u);
+		}
+		{
+			const char *vol = getenv("SHEEP_OS921_CDROM");
+			char home_vol[512];
+			if (vol == NULL || vol[0] == 0) {
+				const char *home = getenv("HOME");
+				if (home) {
+					snprintf(home_vol, sizeof(home_vol),
+						 "%s/Downloads/Mac OS 9.2.1.toast", home);
+					vol = home_vol;
+				}
+			}
+			if (vol && vol[0]) {
+				FILE *tf = fopen(vol, "rb");
+				if (tf) {
+					fclose(tf);
+					uint8_t *chrp = NULL;
+					size_t n = 0;
+					CHECK(nw_rom_bytes_from_volume_file(vol, &chrp, &n));
+					CHECK(chrp != NULL && n > 11 &&
+					      memcmp(chrp, "<CHRP-BOOT>", 11) == 0);
+					std::vector<uint8_t> unpacked(NW_ROM_SIZE, 0);
+					CHECK(nw_decode_rom_image(chrp, n, unpacked.data(),
+								  unpacked.size()));
+					CHECK(nw_g0_unpacked_ok(unpacked.data(), unpacked.size()));
+					free(chrp);
+				}
+			}
+		}
 		CHECK(strcmp(nw_boot_line_g1_tree(),
 			"G1: tree root compatible MacRISC2 Gestalt 406 /memory /cpus /chosen") == 0);
 		CHECK(strcmp(nw_boot_line_g1_kdp(),
