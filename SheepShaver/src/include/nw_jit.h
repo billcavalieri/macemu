@@ -45,6 +45,7 @@ enum { NW_JIT_MAX_BLOCK = 16 };
 
 struct nw_jit_cpu {
 	uint32_t gpr[32];
+	uint32_t vr[32][4];	/* AltiVec, big-endian word order */
 	uint32_t cr;
 	uint32_t xer;
 	uint32_t lr;
@@ -202,6 +203,8 @@ typedef void (*nw_jit_host_mtmsr)(void *host, uint32_t msr);
 void nw_jit_set_host_mtmsr(nw_jit_host_mtmsr fn);
 typedef void (*nw_jit_host_mtspr)(void *host, uint32_t spr, uint32_t val);
 void nw_jit_set_host_mtspr(nw_jit_host_mtspr fn);
+typedef void (*nw_jit_host_lvx)(void *host, uint32_t vd, uint32_t ea, uint32_t pc, int *fault);
+void nw_jit_set_host_lvx(nw_jit_host_lvx fn);
 uint64_t nw_jit_flush_count(void);
 uint64_t nw_jit_compile_count(void);
 void nw_jit_stats_print(const char *why);
@@ -226,6 +229,7 @@ uint32_t nw_ppc_lwzu(int rd, int ra, int d);
 uint32_t nw_ppc_lbz(int rd, int ra, int d);
 uint32_t nw_ppc_lbzu(int rd, int ra, int d);
 uint32_t nw_ppc_lbzx(int rd, int ra, int rb);
+uint32_t nw_ppc_lvx(int vd, int ra, int rb);
 uint32_t nw_ppc_stb(int rs, int ra, int d);
 uint32_t nw_ppc_stbu(int rs, int ra, int d);
 uint32_t nw_ppc_stw(int rs, int ra, int d);

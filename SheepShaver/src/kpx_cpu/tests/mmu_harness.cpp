@@ -2647,8 +2647,6 @@ int main()
 			CHECK(fn != NULL);
 			fn(&b);
 			CHECK(ram[9] == 0xcd);
-
-			/* lbzu after stb: load then RA = saved EA (not recomputed after rD write). */
 			ram[12] = 0xef;
 			a.gpr[1] = 8;
 			a.fault = 0;
@@ -2664,6 +2662,30 @@ int main()
 			fn(&b);
 			CHECK(b.gpr[3] == 0xefu);
 			CHECK(b.gpr[1] == 12u);
+		}
+
+		/* lvx v3, r1, r2: 16-byte aligned load */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			for (int i = 0; i < 16; i++)
+				ram[16 + i] = (uint8_t)(0xa0 + i);
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 16;
+			a.gpr[2] = 0;
+			ops[0] = nw_ppc_lvx(3, 1, 2);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x17d0u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x17d0u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.vr[3][0] == 0xa0a1a2a3u && b.vr[3][0] == a.vr[3][0]);
+			CHECK(a.vr[3][3] == 0xacadaeafu && b.vr[3][3] == a.vr[3][3]);
 		}
 
 		/* stbu r4, 4(r1): store then r1 = EA */
@@ -3118,6 +3140,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_addic(4, 3, -1, 1)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbz(3, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzu(3, 1, 4)));
+		CHECK(nw_jit_op_supported(nw_ppc_lvx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stb(3, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_stbu(4, 1, 4)));

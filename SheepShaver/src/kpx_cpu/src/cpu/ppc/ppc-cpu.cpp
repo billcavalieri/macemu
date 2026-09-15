@@ -360,6 +360,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_isync(powerpc_cpu::jit_host_isync);
 		nw_jit_set_host_mtmsr(powerpc_cpu::jit_host_mtmsr);
 		nw_jit_set_host_mtspr(powerpc_cpu::jit_host_mtspr);
+		nw_jit_set_host_lvx(powerpc_cpu::jit_host_lvx);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
 		nw_jit_set_host_byte(powerpc_cpu::jit_host_lb, powerpc_cpu::jit_host_stb);
 	}
@@ -1446,6 +1447,27 @@ void powerpc_cpu::jit_host_mtspr(void *host, uint32 spr, uint32 val)
 	if (ppc32_guest_mmu_enabled())
 		ppc->mtspr_guest(spr, val);
 	(void)host;
+}
+
+void powerpc_cpu::jit_host_lvx(void *host, uint32 vd, uint32 ea, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	(void)pc;
+	ea &= ~15u;
+	uint32 pa;
+	if (!ppc->guest_data_probe(ea, 16, false, &pa)) {
+		*fault = 1;
+		return;
+	}
+	if (nw_pa_kind(pa) == NW_PA_NONE || nw_pa_kind(pa) == NW_PA_IO) {
+		*fault = (nw_pa_kind(pa) == NW_PA_IO) ? 2 : 1;
+		return;
+	}
+	powerpc_vr &v = ppc->vr((int)vd);
+	v.w[0] = vm_read_memory_4(pa +  0);
+	v.w[1] = vm_read_memory_4(pa +  4);
+	v.w[2] = vm_read_memory_4(pa +  8);
+	v.w[3] = vm_read_memory_4(pa + 12);
 }
 
 uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)
