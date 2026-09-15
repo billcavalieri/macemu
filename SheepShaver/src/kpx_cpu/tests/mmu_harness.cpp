@@ -2647,6 +2647,23 @@ int main()
 			CHECK(fn != NULL);
 			fn(&b);
 			CHECK(ram[9] == 0xcd);
+
+			/* lbzu after stb: load then RA = saved EA (not recomputed after rD write). */
+			ram[12] = 0xef;
+			a.gpr[1] = 8;
+			a.fault = 0;
+			ops[0] = nw_ppc_lbzu(3, 1, 4);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			b.mem = ram;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x17c0u) == 1);
+			CHECK(a.gpr[3] == 0xefu);
+			CHECK(a.gpr[1] == 12u);
+			fn = nw_jit_compile(ops, 2, 0x17c0u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(b.gpr[3] == 0xefu);
+			CHECK(b.gpr[1] == 12u);
 		}
 
 		/* stbu r4, 4(r1): store then r1 = EA */
@@ -3100,6 +3117,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_addc(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_addic(4, 3, -1, 1)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbz(3, 1, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_lbzu(3, 1, 4)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stb(3, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_stbu(4, 1, 4)));
@@ -3156,7 +3174,7 @@ int main()
 		CHECK(!nw_jit_op_supported(nw_ppc_cmpl(0, 3, 4) | (1u << 21))); /* L=1 */
 		CHECK(nw_jit_op_supported(nw_ppc_mfspr(3, NW_PPC_SPR_TBU)));
 		CHECK(!nw_jit_op_supported(nw_ppc_mfspr(3, 18)));	/* DSISR still kpx */
-		CHECK(!nw_jit_op_supported(0x8c000000u));	/* lbzu still unsup */
+		CHECK(!nw_jit_op_supported(0x7c000028u));	/* lwarx still unsup */
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
 		nw_jit_cache_put(0x2000u, 0x2000u, 0, 0, NW_JIT_INTERPRET, 0);
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NW_JIT_INTERPRET);

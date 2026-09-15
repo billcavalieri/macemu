@@ -224,6 +224,7 @@ uint32_t nw_ppc_rlwimi(int ra, int rs, int sh, int mb, int me);
 uint32_t nw_ppc_lwz(int rd, int ra, int d);
 uint32_t nw_ppc_lwzu(int rd, int ra, int d);
 uint32_t nw_ppc_lbz(int rd, int ra, int d);
+uint32_t nw_ppc_lbzu(int rd, int ra, int d);
 uint32_t nw_ppc_lbzx(int rd, int ra, int rb);
 uint32_t nw_ppc_stb(int rs, int ra, int d);
 uint32_t nw_ppc_stbu(int rs, int ra, int d);
