@@ -26,7 +26,7 @@ JIT stays on. Emulate over skip. Do not retry known-bad emits as-is. After each 
 | [x] | **31/231** | **stvx** | **3.26 M** | Landed `cfd1ea39`. Four `jit_host_stw`. `/tmp/g8/stvx4` splash/DFA Done. `xo=231` gone. |
 | [x] | **31/339** | **mfspr** leftover | **2.89 M** | Leftover SPRs via kpx `mfspr_guest`. NOP leaves rD; program interrupt is `NW_JIT_FAULT_EXC`. `/tmp/g8/mfspr2` splash/Starting Up/DFA Done. `xo=339` gone. |
 | [x] | **50** | **lfd** | **2.87 M** | kpx `guest_data_probe` 8 B into FPR. `/tmp/g8/lfd` splash/DFA Done. prim=50 gone. |
-| [ ] | **54** | **stfd** | **2.87 M** | FP store double. Same. |
+| [x] | **54** | **stfd** | **2.87 M** | kpx `guest_data_probe` 8 B store from FPR. `/tmp/g8/stfd` splash/DFA Done. prim=54 gone. |
 | [ ] | **31/235** | **mullw** | **2.68 M** | 32×32→32. Cheap ARM `MUL`/`MADD`. Safe mill. |
 | [ ] | **31/11** | **mulhwu** | **2.37 M** | High unsigned multiply. Cheap integer emit. |
 | [ ] | **31/60** | **andc** | **1.90 M** | `rA = rS AND NOT rB`. Same shape as `and`. Cheapest leftover logical. |

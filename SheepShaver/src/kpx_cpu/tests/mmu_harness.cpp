@@ -2763,6 +2763,19 @@ int main()
 			fn(&b);
 			CHECK(a.fpr[3] == 0x400921fb54442d18ull &&
 			      b.fpr[3] == a.fpr[3]);
+			memset(ram, 0, sizeof(ram));
+			a.fpr[3] = 0x400921fb54442d18ull;
+			a.gpr[1] = 0;
+			ops[0] = nw_ppc_stfd(3, 1, 16);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			b.mem = ram;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x1800u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x1800u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(ram[16] == 0x40 && ram[23] == 0x18);
+			CHECK(b.mem[16] == 0x40 && b.mem[23] == 0x18);
 		}
 
 		/* stbu r4, 4(r1): store then r1 = EA */
@@ -3220,6 +3233,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_lvx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stvx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lfd(3, 1, 8)));
+		CHECK(nw_jit_op_supported(nw_ppc_stfd(3, 1, 16)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stb(3, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_stbu(4, 1, 4)));

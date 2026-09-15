@@ -212,6 +212,8 @@ typedef void (*nw_jit_host_stvx)(void *host, uint32_t ea, const uint32_t *w, uin
 void nw_jit_set_host_stvx(nw_jit_host_stvx fn);
 typedef void (*nw_jit_host_lfd)(void *host, uint32_t fd, uint32_t ea, uint32_t pc, int *fault, uint64_t *out);
 void nw_jit_set_host_lfd(nw_jit_host_lfd fn);
+typedef void (*nw_jit_host_stfd)(void *host, uint32_t ea, uint64_t val, uint32_t pc, int *fault);
+void nw_jit_set_host_stfd(nw_jit_host_stfd fn);
 uint64_t nw_jit_flush_count(void);
 uint64_t nw_jit_compile_count(void);
 void nw_jit_stats_print(const char *why);
@@ -292,6 +294,7 @@ uint32_t nw_ppc_blr(void);
 uint32_t nw_ppc_mfspr(int rd, int spr);
 uint32_t nw_ppc_mtspr(int spr, int rs);
 uint32_t nw_ppc_lfd(int frd, int ra, int d);
+uint32_t nw_ppc_stfd(int frs, int ra, int d);
 
 enum {
 	NW_PPC_SPR_XER = 1,

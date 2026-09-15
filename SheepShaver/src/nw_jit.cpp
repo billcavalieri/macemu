@@ -50,6 +50,7 @@ void nw_jit_helper_mtspr(struct nw_jit_cpu *cpu, uint32_t spr, uint32_t val);
 void nw_jit_helper_lvx(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t ra, uint32_t rb);
 void nw_jit_helper_stvx(struct nw_jit_cpu *cpu, uint32_t vs, uint32_t ra, uint32_t rb);
 void nw_jit_helper_lfd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t ra, uint32_t simm);
+void nw_jit_helper_stfd(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ra, uint32_t simm);
 
 enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
@@ -85,6 +86,7 @@ static nw_jit_host_mtspr g_host_mtspr;
 static nw_jit_host_lvx g_host_lvx;
 static nw_jit_host_stvx g_host_stvx;
 static nw_jit_host_lfd g_host_lfd;
+static nw_jit_host_stfd g_host_stfd;
 static nw_jit_host_lh g_host_lh;
 static nw_jit_host_sth16 g_host_sth16;
 static nw_jit_host_lb g_host_lb;
@@ -176,6 +178,7 @@ static struct nw_jit_hist g_hist[] = {
 	{44, -1, "sth", 0, 0, 0},
 	{45, -1, "sthu", 0, 0, 0},
 	{50, -1, "lfd", 0, 0, 0},
+	{54, -1, "stfd", 0, 0, 0},
 };
 
 static uint64_t g_v_cmp, g_v_miss, g_v_fail, g_v_skip_unsup, g_v_skip_mem;
@@ -299,6 +302,34 @@ void nw_jit_helper_lfd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t ra, uint32_
 		((uint64_t)p[2] << 40) | ((uint64_t)p[3] << 32) |
 		((uint64_t)p[4] << 24) | ((uint64_t)p[5] << 16) |
 		((uint64_t)p[6] << 8) | (uint64_t)p[7];
+}
+
+void nw_jit_helper_stfd(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ra, uint32_t simm)
+{
+	const uint32_t ea = (ra ? cpu->gpr[ra & 31u] : 0u) + simm;
+	const uint64_t v = cpu->fpr[fs & 31u];
+	if (g_host_stfd && cpu->host) {
+		int fault = 0;
+		g_host_stfd(cpu->host, ea, v, cpu->pc, &fault);
+		cpu->fault = (uint32_t)fault;
+		return;
+	}
+	if (!cpu->mem || ea < cpu->mem_base ||
+	    (ea - cpu->mem_base) + 8u > cpu->mem_size) {
+		cpu->fault = 1;
+		cpu->fault_ea = ea;
+		cpu->fault_st = 1;
+		return;
+	}
+	uint8_t *p = cpu->mem + (ea - cpu->mem_base);
+	p[0] = (uint8_t)(v >> 56);
+	p[1] = (uint8_t)(v >> 48);
+	p[2] = (uint8_t)(v >> 40);
+	p[3] = (uint8_t)(v >> 32);
+	p[4] = (uint8_t)(v >> 24);
+	p[5] = (uint8_t)(v >> 16);
+	p[6] = (uint8_t)(v >> 8);
+	p[7] = (uint8_t)v;
 }
 
 void nw_jit_helper_bc(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc)
@@ -779,6 +810,11 @@ void nw_jit_set_host_lfd(nw_jit_host_lfd fn)
 	g_host_lfd = fn;
 }
 
+void nw_jit_set_host_stfd(nw_jit_host_stfd fn)
+{
+	g_host_stfd = fn;
+}
+
 void nw_jit_dtlb_flush(void)
 {
 	memset(g_dtlb, 0, sizeof(g_dtlb));
@@ -983,6 +1019,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* sthu */
 	if (prim == 50)
 		return 1;	/* lfd */
+	if (prim == 54)
+		return 1;	/* stfd */
 	return 0;
 }
 
@@ -1460,6 +1498,11 @@ uint32_t nw_ppc_rlwimi(int ra, int rs, int sh, int mb, int me)
 uint32_t nw_ppc_lfd(int frd, int ra, int d)
 {
 	return (50u << 26) | ((uint32_t)frd << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
+uint32_t nw_ppc_stfd(int frs, int ra, int d)
+{
+	return (54u << 26) | ((uint32_t)frs << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
 }
 
 uint32_t nw_ppc_lwz(int rd, int ra, int d)
@@ -2545,6 +2588,14 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 	if (prim == 50) {
 		cpu->pc = pc;
 		nw_jit_helper_lfd(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)simm);
+		if (cpu->fault)
+			return -1;
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 54) {
+		cpu->pc = pc;
+		nw_jit_helper_stfd(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)simm);
 		if (cpu->fault)
 			return -1;
 		cpu->pc = pc + 4;
@@ -4482,6 +4533,27 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
 		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_lfd))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		return emit_fault_check(e);
+	}
+	if (prim == 54) {
+		if (!emit_set_pc(e, pc))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm32(e, W1, (uint32_t)rd))
+			return 0;
+		if (!emit_imm32(e, W2, (uint32_t)ra))
+			return 0;
+		if (!emit_imm32(e, W3, (uint32_t)simm))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_stfd))
 			return 0;
 		if (!emit_w(e, 0xd63f0120u))
 			return 0;

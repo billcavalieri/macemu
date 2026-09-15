@@ -363,6 +363,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_lvx(powerpc_cpu::jit_host_lvx);
 		nw_jit_set_host_stvx(powerpc_cpu::jit_host_stvx);
 		nw_jit_set_host_lfd(powerpc_cpu::jit_host_lfd);
+		nw_jit_set_host_stfd(powerpc_cpu::jit_host_stfd);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
 		nw_jit_set_host_byte(powerpc_cpu::jit_host_lb, powerpc_cpu::jit_host_stb);
 	}
@@ -1555,6 +1556,36 @@ void powerpc_cpu::jit_host_lfd(void *host, uint32 fd, uint32 ea, uint32 pc, int 
 		*out = v;
 }
 
+void powerpc_cpu::jit_host_stfd(void *host, uint32 ea, uint64 val, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	(void)pc;
+	uint32 pa;
+	if (!ppc->guest_data_probe(ea, 8, true, &pa)) {
+		*fault = 1;
+		return;
+	}
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
+		return;
+	}
+	if (kind == NW_PA_ROM)
+		return;
+	if (kind == NW_PA_NONE || !nw_pa_writable(pa)) {
+		*fault = 1;
+		return;
+	}
+	vm_write_memory_8(pa, val);
+	if (ppc32_guest_mmu_enabled() &&
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
+		nw_jit_dtlb_fill(ea, pa, 1,
+			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu));
+	nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
+		*fault = NW_JIT_FAULT_SMC;
+}
+
 uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
@@ -1727,7 +1758,10 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		is_st = 1;
 	} else if (prim == 50)
 		width = 8;
-	else if (prim == 46 || prim == 47) {
+	else if (prim == 54) {
+		width = 8;
+		is_st = 1;
+	} else if (prim == 46 || prim == 47) {
 		const int rd = (int)((op >> 21) & 0x1f);
 		width = 4 * (32 - rd);
 		is_st = (prim == 47);
