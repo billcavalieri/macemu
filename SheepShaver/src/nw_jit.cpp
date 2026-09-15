@@ -35,7 +35,7 @@ uint32_t nw_jit_helper_lwz(struct nw_jit_cpu *cpu, uint32_t ea);
 void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val);
 uint32_t nw_jit_helper_lwz_pa(struct nw_jit_cpu *cpu, uint32_t pa);
 void nw_jit_helper_stw_pa(struct nw_jit_cpu *cpu, uint32_t pa, uint32_t val);
-uint32_t nw_jit_helper_mfspr(struct nw_jit_cpu *cpu, uint32_t spr);
+void nw_jit_helper_mfspr(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t spr);
 uint32_t nw_jit_helper_lh(struct nw_jit_cpu *cpu, uint32_t ea);
 void nw_jit_helper_sth(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val);
 uint32_t nw_jit_helper_lb(struct nw_jit_cpu *cpu, uint32_t ea);
@@ -921,9 +921,8 @@ int nw_jit_op_supported(uint32_t op)
 		return (rd & 3) == 0;	/* cmp L=0, any crfD */
 	if (prim == 31 && xo == 32)
 		return (rd & 3) == 0;	/* cmpl L=0, any crfD */
-	if (prim == 31 && xo == 339 &&
-	    (spr_is_user(spr_num(op)) || spr_is_mfspr_ext(spr_num(op))))
-		return 1;
+	if (prim == 31 && xo == 339)
+		return 1;	/* mfspr: user inline, else kpx mfspr_guest */
 	if (prim == 31 && xo == 467)
 		return 1;	/* mtspr: user inline, else kpx mtspr_guest */
 	if (prim == 32 || prim == 33 || prim == 36 || prim == 37)
@@ -1148,7 +1147,9 @@ int nw_jit_op_ends_block(uint32_t op)
 	const int xo = (int)((op >> 1) & 0x3ff);
 	return prim == 16 || prim == 18 ||
 	       (prim == 19 && (xo == 16 || xo == 528 || xo == 150)) ||
-	       (prim == 31 && xo == 146);
+	       (prim == 31 && xo == 146) ||
+	       (prim == 31 && xo == 339 &&
+		!spr_is_user(spr_num(op)) && !spr_is_mfspr_ext(spr_num(op)));
 }
 
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
@@ -2062,11 +2063,19 @@ void nw_jit_helper_stw_pa(struct nw_jit_cpu *cpu, uint32_t pa, uint32_t val)
 	cpu->fault_st = 1;
 }
 
-uint32_t nw_jit_helper_mfspr(struct nw_jit_cpu *cpu, uint32_t spr)
+void nw_jit_helper_mfspr(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t spr)
 {
+	int st = 0;
+	uint32_t v = 0;
 	if (g_host_mfspr && cpu->host)
-		return g_host_mfspr(cpu->host, spr);
-	return 0;
+		v = g_host_mfspr(cpu->host, spr, cpu->pc, &st);
+	if (st == 2) {
+		cpu->pc = v;
+		cpu->fault = NW_JIT_FAULT_EXC;
+		return;
+	}
+	if (st == 0)
+		cpu->gpr[rd & 31u] = v;
 }
 
 int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
@@ -2438,10 +2447,11 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 			cpu->gpr[rd] = cpu->ctr;
 		else if (spr == NW_PPC_SPR_XER)
 			cpu->gpr[rd] = cpu->xer;
-		else if (spr_is_mfspr_ext(spr))
-			cpu->gpr[rd] = nw_jit_helper_mfspr(cpu, spr);
-		else
-			return -1;
+		else {
+			nw_jit_helper_mfspr(cpu, (uint32_t)rd, spr);
+			if (cpu->fault)
+				return 0;
+		}
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -2625,6 +2635,8 @@ int nw_jit_interp_n(struct nw_jit_cpu *cpu, const uint32_t *ops, int n, uint32_t
 		last = nw_jit_interp_one(cpu, ops[i]);
 		if (last != 0)
 			return last;
+		if (cpu->fault)
+			return 0;
 	}
 	return last;
 }
@@ -4345,8 +4357,14 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			off = (uint32_t)offsetof(struct nw_jit_cpu, ctr);
 		else if (spr == NW_PPC_SPR_XER)
 			off = (uint32_t)offsetof(struct nw_jit_cpu, xer);
-		else if (xo == 339 && spr_is_mfspr_ext(spr)) {
-			if (!emit_imm32(e, W1, spr))
+		else if (xo == 339) {
+			if (!emit_set_pc(e, pc))
+				return 0;
+			if (!emit_w(e, 0xaa1303e0u))
+				return 0;
+			if (!emit_imm32(e, W1, (uint32_t)rd))
+				return 0;
+			if (!emit_imm32(e, W2, spr))
 				return 0;
 			if (!emit_w(e, 0xaa1303e0u))
 				return 0;
@@ -4354,11 +4372,9 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 				return 0;
 			if (!emit_w(e, 0xd63f0120u))
 				return 0;
-			if (!emit_w(e, a64_orr_reg(W8, 31, W0)))
-				return 0;
 			if (!emit_w(e, 0xaa1303e0u))
 				return 0;
-			return emit_store_gpr(e, W8, rd);
+			return emit_fault_check(e);
 		} else if (xo == 467) {
 			if (!emit_w(e, 0xaa1303e0u))
 				return 0;

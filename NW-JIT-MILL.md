@@ -22,9 +22,9 @@ JIT stays on. Emulate over skip. Do not retry known-bad emits as-is. After each 
 | [x] | **16** | **bc** | **27.3 M** | Landed `cb26a3d9`. CR-only stays inlined; CTR/LK/AA use `nw_jit_helper_bc` (kpx `execute_branch`). `/tmp/g8/bc2` splash/Finder/CS. prim=16 gone. |
 | [x] | **31/467** | **mtspr** leftover | **8.3 M** | Landed `5cf6cff7`. Leftover SPRs call kpx `mtspr_guest`. `/tmp/g8/mtspr2` splash/Starting Up/Finder. `xo=467` gone. |
 | [x] | **35** | **lbzu** | **5.85 M** | Landed after EA-last + save EA across helper (not old shared path). `/tmp/g8/lbzu2` splash/Finder/Control Strip. prim=35 gone. |
-| [ ] | **31/103** | **lvx** | **3.30 M** | AltiVec load 16 B. Real emit or helper, not a nop. Likely memcpy / Control Strip. |
-| [ ] | **31/231** | **stvx** | **3.26 M** | AltiVec store 16 B. Pair with `lvx`. |
-| [ ] | **31/339** | **mfspr** leftover | **2.89 M** | User + TBL/TBU/PVR/SPRG/VRSAVE **reads** already in. Other SPRs: extend helper, no SPRG writes. |
+| [x] | **31/103** | **lvx** | **3.30 M** | Landed `31537d4b`. kpx `guest_data_probe` 16 B into VR. `/tmp/g8/lvx` splash/Finder. `xo=103` gone. |
+| [x] | **31/231** | **stvx** | **3.26 M** | Landed `cfd1ea39`. Four `jit_host_stw`. `/tmp/g8/stvx4` splash/DFA Done. `xo=231` gone. |
+| [x] | **31/339** | **mfspr** leftover | **2.89 M** | Leftover SPRs via kpx `mfspr_guest`. NOP leaves rD; program interrupt is `NW_JIT_FAULT_EXC`. `/tmp/g8/mfspr2` splash/Starting Up/DFA Done. `xo=339` gone. |
 | [ ] | **50** | **lfd** | **2.87 M** | FP load double. Integer mill skipped FP on purpose. Later Finder/QD, not CS first. |
 | [ ] | **54** | **stfd** | **2.87 M** | FP store double. Same. |
 | [ ] | **31/235** | **mullw** | **2.68 M** | 32×32→32. Cheap ARM `MUL`/`MADD`. Safe mill. |

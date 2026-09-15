@@ -1395,9 +1395,11 @@ void powerpc_cpu::jit_host_stw_pa(void *host, uint32 pa, uint32 val, uint32 pc, 
 		*fault = NW_JIT_FAULT_SMC;
 }
 
-uint32 powerpc_cpu::jit_host_mfspr(void *host, uint32 spr)
+uint32 powerpc_cpu::jit_host_mfspr(void *host, uint32 spr, uint32 guest_pc, int *status)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	if (status)
+		*status = 0;
 	switch (spr) {
 	case powerpc_registers::SPR_TBL_R:
 		return (uint32)ppc->tb_ticks();
@@ -1414,8 +1416,22 @@ uint32 powerpc_cpu::jit_host_mfspr(void *host, uint32 spr)
 	case powerpc_registers::SPR_SPRG2:
 	case powerpc_registers::SPR_SPRG3:
 		return ppc->sprg(spr - powerpc_registers::SPR_SPRG0);
-	default:
-		return 0;
+	default: {
+		ppc->pc() = guest_pc;
+		uint32 d = 0;
+		const spr_access_result r = ppc->mfspr_guest(spr, &d);
+		if (r == SPR_ACCESS_EXC) {
+			if (status)
+				*status = 2;
+			return ppc->pc();
+		}
+		if (r == SPR_ACCESS_NOP) {
+			if (status)
+				*status = 1;
+			return 0;
+		}
+		return d;
+	}
 	}
 }
 
@@ -1956,6 +1972,26 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	fn(&jc);
 
 	if (jc.fault) {
+		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_EXC) {
+			for (int i = 0; i < 32; i++)
+				gpr(i) = jc.gpr[i];
+			cr().set(jc.cr);
+			xer().set(jc.xer);
+			lr() = jc.lr;
+			ctr() = jc.ctr;
+			if (jc.dec_wr) {
+				if ((dec_ & 0x80000000u) == 0 && (jc.dec & 0x80000000u))
+					dec_pending_ = true;
+				dec_ = jc.dec;
+				dec_tb_base_ = tb_ticks();
+			}
+			nw_jit_note_exec(n);
+#if NW_BOOT_LOG
+			for (int i = 0; i < n; i++)
+				nw_event_insn();
+#endif
+			return 1;
+		}
 		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_SMC) {
 			for (int i = 0; i < 32; i++)
 				gpr(i) = jc.gpr[i];

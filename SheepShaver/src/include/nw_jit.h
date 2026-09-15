@@ -97,7 +97,8 @@ int nw_jit_op_ends_block(uint32_t op);
 enum {
 	NW_JIT_FAULT_DSI = 1,
 	NW_JIT_FAULT_IO = 2,
-	NW_JIT_FAULT_SMC = 3	/* store into the executing code page */
+	NW_JIT_FAULT_SMC = 3,	/* store into the executing code page */
+	NW_JIT_FAULT_EXC = 4	/* helper already took a program exception */
 };
 
 void nw_jit_verify_note(const uint32_t *ops, int n, int miss);
@@ -192,7 +193,8 @@ uint64_t nw_jit_dtlb_misses(void);
 typedef uint32_t (*nw_jit_host_lwz_pa)(void *host, uint32_t pa, uint32_t pc, int *fault);
 typedef void (*nw_jit_host_stw_pa)(void *host, uint32_t pa, uint32_t val, uint32_t pc, int *fault);
 void nw_jit_set_host_pa(nw_jit_host_lwz_pa lwz, nw_jit_host_stw_pa stw);
-typedef uint32_t (*nw_jit_host_mfspr)(void *host, uint32_t spr);
+/* status: 0 = OK (*value in return), 1 = NOP (leave rD), 2 = EXC (return is new pc). */
+typedef uint32_t (*nw_jit_host_mfspr)(void *host, uint32_t spr, uint32_t guest_pc, int *status);
 void nw_jit_set_host_mfspr(nw_jit_host_mfspr fn);
 /* Same work as kpx execute_isync: flush the pending icbi range (and NW
  * JIT pages), then the emitter does ISB. No PC bump; the JIT owns PC. */

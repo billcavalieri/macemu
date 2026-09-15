@@ -2601,7 +2601,9 @@ int main()
 		{
 			static uint32_t tbl_val;
 			tbl_val = 0x11223344u;
-			auto hmfspr = [](void *, uint32_t spr) -> uint32_t {
+			auto hmfspr = [](void *, uint32_t spr, uint32_t, int *status) -> uint32_t {
+				if (status)
+					*status = 0;
 				return spr == NW_PPC_SPR_TBL ? tbl_val : 0;
 			};
 			nw_jit_set_host_mfspr(+hmfspr);
@@ -2616,6 +2618,48 @@ int main()
 			CHECK(fn != NULL);
 			fn(&b);
 			CHECK(a.gpr[3] == 0x11223344u && b.gpr[3] == a.gpr[3]);
+			nw_jit_set_host_mfspr(NULL);
+		}
+
+		/* leftover mfspr NOP must leave rD; EXC must not write rD */
+		{
+			auto hnop = [](void *, uint32_t, uint32_t, int *status) -> uint32_t {
+				if (status)
+					*status = 1;
+				return 0xdeadu;
+			};
+			nw_jit_set_host_mfspr(+hnop);
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.host = (void *)1;
+			a.gpr[3] = 0xa5a5a5a5u;
+			ops[0] = nw_ppc_mfspr(3, 18);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x1480u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x1480u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[3] == 0xa5a5a5a5u && b.gpr[3] == 0xa5a5a5a5u);
+			CHECK(a.fault == 0 && b.fault == 0);
+			auto hexc = [](void *, uint32_t, uint32_t, int *status) -> uint32_t {
+				if (status)
+					*status = 2;
+				return 0x700u;
+			};
+			nw_jit_set_host_mfspr(+hexc);
+			memset(&a, 0, sizeof(a));
+			a.host = (void *)1;
+			a.gpr[3] = 0x11u;
+			ops[0] = nw_ppc_mfspr(3, 0);
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 1, 0x1490u) == 0);
+			fn = nw_jit_compile(ops, 1, 0x1490u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[3] == 0x11u && b.gpr[3] == 0x11u);
+			CHECK(a.fault == NW_JIT_FAULT_EXC && b.fault == NW_JIT_FAULT_EXC);
+			CHECK(a.pc == 0x700u && b.pc == 0x700u);
 			nw_jit_set_host_mfspr(NULL);
 		}
 
@@ -3198,6 +3242,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_dss()));
 		CHECK(nw_jit_op_supported(nw_ppc_mtmsr(10)));
 		CHECK(nw_jit_op_supported(nw_ppc_mtspr(NW_PPC_SPR_SPRG0, 3)));
+		CHECK(nw_jit_op_supported(nw_ppc_mfspr(3, 287)));	/* PVR already; any SPR now */
 		CHECK(nw_jit_op_supported(nw_ppc_isync()));
 		CHECK(nw_jit_op_supported(nw_ppc_lhax(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lhaux(3, 1, 2)));
@@ -3207,7 +3252,7 @@ int main()
 		CHECK(!nw_jit_op_supported(nw_ppc_cmp_cr(0, 3, 4) | (1u << 21))); /* L=1 */
 		CHECK(!nw_jit_op_supported(nw_ppc_cmpl(0, 3, 4) | (1u << 21))); /* L=1 */
 		CHECK(nw_jit_op_supported(nw_ppc_mfspr(3, NW_PPC_SPR_TBU)));
-		CHECK(!nw_jit_op_supported(nw_ppc_mfspr(3, 18)));	/* DSISR still kpx */
+		CHECK(nw_jit_op_supported(nw_ppc_mfspr(3, 18)));	/* DSISR via mfspr_guest */
 		CHECK(!nw_jit_op_supported(0x7c000028u));	/* lwarx still unsup */
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
 		nw_jit_cache_put(0x2000u, 0x2000u, 0, 0, NW_JIT_INTERPRET, 0);
