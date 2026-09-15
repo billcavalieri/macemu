@@ -45,6 +45,7 @@ void nw_jit_helper_lmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rd);
 void nw_jit_helper_stmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rs);
 void nw_jit_helper_isync(struct nw_jit_cpu *cpu);
 void nw_jit_helper_mtmsr(struct nw_jit_cpu *cpu, uint32_t msr);
+void nw_jit_helper_bc(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc);
 
 enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
@@ -203,6 +204,32 @@ void nw_jit_helper_mtmsr(struct nw_jit_cpu *cpu, uint32_t msr)
 		g_host_mtmsr(cpu->host, msr);
 	else
 		nw_jit_dtlb_flush();
+}
+
+void nw_jit_helper_bc(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc)
+{
+	const int bo = (int)((op >> 21) & 0x1f);
+	const int bi = (int)((op >> 16) & 0x1f);
+	const int32_t disp = (int16_t)(op & 0xfffcu);
+	const int aa = (int)((op >> 1) & 1);
+	const int lk = (int)(op & 1);
+	int cond_ok = 1, ctr_ok = 1;
+	if ((bo & 0x10) == 0) {
+		const int crbit = (int)((cpu->cr >> (31 - bi)) & 1);
+		cond_ok = (bo & 0x08) ? crbit : !crbit;
+	}
+	if ((bo & 0x04) == 0) {
+		cpu->ctr -= 1u;
+		ctr_ok = (cpu->ctr == 0);
+		if ((bo & 0x02) == 0)
+			ctr_ok = !ctr_ok;
+	}
+	if (lk)
+		cpu->lr = pc + 4;
+	if (cond_ok && ctr_ok)
+		cpu->pc = ((aa ? 0u : pc) + (uint32_t)disp) & ~3u;
+	else
+		cpu->pc = pc + 4;
 }
 
 static int page_bit_index(uint32_t phys_page, uint8_t **bits, unsigned *idx)
@@ -772,7 +799,7 @@ int nw_jit_op_supported(uint32_t op)
 	if (prim == 46 || prim == 47)
 		return 1;	/* lmw / stmw */
 	if (prim == 16)
-		return bo_is_cr(rd) && (op & 3) == 0;
+		return 1;	/* bc: CR, CTR, LK, AA */
 	if (prim == 18)
 		return (op & 2) == 0;
 	if (prim == 19 && xo == 33)
@@ -2090,15 +2117,9 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		return 1;	/* end block: icbi range may have dropped later code */
 	}
 	if (prim == 16) {
-		const int bo = rd, bi = ra;
-		const int32_t disp = (int16_t)(op & 0xfffcu);
-		const int crbit = (int)((cpu->cr >> (31 - bi)) & 1);
-		int take = 0;
-		if (!bo_is_cr(bo))
-			return -1;
-		take = ((bo & ~1) == NW_PPC_BO_TRUE) ? crbit : !crbit;
-		cpu->pc = take ? (uint32_t)(pc + disp) : pc + 4;
-		return take ? 1 : 0;
+		const uint32_t next = pc + 4;
+		nw_jit_helper_bc(cpu, op, pc);
+		return (cpu->pc != next) ? 1 : 0;
 	}
 	if (prim == 18) {
 		const int32_t disp = (((int32_t)(op << 6)) >> 6) & ~3;
@@ -2486,7 +2507,7 @@ int nw_jit_interp_n(struct nw_jit_cpu *cpu, const uint32_t *ops, int n, uint32_t
 #if defined(__aarch64__)
 
 enum {
-	W0 = 0, W1 = 1, W2 = 2, W8 = 8, W9 = 9, W10 = 10, W12 = 12, W13 = 13,
+	W0 = 0, W1 = 1, W2 = 2, W8 = 8, W9 = 9, W10 = 10, W11 = 11, W12 = 12, W13 = 13,
 	X0 = 0, X9 = 9, X10 = 10, X11 = 11, X12 = 12, X13 = 13, X19 = 19
 };
 
@@ -2536,6 +2557,11 @@ static uint32_t a64_sbcs_reg(int rd, int rn, int rm)
 static uint32_t a64_cmp_imm1(int rn)
 {
 	return 0x7100041fu | ((uint32_t)rn << 5);
+}
+
+static uint32_t a64_subs_imm1(int rd, int rn)
+{
+	return 0x71000400u | ((uint32_t)rn << 5) | (uint32_t)rd;
 }
 
 static uint32_t a64_sub_reg(int rd, int rn, int rm)
@@ -3433,26 +3459,43 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	if (prim == 16) {
 		const int bo = rd, bi = ra;
 		const int32_t disp = (int16_t)(op & 0xfffcu);
-		if (!bo_is_cr(bo))
+		const int aa = (int)((op >> 1) & 1);
+		const int lk = (int)(op & 1);
+		const int dec_ctr = ((bo & 0x04) == 0);
+		if (!dec_ctr && !lk && !aa && bo_is_cr(bo)) {
+			if (!emit_w(e, a64_ldr_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr))))
+				return 0;
+			if (!emit_w(e, a64_lsr(W8, W8, 31 - bi)))
+				return 0;
+			if (!emit_w(e, a64_and_imm1(W8, W8)))
+				return 0;
+			uint32_t *cb = e->p;
+			if (!emit_w(e, a64_cbz(W8, 0)))
+				return 0;
+			if (!emit_set_pc(e, (uint32_t)(pc + disp)))
+				return 0;
+			if (!emit_ret(e))
+				return 0;
+			int32_t off = (int32_t)(e->p - cb);
+			*cb = ((bo & ~1) == NW_PPC_BO_TRUE) ? a64_cbz(W8, off) : a64_cbnz(W8, off);
+			if (is_last)
+				return emit_set_pc(e, pc + 4);
+			return 1;
+		}
+		/* CTR / LK / AA: same as kpx execute_branch; helper sets PC. */
+		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
-		if (!emit_w(e, a64_ldr_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr))))
+		if (!emit_imm32(e, W1, op))
 			return 0;
-		if (!emit_w(e, a64_lsr(W8, W8, 31 - bi)))
+		if (!emit_imm32(e, W2, pc))
 			return 0;
-		if (!emit_w(e, a64_and_imm1(W8, W8)))
+		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
-		uint32_t *cb = e->p;
-		if (!emit_w(e, a64_cbz(W8, 0)))
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_bc))
 			return 0;
-		if (!emit_set_pc(e, (uint32_t)(pc + disp)))
+		if (!emit_w(e, 0xd63f0120u))
 			return 0;
-		if (!emit_ret(e))
-			return 0;
-		int32_t off = (int32_t)(e->p - cb);
-		*cb = ((bo & ~1) == NW_PPC_BO_TRUE) ? a64_cbz(W8, off) : a64_cbnz(W8, off);
-		if (is_last)
-			return emit_set_pc(e, pc + 4);
-		return 1;
+		return emit_ret(e);
 	}
 	if (prim == 18) {
 		const int32_t disp = (((int32_t)(op << 6)) >> 6) & ~3;

@@ -2941,6 +2941,51 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[5] == 0 && b.gpr[5] == 0 && a.pc == 0x1c10u && b.pc == a.pc);
 
+		/* bdnz: CTR=1 decs to 0, not taken (interp continues; compile ends block) */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.ctr = 1;
+		ops[0] = nw_ppc_bc(NW_PPC_BO_BDNZ, 0, 8);
+		ops[1] = nw_ppc_addi(5, 0, 99);
+		ops[2] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 3, 0x1790u) == 1);
+		CHECK(a.ctr == 0 && a.gpr[5] == 99);
+		fn = nw_jit_compile(ops, 1, 0x1790u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(b.ctr == 0 && b.pc == 0x1794u);
+
+		/* bdnz: CTR=2 decs to 1, taken, skips addi 99 */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.ctr = 2;
+		ops[0] = nw_ppc_bc(NW_PPC_BO_BDNZ, 0, 8);
+		ops[1] = nw_ppc_addi(5, 0, 99);
+		ops[2] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 3, 0x17a0u) == 1);
+		fn = nw_jit_compile(ops, 3, 0x17a0u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.ctr == 1 && b.ctr == 1);
+		CHECK(a.gpr[5] == 0 && b.gpr[5] == 0);
+		CHECK(a.pc == 0x17a8u && b.pc == a.pc);
+
+		/* bcl: LK sets LR even when not taken (bdnz CTR=1) */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0;
+		a.ctr = 1;
+		ops[0] = nw_ppc_bc(NW_PPC_BO_BDNZ, 0, 8) | 1u;
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x17b0u) == 1);
+		CHECK(a.lr == 0x17b4u);
+		fn = nw_jit_compile(ops, 1, 0x17b0u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(b.lr == 0x17b4u && b.pc == 0x17b4u);
+
 		/* bclr BO=5 not taken (CR bit 8 set) falls through */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x3000u;
@@ -3046,6 +3091,8 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_lmw(30, 0, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_stmw(30, 0, 8)));
 		CHECK(nw_jit_op_supported(nw_ppc_bcctr(20, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_bc(NW_PPC_BO_BDNZ, 0, -8)));
+		CHECK(nw_jit_op_supported(nw_ppc_bc(NW_PPC_BO_BDNZ, 0, 8) | 1u));
 		CHECK(nw_jit_op_supported(nw_ppc_stwu(3, 1, -4)));
 		CHECK(nw_jit_op_supported(nw_ppc_lwzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stwx(3, 1, 2)));

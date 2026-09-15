@@ -291,7 +291,10 @@ enum {
 	NW_PPC_SPR_SPRG3 = 275,
 	NW_PPC_SPR_PVR = 287,
 	NW_PPC_BO_TRUE = 12,
-	NW_PPC_BO_FALSE = 4
+	NW_PPC_BO_FALSE = 4,
+	NW_PPC_BO_BDNZ = 16,	/* dec CTR, branch if CTR != 0 */
+	NW_PPC_BO_BDZ = 18,	/* dec CTR, branch if CTR == 0 */
+	NW_PPC_BO_ALWAYS = 20
 };
 
 #endif
