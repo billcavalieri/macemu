@@ -43,7 +43,7 @@ uint32_t nw_jit_helper_sraw(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t rb);
 void nw_jit_helper_lmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rd);
 void nw_jit_helper_stmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rs);
 
-enum { NW_JIT_CODE_SIZE = 1 << 20, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
+enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
 
 struct nw_jit_entry {
@@ -746,8 +746,6 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* crandc */
 	if (prim == 19 && xo == 225)
 		return 1;	/* crnand */
-	if (prim == 19 && xo == 150)
-		return 1;	/* isync */
 	if (prim == 19 && (xo == 16 || xo == 528) && (rd == 20 || bo_is_cr(rd)))
 		return 1;	/* blr / bclr / bcctr (CR true/false, likely ignored) */
 	if (prim == 31 && xo == 266)
@@ -3401,8 +3399,6 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return emit_ret(e);
 	}
-	if (prim == 19 && xo == 150)
-		return emit_w(e, 0xd5033fdfu);	/* ISB */
 	if (prim == 19 && xo == 33) {
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
