@@ -20,6 +20,7 @@
  */
 
 #include "nw_jit.h"
+#include "nw_io.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -237,6 +238,13 @@ static void pagebit_clear(uint32_t phys_page)
 
 static int page_may_have_code(uint32_t phys_page)
 {
+	switch (nw_pa_kind(phys_page)) {
+	case NW_PA_FB:
+	case NW_PA_IO:
+		return 0;
+	default:
+		break;
+	}
 	uint8_t *bits;
 	unsigned i;
 	if (!page_bit_index(phys_page, &bits, &i))

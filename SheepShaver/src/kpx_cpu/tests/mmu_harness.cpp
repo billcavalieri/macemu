@@ -2977,6 +2977,16 @@ int main()
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == pb);
 		nw_jit_invalidate_range_src(0x2000u, 4, NW_JIT_FL_HOST);
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
+
+		/* FB is never a code page: a store there must not walk/drop RAM translations. */
+		nw_jit_reset();
+		nw_banks_set(NW_PA_FB, 0x50590000u, 0x12c000u);
+		pa = nw_jit_compile(ops, 2, 0x1000u, 0x1000u, 0, 0);
+		CHECK(pa != NULL);
+		fl = nw_jit_flush_count();
+		nw_jit_invalidate_page_src(0x50590000u, NW_JIT_FL_STORE);
+		CHECK(nw_jit_flush_count() == fl);
+		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == pa);
 	}
 
 	/* WP3 4b: dispatcher cache sentinels, mode, op filter. */
