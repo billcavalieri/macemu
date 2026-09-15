@@ -3145,6 +3145,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_sync()));
 		CHECK(nw_jit_op_supported(nw_ppc_dss()));
 		CHECK(nw_jit_op_supported(nw_ppc_mtmsr(10)));
+		CHECK(nw_jit_op_supported(nw_ppc_mtspr(NW_PPC_SPR_SPRG0, 3)));
 		CHECK(nw_jit_op_supported(nw_ppc_isync()));
 		CHECK(nw_jit_op_supported(nw_ppc_lhax(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lhaux(3, 1, 2)));

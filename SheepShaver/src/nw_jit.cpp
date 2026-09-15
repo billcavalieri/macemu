@@ -46,6 +46,7 @@ void nw_jit_helper_stmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rs);
 void nw_jit_helper_isync(struct nw_jit_cpu *cpu);
 void nw_jit_helper_mtmsr(struct nw_jit_cpu *cpu, uint32_t msr);
 void nw_jit_helper_bc(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc);
+void nw_jit_helper_mtspr(struct nw_jit_cpu *cpu, uint32_t spr, uint32_t val);
 
 enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
@@ -77,6 +78,7 @@ static nw_jit_host_stw_pa g_host_stw_pa;
 static nw_jit_host_mfspr g_host_mfspr;
 static nw_jit_host_isync g_host_isync;
 static nw_jit_host_mtmsr g_host_mtmsr;
+static nw_jit_host_mtspr g_host_mtspr;
 static nw_jit_host_lh g_host_lh;
 static nw_jit_host_sth16 g_host_sth16;
 static nw_jit_host_lb g_host_lb;
@@ -204,6 +206,12 @@ void nw_jit_helper_mtmsr(struct nw_jit_cpu *cpu, uint32_t msr)
 		g_host_mtmsr(cpu->host, msr);
 	else
 		nw_jit_dtlb_flush();
+}
+
+void nw_jit_helper_mtspr(struct nw_jit_cpu *cpu, uint32_t spr, uint32_t val)
+{
+	if (g_host_mtspr && cpu->host)
+		g_host_mtspr(cpu->host, spr, val);
 }
 
 void nw_jit_helper_bc(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc)
@@ -664,6 +672,11 @@ void nw_jit_set_host_mtmsr(nw_jit_host_mtmsr fn)
 	g_host_mtmsr = fn;
 }
 
+void nw_jit_set_host_mtspr(nw_jit_host_mtspr fn)
+{
+	g_host_mtspr = fn;
+}
+
 void nw_jit_dtlb_flush(void)
 {
 	memset(g_dtlb, 0, sizeof(g_dtlb));
@@ -841,8 +854,8 @@ int nw_jit_op_supported(uint32_t op)
 	if (prim == 31 && xo == 339 &&
 	    (spr_is_user(spr_num(op)) || spr_is_mfspr_ext(spr_num(op))))
 		return 1;
-	if (prim == 31 && xo == 467 && spr_is_user(spr_num(op)))
-		return 1;
+	if (prim == 31 && xo == 467)
+		return 1;	/* mtspr: user inline, else kpx mtspr_guest */
 	if (prim == 32 || prim == 33 || prim == 36 || prim == 37)
 		return 1;	/* lwz / lwzu / stw / stwu */
 	if (prim == 34 || prim == 38)
@@ -2353,8 +2366,11 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 			cpu->ctr = cpu->gpr[rd];
 		else if (spr == NW_PPC_SPR_XER)
 			cpu->xer = cpu->gpr[rd];
-		else
-			return -1;
+		else {
+			nw_jit_helper_mtspr(cpu, spr, cpu->gpr[rd]);
+			cpu->pc = pc + 4;
+			return 1;
+		}
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -4217,6 +4233,24 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			if (!emit_w(e, 0xaa1303e0u))
 				return 0;
 			return emit_store_gpr(e, W8, rd);
+		} else if (xo == 467) {
+			if (!emit_w(e, 0xaa1303e0u))
+				return 0;
+			if (!emit_imm32(e, W1, spr))
+				return 0;
+			if (!emit_load_gpr(e, W2, rd))
+				return 0;
+			if (!emit_w(e, 0xaa1303e0u))
+				return 0;
+			if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_mtspr))
+				return 0;
+			if (!emit_w(e, 0xd63f0120u))
+				return 0;
+			if (!emit_w(e, 0xaa1303e0u))
+				return 0;
+			if (!emit_set_pc(e, pc + 4))
+				return 0;
+			return emit_ret(e);
 		} else
 			return 0;
 		if (xo == 339) {

@@ -359,6 +359,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_mfspr(powerpc_cpu::jit_host_mfspr);
 		nw_jit_set_host_isync(powerpc_cpu::jit_host_isync);
 		nw_jit_set_host_mtmsr(powerpc_cpu::jit_host_mtmsr);
+		nw_jit_set_host_mtspr(powerpc_cpu::jit_host_mtspr);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
 		nw_jit_set_host_byte(powerpc_cpu::jit_host_lb, powerpc_cpu::jit_host_stb);
 	}
@@ -1436,6 +1437,15 @@ void powerpc_cpu::jit_host_mtmsr(void *host, uint32 msr)
 	}
 	nw_jit_dtlb_flush();
 	(void)ppc;
+}
+
+void powerpc_cpu::jit_host_mtspr(void *host, uint32 spr, uint32 val)
+{
+	/* Same as execute_mtspr guest path without the PC bump. */
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	if (ppc32_guest_mmu_enabled())
+		ppc->mtspr_guest(spr, val);
+	(void)host;
 }
 
 uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)

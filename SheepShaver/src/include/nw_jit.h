@@ -200,6 +200,8 @@ void nw_jit_set_host_isync(nw_jit_host_isync fn);
 /* Same work as kpx execute_mtmsr: set_msr(rS), no PC bump. */
 typedef void (*nw_jit_host_mtmsr)(void *host, uint32_t msr);
 void nw_jit_set_host_mtmsr(nw_jit_host_mtmsr fn);
+typedef void (*nw_jit_host_mtspr)(void *host, uint32_t spr, uint32_t val);
+void nw_jit_set_host_mtspr(nw_jit_host_mtspr fn);
 uint64_t nw_jit_flush_count(void);
 uint64_t nw_jit_compile_count(void);
 void nw_jit_stats_print(const char *why);
