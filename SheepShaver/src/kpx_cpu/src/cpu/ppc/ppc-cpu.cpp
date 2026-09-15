@@ -361,6 +361,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_mtmsr(powerpc_cpu::jit_host_mtmsr);
 		nw_jit_set_host_mtspr(powerpc_cpu::jit_host_mtspr);
 		nw_jit_set_host_lvx(powerpc_cpu::jit_host_lvx);
+		nw_jit_set_host_stvx(powerpc_cpu::jit_host_stvx);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
 		nw_jit_set_host_byte(powerpc_cpu::jit_host_lb, powerpc_cpu::jit_host_stb);
 	}
@@ -1449,7 +1450,7 @@ void powerpc_cpu::jit_host_mtspr(void *host, uint32 spr, uint32 val)
 	(void)host;
 }
 
-void powerpc_cpu::jit_host_lvx(void *host, uint32 vd, uint32 ea, uint32 pc, int *fault)
+void powerpc_cpu::jit_host_lvx(void *host, uint32 vd, uint32 ea, uint32 pc, int *fault, uint32 *out)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
 	(void)pc;
@@ -1468,6 +1469,45 @@ void powerpc_cpu::jit_host_lvx(void *host, uint32 vd, uint32 ea, uint32 pc, int 
 	v.w[1] = vm_read_memory_4(pa +  4);
 	v.w[2] = vm_read_memory_4(pa +  8);
 	v.w[3] = vm_read_memory_4(pa + 12);
+	if (out) {
+		out[0] = v.w[0];
+		out[1] = v.w[1];
+		out[2] = v.w[2];
+		out[3] = v.w[3];
+	}
+}
+
+void powerpc_cpu::jit_host_stvx(void *host, uint32 ea, const uint32 *w, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	(void)pc;
+	ea &= ~15u;
+	uint32 pa;
+	if (!ppc->guest_data_probe(ea, 16, true, &pa)) {
+		*fault = 1;
+		return;
+	}
+	const int kind = nw_pa_kind(pa);
+	if (kind == NW_PA_IO) {
+		*fault = 2;
+		return;
+	}
+	if (kind == NW_PA_ROM)
+		return;
+	if (kind == NW_PA_NONE || !nw_pa_writable(pa)) {
+		*fault = 1;
+		return;
+	}
+	jit_host_stw(host, ea +  0, w[0], pc, fault);
+	if (*fault)
+		return;
+	jit_host_stw(host, ea +  4, w[1], pc, fault);
+	if (*fault)
+		return;
+	jit_host_stw(host, ea +  8, w[2], pc, fault);
+	if (*fault)
+		return;
+	jit_host_stw(host, ea + 12, w[3], pc, fault);
 }
 
 uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)
@@ -1899,6 +1939,12 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	memset(&jc, 0, sizeof(jc));
 	for (int i = 0; i < 32; i++)
 		jc.gpr[i] = gpr(i);
+	for (int i = 0; i < 32; i++) {
+		jc.vr[i][0] = vr(i).w[0];
+		jc.vr[i][1] = vr(i).w[1];
+		jc.vr[i][2] = vr(i).w[2];
+		jc.vr[i][3] = vr(i).w[3];
+	}
 	jc.cr = cr().get();
 	jc.xer = xer().get();
 	jc.lr = lr();

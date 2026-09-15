@@ -2686,6 +2686,16 @@ int main()
 			fn(&b);
 			CHECK(a.vr[3][0] == 0xa0a1a2a3u && b.vr[3][0] == a.vr[3][0]);
 			CHECK(a.vr[3][3] == 0xacadaeafu && b.vr[3][3] == a.vr[3][3]);
+			a.gpr[1] = 32;
+			ops[0] = nw_ppc_stvx(3, 1, 2);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			b.mem = ram;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x17e0u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x17e0u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(ram[32] == 0xa0 && ram[47] == 0xaf);
 		}
 
 		/* stbu r4, 4(r1): store then r1 = EA */
@@ -3141,6 +3151,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_lbz(3, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzu(3, 1, 4)));
 		CHECK(nw_jit_op_supported(nw_ppc_lvx(3, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_stvx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stb(3, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_stbu(4, 1, 4)));
