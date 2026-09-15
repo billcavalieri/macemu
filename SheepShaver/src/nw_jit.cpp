@@ -43,7 +43,7 @@ uint32_t nw_jit_helper_sraw(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t rb);
 void nw_jit_helper_lmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rd);
 void nw_jit_helper_stmw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t rs);
 
-enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
+enum { NW_JIT_CODE_SIZE = 1 << 20, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 8 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
 
 struct nw_jit_entry {
@@ -56,8 +56,8 @@ struct nw_jit_entry {
 static uint8_t *g_code;
 static size_t g_code_used;
 static struct nw_jit_entry g_cache[NW_JIT_CACHE];
-static uint16_t g_page_n_ram[NW_JIT_RAM_PAGES];
-static uint16_t g_page_n_rom[NW_JIT_ROM_PAGES];
+static uint8_t g_pagebit_ram[(NW_JIT_RAM_PAGES + 7) / 8];
+static uint8_t g_pagebit_rom[(NW_JIT_ROM_PAGES + 7) / 8];
 static uint32_t g_ram_base, g_ram_size, g_rom_base, g_rom_size;
 static uint64_t g_flush;
 static uint64_t g_flush_src[NW_JIT_FL_N];	/* entries dropped, by cause */
@@ -183,46 +183,57 @@ static int cache_slot(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir, ui
 	return (int)(h & (NW_JIT_CACHE - 1));
 }
 
-static uint16_t *page_count_ptr(uint32_t phys_page)
+static int page_bit_index(uint32_t phys_page, uint8_t **bits, unsigned *idx)
 {
 	phys_page &= ~0xfffu;
 	if (g_ram_size != 0 && phys_page >= g_ram_base &&
 	    phys_page - g_ram_base < g_ram_size) {
 		const unsigned i = (phys_page - g_ram_base) >> 12;
-		if (i < (unsigned)NW_JIT_RAM_PAGES)
-			return &g_page_n_ram[i];
-		return NULL;
+		if (i < (unsigned)NW_JIT_RAM_PAGES) {
+			*bits = g_pagebit_ram;
+			*idx = i;
+			return 1;
+		}
+		return 0;
 	}
 	if (g_rom_size != 0 && phys_page >= g_rom_base &&
 	    phys_page - g_rom_base < g_rom_size) {
 		const unsigned i = (phys_page - g_rom_base) >> 12;
-		if (i < (unsigned)NW_JIT_ROM_PAGES)
-			return &g_page_n_rom[i];
-		return NULL;
+		if (i < (unsigned)NW_JIT_ROM_PAGES) {
+			*bits = g_pagebit_rom;
+			*idx = i;
+			return 1;
+		}
+		return 0;
 	}
-	return NULL;
+	return 0;
+}
+
+static void pagebit_set(uint32_t phys_page)
+{
+	uint8_t *bits;
+	unsigned i;
+	if (!page_bit_index(phys_page, &bits, &i))
+		return;
+	bits[i >> 3] |= (uint8_t)(1u << (i & 7u));
+}
+
+static void pagebit_clear(uint32_t phys_page)
+{
+	uint8_t *bits;
+	unsigned i;
+	if (!page_bit_index(phys_page, &bits, &i))
+		return;
+	bits[i >> 3] &= (uint8_t)~(1u << (i & 7u));
 }
 
 static int page_may_have_code(uint32_t phys_page)
 {
-	uint16_t *c = page_count_ptr(phys_page);
-	if (c == NULL)
+	uint8_t *bits;
+	unsigned i;
+	if (!page_bit_index(phys_page, &bits, &i))
 		return 1;
-	return *c != 0;
-}
-
-static void page_count_inc(uint32_t phys_page)
-{
-	uint16_t *c = page_count_ptr(phys_page);
-	if (c != NULL && *c < 0xffffu)
-		(*c)++;
-}
-
-static void page_count_dec(uint32_t phys_page)
-{
-	uint16_t *c = page_count_ptr(phys_page);
-	if (c != NULL && *c > 0)
-		(*c)--;
+	return bits[i >> 3] & (uint8_t)(1u << (i & 7u));
 }
 
 void nw_jit_set_code_pages(uint32_t ram_base, uint32_t ram_size,
@@ -232,8 +243,8 @@ void nw_jit_set_code_pages(uint32_t ram_base, uint32_t ram_size,
 	g_ram_size = ram_size;
 	g_rom_base = rom_base & ~0xfffu;
 	g_rom_size = rom_size;
-	memset(g_page_n_ram, 0, sizeof(g_page_n_ram));
-	memset(g_page_n_rom, 0, sizeof(g_page_n_rom));
+	memset(g_pagebit_ram, 0, sizeof(g_pagebit_ram));
+	memset(g_pagebit_rom, 0, sizeof(g_pagebit_rom));
 }
 
 static int code_ready(void)
@@ -253,8 +264,8 @@ static int code_ready(void)
 void nw_jit_reset(void)
 {
 	memset(g_cache, 0, sizeof(g_cache));
-	memset(g_page_n_ram, 0, sizeof(g_page_n_ram));
-	memset(g_page_n_rom, 0, sizeof(g_page_n_rom));
+	memset(g_pagebit_ram, 0, sizeof(g_pagebit_ram));
+	memset(g_pagebit_rom, 0, sizeof(g_pagebit_rom));
 	g_code_used = 0;
 	g_flush = 0;
 	g_compiles = 0;
@@ -286,11 +297,11 @@ void nw_jit_invalidate_page_src(uint32_t phys_page, int src)
 	for (int i = 0; i < NW_JIT_CACHE; i++) {
 		if (g_cache[i].used && g_cache[i].phys_page == phys_page) {
 			g_cache[i].used = 0;
-			page_count_dec(phys_page);
 			g_flush++;
 			g_flush_src[src]++;
 		}
 	}
+	pagebit_clear(phys_page);
 }
 
 void nw_jit_invalidate_page(uint32_t phys_page)
@@ -324,8 +335,8 @@ void nw_jit_invalidate_all_src(int src)
 			g_flush_src[src]++;
 		}
 	}
-	memset(g_page_n_ram, 0, sizeof(g_page_n_ram));
-	memset(g_page_n_rom, 0, sizeof(g_page_n_rom));
+	memset(g_pagebit_ram, 0, sizeof(g_pagebit_ram));
+	memset(g_pagebit_rom, 0, sizeof(g_pagebit_rom));
 }
 
 void nw_jit_invalidate_all(void)
@@ -1003,25 +1014,29 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 		      uint32_t endian, nw_jit_fn fn, int n)
 {
 	int i = cache_slot(phys_page, guest_pc, msr_ir, endian);
-	int slot = i;
+	int slot = -1, empty = -1;
 	for (int p = 0; p < NW_JIT_PROBE; p++) {
 		int j = (i + p) & (NW_JIT_CACHE - 1);
-		if (!g_cache[j].used ||
-		    (g_cache[j].phys_page == phys_page && g_cache[j].guest_pc == guest_pc &&
-		     g_cache[j].msr_ir == msr_ir && g_cache[j].endian == endian)) {
+		if (!g_cache[j].used) {
+			if (empty < 0)
+				empty = j;
+			continue;
+		}
+		if (g_cache[j].phys_page == phys_page && g_cache[j].guest_pc == guest_pc &&
+		    g_cache[j].msr_ir == msr_ir && g_cache[j].endian == endian) {
 			slot = j;
 			break;
 		}
 	}
+	if (slot < 0)
+		slot = (empty >= 0) ? empty : ((i + NW_JIT_PROBE - 1) & (NW_JIT_CACHE - 1));
 	const int same = g_cache[slot].used &&
 		g_cache[slot].phys_page == phys_page &&
 		g_cache[slot].guest_pc == guest_pc &&
 		g_cache[slot].msr_ir == msr_ir &&
 		g_cache[slot].endian == endian;
-	if (g_cache[slot].used && !same) {
+	if (g_cache[slot].used && !same)
 		g_evict++;
-		page_count_dec(g_cache[slot].phys_page);
-	}
 	g_cache[slot].phys_page = phys_page;
 	g_cache[slot].guest_pc = guest_pc;
 	g_cache[slot].msr_ir = msr_ir;
@@ -1029,8 +1044,7 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 	g_cache[slot].fn = fn;
 	g_cache[slot].used = 1;
 	g_cache[slot].n = (uint8_t)(n < 0 ? 0 : n > 255 ? 255 : n);
-	if (!same)
-		page_count_inc(phys_page);
+	pagebit_set(phys_page);
 }
 
 uint32_t nw_ppc_addi(int rd, int ra, int simm)
