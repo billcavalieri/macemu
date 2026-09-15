@@ -295,6 +295,7 @@ uint32_t nw_ppc_mfspr(int rd, int spr);
 uint32_t nw_ppc_mtspr(int spr, int rs);
 uint32_t nw_ppc_lfd(int frd, int ra, int d);
 uint32_t nw_ppc_stfd(int frs, int ra, int d);
+uint32_t nw_ppc_mullw(int rd, int ra, int rb, int rc);
 
 enum {
 	NW_PPC_SPR_XER = 1,
