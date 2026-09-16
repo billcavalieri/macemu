@@ -52,8 +52,8 @@ void nw_jit_helper_stvx(struct nw_jit_cpu *cpu, uint32_t vs, uint32_t ra, uint32
 void nw_jit_helper_lfd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t ra, uint32_t simm);
 void nw_jit_helper_stfd(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ra, uint32_t simm);
 
-enum { NW_JIT_CODE_SIZE = 1 << 23, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 16 };
-enum { NW_JIT_HITS_ROM = 64, NW_JIT_HITS_AGE = 4096 };
+enum { NW_JIT_CODE_SIZE = 1 << 24, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 16 };
+enum { NW_JIT_HITS_AGE = 4096 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
 
 struct nw_jit_entry {
@@ -76,6 +76,9 @@ static uint64_t g_flush_calls[NW_JIT_FL_N];	/* invalidate calls, by cause */
 static uint64_t g_compiles;
 static uint64_t g_evict, g_recompile_n;
 static uint64_t g_exec_blocks, g_exec_insns;
+static uint64_t g_code_emitted, g_compiles_at_wrap, g_wraps;
+static int g_occ_max;
+static uint64_t g_dtlb_fl[NW_JIT_DTLB_FL_N];
 static int g_mode = -1;
 static nw_jit_host_lwz g_host_lwz;
 static nw_jit_host_stw g_host_stw;
@@ -210,7 +213,14 @@ static uint32_t spr_num(uint32_t op);
 
 static int cache_slot(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir, uint32_t endian)
 {
-	uint32_t h = phys_page ^ (guest_pc * 0x9e3779b1u) ^ (msr_ir << 16) ^ endian;
+	/* Mix then fold: a low-bit mask of guest_pc * K aliases every 32 KiB
+	 * (ROM is 4 MiB), 4-aligned PCs only hit slots ≡ 0/1, and msr_ir<<16
+	 * sits above the 15-bit index. */
+	uint32_t h = (guest_pc >> 2) * 0x9e3779b1u;
+	h ^= (phys_page >> 12) * 0x85ebca6bu;
+	h ^= msr_ir * 0x27d4eb2fu;
+	h ^= endian;
+	h ^= h >> 15;
 	return (int)(h & (NW_JIT_CACHE - 1));
 }
 
@@ -222,11 +232,12 @@ void nw_jit_helper_isync(struct nw_jit_cpu *cpu)
 
 void nw_jit_helper_mtmsr(struct nw_jit_cpu *cpu, uint32_t msr)
 {
+	const uint32_t old = cpu->msr;
 	cpu->msr = msr;
 	if (g_host_mtmsr && cpu->host)
 		g_host_mtmsr(cpu->host, msr);
 	else
-		nw_jit_dtlb_flush();
+		nw_jit_dtlb_flush_if_pr(old, msr, NW_JIT_DTLB_FL_MTMSR);
 }
 
 void nw_jit_helper_mtspr(struct nw_jit_cpu *cpu, uint32_t spr, uint32_t val)
@@ -462,6 +473,10 @@ void nw_jit_reset(void)
 	g_compiles = 0;
 	g_evict = 0;
 	g_recompile_n = 0;
+	g_code_emitted = 0;
+	g_compiles_at_wrap = 0;
+	g_wraps = 0;
+	g_occ_max = 0;
 	memset(g_flush_src, 0, sizeof(g_flush_src));
 	memset(g_flush_calls, 0, sizeof(g_flush_calls));
 	g_exec_blocks = 0;
@@ -473,7 +488,8 @@ void nw_jit_reset(void)
 		g_hist[i].n = g_hist[i].miss = g_hist[i].insns = 0;
 	memset(g_pchot, 0, sizeof(g_pchot));
 	memset(g_skip, 0, sizeof(g_skip));
-	nw_jit_dtlb_flush();
+	nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_RESET);
+	memset(g_dtlb_fl, 0, sizeof(g_dtlb_fl));
 	g_dtlb_hit = g_dtlb_miss = 0;
 }
 
@@ -599,7 +615,7 @@ void nw_jit_stats_print(const char *why)
 		"store", "icbi", "tlb", "sr", "bat", "sdr1", "wrap",
 		"istore", "host", "other"
 	};
-	printf("NW-BOOT G1: jit stats %s mode %s blocks %llu insns %llu flush %llu compiles %llu evict %llu recompile_n %llu dtlb hit %llu miss %llu\n",
+	printf("NW-BOOT G1: jit stats %s mode %s blocks %llu insns %llu flush %llu compiles %llu evict %llu recompile_n %llu dtlb hit %llu miss %llu wrap %llu occ_max %d b/block %llu\n",
 	       why, nw_jit_mode_name(),
 	       (unsigned long long)g_exec_blocks,
 	       (unsigned long long)g_exec_insns,
@@ -608,13 +624,27 @@ void nw_jit_stats_print(const char *why)
 	       (unsigned long long)g_evict,
 	       (unsigned long long)g_recompile_n,
 	       (unsigned long long)g_dtlb_hit,
-	       (unsigned long long)g_dtlb_miss);
+	       (unsigned long long)g_dtlb_miss,
+	       (unsigned long long)g_wraps,
+	       g_occ_max,
+	       (unsigned long long)(g_compiles ? g_code_emitted / g_compiles : 0));
 	for (int i = 0; i < NW_JIT_FL_N; i++) {
 		if (g_flush_calls[i] || g_flush_src[i])
 			printf("NW-BOOT G1: jit flush %s calls %llu entries %llu\n",
 			       src_name[i],
 			       (unsigned long long)g_flush_calls[i],
 			       (unsigned long long)g_flush_src[i]);
+	}
+	{
+		static const char *const dtlb_fl_name[NW_JIT_DTLB_FL_N] = {
+			"mtmsr", "rfi", "mtsr", "tlb", "bat", "sdr1", "reset", "other"
+		};
+		for (int i = 0; i < NW_JIT_DTLB_FL_N; i++) {
+			if (g_dtlb_fl[i])
+				printf("NW-BOOT G1: jit dtlb-flush %s %llu\n",
+				       dtlb_fl_name[i],
+				       (unsigned long long)g_dtlb_fl[i]);
+		}
 	}
 	{
 		int top[NW_JIT_SKIPTOP];
@@ -829,9 +859,33 @@ void nw_jit_set_host_stfd(nw_jit_host_stfd fn)
 	g_host_stfd = fn;
 }
 
+void nw_jit_dtlb_flush_src(int src)
+{
+	if (src < 0 || src >= NW_JIT_DTLB_FL_N)
+		src = NW_JIT_DTLB_FL_OTHER;
+	g_dtlb_fl[src]++;
+	memset(g_dtlb, 0, sizeof(g_dtlb));
+}
+
 void nw_jit_dtlb_flush(void)
 {
-	memset(g_dtlb, 0, sizeof(g_dtlb));
+	nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_OTHER);
+}
+
+void nw_jit_dtlb_flush_if_pr(uint32_t old_msr, uint32_t new_msr, int src)
+{
+	if ((old_msr ^ new_msr) & 0x00004000u)	/* MSR[PR] */
+		nw_jit_dtlb_flush_src(src);
+}
+
+static void nw_jit_cpu_bind(struct nw_jit_cpu *c)
+{
+	c->jit_dtlb = g_dtlb;
+	c->jit_dtlb_hit = &g_dtlb_hit;
+	c->jit_lwz = (void *)nw_jit_helper_lwz;
+	c->jit_stw = (void *)nw_jit_helper_stw;
+	c->jit_lwz_pa = (void *)nw_jit_helper_lwz_pa;
+	c->jit_stw_pa = (void *)nw_jit_helper_stw_pa;
 }
 
 void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host)
@@ -1320,15 +1374,8 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 	g_cache[slot].fn = fn;
 	g_cache[slot].used = 1;
 	g_cache[slot].n = (uint8_t)(n < 0 ? 0 : n > 255 ? 255 : n);
-	if (!same) {
-		uint16_t h = 1;
-		if (g_rom_size != 0 && phys_page >= g_rom_base &&
-		    phys_page - g_rom_base < g_rom_size)
-			h = NW_JIT_HITS_ROM;
-		if (guest_pc >= 0x68000000u && guest_pc < 0x68c00000u)
-			h = (uint16_t)(h + NW_JIT_HITS_ROM);
-		g_cache[slot].hits = h;
-	}
+	if (!same)
+		g_cache[slot].hits = 1;
 	pagebit_set(phys_page);
 }
 
@@ -3020,6 +3067,11 @@ static uint32_t a64_ldr_w(int rt, int rn, uint32_t off)
 	return 0xb9400000u | ((off >> 2) << 10) | ((uint32_t)rn << 5) | (uint32_t)rt;
 }
 
+static uint32_t a64_ldr_x(int rt, int rn, uint32_t off)
+{
+	return 0xf9400000u | ((off >> 3) << 10) | ((uint32_t)rn << 5) | (uint32_t)rt;
+}
+
 static uint32_t a64_str_w(int rt, int rn, uint32_t off)
 {
 	return 0xb9000000u | ((off >> 2) << 10) | ((uint32_t)rn << 5) | (uint32_t)rt;
@@ -3102,16 +3154,46 @@ static uint32_t a64_and_dtlb_idx(int rd, int rn)
 	return 0x12002400u | ((uint32_t)rn << 5) | (uint32_t)rd;
 }
 
-/* W8 = EA. Hit: helper_pa(cpu, pa). Miss: helper_ea(cpu, ea). W2 preserved. */
-static int emit_dtlb_and_helpers(struct emit *e, int is_store,
-				 void *miss_fn, void *hit_fn)
+static uint32_t a64_and_imm_off12(int rd, int rn)
 {
+	/* AND Wd, Wn, #0xfff */
+	return 0x12002c00u | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t a64_and_imm_page(int rd, int rn)
+{
+	/* AND Wd, Wn, #0xfffff000 */
+	return 0x12144c00u | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static int emit_blr_x19(struct emit *e, uint32_t off)
+{
+	if (!emit_w(e, a64_ldr_x(X9, X19, off)))
+		return 0;
+	return emit_w(e, 0xd63f0120u);			/* BLR X9 */
+}
+
+/* W8 = EA. Hit: helper_pa(cpu, pa). Miss: helper_ea(cpu, ea). W2 preserved. */
+static int emit_dtlb_and_helpers(struct emit *e, int is_store)
+{
+	static_assert((offsetof(struct nw_jit_cpu, jit_dtlb) & 7) == 0, "jit_dtlb 8-aligned");
+	static_assert((offsetof(struct nw_jit_cpu, jit_dtlb_hit) & 7) == 0, "jit_dtlb_hit 8-aligned");
+	static_assert((offsetof(struct nw_jit_cpu, jit_lwz) & 7) == 0, "jit_lwz 8-aligned");
+	static_assert((offsetof(struct nw_jit_cpu, jit_stw) & 7) == 0, "jit_stw 8-aligned");
+	static_assert((offsetof(struct nw_jit_cpu, jit_lwz_pa) & 7) == 0, "jit_lwz_pa 8-aligned");
+	static_assert((offsetof(struct nw_jit_cpu, jit_stw_pa) & 7) == 0, "jit_stw_pa 8-aligned");
+	const uint32_t off_miss = is_store
+		? (uint32_t)offsetof(struct nw_jit_cpu, jit_stw)
+		: (uint32_t)offsetof(struct nw_jit_cpu, jit_lwz);
+	const uint32_t off_hit = is_store
+		? (uint32_t)offsetof(struct nw_jit_cpu, jit_stw_pa)
+		: (uint32_t)offsetof(struct nw_jit_cpu, jit_lwz_pa);
 	if (!emit_w(e, a64_ldr_w(W12, X19, (uint32_t)offsetof(struct nw_jit_cpu, msr))))
 		return 0;
 	uint32_t *dr_off = e->p;
 	if (!emit_w(e, a64_tbz(W12, 4, 0)))
 		return 0;
-	if (!emit_imm64(e, X10, (uint64_t)(uintptr_t)g_dtlb))
+	if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_dtlb))))
 		return 0;
 	if (!emit_w(e, a64_lsr(W9, W8, 12)))
 		return 0;
@@ -3121,9 +3203,7 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 		return 0;
 	if (!emit_w(e, a64_ldr_w(W12, X11, 0)))
 		return 0;
-	if (!emit_imm32(e, W13, ~0xfffu))
-		return 0;
-	if (!emit_w(e, a64_and_reg(W13, W8, W13)))
+	if (!emit_w(e, a64_and_imm_page(W13, W8)))
 		return 0;
 	if (!emit_w(e, a64_cmp_w(W12, W13)))
 		return 0;
@@ -3143,9 +3223,7 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 	}
 	if (!emit_w(e, a64_ldr_w(W12, X11, 4)))
 		return 0;
-	if (!emit_imm32(e, W1, 0xfffu))
-		return 0;
-	if (!emit_w(e, a64_and_reg(W1, W8, W1)))
+	if (!emit_w(e, a64_and_imm_off12(W1, W8)))
 		return 0;
 	if (!emit_w(e, a64_orr_reg(W1, W1, W12)))
 		return 0;
@@ -3164,9 +3242,7 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
-	if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)miss_fn))
-		return 0;
-	if (!emit_w(e, 0xd63f0120u))
+	if (!emit_blr_x19(e, off_miss))
 		return 0;
 	uint32_t *to_join = e->p;
 	if (!emit_w(e, a64_b(0)))
@@ -3177,9 +3253,7 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 	uint32_t *no_host = e->p;
 	if (!emit_w(e, 0xb400000cu))			/* CBZ X12, helper_pa */
 		return 0;
-	if (!emit_imm32(e, W13, 0xfffu))
-		return 0;
-	if (!emit_w(e, a64_and_reg(W13, W8, W13)))
+	if (!emit_w(e, a64_and_imm_off12(W13, W8)))
 		return 0;
 	if (!emit_w(e, 0x8b2d418cu))			/* ADD X12, X12, W13, UXTW */
 		return 0;
@@ -3194,7 +3268,7 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 		if (!emit_w(e, 0x5ac00800u))		/* REV W0, W0 */
 			return 0;
 	}
-	if (!emit_imm64(e, X10, (uint64_t)(uintptr_t)&g_dtlb_hit))
+	if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_dtlb_hit))))
 		return 0;
 	if (!emit_w(e, 0xf940014du))			/* LDR X13, [X10] */
 		return 0;
@@ -3208,9 +3282,7 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store,
 	uint32_t *hit_p = e->p;
 	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
-	if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)hit_fn))
-		return 0;
-	if (!emit_w(e, 0xd63f0120u))
+	if (!emit_blr_x19(e, off_hit))
 		return 0;
 	uint32_t *join = e->p;
 	*dr_off = a64_tbz(W12, 4, (int)(ident_p - dr_off));
@@ -3285,7 +3357,13 @@ static int emit_prologue(struct emit *e)
 		return 0;
 	if (!emit_w(e, 0xf9000bf3u))		/* str x19, [sp, #16] */
 		return 0;
-	return emit_w(e, 0xaa0003f3u);		/* mov x19, x0 */
+	if (!emit_w(e, 0xaa0003f3u))		/* mov x19, x0 */
+		return 0;
+	if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_cpu_bind))
+		return 0;
+	if (!emit_w(e, 0xd63f0120u))		/* blr x9 */
+		return 0;
+	return emit_w(e, 0xaa1303e0u);		/* mov x0, x19 */
 }
 
 static int emit_ret(struct emit *e)
@@ -3322,8 +3400,7 @@ static int emit_call_lwz(struct emit *e, uint32_t pc, int rd, int ra, int simm, 
 		return 0;
 	if (!emit_helper_ea(e, ra, simm))
 		return 0;
-	if (!emit_dtlb_and_helpers(e, 0, (void *)nw_jit_helper_lwz,
-				   (void *)nw_jit_helper_lwz_pa))
+	if (!emit_dtlb_and_helpers(e, 0))
 		return 0;
 	if (!emit_w(e, a64_orr_reg(W8, 31, W0)))	/* mov w8, w0 */
 		return 0;
@@ -3466,8 +3543,7 @@ static int emit_call_stw(struct emit *e, uint32_t pc, int rs, int ra, int simm, 
 		return 0;
 	if (!emit_load_gpr(e, W2, rs))			/* w2 = value */
 		return 0;
-	if (!emit_dtlb_and_helpers(e, 1, (void *)nw_jit_helper_stw,
-				   (void *)nw_jit_helper_stw_pa))
+	if (!emit_dtlb_and_helpers(e, 1))
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))			/* mov x0, x19 */
 		return 0;
@@ -3511,8 +3587,7 @@ static int emit_call_stwx(struct emit *e, uint32_t pc, int rs, int ra, int rb)
 		return 0;
 	if (!emit_load_gpr(e, W2, rs))
 		return 0;
-	if (!emit_dtlb_and_helpers(e, 1, (void *)nw_jit_helper_stw,
-				   (void *)nw_jit_helper_stw_pa))
+	if (!emit_dtlb_and_helpers(e, 1))
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
@@ -3546,8 +3621,7 @@ static int emit_call_lwzx(struct emit *e, uint32_t pc, int rd, int ra, int rb)
 		return 0;
 	if (!emit_helper_ea_idx(e, ra, rb))
 		return 0;
-	if (!emit_dtlb_and_helpers(e, 0, (void *)nw_jit_helper_lwz,
-				   (void *)nw_jit_helper_lwz_pa))
+	if (!emit_dtlb_and_helpers(e, 0))
 		return 0;
 	if (!emit_w(e, a64_orr_reg(W9, 31, W0)))	/* value; fault_check uses W8 */
 		return 0;
@@ -4544,7 +4618,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	if (prim == 31 && xo == 822)
 		return emit_w(e, 0xd503201fu);	/* NOP; kpx dss is a no-op */
 	if (prim == 31 && xo == 146) {
-		/* Same as kpx execute_mtmsr: set_msr(rS), flush DTLB, leave the block. */
+		/* Same as kpx execute_mtmsr: set_msr(rS), flush DTLB if PR
+		 * changes, leave the block. */
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
 		if (!emit_load_gpr(e, W1, rd))
@@ -4903,6 +4978,23 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 	if (!code_ready() || n <= 0)
 		return NULL;
 	if (g_code_used + 8192 > NW_JIT_CODE_SIZE) {
+		int live = 0;
+		for (int i = 0; i < NW_JIT_CACHE; i++) {
+			if (g_cache[i].used)
+				live++;
+		}
+		if (live > g_occ_max)
+			g_occ_max = live;
+		const uint64_t since = g_compiles - g_compiles_at_wrap;
+		if (nw_jit_stats_wanted()) {
+			printf("NW-BOOT G1: jit wrap live %d occ_max %d used %zu compiles %llu b/block %llu\n",
+			       live, g_occ_max, g_code_used,
+			       (unsigned long long)since,
+			       (unsigned long long)(since ? g_code_used / since : 0));
+			fflush(stdout);
+		}
+		g_wraps++;
+		g_compiles_at_wrap = g_compiles;
 		g_code_used = 0;
 		nw_jit_invalidate_all_src(NW_JIT_FL_WRAP);
 	}
@@ -4970,6 +5062,7 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 	}
 	size_t bytes = (size_t)((uint8_t *)e.p - (g_code + g_code_used));
 	g_code_used += bytes;
+	g_code_emitted += bytes;
 #ifdef __APPLE__
 	pthread_jit_write_protect_np(1);
 	sys_icache_invalidate(start, bytes);

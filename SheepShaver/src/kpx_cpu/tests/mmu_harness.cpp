@@ -3307,11 +3307,22 @@ int main()
 		CHECK(nw_jit_evict_count() > 0 ||
 		      nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == hot);
 
-		/* 68k emulator window gets a hits bias */
+		/* 68k emulator window is still cached after the flood */
 		nw_jit_fn emu = nw_jit_compile(ops, 2, 0x68066084u, 0x68066000u, 0, 0);
 		CHECK(emu != NULL);
 		CHECK(nw_jit_cache_get(0x68066000u, 0x68066084u, 0, 0, NULL) == emu);
 		CHECK(NW_JIT_DTLB_N == 1024);
+
+		/* 32 KiB PC aliases must not share a home slot (old hash evicted). */
+		nw_jit_reset();
+		for (int i = 0; i < 16384; i++) {
+			const uint32_t pc = 0x1000u + (uint32_t)i * 0x8000u;
+			nw_jit_cache_put(0x1000u, pc, 0, 0, NW_JIT_INTERPRET, 1);
+		}
+		CHECK(nw_jit_evict_count() == 0);
+		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == NW_JIT_INTERPRET);
+		CHECK(nw_jit_cache_get(0x1000u, 0x1000u + 16383u * 0x8000u, 0, 0, NULL) ==
+		      NW_JIT_INTERPRET);
 	}
 
 	/* WP3 4b: dispatcher cache sentinels, mode, op filter. */

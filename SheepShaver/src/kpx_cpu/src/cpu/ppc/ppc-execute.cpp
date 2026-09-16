@@ -1310,11 +1310,13 @@ void powerpc_cpu::execute_mtmsr(uint32 opcode)
 {
 	if (ppc32_guest_mmu_enabled()) {
 		const uint32 msr = operand_RS::get(this, opcode);
+		const uint32 old = ppc32_guest_mmu().msr();
 		ppc32_guest_mmu().set_msr(msr);
 #ifdef SHEEPSHAVER
 		nw_log_msr_dr(msr);
 		nw_log_msr_write("mtmsr", pc(), msr);
 #endif
+		nw_jit_dtlb_flush_if_pr(old, msr, NW_JIT_DTLB_FL_MTMSR);
 	}
 	increment_pc(4);
 }
@@ -1331,9 +1333,13 @@ void powerpc_cpu::execute_mfsr(uint32 opcode)
 void powerpc_cpu::execute_mtsr(uint32 opcode)
 {
 	if (ppc32_guest_mmu_enabled()) {
-		ppc32_guest_mmu().set_sr(rA_field::extract(opcode) & 0xfu,
-					 operand_RS::get(this, opcode));
-		nw_jit_dtlb_flush();
+		const unsigned i = rA_field::extract(opcode) & 0xfu;
+		const uint32 val = operand_RS::get(this, opcode);
+		ppc32_mmu &mmu = ppc32_guest_mmu();
+		if (mmu.sr(i) != val) {
+			mmu.set_sr(i, val);
+			nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_MTSR);
+		}
 	}
 	increment_pc(4);
 }
@@ -1353,9 +1359,13 @@ void powerpc_cpu::execute_mtsrin(uint32 opcode)
 {
 	if (ppc32_guest_mmu_enabled()) {
 		const uint32 ea = operand_RB::get(this, opcode);
-		ppc32_guest_mmu().set_sr((ea >> 28) & 0xfu,
-					 operand_RS::get(this, opcode));
-		nw_jit_dtlb_flush();
+		const unsigned i = (ea >> 28) & 0xfu;
+		const uint32 val = operand_RS::get(this, opcode);
+		ppc32_mmu &mmu = ppc32_guest_mmu();
+		if (mmu.sr(i) != val) {
+			mmu.set_sr(i, val);
+			nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_MTSR);
+		}
 	}
 	increment_pc(4);
 }
@@ -1364,11 +1374,13 @@ void powerpc_cpu::execute_rfi(uint32 opcode)
 {
 	(void)opcode;
 	if (ppc32_guest_mmu_enabled()) {
+		const uint32 old = ppc32_guest_mmu().msr();
 		ppc32_guest_mmu().set_msr(srr1_);
 #ifdef SHEEPSHAVER
 		nw_log_msr_dr(srr1_);
 		nw_log_msr_write("rfi", srr0_, srr1_);
 #endif
+		nw_jit_dtlb_flush_if_pr(old, srr1_, NW_JIT_DTLB_FL_RFI);
 		pc() = srr0_;
 		return;
 	}
@@ -1379,7 +1391,7 @@ void powerpc_cpu::execute_tlbie(uint32 opcode)
 {
 	if (ppc32_guest_mmu_enabled()) {
 		ppc32_guest_mmu().tlbie(operand_RB::get(this, opcode));
-		nw_jit_dtlb_flush();
+		nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_TLB);
 		invalidate_cache();
 	}
 	increment_pc(4);
@@ -1390,7 +1402,7 @@ void powerpc_cpu::execute_tlbia(uint32 opcode)
 	(void)opcode;
 	if (ppc32_guest_mmu_enabled()) {
 		ppc32_guest_mmu().tlbia();
-		nw_jit_dtlb_flush();
+		nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_TLB);
 		invalidate_cache();
 	}
 	increment_pc(4);

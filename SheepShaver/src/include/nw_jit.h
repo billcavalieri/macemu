@@ -65,6 +65,13 @@ struct nw_jit_cpu {
 	int nstore;
 	uint32_t store_ea[NW_JIT_MAX_BLOCK];
 	uint32_t store_val[NW_JIT_MAX_BLOCK];
+	/* Filled by nw_jit_cpu_bind; compiled code loads these via x19. */
+	void *jit_dtlb;
+	uint64_t *jit_dtlb_hit;
+	void *jit_lwz;
+	void *jit_stw;
+	void *jit_lwz_pa;
+	void *jit_stw_pa;
 };
 
 typedef void (*nw_jit_fn)(struct nw_jit_cpu *cpu);
@@ -170,9 +177,21 @@ int nw_jit_stats_wanted(void);
  * a successful probe). Direct-mapped, 1024 entries (ARM index mask
  * must match a64_and_dtlb_idx). Not a second translator.
  * Hit is inlined; miss calls the C helper, which walks and fills.
- * Flush on tlbie/tlbia/mtsr/BAT/SDR1. MSR[DR] off skips the cache.
+ * Flush on tlbie/tlbia/BAT/SDR1; mtsr only if the SR changes.
+ * mtmsr/rfi flush only when MSR[PR] changes (DR-off skips the table).
  */
 enum { NW_JIT_DTLB_N = 1024 };
+enum {
+	NW_JIT_DTLB_FL_MTMSR = 0,
+	NW_JIT_DTLB_FL_RFI,
+	NW_JIT_DTLB_FL_MTSR,
+	NW_JIT_DTLB_FL_TLB,
+	NW_JIT_DTLB_FL_BAT,
+	NW_JIT_DTLB_FL_SDR1,
+	NW_JIT_DTLB_FL_RESET,
+	NW_JIT_DTLB_FL_OTHER,
+	NW_JIT_DTLB_FL_N
+};
 enum {
 	NW_JIT_DTLB_VALID = 1u,
 	NW_JIT_DTLB_WRITE = 2u,
@@ -187,6 +206,8 @@ struct nw_jit_dtlb_ent {
 	uint64_t pad2;		/* 32-byte entry, index << 5 */
 };
 void nw_jit_dtlb_flush(void);
+void nw_jit_dtlb_flush_src(int src);
+void nw_jit_dtlb_flush_if_pr(uint32_t old_msr, uint32_t new_msr, int src);
 void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host);
 int nw_jit_dtlb_lookup(uint32_t ea, int is_store, uint32_t *pa);
 uint64_t nw_jit_dtlb_hits(void);

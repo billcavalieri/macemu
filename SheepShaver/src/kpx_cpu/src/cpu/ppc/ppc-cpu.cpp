@@ -1003,7 +1003,7 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		/* Cache key is phys_page; a new HTAB misses, no flush-all. */
 #endif
 		mmu.set_sdr1(value);
-		nw_jit_dtlb_flush();
+		nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_SDR1);
 		return true;
 	case powerpc_registers::SPR_SRR0:	srr0_ = value; return true;
 	case powerpc_registers::SPR_SRR1:	srr1_ = value; return true;
@@ -1030,7 +1030,7 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		else
 			u = value;
 		mmu.set_ibat(i, u, l);
-		nw_jit_dtlb_flush();
+		nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
 		return true;
 	}
 	if (spr >= powerpc_registers::SPR_DBAT0U && spr <= powerpc_registers::SPR_DBAT3L) {
@@ -1042,7 +1042,7 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		else
 			u = value;
 		mmu.set_dbat(i, u, l);
-		nw_jit_dtlb_flush();
+		nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
 		return true;
 	}
 	return false;
@@ -1452,13 +1452,14 @@ void powerpc_cpu::jit_host_mtmsr(void *host, uint32 msr)
 	/* Same as execute_mtmsr without the PC bump. */
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
 	if (ppc32_guest_mmu_enabled()) {
+		const uint32 old = ppc32_guest_mmu().msr();
 		ppc32_guest_mmu().set_msr(msr);
 #ifdef SHEEPSHAVER
 		nw_log_msr_dr(msr);
 		nw_log_msr_write("mtmsr", ppc->pc(), msr);
 #endif
+		nw_jit_dtlb_flush_if_pr(old, msr, NW_JIT_DTLB_FL_MTMSR);
 	}
-	nw_jit_dtlb_flush();
 	(void)ppc;
 }
 
