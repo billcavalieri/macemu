@@ -11,6 +11,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 
 /* Must match rom_patches.h ROMTYPE_NEWWORLD. */
@@ -1225,6 +1226,15 @@ static unsigned long nw_event_nx;
 static unsigned long nw_event_na;
 static unsigned long long nw_event_ni;
 static unsigned long nw_event_nf;
+/* 2M+ A/X lines per 100s. A TTY (Xcode/Terminal, no redirect) spends
+ * the boot drawing them; mill logs still redirect to a file. */
+static int nw_boot_log_stream(void)
+{
+	static int cached = -1;
+	if (cached < 0)
+		cached = getenv("NW_BOOT_LOG_TTY") ? 1 : !isatty(STDOUT_FILENO);
+	return cached;
+}
 #endif
 
 void nw_event_insn(void)
@@ -1245,11 +1255,13 @@ void nw_event_exception(uint32_t srr0, uint32_t vector, uint32_t extra, int extr
 {
 #if NW_BOOT_LOG
 	nw_event_nx++;
-	if (extra_valid)
-		printf("NW-BOOT X E %08x %08x %08x\n", (unsigned)srr0,
-		       (unsigned)vector, (unsigned)extra);
-	else
-		printf("NW-BOOT X E %08x %08x\n", (unsigned)srr0, (unsigned)vector);
+	if (nw_boot_log_stream()) {
+		if (extra_valid)
+			printf("NW-BOOT X E %08x %08x %08x\n", (unsigned)srr0,
+			       (unsigned)vector, (unsigned)extra);
+		else
+			printf("NW-BOOT X E %08x %08x\n", (unsigned)srr0, (unsigned)vector);
+	}
 #else
 	(void)srr0;
 	(void)vector;
@@ -1262,8 +1274,9 @@ void nw_event_aline(uint32_t op, uint32_t pc68k, int handler)
 {
 #if NW_BOOT_LOG
 	nw_event_na++;
-	printf("NW-BOOT A %04x %08x %d\n", (unsigned)(op & 0xffffu),
-	       (unsigned)pc68k, handler);
+	if (nw_boot_log_stream())
+		printf("NW-BOOT A %04x %08x %d\n", (unsigned)(op & 0xffffu),
+		       (unsigned)pc68k, handler);
 #else
 	(void)op;
 	(void)pc68k;

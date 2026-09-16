@@ -179,6 +179,7 @@ static bool mouse_grabbed = false;
  * forwarded to the guest). */
 static bool nw_grab_held_off;
 static bool nw_swallow_capture_up;
+static bool nw_hold_guest_buttons;
 static uint32 nw_grab_settle_until;
 static bool nw_relative_input(void)
 {
@@ -200,6 +201,27 @@ static void nw_host_cursor(bool show)
 	} else {
 		SDL_ShowCursor(SDL_DISABLE);
 	}
+}
+static void nw_release_guest_buttons(void)
+{
+	ADBMouseUp(0);
+	ADBMouseUp(1);
+	ADBMouseUp(2);
+}
+static bool nw_host_buttons_down(void)
+{
+	return (SDL_GetMouseState(NULL, NULL) &
+		(SDL_BUTTON_LMASK | SDL_BUTTON_MMASK | SDL_BUTTON_RMASK)) != 0;
+}
+/* After click-to-focus or recapture, ignore guest downs until the host
+ * button is released. FOCUS_GAINED grabs before MOUSEBUTTONDOWN, so a
+ * 100ms window is not enough. */
+static bool nw_eat_capture_click(void)
+{
+	if (!nw_relative_input() || !nw_hold_guest_buttons)
+		return false;
+	nw_swallow_capture_up = true;
+	return true;
 }
 #endif
 
@@ -808,7 +830,10 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
 	
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, PrefsFindBool("scale_nearest") ? "nearest" : "linear");
 #ifdef SHEEPSHAVER
-	SDL_SetHint("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1");
+	/* "1" delivers the focusing click to the guest and starts a Finder
+	 * drag. Relative grab already captures on FOCUS_GAINED. */
+	SDL_SetHint("SDL_MOUSE_FOCUS_CLICKTHROUGH",
+		    ROMType == ROMTYPE_NEWWORLD ? "0" : "1");
 #endif
 	
 #if defined(__MACOSX__) && SDL_VERSION_ATLEAST(2,0,14)
@@ -1334,6 +1359,15 @@ void driver_base::grab_mouse(void)
 void driver_base::ungrab_mouse(void)
 {
 	if (mouse_grabbed) {
+#ifdef SHEEPSHAVER
+		/* Leaving the window often drops the host mouse-up. The guest
+		 * still has the button down, so the next motion is a drag. */
+		if (ROMType == ROMTYPE_NEWWORLD) {
+			ADBMouseUp(0);
+			ADBMouseUp(1);
+			ADBMouseUp(2);
+		}
+#endif
 		mouse_grabbed = false;
 		update_mouse_grab();
 #ifdef SHEEPSHAVER
@@ -2438,10 +2472,14 @@ static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event)
 #ifdef SHEEPSHAVER
 			if (nw_relative_input() && drv && !mouse_grabbed) {
 				nw_grab_held_off = false;
+				nw_release_guest_buttons();
+				nw_hold_guest_buttons = true;
 				nw_swallow_capture_up = true;
 				drv->grab_mouse();
 				return EVENT_DROP_FROM_QUEUE;
 			}
+			if (nw_eat_capture_click())
+				return EVENT_DROP_FROM_QUEUE;
 #endif
 			break;
 
@@ -2455,8 +2493,14 @@ static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event)
 			switch (event->window.event) {
 #ifdef SHEEPSHAVER
 				case SDL_WINDOWEVENT_FOCUS_GAINED:
-					if (nw_relative_input() && !nw_grab_held_off && drv)
+					if (nw_relative_input() && !nw_grab_held_off && drv) {
+						nw_release_guest_buttons();
 						drv->grab_mouse();
+						if (nw_host_buttons_down()) {
+							nw_hold_guest_buttons = true;
+							nw_swallow_capture_up = true;
+						}
+					}
 					break;
 				case SDL_WINDOWEVENT_FOCUS_LOST:
 					/* SetRelativeMouseMode often synthesizes a focus-lost
@@ -2514,6 +2558,10 @@ static void handle_events(void)
 
 			// Mouse button
 			case SDL_MOUSEBUTTONDOWN: {
+#ifdef SHEEPSHAVER
+				if (nw_eat_capture_click())
+					break;
+#endif
 				unsigned int button = event.button.button;
 				if (button == SDL_BUTTON_LEFT)
 					ADBMouseDown(0);
@@ -2525,8 +2573,10 @@ static void handle_events(void)
 			}
 			case SDL_MOUSEBUTTONUP: {
 #ifdef SHEEPSHAVER
-				if (nw_swallow_capture_up) {
+				if (nw_swallow_capture_up || nw_hold_guest_buttons) {
 					nw_swallow_capture_up = false;
+					if (!nw_host_buttons_down())
+						nw_hold_guest_buttons = false;
 					break;
 				}
 #endif
