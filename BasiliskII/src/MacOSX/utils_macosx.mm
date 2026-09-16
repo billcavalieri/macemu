@@ -45,14 +45,28 @@ bool MetalIsAvailable() {
 	return r;
 }
 
+static void strip_menu_key_equivalents(NSMenu *menu)
+{
+	if (!menu)
+		return;
+	for (NSMenuItem *item in menu.itemArray) {
+		item.keyEquivalent = @"";
+		item.keyEquivalentModifierMask = 0;
+		if (item.hasSubmenu)
+			strip_menu_key_equivalents(item.submenu);
+	}
+}
+
 void disable_SDL2_macosx_menu_bar_keyboard_shortcuts() {
+	if (![NSThread isMainThread]) {
+		dispatch_sync(dispatch_get_main_queue(), ^{
+			disable_SDL2_macosx_menu_bar_keyboard_shortcuts();
+		});
+		return;
+	}
+	/* Cmd-Q (Quit) and Cmd-W (Close) must reach the guest, not Cocoa. */
+	strip_menu_key_equivalents([NSApp mainMenu]);
 	for (NSMenuItem * menu_item in [NSApp mainMenu].itemArray) {
-		if (menu_item.hasSubmenu) {
-			for (NSMenuItem * sub_item in menu_item.submenu.itemArray) {
-				sub_item.keyEquivalent = @"";
-				sub_item.keyEquivalentModifierMask = 0;
-			}
-		}
 		if ([menu_item.title isEqualToString:@"View"]) {
 			[[NSApp mainMenu] removeItem:menu_item];
 			break;

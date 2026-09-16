@@ -855,6 +855,11 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
 		}
 		set_window_name();
 	}
+#ifdef __MACOSX__
+	/* SDL2 installs Cmd-Q / Cmd-W on the Cocoa menu at window create. */
+	if (sdl_window)
+		disable_SDL2_macosx_menu_bar_keyboard_shortcuts();
+#endif
 	if (flags & SDL_WINDOW_FULLSCREEN) SDL_SetWindowGrab(sdl_window, SDL_TRUE);
 	
 	// Some SDL events (regarding some native-window events), need processing

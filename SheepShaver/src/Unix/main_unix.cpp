@@ -792,6 +792,9 @@ static bool init_sdl()
 		return false;
 	}
 	atexit(SDL_Quit);
+#if SDL_PLATFORM_MACOS && SDL_VERSION_ATLEAST(2,0,0)
+	disable_SDL2_macosx_menu_bar_keyboard_shortcuts();
+#endif
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 	/* Drop-file poll omitted: SDL_PollEvent+Delay on first AppKit
