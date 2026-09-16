@@ -56,6 +56,7 @@ void nw_jit_helper_lfd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t ra, uint32_
 void nw_jit_helper_stfd(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ra, uint32_t simm);
 
 enum { NW_JIT_CODE_SIZE = 1 << 24, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 16 };
+enum { NW_JIT_BANKS = 2, NW_JIT_BANK_SIZE = NW_JIT_CODE_SIZE / NW_JIT_BANKS };
 enum { NW_JIT_HITS_AGE = 4096 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
 
@@ -147,6 +148,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 822, "dss", 0, 0, 0},
 	{31, 278, "dcbt", 0, 0, 0},
 	{31, 246, "dcbtst", 0, 0, 0},
+	{31, 86, "dcbf", 0, 0, 0},
 	{31, 854, "eieio", 0, 0, 0},
 	{31, 1014, "dcbz", 0, 0, 0},
 	{31, 210, "mtsr", 0, 0, 0},
@@ -199,6 +201,7 @@ static struct nw_jit_hist g_hist[] = {
 	{31, 11, "mulhwu", 0, 0, 0},
 	{31, 60, "andc", 0, 0, 0},
 	{31, 8, "subfc", 0, 0, 0},
+	{25, -1, "oris", 0, 0, 0},
 	{26, -1, "xori", 0, 0, 0},
 	{27, -1, "xoris", 0, 0, 0},
 	{29, -1, "andis.", 0, 0, 0},
@@ -596,6 +599,62 @@ void nw_jit_invalidate_all(void)
 	nw_jit_invalidate_all_src(NW_JIT_FL_OTHER);
 }
 
+static int code_bank(nw_jit_fn fn)
+{
+	if (!g_code || !fn || fn == NW_JIT_INTERPRET)
+		return -1;
+	ptrdiff_t off = (uint8_t *)fn - g_code;
+	if (off < 0 || (size_t)off >= NW_JIT_CODE_SIZE)
+		return -1;
+	return (int)((size_t)off / NW_JIT_BANK_SIZE);
+}
+
+static void pagebit_rebuild(void)
+{
+	memset(g_pagebit_ram, 0, sizeof(g_pagebit_ram));
+	memset(g_pagebit_rom, 0, sizeof(g_pagebit_rom));
+	for (int i = 0; i < NW_JIT_CACHE; i++) {
+		if (g_cache[i].used)
+			pagebit_set(g_cache[i].phys_page);
+	}
+}
+
+static void invalidate_bank(int bank)
+{
+	g_flush_calls[NW_JIT_FL_WRAP]++;
+	for (int i = 0; i < NW_JIT_CACHE; i++) {
+		if (!g_cache[i].used)
+			continue;
+		if (code_bank(g_cache[i].fn) != bank)
+			continue;
+		g_cache[i].used = 0;
+		g_flush++;
+		g_flush_src[NW_JIT_FL_WRAP]++;
+	}
+	pagebit_rebuild();
+}
+
+static void wrap_note_occupancy(void)
+{
+	int live = 0;
+	for (int i = 0; i < NW_JIT_CACHE; i++) {
+		if (g_cache[i].used)
+			live++;
+	}
+	if (live > g_occ_max)
+		g_occ_max = live;
+	const uint64_t since = g_compiles - g_compiles_at_wrap;
+	if (nw_jit_stats_wanted()) {
+		printf("NW-BOOT G1: jit wrap live %d occ_max %d used %zu compiles %llu b/block %llu\n",
+		       live, g_occ_max, g_code_used,
+		       (unsigned long long)since,
+		       (unsigned long long)(since ? g_code_used / since : 0));
+		fflush(stdout);
+	}
+	g_wraps++;
+	g_compiles_at_wrap = g_compiles;
+}
+
 uint64_t nw_jit_flush_count(void)
 {
 	return g_flush;
@@ -604,6 +663,16 @@ uint64_t nw_jit_flush_count(void)
 uint64_t nw_jit_compile_count(void)
 {
 	return g_compiles;
+}
+
+uint64_t nw_jit_wrap_count(void)
+{
+	return g_wraps;
+}
+
+size_t nw_jit_code_used(void)
+{
+	return g_code_used;
 }
 
 uint64_t nw_jit_evict_count(void)
@@ -751,6 +820,8 @@ void nw_jit_stats_print(const char *why)
 				nm = "extsb";
 			else if (p == 31 && x == 598)
 				nm = "sync";
+			else if (p == 31 && x == 86)
+				nm = "dcbf";
 			else if (p == 31 && x == 144)
 				nm = "mtcrf";
 			else if (p == 31 && x == 19)
@@ -1112,8 +1183,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* sync */
 	if (prim == 31 && xo == 822)
 		return 1;	/* dss (kpx nop) */
-	if (prim == 31 && (xo == 278 || xo == 246))
-		return 1;	/* dcbt / dcbtst (kpx nop) */
+	if (prim == 31 && (xo == 278 || xo == 246 || xo == 86))
+		return 1;	/* dcbt / dcbtst / dcbf (kpx nop) */
 	if (prim == 31 && xo == 854)
 		return 1;	/* eieio */
 	if (prim == 31 && xo == 1014)
@@ -1170,6 +1241,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* neg */
 	if (prim == 24)
 		return 1;	/* ori */
+	if (prim == 25)
+		return 1;	/* oris */
 	if (prim == 31 && xo == 0)
 		return (rd & 3) == 0;	/* cmp L=0, any crfD */
 	if (prim == 31 && xo == 32)
@@ -1490,8 +1563,11 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 	g_cache[slot].fn = fn;
 	g_cache[slot].used = 1;
 	g_cache[slot].n = (uint8_t)(n < 0 ? 0 : n > 255 ? 255 : n);
-	if (!same)
-		g_cache[slot].hits = 1;
+	if (!same) {
+		/* NK 68k emulator window: last to evict in a full probe. */
+		g_cache[slot].hits = (guest_pc >= 0x68000000u && guest_pc < 0x68c00000u)
+			? 64 : 1;
+	}
 	pagebit_set(phys_page);
 }
 
@@ -1687,6 +1763,11 @@ uint32_t nw_ppc_dcbt(int ra, int rb)
 uint32_t nw_ppc_dcbtst(int ra, int rb)
 {
 	return (31u << 26) | ((uint32_t)ra << 16) | ((uint32_t)rb << 11) | (246u << 1);
+}
+
+uint32_t nw_ppc_dcbf(int ra, int rb)
+{
+	return (31u << 26) | ((uint32_t)ra << 16) | ((uint32_t)rb << 11) | (86u << 1);
 }
 
 uint32_t nw_ppc_eieio(void)
@@ -1962,6 +2043,12 @@ uint32_t nw_ppc_neg(int rd, int ra, int rc)
 uint32_t nw_ppc_ori(int ra, int rs, unsigned uimm)
 {
 	return (24u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
+	       (uimm & 0xffffu);
+}
+
+uint32_t nw_ppc_oris(int ra, int rs, unsigned uimm)
+{
+	return (25u << 26) | ((uint32_t)rs << 21) | ((uint32_t)ra << 16) |
 	       (uimm & 0xffffu);
 }
 
@@ -2620,7 +2707,7 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
-	if (prim == 31 && (xo == 278 || xo == 246)) {
+	if (prim == 31 && (xo == 278 || xo == 246 || xo == 86)) {
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -2761,6 +2848,11 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 	}
 	if (prim == 24) {
 		cpu->gpr[ra] = cpu->gpr[rd] | (op & 0xffffu);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 25) {
+		cpu->gpr[ra] = cpu->gpr[rd] | ((op & 0xffffu) << 16);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -4135,6 +4227,15 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return emit_store_gpr(e, W8, ra);
 	}
+	if (prim == 25) {
+		if (!emit_load_gpr(e, W8, rd))
+			return 0;
+		if (!emit_imm32(e, W9, (op & 0xffffu) << 16))
+			return 0;
+		if (!emit_w(e, a64_orr_reg(W8, W8, W9)))
+			return 0;
+		return emit_store_gpr(e, W8, ra);
+	}
 	if (prim == 26) {
 		if (!emit_load_gpr(e, W8, rd))
 			return 0;
@@ -4824,8 +4925,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		return emit_w(e, 0xd5033f9fu);	/* DMB SY */
 	if (prim == 31 && xo == 822)
 		return emit_w(e, 0xd503201fu);	/* NOP; kpx dss is a no-op */
-	if (prim == 31 && (xo == 278 || xo == 246))
-		return emit_w(e, 0xd503201fu);	/* NOP; kpx dcbt/dcbtst */
+	if (prim == 31 && (xo == 278 || xo == 246 || xo == 86))
+		return emit_w(e, 0xd503201fu);	/* NOP; kpx dcbt/dcbtst/dcbf */
 	if (prim == 31 && xo == 854)
 		return emit_w(e, 0xd5033f9fu);	/* DMB SY; eieio */
 	if (prim == 31 && xo == 1014) {
@@ -5244,26 +5345,21 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 {
 	if (!code_ready() || n <= 0)
 		return NULL;
-	if (g_code_used + 8192 > NW_JIT_CODE_SIZE) {
-		int live = 0;
-		for (int i = 0; i < NW_JIT_CACHE; i++) {
-			if (g_cache[i].used)
-				live++;
+	{
+		const size_t need = 8192;
+		if (g_code_used + need > NW_JIT_CODE_SIZE) {
+			wrap_note_occupancy();
+			invalidate_bank(0);
+			g_code_used = 0;
+		} else {
+			const size_t cur = g_code_used / NW_JIT_BANK_SIZE;
+			const size_t nxt = (g_code_used + need) / NW_JIT_BANK_SIZE;
+			if (nxt != cur && nxt < (size_t)NW_JIT_BANKS) {
+				wrap_note_occupancy();
+				invalidate_bank((int)nxt);
+				g_code_used = nxt * NW_JIT_BANK_SIZE;
+			}
 		}
-		if (live > g_occ_max)
-			g_occ_max = live;
-		const uint64_t since = g_compiles - g_compiles_at_wrap;
-		if (nw_jit_stats_wanted()) {
-			printf("NW-BOOT G1: jit wrap live %d occ_max %d used %zu compiles %llu b/block %llu\n",
-			       live, g_occ_max, g_code_used,
-			       (unsigned long long)since,
-			       (unsigned long long)(since ? g_code_used / since : 0));
-			fflush(stdout);
-		}
-		g_wraps++;
-		g_compiles_at_wrap = g_compiles;
-		g_code_used = 0;
-		nw_jit_invalidate_all_src(NW_JIT_FL_WRAP);
 	}
 	g_compiles++;
 	if ((g_compiles & (NW_JIT_HITS_AGE - 1u)) == 0) {

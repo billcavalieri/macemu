@@ -250,6 +250,8 @@ void nw_jit_set_host_stfd(nw_jit_host_stfd fn);
 uint64_t nw_jit_flush_count(void);
 uint64_t nw_jit_evict_count(void);
 uint64_t nw_jit_compile_count(void);
+uint64_t nw_jit_wrap_count(void);
+size_t nw_jit_code_used(void);
 void nw_jit_stats_print(const char *why);
 
 /* PPC instruction constructors for the harness. */
@@ -296,6 +298,7 @@ uint32_t nw_ppc_andc(int ra, int rs, int rb, int rc);
 uint32_t nw_ppc_cntlzw(int ra, int rs, int rc);
 uint32_t nw_ppc_neg(int rd, int ra, int rc);
 uint32_t nw_ppc_ori(int ra, int rs, unsigned uimm);
+uint32_t nw_ppc_oris(int ra, int rs, unsigned uimm);
 uint32_t nw_ppc_xori(int ra, int rs, unsigned uimm);
 uint32_t nw_ppc_xoris(int ra, int rs, unsigned uimm);
 uint32_t nw_ppc_cmp(int ra, int rb);
@@ -327,6 +330,7 @@ uint32_t nw_ppc_sync(void);
 uint32_t nw_ppc_dss(void);
 uint32_t nw_ppc_dcbt(int ra, int rb);
 uint32_t nw_ppc_dcbtst(int ra, int rb);
+uint32_t nw_ppc_dcbf(int ra, int rb);
 uint32_t nw_ppc_eieio(void);
 uint32_t nw_ppc_dcbz(int ra, int rb);
 uint32_t nw_ppc_mtsr(int sr, int rs);

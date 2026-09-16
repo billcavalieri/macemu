@@ -1704,6 +1704,19 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[4] == 0x00550000u && b.gpr[4] == a.gpr[4]);
 
+		/* oris r4, r3, 0x00ff */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x11000000u;
+		ops[0] = nw_ppc_oris(4, 3, 0xff);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1864u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1864u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0x11ff0000u && b.gpr[4] == a.gpr[4]);
+
 		/* andis. r4, r3, 0x0ff0 */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
@@ -2710,6 +2723,20 @@ int main()
 		CHECK(nw_jit_op_ends_block(nw_ppc_dcbt(3, 4)) == 0);
 		CHECK(nw_jit_op_ends_block(nw_ppc_eieio()) == 0);
 
+		/* dcbf: kpx nop; GPRs unchanged; do not end the block */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x5555u;
+		ops[0] = nw_ppc_dcbf(3, 4);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1776u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x1776u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[3] == 0x5555u && b.gpr[3] == 0x5555u);
+		CHECK(nw_jit_op_ends_block(nw_ppc_dcbf(3, 4)) == 0);
+
 		/* dcbz zeros 32 B at (rA|0)+rB through the store path */
 		{
 			uint8_t ram[128];
@@ -3422,6 +3449,41 @@ int main()
 		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == NW_JIT_INTERPRET);
 		CHECK(nw_jit_cache_get(0x1000u, 0x1000u + 16383u * 0x8000u, 0, 0, NULL) ==
 		      NW_JIT_INTERPRET);
+
+		/* Banked wrap: a block in bank 1 survives recycle of bank 0. */
+		{
+			nw_jit_reset();
+			uint32_t wops[2];
+			wops[0] = nw_ppc_addi(3, 0, 1);
+			wops[1] = nw_ppc_blr();
+			int i = 0;
+			while (nw_jit_wrap_count() == 0 && i < 200000) {
+				const uint32_t pc = 0x1000u + (uint32_t)i * 4u;
+				(void)nw_jit_compile(wops, 2, pc, 0x1000u, 0, 0);
+				i++;
+			}
+			CHECK(nw_jit_wrap_count() >= 1);
+			nw_jit_fn keep = nw_jit_compile(wops, 2, 0x2000u, 0x2000u, 0, 0);
+			CHECK(keep != NULL);
+			CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == keep);
+			const uint64_t w0 = nw_jit_wrap_count();
+			while (nw_jit_wrap_count() == w0 && i < 400000) {
+				const uint32_t pc = 0x1000u + (uint32_t)i * 4u;
+				(void)nw_jit_compile(wops, 2, pc, 0x1000u, 0, 0);
+				if ((i & 1023) == 0)
+					(void)nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL);
+				i++;
+			}
+			CHECK(nw_jit_wrap_count() > w0);
+			CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == keep);
+			struct nw_jit_cpu kc;
+			memset(&kc, 0, sizeof(kc));
+			kc.lr = 0x3000u;
+			keep(&kc);
+			CHECK(kc.gpr[3] == 1 && kc.pc == 0x3000u);
+			nw_jit_invalidate_page(0x2000u);
+			CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
+		}
 	}
 
 	/* WP3 4b: dispatcher cache sentinels, mode, op filter. */
@@ -3470,6 +3532,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_andc(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_xori(4, 3, 0xff)));
 		CHECK(nw_jit_op_supported(nw_ppc_xoris(4, 3, 0xff)));
+		CHECK(nw_jit_op_supported(nw_ppc_oris(4, 3, 0xff)));
 		CHECK(nw_jit_op_supported(nw_ppc_andis_dot(4, 3, 0x0ff0)));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stb(3, 1, 0)));
@@ -3518,6 +3581,7 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_dss()));
 		CHECK(nw_jit_op_supported(nw_ppc_dcbt(3, 4)));
 		CHECK(nw_jit_op_supported(nw_ppc_dcbtst(3, 4)));
+		CHECK(nw_jit_op_supported(nw_ppc_dcbf(3, 4)));
 		CHECK(nw_jit_op_supported(nw_ppc_eieio()));
 		CHECK(nw_jit_op_supported(nw_ppc_dcbz(3, 4)));
 		CHECK(nw_jit_op_supported(nw_ppc_mtsr(2, 5)));
