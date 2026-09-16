@@ -88,6 +88,7 @@ enum {
 };
 
 void nw_jit_reset(void);
+void nw_jit_cpu_bind(struct nw_jit_cpu *c);
 
 int nw_jit_mode(void);
 void nw_jit_set_mode(int mode);

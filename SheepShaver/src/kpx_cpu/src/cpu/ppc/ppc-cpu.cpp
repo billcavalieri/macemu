@@ -2043,6 +2043,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	jc.dec = dec_;
 	jc.msr = ppc32_guest_mmu().msr();
 	jc.host = this;
+	nw_jit_cpu_bind(&jc);
 	fn(&jc);
 
 	if (jc.fault) {

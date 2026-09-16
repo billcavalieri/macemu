@@ -943,7 +943,7 @@ void init_emul_ppc(void)
 			else if (e && strcmp(e, "fallback") == 0)
 				nw_jit_set_mode(NW_JIT_FALLBACK);
 			else if (PrefsFindBool("jit"))
-				nw_jit_set_mode(NW_JIT_FALLBACK);
+				nw_jit_set_mode(NW_JIT_ON);
 			else
 				nw_jit_set_mode(NW_JIT_OFF);
 			printf("NW-BOOT G1: jit %s\n", nw_jit_mode_name());

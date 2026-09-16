@@ -878,7 +878,7 @@ void nw_jit_dtlb_flush_if_pr(uint32_t old_msr, uint32_t new_msr, int src)
 		nw_jit_dtlb_flush_src(src);
 }
 
-static void nw_jit_cpu_bind(struct nw_jit_cpu *c)
+void nw_jit_cpu_bind(struct nw_jit_cpu *c)
 {
 	c->jit_dtlb = g_dtlb;
 	c->jit_dtlb_hit = &g_dtlb_hit;
@@ -3119,6 +3119,11 @@ static uint32_t a64_cbnz(int rt, int imm19)
 	return 0x35000000u | (((uint32_t)imm19 & 0x7ffffu) << 5) | (uint32_t)rt;
 }
 
+static uint32_t a64_cbnz64(int rt, int imm19)
+{
+	return 0xb5000000u | (((uint32_t)imm19 & 0x7ffffu) << 5) | (uint32_t)rt;
+}
+
 static uint32_t a64_b_cond(int cond, int imm19)
 {
 	return 0x54000000u | (((uint32_t)imm19 & 0x7ffffu) << 5) | (uint32_t)(cond & 15);
@@ -3359,11 +3364,20 @@ static int emit_prologue(struct emit *e)
 		return 0;
 	if (!emit_w(e, 0xaa0003f3u))		/* mov x19, x0 */
 		return 0;
+	/* Live path binds from C. Harness memset leaves jit_dtlb NULL. */
+	if (!emit_w(e, a64_ldr_x(X9, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_dtlb))))
+		return 0;
+	uint32_t *bound = e->p;
+	if (!emit_w(e, a64_cbnz64(X9, 0)))
+		return 0;
 	if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_cpu_bind))
 		return 0;
 	if (!emit_w(e, 0xd63f0120u))		/* blr x9 */
 		return 0;
-	return emit_w(e, 0xaa1303e0u);		/* mov x0, x19 */
+	if (!emit_w(e, 0xaa1303e0u))		/* mov x0, x19 */
+		return 0;
+	*bound = a64_cbnz64(X9, (int)(e->p - bound));
+	return 1;
 }
 
 static int emit_ret(struct emit *e)
