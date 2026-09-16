@@ -178,8 +178,9 @@ int nw_jit_stats_wanted(void);
  * a successful probe). Direct-mapped, 1024 entries (ARM index mask
  * must match a64_and_dtlb_idx). Not a second translator.
  * Hit is inlined; miss calls the C helper, which walks and fills.
- * Flush on tlbie/tlbia/BAT/SDR1; mtsr only if the SR changes.
- * mtmsr/rfi flush only when MSR[PR] changes (DR-off skips the table).
+ * Flush on tlbia/SDR1; mtsr drops that SR's entries; DBAT drops its
+ * EA range; tlbie drops one page. Entries are tagged with MSR[PR]; a
+ * privilege change is a miss, not a flush. IBAT does not touch the DTLB.
  */
 enum { NW_JIT_DTLB_N = 1024 };
 enum {
@@ -196,7 +197,8 @@ enum {
 enum {
 	NW_JIT_DTLB_VALID = 1u,
 	NW_JIT_DTLB_WRITE = 2u,
-	NW_JIT_DTLB_HOST = 4u	/* host page pointer is live; ARM ldr/str */
+	NW_JIT_DTLB_HOST = 4u,	/* host page pointer is live; ARM ldr/str */
+	NW_JIT_DTLB_PR = 8u	/* filled with MSR[PR]=1; miss if current PR differs */
 };
 struct nw_jit_dtlb_ent {
 	uint32_t ea_page;
@@ -209,8 +211,12 @@ struct nw_jit_dtlb_ent {
 void nw_jit_dtlb_flush(void);
 void nw_jit_dtlb_flush_src(int src);
 void nw_jit_dtlb_flush_if_pr(uint32_t old_msr, uint32_t new_msr, int src);
-void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host);
+void nw_jit_dtlb_drop_sr(unsigned sr, int src);
+void nw_jit_dtlb_drop_bat(uint32_t upper, int src);
+void nw_jit_dtlb_drop_page(uint32_t ea, int src);
+void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host, int pr = 0);
 int nw_jit_dtlb_lookup(uint32_t ea, int is_store, uint32_t *pa);
+int nw_jit_dtlb_lookup_pr(uint32_t ea, int is_store, uint32_t *pa, int pr);
 uint64_t nw_jit_dtlb_hits(void);
 uint64_t nw_jit_dtlb_misses(void);
 
@@ -227,6 +233,10 @@ void nw_jit_set_host_isync(nw_jit_host_isync fn);
 /* Same work as kpx execute_mtmsr: set_msr(rS), no PC bump. */
 typedef void (*nw_jit_host_mtmsr)(void *host, uint32_t msr);
 void nw_jit_set_host_mtmsr(nw_jit_host_mtmsr fn);
+typedef void (*nw_jit_host_mtsr)(void *host, uint32_t sr, uint32_t val);
+void nw_jit_set_host_mtsr(nw_jit_host_mtsr fn);
+typedef void (*nw_jit_host_trap)(void *host, uint32_t guest_pc);
+void nw_jit_set_host_trap(nw_jit_host_trap fn);
 typedef void (*nw_jit_host_mtspr)(void *host, uint32_t spr, uint32_t val);
 void nw_jit_set_host_mtspr(nw_jit_host_mtspr fn);
 typedef void (*nw_jit_host_lvx)(void *host, uint32_t vd, uint32_t ea, uint32_t pc, int *fault, uint32_t *out);
@@ -315,6 +325,12 @@ uint32_t nw_ppc_sraw(int ra, int rs, int rb, int rc);
 uint32_t nw_ppc_srawi(int ra, int rs, int sh, int rc);
 uint32_t nw_ppc_sync(void);
 uint32_t nw_ppc_dss(void);
+uint32_t nw_ppc_dcbt(int ra, int rb);
+uint32_t nw_ppc_dcbtst(int ra, int rb);
+uint32_t nw_ppc_eieio(void);
+uint32_t nw_ppc_dcbz(int ra, int rb);
+uint32_t nw_ppc_mtsr(int sr, int rs);
+uint32_t nw_ppc_twi(int to, int ra, int simm);
 uint32_t nw_ppc_mtmsr(int rs);
 uint32_t nw_ppc_isync(void);
 uint32_t nw_ppc_b(int disp, int lk);

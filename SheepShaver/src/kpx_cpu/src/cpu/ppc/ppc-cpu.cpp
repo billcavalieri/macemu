@@ -359,6 +359,8 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_mfspr(powerpc_cpu::jit_host_mfspr);
 		nw_jit_set_host_isync(powerpc_cpu::jit_host_isync);
 		nw_jit_set_host_mtmsr(powerpc_cpu::jit_host_mtmsr);
+		nw_jit_set_host_mtsr(powerpc_cpu::jit_host_mtsr);
+		nw_jit_set_host_trap(powerpc_cpu::jit_host_trap);
 		nw_jit_set_host_mtspr(powerpc_cpu::jit_host_mtspr);
 		nw_jit_set_host_lvx(powerpc_cpu::jit_host_lvx);
 		nw_jit_set_host_stvx(powerpc_cpu::jit_host_stvx);
@@ -1025,24 +1027,32 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		unsigned i = (spr - powerpc_registers::SPR_IBAT0U) / 2;
 		uint32 u = 0, l = 0;
 		mmu.get_ibat(i, &u, &l);
+		const uint32 ou = u, ol = l;
 		if (spr & 1)
 			l = value;
 		else
 			u = value;
+		if (u == ou && l == ol)
+			return true;
 		mmu.set_ibat(i, u, l);
-		nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
+		/* IBAT is instruction translation; the JIT DTLB is data-only. */
 		return true;
 	}
 	if (spr >= powerpc_registers::SPR_DBAT0U && spr <= powerpc_registers::SPR_DBAT3L) {
 		unsigned i = (spr - powerpc_registers::SPR_DBAT0U) / 2;
 		uint32 u = 0, l = 0;
 		mmu.get_dbat(i, &u, &l);
+		const uint32 ou = u, ol = l;
 		if (spr & 1)
 			l = value;
 		else
 			u = value;
+		if (u == ou && l == ol)
+			return true;
 		mmu.set_dbat(i, u, l);
-		nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
+		nw_jit_dtlb_drop_bat(ou, NW_JIT_DTLB_FL_BAT);
+		if (u != ou)
+			nw_jit_dtlb_drop_bat(u, NW_JIT_DTLB_FL_BAT);
 		return true;
 	}
 	return false;
@@ -1325,7 +1335,8 @@ uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
 	if (ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
 		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM,
-			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu));
+			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
+			(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0);
 	return vm_read_memory_4(pa);
 }
 
@@ -1353,7 +1364,8 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 	if (ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR)) {
 		uint8 *hostp = vm_do_get_real_address(pa & ~0xfffu);
-		nw_jit_dtlb_fill(ea, pa, 1, (uint64_t)(uintptr_t)hostp);
+		nw_jit_dtlb_fill(ea, pa, 1, (uint64_t)(uintptr_t)hostp,
+			(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0);
 	}
 	if (kind != NW_PA_FB)
 		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
@@ -1463,6 +1475,26 @@ void powerpc_cpu::jit_host_mtmsr(void *host, uint32 msr)
 	(void)ppc;
 }
 
+void powerpc_cpu::jit_host_mtsr(void *host, uint32 sr, uint32 val)
+{
+	(void)host;
+	if (!ppc32_guest_mmu_enabled())
+		return;
+	ppc32_mmu &mmu = ppc32_guest_mmu();
+	const unsigned i = sr & 0xfu;
+	if (mmu.sr(i) == val)
+		return;
+	mmu.set_sr(i, val);
+	nw_jit_dtlb_drop_sr(i, NW_JIT_DTLB_FL_MTSR);
+}
+
+void powerpc_cpu::jit_host_trap(void *host, uint32 guest_pc)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	ppc->pc() = guest_pc;
+	ppc->take_program(0x00020000u);
+}
+
 void powerpc_cpu::jit_host_mtspr(void *host, uint32 spr, uint32 val)
 {
 	/* Same as execute_mtspr guest path without the PC bump. */
@@ -1553,7 +1585,8 @@ void powerpc_cpu::jit_host_lfd(void *host, uint32 fd, uint32 ea, uint32 pc, int 
 	if (ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
 		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM,
-			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu));
+			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
+			(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0);
 	const uint64 v = vm_read_memory_8(pa);
 	ppc->fpr_dw((int)fd) = v;
 	if (out)
@@ -1584,7 +1617,8 @@ void powerpc_cpu::jit_host_stfd(void *host, uint32 ea, uint64 val, uint32 pc, in
 	if (ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
 		nw_jit_dtlb_fill(ea, pa, 1,
-			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu));
+			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
+			(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0);
 	if (kind != NW_PA_FB)
 		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))

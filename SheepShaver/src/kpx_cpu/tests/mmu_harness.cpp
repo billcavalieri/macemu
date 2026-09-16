@@ -2089,6 +2089,33 @@ int main()
 			CHECK(pa == 0x2000u);
 			nw_jit_dtlb_flush();
 			CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa) == 0);
+
+			/* drop_sr keeps other segments (distinct DTLB slots) */
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0);
+			nw_jit_dtlb_fill(0x10000000u, 0x3000u, 1, 0);
+			nw_jit_dtlb_drop_sr(0, NW_JIT_DTLB_FL_MTSR);
+			CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa) == 0);
+			CHECK(nw_jit_dtlb_lookup(0x10000000u, 0, &pa) == 1);
+			CHECK(pa == 0x3000u);
+
+			/* drop_bat 128 KiB at 0; SR1 page survives */
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0);
+			nw_jit_dtlb_drop_bat(0x2u, NW_JIT_DTLB_FL_BAT); /* Vs, BL=0 */
+			CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa) == 0);
+			CHECK(nw_jit_dtlb_lookup(0x10000000u, 0, &pa) == 1);
+
+			/* drop_page hits one slot */
+			nw_jit_dtlb_fill(0x10000000u, 0x3000u, 1, 0);
+			nw_jit_dtlb_drop_page(0x10000004u, NW_JIT_DTLB_FL_TLB);
+			CHECK(nw_jit_dtlb_lookup(0x10000000u, 0, &pa) == 0);
+
+			/* PR tag: kernel fill misses in user, hits in kernel */
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0, 0);
+			CHECK(nw_jit_dtlb_lookup_pr(0x1000u, 0, &pa, 0) == 1);
+			CHECK(nw_jit_dtlb_lookup_pr(0x1000u, 0, &pa, 1) == 0);
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0, 1);
+			CHECK(nw_jit_dtlb_lookup_pr(0x1000u, 0, &pa, 1) == 1);
+			CHECK(nw_jit_dtlb_lookup_pr(0x1000u, 0, &pa, 0) == 0);
 		}
 
 		/* two lwz same EA: first miss fills, second hits */
@@ -2666,6 +2693,78 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[3] == 0x3333u && b.gpr[3] == 0x3333u);
 		CHECK(nw_jit_op_ends_block(nw_ppc_dss()) == 0);
+
+		/* dcbt / eieio: nop / barrier; GPRs unchanged; do not end the block */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x4444u;
+		ops[0] = nw_ppc_dcbt(3, 4);
+		ops[1] = nw_ppc_eieio();
+		ops[2] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 3, 0x1774u) == 1);
+		fn = nw_jit_compile(ops, 3, 0x1774u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[3] == 0x4444u && b.gpr[3] == 0x4444u);
+		CHECK(nw_jit_op_ends_block(nw_ppc_dcbt(3, 4)) == 0);
+		CHECK(nw_jit_op_ends_block(nw_ppc_eieio()) == 0);
+
+		/* dcbz zeros 32 B at (rA|0)+rB through the store path */
+		{
+			uint8_t ram[128];
+			memset(ram, 0xaa, sizeof(ram));
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = sizeof(ram);
+			a.gpr[3] = 0x20u;
+			a.gpr[4] = 0x10u;
+			ops[0] = nw_ppc_dcbz(3, 4);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x1778u) == 1);
+			fn = nw_jit_compile(ops, 2, 0x1778u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			int i;
+			for (i = 0x20; i < 0x40; i++)
+				CHECK(ram[i] == 0);
+			CHECK(ram[0x1f] == 0xaa && ram[0x40] == 0xaa);
+		}
+
+		/* twi: no-trap continues; TO=4 (eq) with unequal is a fall-through */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 5;
+		ops[0] = nw_ppc_twi(4, 3, 9);
+		ops[1] = nw_ppc_addi(5, 0, 1);
+		ops[2] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 3, 0x177cu) == 1);
+		fn = nw_jit_compile(ops, 3, 0x177cu, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[5] == 1 && b.gpr[5] == 1 && b.fault == 0);
+
+		/* twi trap (TO=4 eq) leaves fault EXC at the twi */
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 9;
+		ops[0] = nw_ppc_twi(4, 3, 9);
+		ops[1] = nw_ppc_addi(5, 0, 1);
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1788u) == 0);
+		CHECK(a.fault == NW_JIT_FAULT_EXC && a.pc == 0x1788u);
+		fn = nw_jit_compile(ops, 2, 0x1788u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(b.fault == NW_JIT_FAULT_EXC && b.gpr[5] == 0);
+
+		/* mtsr is supported and does not end the block */
+		CHECK(nw_jit_op_supported(nw_ppc_mtsr(1, 4)));
+		CHECK(nw_jit_op_ends_block(nw_ppc_mtsr(1, 4)));
 
 		/* mtmsr r4: writes MSR from rS; ends the block (IR/DR may change) */
 		memset(&a, 0, sizeof(a));
@@ -3417,6 +3516,12 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_srawi(4, 8, 1, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_sync()));
 		CHECK(nw_jit_op_supported(nw_ppc_dss()));
+		CHECK(nw_jit_op_supported(nw_ppc_dcbt(3, 4)));
+		CHECK(nw_jit_op_supported(nw_ppc_dcbtst(3, 4)));
+		CHECK(nw_jit_op_supported(nw_ppc_eieio()));
+		CHECK(nw_jit_op_supported(nw_ppc_dcbz(3, 4)));
+		CHECK(nw_jit_op_supported(nw_ppc_mtsr(2, 5)));
+		CHECK(nw_jit_op_supported(nw_ppc_twi(4, 3, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_mtmsr(10)));
 		CHECK(nw_jit_op_supported(nw_ppc_mtspr(NW_PPC_SPR_SPRG0, 3)));
 		CHECK(nw_jit_op_supported(nw_ppc_mfspr(3, 287)));	/* PVR already; any SPR now */

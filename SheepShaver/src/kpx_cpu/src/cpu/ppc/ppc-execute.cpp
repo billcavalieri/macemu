@@ -1338,7 +1338,7 @@ void powerpc_cpu::execute_mtsr(uint32 opcode)
 		ppc32_mmu &mmu = ppc32_guest_mmu();
 		if (mmu.sr(i) != val) {
 			mmu.set_sr(i, val);
-			nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_MTSR);
+			nw_jit_dtlb_drop_sr(i, NW_JIT_DTLB_FL_MTSR);
 		}
 	}
 	increment_pc(4);
@@ -1364,7 +1364,7 @@ void powerpc_cpu::execute_mtsrin(uint32 opcode)
 		ppc32_mmu &mmu = ppc32_guest_mmu();
 		if (mmu.sr(i) != val) {
 			mmu.set_sr(i, val);
-			nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_MTSR);
+			nw_jit_dtlb_drop_sr(i, NW_JIT_DTLB_FL_MTSR);
 		}
 	}
 	increment_pc(4);
@@ -1390,8 +1390,9 @@ void powerpc_cpu::execute_rfi(uint32 opcode)
 void powerpc_cpu::execute_tlbie(uint32 opcode)
 {
 	if (ppc32_guest_mmu_enabled()) {
-		ppc32_guest_mmu().tlbie(operand_RB::get(this, opcode));
-		nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_TLB);
+		const uint32 ea = operand_RB::get(this, opcode);
+		ppc32_guest_mmu().tlbie(ea);
+		nw_jit_dtlb_drop_page(ea, NW_JIT_DTLB_FL_TLB);
 		invalidate_cache();
 	}
 	increment_pc(4);
