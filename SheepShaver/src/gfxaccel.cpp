@@ -23,6 +23,7 @@
 #include "prefs.h"
 #include "video.h"
 #include "video_defs.h"
+#include "nw_io.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -55,13 +56,31 @@ static inline int bytes_per_pixel(int depth)
 // Pass-through dirty areas to redraw functions
 static inline void NQD_set_dirty_area(uint32 p)
 {
-	if (ReadMacInt32(p + acclDestBaseAddr) == screen_base) {
-		int16 x = (int16)ReadMacInt16(p + acclDestRect + 2) - (int16)ReadMacInt16(p + acclDestBoundsRect + 2);
-		int16 y = (int16)ReadMacInt16(p + acclDestRect + 0) - (int16)ReadMacInt16(p + acclDestBoundsRect + 0);
-		int16 w  = (int16)ReadMacInt16(p + acclDestRect + 6) - (int16)ReadMacInt16(p + acclDestRect + 2);
-		int16 h = (int16)ReadMacInt16(p + acclDestRect + 4) - (int16)ReadMacInt16(p + acclDestRect + 0);
+	int16 x = (int16)ReadMacInt16(p + acclDestRect + 2) - (int16)ReadMacInt16(p + acclDestBoundsRect + 2);
+	int16 y = (int16)ReadMacInt16(p + acclDestRect + 0) - (int16)ReadMacInt16(p + acclDestBoundsRect + 0);
+	int16 w  = (int16)ReadMacInt16(p + acclDestRect + 6) - (int16)ReadMacInt16(p + acclDestRect + 2);
+	int16 h = (int16)ReadMacInt16(p + acclDestRect + 4) - (int16)ReadMacInt16(p + acclDestRect + 0);
+	const uint32 dest = ReadMacInt32(p + acclDestBaseAddr);
+	nw_fb_damage_pixmap(dest, x, y, w, h);
+	if (dest == screen_base)
 		video_set_dirty_area(x, y, w, h);
-	}
+}
+
+static void nqd_mark_written(uint8 *dest, int width_px, int height, int bpp)
+{
+	if (!screen_base || !dest || width_px <= 0 || height <= 0 || bpp <= 0)
+		return;
+	uint8 *fb = Mac2HostAddr(screen_base);
+	if (!fb)
+		return;
+	const uint32 rowbytes = VModes[cur_mode].viRowBytes;
+	const uint32 fb_bytes = rowbytes * VModes[cur_mode].viYsize;
+	if (dest < fb || dest >= fb + fb_bytes)
+		return;
+	const uint32 off = (uint32)(dest - fb);
+	const int x = (int)((off % rowbytes) / (uint32)bpp);
+	const int y = (int)(off / rowbytes);
+	nw_fb_damage_rect(x, y, width_px, height);
 }
 
 
@@ -154,6 +173,7 @@ void NQD_invrect(uint32 p)
 	const int bpp = bytes_per_pixel(ReadMacInt32(p + acclDestPixelSize));
 	const int dest_row_bytes = (int32)ReadMacInt32(p + acclDestRowBytes);
 	uint8 *dest = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) + (dest_Y * dest_row_bytes) + (dest_X * bpp));
+	nqd_mark_written(dest, width, height, bpp);
 	width *= bpp;
 	switch (bpp) {
 	case 1:
@@ -268,6 +288,7 @@ void NQD_fillrect(uint32 p)
 	const int bpp = bytes_per_pixel(ReadMacInt32(p + acclDestPixelSize));
 	const int dest_row_bytes = (int32)ReadMacInt32(p + acclDestRowBytes);
 	uint8 *dest = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) + (dest_Y * dest_row_bytes) + (dest_X * bpp));
+	nqd_mark_written(dest, width, height, bpp);
 	width *= bpp;
 	switch (bpp) {
 	case 1:
@@ -341,6 +362,7 @@ void NQD_bitblt(uint32 p)
 		const int dst_row_bytes = (int32)ReadMacInt32(p + acclDestRowBytes);
 		uint8 *src = Mac2HostAddr(ReadMacInt32(p + acclSrcBaseAddr) + (src_Y * src_row_bytes) + (src_X * bpp));
 		uint8 *dst = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) + (dest_Y * dst_row_bytes) + (dest_X * bpp));
+		nqd_mark_written(dst, width / bpp, height, bpp);
 		for (int i = 0; i < height; i++) {
 			memmove(dst, src, width);
 			src += src_row_bytes;
@@ -352,6 +374,8 @@ void NQD_bitblt(uint32 p)
 		const int dst_row_bytes = -(int32)ReadMacInt32(p + acclDestRowBytes);
 		uint8 *src = Mac2HostAddr(ReadMacInt32(p + acclSrcBaseAddr) + ((src_Y + height - 1) * src_row_bytes) + (src_X * bpp));
 		uint8 *dst = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) + ((dest_Y + height - 1) * dst_row_bytes) + (dest_X * bpp));
+		uint8 *dst0 = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) + (dest_Y * dst_row_bytes) + (dest_X * bpp));
+		nqd_mark_written(dst0, width / bpp, height, bpp);
 		for (int i = height - 1; i >= 0; i--) {
 			memmove(dst, src, width);
 			src -= src_row_bytes;

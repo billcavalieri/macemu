@@ -1332,7 +1332,7 @@ uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
 		*fault = 1;
 		return 0;
 	}
-	if (ppc32_guest_mmu_enabled() &&
+	if (kind != NW_PA_FB && ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
 		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM,
 			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
@@ -1361,7 +1361,9 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 		return;
 	}
 	vm_write_memory_4(pa, val);
-	if (ppc32_guest_mmu_enabled() &&
+	if (kind == NW_PA_FB)
+		nw_fb_damage_store(pa, 4);
+	else if (ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR)) {
 		uint8 *hostp = vm_do_get_real_address(pa & ~0xfffu);
 		nw_jit_dtlb_fill(ea, pa, 1, (uint64_t)(uintptr_t)hostp,
@@ -1406,6 +1408,8 @@ void powerpc_cpu::jit_host_stw_pa(void *host, uint32 pa, uint32 val, uint32 pc, 
 		return;
 	}
 	vm_write_memory_4(pa, val);
+	if (kind == NW_PA_FB)
+		nw_fb_damage_store(pa, 4);
 	if (kind != NW_PA_FB)
 		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
@@ -1582,7 +1586,7 @@ void powerpc_cpu::jit_host_lfd(void *host, uint32 fd, uint32 ea, uint32 pc, int 
 		*fault = 1;
 		return;
 	}
-	if (ppc32_guest_mmu_enabled() &&
+	if (kind != NW_PA_FB && ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
 		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM,
 			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
@@ -1614,7 +1618,9 @@ void powerpc_cpu::jit_host_stfd(void *host, uint32 ea, uint64 val, uint32 pc, in
 		return;
 	}
 	vm_write_memory_8(pa, val);
-	if (ppc32_guest_mmu_enabled() &&
+	if (kind == NW_PA_FB)
+		nw_fb_damage_store(pa, 8);
+	else if (ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
 		nw_jit_dtlb_fill(ea, pa, 1,
 			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
@@ -1667,6 +1673,8 @@ void powerpc_cpu::jit_host_sth(void *host, uint32 ea, uint32 val, uint32 pc, int
 		return;
 	}
 	vm_write_memory_2(pa, val);
+	if (kind == NW_PA_FB)
+		nw_fb_damage_store(pa, 2);
 	if (kind != NW_PA_FB)
 		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
@@ -1715,6 +1723,8 @@ void powerpc_cpu::jit_host_stb(void *host, uint32 ea, uint32 val, uint32 pc, int
 		return;
 	}
 	vm_write_memory_1(pa, val);
+	if (kind == NW_PA_FB)
+		nw_fb_damage_store(pa, 1);
 	if (kind != NW_PA_FB)
 		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
@@ -2033,7 +2043,10 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			uint32 op;
 			if (!nw_jit_peek(ea, &op))
 				break;
-			if (is_altivec_insn(op) || is_fp_insn(op))
+			/* Do not mix FP/AltiVec into an integer block. A codec
+			 * loop that starts with FP or VMX may keep packing those. */
+			if ((is_altivec_insn(op) || is_fp_insn(op)) &&
+			    !is_altivec_insn(ops[0]) && !is_fp_insn(ops[0]))
 				break;
 			if (!nw_jit_op_dispatch(op))
 				break;
@@ -2169,6 +2182,12 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	if (mode == NW_JIT_ON) {
 		for (int i = 0; i < 32; i++)
 			gpr(i) = jc.gpr[i];
+		for (int i = 0; i < 32; i++) {
+			vr(i).w[0] = jc.vr[i][0];
+			vr(i).w[1] = jc.vr[i][1];
+			vr(i).w[2] = jc.vr[i][2];
+			vr(i).w[3] = jc.vr[i][3];
+		}
 		for (int i = 0; i < 32; i++)
 			fpr_dw(i) = jc.fpr[i];
 		cr().set(jc.cr);

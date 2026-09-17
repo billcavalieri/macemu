@@ -1582,6 +1582,50 @@ int main()
 		CHECK(nw_pa_kind(NW_IO_ATA0_BASE) == NW_PA_IO);
 		CHECK(nw_pa_writable(0x10000000u));
 		CHECK(nw_pa_writable(0x50590000u));
+
+		/* WP5: a store in the FB bank marks the 64-pixel tile; RAM does not. */
+		nw_fb_damage_layout(0x50590000u, 2560u, 640u, 480u, 4u);
+		nw_fb_damage_clear();
+		CHECK(nw_fb_damage_any() == 0);
+		nw_fb_damage_store(0x10000000u, 4);
+		CHECK(nw_fb_damage_any() == 0);
+		nw_fb_damage_store(0x50590000u, 4);
+		CHECK(nw_fb_damage_any());
+		{
+			int x[4], y[4], w[4], h[4];
+			CHECK(nw_fb_damage_collect(x, y, w, h, 4) == 1);
+			CHECK(x[0] == 0 && y[0] == 0 && w[0] == 64 && h[0] == 64);
+		}
+		nw_fb_damage_clear();
+		CHECK(nw_fb_damage_any() == 0);
+		nw_fb_damage_store(0x50590000u + 63u * 4u, 8);
+		{
+			int x[4], y[4], w[4], h[4];
+			CHECK(nw_fb_damage_collect(x, y, w, h, 4) == 2);
+			CHECK(x[0] == 0 && y[0] == 0);
+			CHECK(x[1] == 64 && y[1] == 0);
+		}
+		nw_fb_damage_rect(200, 100, 10, 10);
+		{
+			int x[8], y[8], w[8], h[8];
+			const int n = nw_fb_damage_collect(x, y, w, h, 8);
+			int saw = 0;
+			for (int i = 0; i < n; i++)
+				if (x[i] == 192 && y[i] == 64)
+					saw = 1;
+			CHECK(n >= 3 && saw);
+		}
+		/* Pixmap base inside the FB (window / QT dest != screen_base). */
+		nw_fb_damage_clear();
+		nw_fb_damage_pixmap(0x50590000u + 64u * 4u, 0, 0, 8, 8);
+		{
+			int x[4], y[4], w[4], h[4];
+			CHECK(nw_fb_damage_take(x, y, w, h, 4) == 1);
+			CHECK(x[0] == 64 && y[0] == 0);
+			CHECK(nw_fb_damage_any() == 0);
+		}
+		nw_fb_damage_pixmap(0x10000000u, 0, 0, 8, 8);
+		CHECK(nw_fb_damage_any() == 0);
 		CHECK(!nw_pa_writable(0x50000000u));
 		CHECK(!nw_pa_writable(NW_IO_VIA_PMU_BASE));
 		CHECK(!nw_pa_writable(0x30000000u));
@@ -3002,6 +3046,41 @@ int main()
 			fn(&b);
 			CHECK(ram[16] == 0x40 && ram[23] == 0x18);
 			CHECK(b.mem[16] == 0x40 && b.mem[23] == 0x18);
+		}
+
+		/* lfs / fsubs / stfs: 3.0f - 1.0f = 2.0f */
+		{
+			uint8_t ram[64];
+			memset(ram, 0, sizeof(ram));
+			ram[0] = 0x40; ram[1] = 0x40; ram[2] = 0x00; ram[3] = 0x00; /* 3.0f */
+			ram[4] = 0x3f; ram[5] = 0x80; ram[6] = 0x00; ram[7] = 0x00; /* 1.0f */
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			ops[0] = nw_ppc_lfs(1, 0, 0);
+			ops[1] = nw_ppc_lfs(2, 0, 4);
+			ops[2] = nw_ppc_fsubs(3, 1, 2);
+			ops[3] = nw_ppc_stfs(3, 0, 8);
+			ops[4] = nw_ppc_blr();
+			b = a;
+			b.mem = ram;
+			CHECK(nw_jit_op_supported(nw_ppc_lfs(1, 0, 0)));
+			CHECK(nw_jit_op_supported(nw_ppc_fsubs(3, 1, 2)));
+			CHECK(nw_jit_op_supported(nw_ppc_stfs(3, 0, 8)));
+			CHECK(nw_jit_op_supported(nw_ppc_lfsx(1, 0, 3)));
+			CHECK(nw_jit_op_supported(nw_ppc_stfsx(3, 0, 3)));
+			CHECK(nw_jit_op_supported(nw_ppc_fdivs(3, 1, 2)));
+			CHECK(nw_jit_op_supported(nw_ppc_fmuls(3, 1, 2)));
+			CHECK(nw_jit_op_supported(nw_ppc_fmadds(3, 1, 2, 2)));
+			CHECK(nw_jit_op_supported(nw_ppc_fneg(3, 1)));
+			CHECK(nw_jit_interp_n(&a, ops, 5, 0x1900u) == 1);
+			fn = nw_jit_compile(ops, 5, 0x1900u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(ram[8] == 0x40 && ram[9] == 0x00 && ram[10] == 0x00 && ram[11] == 0x00);
+			CHECK(b.mem[8] == 0x40 && b.mem[9] == 0x00);
 		}
 
 		/* stbu r4, 4(r1): store then r1 = EA */

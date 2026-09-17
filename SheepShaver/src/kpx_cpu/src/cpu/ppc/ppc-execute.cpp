@@ -573,7 +573,10 @@ void powerpc_cpu::execute_fp_arith(uint32 opcode)
  **/
 
 #ifdef SHEEPSHAVER
-#define PA_JIT_STORE(PA, N) nw_jit_invalidate_range_src((PA), (N), NW_JIT_FL_ISTORE)
+#define PA_JIT_STORE(PA, N) do { \
+	nw_jit_invalidate_range_src((PA), (N), NW_JIT_FL_ISTORE); \
+	nw_fb_damage_store((PA), (unsigned)(N)); \
+} while (0)
 #else
 #define PA_JIT_STORE(PA, N) ((void)0)
 #endif
@@ -736,6 +739,7 @@ void powerpc_cpu::execute_loadstore_multiple(uint32 opcode)
 			vm_write_memory_4(pa, gpr(r));
 #ifdef SHEEPSHAVER
 			nw_jit_invalidate_page_src(pa, NW_JIT_FL_ISTORE);
+			nw_fb_damage_store(pa, 4);
 #endif
 		}
 		r++;
@@ -1594,8 +1598,13 @@ void powerpc_cpu::execute_dcbz(uint32 opcode)
 	uint32 pa;
 	if (!guest_data_xlate(ea, 32, true, &pa))
 		return;
-	if (!pa_is_io(pa) && !pa_is_rom(pa))
-		vm_memset(pa - (pa % 32), 0, 32);
+	if (!pa_is_io(pa) && !pa_is_rom(pa)) {
+		const uint32 base = pa - (pa % 32);
+		vm_memset(base, 0, 32);
+#ifdef SHEEPSHAVER
+		nw_fb_damage_store(base, 32);
+#endif
+	}
 	increment_pc(4);
 }
 

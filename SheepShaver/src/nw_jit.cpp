@@ -54,6 +54,22 @@ void nw_jit_helper_lvx(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t ra, uint32_
 void nw_jit_helper_stvx(struct nw_jit_cpu *cpu, uint32_t vs, uint32_t ra, uint32_t rb);
 void nw_jit_helper_lfd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t ra, uint32_t simm);
 void nw_jit_helper_stfd(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ra, uint32_t simm);
+void nw_jit_helper_lfs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t ea);
+void nw_jit_helper_stfs(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ea);
+void nw_jit_helper_fsubs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb);
+void nw_jit_helper_fdivs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb);
+void nw_jit_helper_fmuls(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc);
+void nw_jit_helper_fmadds(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc, uint32_t fb);
+void nw_jit_helper_fneg(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb);
+void nw_jit_helper_fsub(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb);
+void nw_jit_helper_fadd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb);
+void nw_jit_helper_fmul(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc);
+void nw_jit_helper_fdiv(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb);
+void nw_jit_helper_fctiwz(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb);
+void nw_jit_helper_lvsl(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t ea, int sl);
+void nw_jit_helper_vor(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb);
+void nw_jit_helper_vsel(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc);
+void nw_jit_helper_vperm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc);
 
 enum { NW_JIT_CODE_SIZE = 1 << 24, NW_JIT_CACHE = 32768, NW_JIT_PROBE = 16 };
 enum { NW_JIT_BANKS = 2, NW_JIT_BANK_SIZE = NW_JIT_CODE_SIZE / NW_JIT_BANKS };
@@ -197,6 +213,15 @@ static struct nw_jit_hist g_hist[] = {
 	{45, -1, "sthu", 0, 0, 0},
 	{50, -1, "lfd", 0, 0, 0},
 	{54, -1, "stfd", 0, 0, 0},
+	{48, -1, "lfs", 0, 0, 0},
+	{52, -1, "stfs", 0, 0, 0},
+	{31, 535, "lfsx", 0, 0, 0},
+	{31, 663, "stfsx", 0, 0, 0},
+	{59, 20, "fdivs", 0, 0, 0},
+	{59, 21, "fsubs", 0, 0, 0},
+	{59, 25, "fmuls", 0, 0, 0},
+	{59, 29, "fmadds", 0, 0, 0},
+	{63, 40, "fneg", 0, 0, 0},
 	{31, 235, "mullw", 0, 0, 0},
 	{31, 11, "mulhwu", 0, 0, 0},
 	{31, 60, "andc", 0, 0, 0},
@@ -398,6 +423,227 @@ void nw_jit_helper_stfd(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ra, uint32
 	p[5] = (uint8_t)(v >> 16);
 	p[6] = (uint8_t)(v >> 8);
 	p[7] = (uint8_t)v;
+}
+
+static uint64_t f64_from_f32_bits(uint32_t i)
+{
+	float f;
+	double d;
+	uint64_t j;
+	memcpy(&f, &i, 4);
+	d = (double)f;
+	memcpy(&j, &d, 8);
+	return j;
+}
+
+static uint32_t f32_bits_from_f64(uint64_t j)
+{
+	const int exp = (int)((j >> 52) & 0x7ff);
+	if (exp < 874 || exp > 896)
+		return (uint32_t)(((j >> 32) & 0xc0000000u) | ((j >> 29) & 0x3fffffffu));
+	double d;
+	float f;
+	uint32_t i;
+	memcpy(&d, &j, 8);
+	f = (float)d;
+	memcpy(&i, &f, 4);
+	return i;
+}
+
+static float f32_from_fpr(uint64_t j)
+{
+	double d;
+	memcpy(&d, &j, 8);
+	return (float)d;
+}
+
+static uint64_t fpr_from_f32(float f)
+{
+	double d = (double)f;
+	uint64_t j;
+	memcpy(&j, &d, 8);
+	return j;
+}
+
+void nw_jit_helper_lfs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t ea)
+{
+	fd &= 31u;
+	if (g_host_lwz && cpu->host) {
+		int fault = 0;
+		const uint32_t w = g_host_lwz(cpu->host, ea, cpu->pc, &fault);
+		cpu->fault = (uint32_t)fault;
+		if (!fault)
+			cpu->fpr[fd] = f64_from_f32_bits(w);
+		return;
+	}
+	if (!cpu->mem || ea < cpu->mem_base ||
+	    (ea - cpu->mem_base) + 4u > cpu->mem_size) {
+		cpu->fault = 1;
+		cpu->fault_ea = ea;
+		return;
+	}
+	const uint8_t *p = cpu->mem + (ea - cpu->mem_base);
+	const uint32_t w = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+			   ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+	cpu->fpr[fd] = f64_from_f32_bits(w);
+}
+
+void nw_jit_helper_stfs(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ea)
+{
+	const uint32_t w = f32_bits_from_f64(cpu->fpr[fs & 31u]);
+	if (g_host_stw && cpu->host) {
+		int fault = 0;
+		g_host_stw(cpu->host, ea, w, cpu->pc, &fault);
+		cpu->fault = (uint32_t)fault;
+		return;
+	}
+	if (!cpu->mem || ea < cpu->mem_base ||
+	    (ea - cpu->mem_base) + 4u > cpu->mem_size) {
+		cpu->fault = 1;
+		cpu->fault_ea = ea;
+		cpu->fault_st = 1;
+		return;
+	}
+	uint8_t *p = cpu->mem + (ea - cpu->mem_base);
+	p[0] = (uint8_t)(w >> 24);
+	p[1] = (uint8_t)(w >> 16);
+	p[2] = (uint8_t)(w >> 8);
+	p[3] = (uint8_t)w;
+}
+
+void nw_jit_helper_fsubs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
+{
+	const float r = f32_from_fpr(cpu->fpr[fa & 31u]) - f32_from_fpr(cpu->fpr[fb & 31u]);
+	cpu->fpr[fd & 31u] = fpr_from_f32(r);
+}
+
+void nw_jit_helper_fdivs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
+{
+	const float r = f32_from_fpr(cpu->fpr[fa & 31u]) / f32_from_fpr(cpu->fpr[fb & 31u]);
+	cpu->fpr[fd & 31u] = fpr_from_f32(r);
+}
+
+void nw_jit_helper_fmuls(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc)
+{
+	const float r = f32_from_fpr(cpu->fpr[fa & 31u]) * f32_from_fpr(cpu->fpr[fc & 31u]);
+	cpu->fpr[fd & 31u] = fpr_from_f32(r);
+}
+
+void nw_jit_helper_fmadds(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc, uint32_t fb)
+{
+	const float r = f32_from_fpr(cpu->fpr[fa & 31u]) * f32_from_fpr(cpu->fpr[fc & 31u]) +
+			f32_from_fpr(cpu->fpr[fb & 31u]);
+	cpu->fpr[fd & 31u] = fpr_from_f32(r);
+}
+
+void nw_jit_helper_fneg(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb)
+{
+	cpu->fpr[fd & 31u] = cpu->fpr[fb & 31u] ^ 0x8000000000000000ull;
+}
+
+static uint64_t bits_from_f64(double d)
+{
+	uint64_t j;
+	memcpy(&j, &d, 8);
+	return j;
+}
+
+static double f64_from_fpr(uint64_t j)
+{
+	double d;
+	memcpy(&d, &j, 8);
+	return d;
+}
+
+void nw_jit_helper_fsub(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
+{
+	cpu->fpr[fd & 31u] = bits_from_f64(f64_from_fpr(cpu->fpr[fa & 31u]) -
+					   f64_from_fpr(cpu->fpr[fb & 31u]));
+}
+
+void nw_jit_helper_fadd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
+{
+	cpu->fpr[fd & 31u] = bits_from_f64(f64_from_fpr(cpu->fpr[fa & 31u]) +
+					   f64_from_fpr(cpu->fpr[fb & 31u]));
+}
+
+void nw_jit_helper_fmul(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc)
+{
+	cpu->fpr[fd & 31u] = bits_from_f64(f64_from_fpr(cpu->fpr[fa & 31u]) *
+					   f64_from_fpr(cpu->fpr[fc & 31u]));
+}
+
+void nw_jit_helper_fdiv(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
+{
+	cpu->fpr[fd & 31u] = bits_from_f64(f64_from_fpr(cpu->fpr[fa & 31u]) /
+					   f64_from_fpr(cpu->fpr[fb & 31u]));
+}
+
+void nw_jit_helper_fctiwz(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb)
+{
+	const double d = f64_from_fpr(cpu->fpr[fb & 31u]);
+	int32_t i;
+	if (d >= 2147483647.0)
+		i = 0x7fffffff;
+	else if (d <= -2147483648.0)
+		i = (int32_t)0x80000000;
+	else
+		i = (int32_t)d;
+	cpu->fpr[fd & 31u] = 0xfff8000000000000ull | (uint32_t)i;
+}
+
+void nw_jit_helper_lvsl(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t ea, int sl)
+{
+	uint8_t b[16];
+	int j = sl ? (int)(ea & 15u) : (16 - (int)(ea & 15u));
+	for (int i = 0; i < 16; i++)
+		b[i] = (uint8_t)(j + i);
+	vd &= 31u;
+	for (int w = 0; w < 4; w++)
+		cpu->vr[vd][w] = ((uint32_t)b[w * 4] << 24) | ((uint32_t)b[w * 4 + 1] << 16) |
+				 ((uint32_t)b[w * 4 + 2] << 8) | (uint32_t)b[w * 4 + 3];
+}
+
+void nw_jit_helper_vor(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
+{
+	vd &= 31u; va &= 31u; vb &= 31u;
+	for (int i = 0; i < 4; i++)
+		cpu->vr[vd][i] = cpu->vr[va][i] | cpu->vr[vb][i];
+}
+
+void nw_jit_helper_vsel(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc)
+{
+	vd &= 31u; va &= 31u; vb &= 31u; vc &= 31u;
+	for (int i = 0; i < 4; i++)
+		cpu->vr[vd][i] = (cpu->vr[va][i] & ~cpu->vr[vc][i]) |
+				 (cpu->vr[vb][i] & cpu->vr[vc][i]);
+}
+
+void nw_jit_helper_vperm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc)
+{
+	uint8_t src[32], c[16], d[16];
+	vd &= 31u; va &= 31u; vb &= 31u; vc &= 31u;
+	for (int w = 0; w < 4; w++) {
+		const uint32_t a = cpu->vr[va][w], b = cpu->vr[vb][w];
+		src[w * 4] = (uint8_t)(a >> 24);
+		src[w * 4 + 1] = (uint8_t)(a >> 16);
+		src[w * 4 + 2] = (uint8_t)(a >> 8);
+		src[w * 4 + 3] = (uint8_t)a;
+		src[16 + w * 4] = (uint8_t)(b >> 24);
+		src[16 + w * 4 + 1] = (uint8_t)(b >> 16);
+		src[16 + w * 4 + 2] = (uint8_t)(b >> 8);
+		src[16 + w * 4 + 3] = (uint8_t)b;
+		const uint32_t cv = cpu->vr[vc][w];
+		c[w * 4] = (uint8_t)(cv >> 24);
+		c[w * 4 + 1] = (uint8_t)(cv >> 16);
+		c[w * 4 + 2] = (uint8_t)(cv >> 8);
+		c[w * 4 + 3] = (uint8_t)cv;
+	}
+	for (int i = 0; i < 16; i++)
+		d[i] = src[c[i] & 31];
+	for (int w = 0; w < 4; w++)
+		cpu->vr[vd][w] = ((uint32_t)d[w * 4] << 24) | ((uint32_t)d[w * 4 + 1] << 16) |
+				 ((uint32_t)d[w * 4 + 2] << 8) | (uint32_t)d[w * 4 + 3];
 }
 
 void nw_jit_helper_bc(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc)
@@ -822,6 +1068,24 @@ void nw_jit_stats_print(const char *why)
 				nm = "sync";
 			else if (p == 31 && x == 86)
 				nm = "dcbf";
+			else if (p == 31 && x == 535)
+				nm = "lfsx";
+			else if (p == 31 && x == 663)
+				nm = "stfsx";
+			else if (p == 48)
+				nm = "lfs";
+			else if (p == 52)
+				nm = "stfs";
+			else if (p == 59 && (x & 31) == 20)
+				nm = "fdivs";
+			else if (p == 59 && (x & 31) == 21)
+				nm = "fsubs";
+			else if (p == 59 && (x & 31) == 25)
+				nm = "fmuls";
+			else if (p == 59 && (x & 31) == 29)
+				nm = "fmadds";
+			else if (p == 63 && x == 40)
+				nm = "fneg";
 			else if (p == 31 && x == 144)
 				nm = "mtcrf";
 			else if (p == 31 && x == 19)
@@ -1279,6 +1543,34 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* lfd */
 	if (prim == 54)
 		return 1;	/* stfd */
+	if (prim == 48)
+		return 1;	/* lfs */
+	if (prim == 52)
+		return 1;	/* stfs */
+	if (prim == 31 && (xo == 535 || xo == 663))
+		return 1;	/* lfsx / stfsx */
+	if (prim == 59 && !(op & 1u)) {
+		const int axo = (int)((op >> 1) & 0x1f);
+		if (axo == 20 || axo == 21 || axo == 25 || axo == 29)
+			return 1;	/* fdivs / fsubs / fmuls / fmadds */
+	}
+	if (prim == 63 && xo == 40 && !(op & 1u))
+		return 1;	/* fneg */
+	if (prim == 63 && xo == 15 && !(op & 1u))
+		return 1;	/* fctiwz */
+	if (prim == 63 && !(op & 1u)) {
+		const int axo = (int)((op >> 1) & 0x1f);
+		if (axo == 18 || axo == 20 || axo == 21 || axo == 25)
+			return 1;	/* fdiv / fsub / fadd / fmul */
+	}
+	if (prim == 31 && (xo == 6 || xo == 38))
+		return 1;	/* lvsl / lvsr */
+	if (prim == 4) {
+		const int vxo = (int)(op & 0x7ff);
+		const int vaxo = (int)(op & 0x3f);
+		if (vxo == 1156 || vaxo == 42 || vaxo == 43)
+			return 1;	/* vor / vsel / vperm */
+	}
 	if (prim == 31 && xo == 235)
 		return 1;	/* mullw */
 	if (prim == 31 && xo == 11)
@@ -1352,7 +1644,7 @@ void nw_jit_note_skip_unsup(uint32_t op)
 {
 	g_v_skip_unsup++;
 	const int prim = (int)(op >> 26);
-	const int xo = (prim == 19 || prim == 31 || prim == 59 || prim == 63)
+	const int xo = (prim == 4 || prim == 19 || prim == 31 || prim == 59 || prim == 63)
 			       ? (int)((op >> 1) & 0x3ff) : -1;
 	const uint32_t h = (uint32_t)prim * 0x9e3779b1u ^ (uint32_t)(xo + 1) * 0x85ebca6bu;
 	int i = (int)(h & (NW_JIT_SKIPN - 1));
@@ -1842,6 +2134,57 @@ uint32_t nw_ppc_lfd(int frd, int ra, int d)
 uint32_t nw_ppc_stfd(int frs, int ra, int d)
 {
 	return (54u << 26) | ((uint32_t)frs << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
+uint32_t nw_ppc_lfs(int frd, int ra, int d)
+{
+	return (48u << 26) | ((uint32_t)frd << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
+uint32_t nw_ppc_stfs(int frs, int ra, int d)
+{
+	return (52u << 26) | ((uint32_t)frs << 21) | ((uint32_t)ra << 16) | ((uint32_t)d & 0xffffu);
+}
+
+uint32_t nw_ppc_lfsx(int frd, int ra, int rb)
+{
+	return (31u << 26) | ((uint32_t)frd << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | (535u << 1);
+}
+
+uint32_t nw_ppc_stfsx(int frs, int ra, int rb)
+{
+	return (31u << 26) | ((uint32_t)frs << 21) | ((uint32_t)ra << 16) |
+	       ((uint32_t)rb << 11) | (663u << 1);
+}
+
+uint32_t nw_ppc_fsubs(int frd, int fra, int frb)
+{
+	return (59u << 26) | ((uint32_t)frd << 21) | ((uint32_t)fra << 16) |
+	       ((uint32_t)frb << 11) | (21u << 1);
+}
+
+uint32_t nw_ppc_fdivs(int frd, int fra, int frb)
+{
+	return (59u << 26) | ((uint32_t)frd << 21) | ((uint32_t)fra << 16) |
+	       ((uint32_t)frb << 11) | (20u << 1);
+}
+
+uint32_t nw_ppc_fmuls(int frd, int fra, int frc)
+{
+	return (59u << 26) | ((uint32_t)frd << 21) | ((uint32_t)fra << 16) |
+	       ((uint32_t)frc << 6) | (25u << 1);
+}
+
+uint32_t nw_ppc_fmadds(int frd, int fra, int frc, int frb)
+{
+	return (59u << 26) | ((uint32_t)frd << 21) | ((uint32_t)fra << 16) |
+	       ((uint32_t)frb << 11) | ((uint32_t)frc << 6) | (29u << 1);
+}
+
+uint32_t nw_ppc_fneg(int frd, int frb)
+{
+	return (63u << 26) | ((uint32_t)frd << 21) | ((uint32_t)frb << 11) | (40u << 1);
 }
 
 uint32_t nw_ppc_mullw(int rd, int ra, int rb, int rc)
@@ -3056,6 +3399,101 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
+	if (prim == 48) {
+		cpu->pc = pc;
+		nw_jit_helper_lfs(cpu, (uint32_t)rd, ra_or_0(cpu, ra) + (uint32_t)simm);
+		if (cpu->fault)
+			return -1;
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 52) {
+		cpu->pc = pc;
+		nw_jit_helper_stfs(cpu, (uint32_t)rd, ra_or_0(cpu, ra) + (uint32_t)simm);
+		if (cpu->fault)
+			return -1;
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 535) {
+		cpu->pc = pc;
+		nw_jit_helper_lfs(cpu, (uint32_t)rd, ra_or_0(cpu, ra) + cpu->gpr[rb]);
+		if (cpu->fault)
+			return -1;
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && xo == 663) {
+		cpu->pc = pc;
+		nw_jit_helper_stfs(cpu, (uint32_t)rd, ra_or_0(cpu, ra) + cpu->gpr[rb]);
+		if (cpu->fault)
+			return -1;
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 59 && !(op & 1u)) {
+		const int axo = (int)((op >> 1) & 0x1f);
+		const int fc = (int)((op >> 6) & 0x1f);
+		if (axo == 21)
+			nw_jit_helper_fsubs(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)rb);
+		else if (axo == 20)
+			nw_jit_helper_fdivs(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)rb);
+		else if (axo == 25)
+			nw_jit_helper_fmuls(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)fc);
+		else if (axo == 29)
+			nw_jit_helper_fmadds(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)fc, (uint32_t)rb);
+		else
+			return -1;
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 63 && xo == 40 && !(op & 1u)) {
+		nw_jit_helper_fneg(cpu, (uint32_t)rd, (uint32_t)rb);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 63 && xo == 15 && !(op & 1u)) {
+		nw_jit_helper_fctiwz(cpu, (uint32_t)rd, (uint32_t)rb);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 63 && !(op & 1u)) {
+		const int axo = (int)((op >> 1) & 0x1f);
+		const int fc = (int)((op >> 6) & 0x1f);
+		if (axo == 20)
+			nw_jit_helper_fsub(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)rb);
+		else if (axo == 21)
+			nw_jit_helper_fadd(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)rb);
+		else if (axo == 18)
+			nw_jit_helper_fdiv(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)rb);
+		else if (axo == 25)
+			nw_jit_helper_fmul(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)fc);
+		else
+			return -1;
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 31 && (xo == 6 || xo == 38)) {
+		const uint32_t ea = ra_or_0(cpu, ra) + cpu->gpr[rb];
+		nw_jit_helper_lvsl(cpu, (uint32_t)rd, ea, xo == 6);
+		cpu->pc = pc + 4;
+		return 0;
+	}
+	if (prim == 4) {
+		const int vxo = (int)(op & 0x7ff);
+		const int vaxo = (int)(op & 0x3f);
+		const int vc = (int)((op >> 6) & 0x1f);
+		if (vxo == 1156)
+			nw_jit_helper_vor(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)rb);
+		else if (vaxo == 42)
+			nw_jit_helper_vsel(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)rb, (uint32_t)vc);
+		else if (vaxo == 43)
+			nw_jit_helper_vperm(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)rb, (uint32_t)vc);
+		else
+			return -1;
+		cpu->pc = pc + 4;
+		return 0;
+	}
 	if (prim == 31 && xo == 103) {
 		cpu->pc = pc;
 		nw_jit_helper_lvx(cpu, (uint32_t)rd, (uint32_t)ra, (uint32_t)rb);
@@ -3197,7 +3635,7 @@ int nw_jit_interp_n(struct nw_jit_cpu *cpu, const uint32_t *ops, int n, uint32_t
 #if defined(__aarch64__)
 
 enum {
-	W0 = 0, W1 = 1, W2 = 2, W3 = 3, W8 = 8, W9 = 9, W10 = 10, W11 = 11, W12 = 12, W13 = 13, W14 = 14,
+	W0 = 0, W1 = 1, W2 = 2, W3 = 3, W4 = 4, W8 = 8, W9 = 9, W10 = 10, W11 = 11, W12 = 12, W13 = 13, W14 = 14,
 	X0 = 0, X9 = 9, X10 = 10, X11 = 11, X12 = 12, X13 = 13, X19 = 19
 };
 
@@ -5239,6 +5677,208 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
 		return emit_fault_check(e);
+	}
+	if (prim == 48 || prim == 52) {
+		if (!emit_set_pc(e, pc))
+			return 0;
+		if (!emit_imm32(e, W1, (uint32_t)rd))
+			return 0;
+		if (!emit_ra_or_0(e, W8, ra))
+			return 0;
+		if (!emit_imm32(e, W9, (uint32_t)simm))
+			return 0;
+		if (!emit_w(e, a64_add_reg(W2, W8, W9)))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)(prim == 48 ? nw_jit_helper_lfs : nw_jit_helper_stfs)))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		return emit_fault_check(e);
+	}
+	if (prim == 31 && (xo == 535 || xo == 663)) {
+		if (!emit_set_pc(e, pc))
+			return 0;
+		if (!emit_imm32(e, W1, (uint32_t)rd))
+			return 0;
+		if (!emit_ra_or_0(e, W8, ra))
+			return 0;
+		if (!emit_load_gpr(e, W9, rb))
+			return 0;
+		if (!emit_w(e, a64_add_reg(W2, W8, W9)))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)(xo == 535 ? nw_jit_helper_lfs : nw_jit_helper_stfs)))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		return emit_fault_check(e);
+	}
+	if (prim == 59 && !(op & 1u)) {
+		const int axo = (int)((op >> 1) & 0x1f);
+		const int fc = (int)((op >> 6) & 0x1f);
+		if (!emit_imm32(e, W1, (uint32_t)rd))
+			return 0;
+		if (!emit_imm32(e, W2, (uint32_t)ra))
+			return 0;
+		if (axo == 25) {
+			if (!emit_imm32(e, W3, (uint32_t)fc))
+				return 0;
+		} else if (axo == 29) {
+			if (!emit_imm32(e, W3, (uint32_t)fc))
+				return 0;
+			if (!emit_imm32(e, W4, (uint32_t)rb))
+				return 0;
+		} else if (axo == 20 || axo == 21) {
+			if (!emit_imm32(e, W3, (uint32_t)rb))
+				return 0;
+		} else
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		{
+			void *fn = NULL;
+			if (axo == 21)
+				fn = (void *)nw_jit_helper_fsubs;
+			else if (axo == 20)
+				fn = (void *)nw_jit_helper_fdivs;
+			else if (axo == 25)
+				fn = (void *)nw_jit_helper_fmuls;
+			else
+				fn = (void *)nw_jit_helper_fmadds;
+			if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)fn))
+				return 0;
+		}
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		return 1;
+	}
+	if (prim == 63 && xo == 40 && !(op & 1u)) {
+		if (!emit_imm32(e, W1, (uint32_t)rd))
+			return 0;
+		if (!emit_imm32(e, W2, (uint32_t)rb))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_fneg))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		return 1;
+	}
+	if (prim == 63 && xo == 15 && !(op & 1u)) {
+		if (!emit_imm32(e, W1, (uint32_t)rd))
+			return 0;
+		if (!emit_imm32(e, W2, (uint32_t)rb))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_fctiwz))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		return 1;
+	}
+	if (prim == 63 && !(op & 1u)) {
+		const int axo = (int)((op >> 1) & 0x1f);
+		const int fc = (int)((op >> 6) & 0x1f);
+		if (!emit_imm32(e, W1, (uint32_t)rd))
+			return 0;
+		if (!emit_imm32(e, W2, (uint32_t)ra))
+			return 0;
+		if (axo == 25) {
+			if (!emit_imm32(e, W3, (uint32_t)fc))
+				return 0;
+		} else if (axo == 18 || axo == 20 || axo == 21) {
+			if (!emit_imm32(e, W3, (uint32_t)rb))
+				return 0;
+		} else
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		{
+			void *fn = NULL;
+			if (axo == 20)
+				fn = (void *)nw_jit_helper_fsub;
+			else if (axo == 21)
+				fn = (void *)nw_jit_helper_fadd;
+			else if (axo == 18)
+				fn = (void *)nw_jit_helper_fdiv;
+			else
+				fn = (void *)nw_jit_helper_fmul;
+			if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)fn))
+				return 0;
+		}
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		return 1;
+	}
+	if (prim == 31 && (xo == 6 || xo == 38)) {
+		if (!emit_ra_or_0(e, W8, ra))
+			return 0;
+		if (!emit_load_gpr(e, W9, rb))
+			return 0;
+		if (!emit_w(e, a64_add_reg(W2, W8, W9)))
+			return 0;
+		if (!emit_imm32(e, W1, (uint32_t)rd))
+			return 0;
+		if (!emit_imm32(e, W3, xo == 6 ? 1u : 0u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_lvsl))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		return 1;
+	}
+	if (prim == 4) {
+		const int vxo = (int)(op & 0x7ff);
+		const int vaxo = (int)(op & 0x3f);
+		const int vc = (int)((op >> 6) & 0x1f);
+		if (!emit_imm32(e, W1, (uint32_t)rd))
+			return 0;
+		if (!emit_imm32(e, W2, (uint32_t)ra))
+			return 0;
+		if (!emit_imm32(e, W3, (uint32_t)rb))
+			return 0;
+		if (vaxo == 42 || vaxo == 43) {
+			if (!emit_imm32(e, W4, (uint32_t)vc))
+				return 0;
+		} else if (vxo != 1156)
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		{
+			void *fn = (void *)nw_jit_helper_vor;
+			if (vaxo == 42)
+				fn = (void *)nw_jit_helper_vsel;
+			else if (vaxo == 43)
+				fn = (void *)nw_jit_helper_vperm;
+			if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)fn))
+				return 0;
+		}
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		return 1;
 	}
 	if (prim == 31 && xo == 103) {
 		if (!emit_set_pc(e, pc))

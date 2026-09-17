@@ -41,12 +41,34 @@ struct nw_bank {
 static struct nw_bank g_banks[NW_BANKS_MAX];
 static int g_nbanks;
 
+static uint32_t g_fb_base;
+static uint32_t g_fb_rowbytes;
+static uint32_t g_fb_w;
+static uint32_t g_fb_h;
+static uint32_t g_fb_bpp;
+static uint32_t g_fb_tiles[(NW_FB_TILES_X * NW_FB_TILES_Y + 31) / 32];
+static uint64_t g_fb_marks;
+static uint64_t g_fb_upload;
+
+static void fb_damage_reset(void)
+{
+	g_fb_base = 0;
+	g_fb_rowbytes = 0;
+	g_fb_w = 0;
+	g_fb_h = 0;
+	g_fb_bpp = 0;
+	memset(g_fb_tiles, 0, sizeof(g_fb_tiles));
+	g_fb_marks = 0;
+	g_fb_upload = 0;
+}
+
 void nw_io_reset(void)
 {
 	g_ndevs = 0;
 	g_log_count = 0;
 	g_npages = 0;
 	g_nbanks = 0;
+	fb_damage_reset();
 }
 
 void nw_banks_set(int kind, uint32_t base, uint32_t size)
@@ -228,4 +250,159 @@ void nw_io_write(uint32_t pa, int size, uint32_t value, uint32_t pc)
 		return;
 	}
 	log_unclaimed('W', pa, size, value, pc);
+}
+
+static void fb_set_tile(unsigned tx, unsigned ty)
+{
+	if (tx >= NW_FB_TILES_X || ty >= NW_FB_TILES_Y)
+		return;
+	const unsigned i = ty * NW_FB_TILES_X + tx;
+	g_fb_tiles[i >> 5] |= 1u << (i & 31u);
+}
+
+void nw_fb_damage_layout(uint32_t base, uint32_t rowbytes, uint32_t width,
+			 uint32_t height, uint32_t bpp)
+{
+	const int had = g_fb_w != 0;
+	g_fb_base = base;
+	g_fb_rowbytes = rowbytes;
+	g_fb_w = width;
+	g_fb_h = height;
+	g_fb_bpp = bpp ? bpp : 4;
+	memset(g_fb_tiles, 0, sizeof(g_fb_tiles));
+	/* Mode change: the new buffer must be uploaded. First layout
+	 * leaves tiles clear so we do not present a black frame. */
+	if (had && width && height)
+		nw_fb_damage_rect(0, 0, (int)width, (int)height);
+}
+
+void nw_fb_damage_rect(int x, int y, int w, int h)
+{
+	if (!g_fb_w || !g_fb_h || w <= 0 || h <= 0)
+		return;
+	int x1 = x + w - 1;
+	int y1 = y + h - 1;
+	if (x < 0)
+		x = 0;
+	if (y < 0)
+		y = 0;
+	if (x1 >= (int)g_fb_w)
+		x1 = (int)g_fb_w - 1;
+	if (y1 >= (int)g_fb_h)
+		y1 = (int)g_fb_h - 1;
+	if (x1 < x || y1 < y)
+		return;
+	const int tx0 = x / NW_FB_TILE;
+	const int ty0 = y / NW_FB_TILE;
+	const int tx1 = x1 / NW_FB_TILE;
+	const int ty1 = y1 / NW_FB_TILE;
+	for (int ty = ty0; ty <= ty1; ty++)
+		for (int tx = tx0; tx <= tx1; tx++)
+			fb_set_tile((unsigned)tx, (unsigned)ty);
+	g_fb_marks++;
+}
+
+void nw_fb_damage_pixmap(uint32_t dest_base, int x, int y, int w, int h)
+{
+	if (!g_fb_rowbytes || !g_fb_bpp || !g_fb_w || w <= 0 || h <= 0)
+		return;
+	const uint32_t fb_bytes = g_fb_rowbytes * g_fb_h;
+	if (dest_base < g_fb_base || dest_base - g_fb_base >= fb_bytes)
+		return;
+	const uint32_t off = dest_base - g_fb_base;
+	const int ox = (int)((off % g_fb_rowbytes) / g_fb_bpp);
+	const int oy = (int)(off / g_fb_rowbytes);
+	nw_fb_damage_rect(ox + x, oy + y, w, h);
+}
+
+void nw_fb_damage_store(uint32_t pa, unsigned nbytes)
+{
+	if (!g_fb_rowbytes || !g_fb_bpp || !g_fb_w)
+		return;
+	if (pa < g_fb_base)
+		return;
+	const uint32_t off = pa - g_fb_base;
+	const uint32_t fb_bytes = g_fb_rowbytes * g_fb_h;
+	if (off >= fb_bytes)
+		return;
+	uint32_t last = off;
+	if (nbytes)
+		last = off + nbytes - 1;
+	if (last >= fb_bytes)
+		last = fb_bytes - 1;
+	const int y0 = (int)(off / g_fb_rowbytes);
+	const int x0 = (int)((off % g_fb_rowbytes) / g_fb_bpp);
+	const int y1 = (int)(last / g_fb_rowbytes);
+	const int x1 = (int)((last % g_fb_rowbytes) / g_fb_bpp);
+	nw_fb_damage_rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+}
+
+int nw_fb_damage_any(void)
+{
+	for (unsigned i = 0; i < sizeof(g_fb_tiles) / sizeof(g_fb_tiles[0]); i++) {
+		if (g_fb_tiles[i])
+			return 1;
+	}
+	return 0;
+}
+
+static int fb_collect_from(const uint32_t *bits, int *x, int *y, int *w, int *h, int max)
+{
+	if (!x || !y || !w || !h || max <= 0 || !g_fb_w || !bits)
+		return 0;
+	int n = 0;
+	const unsigned ntx = (g_fb_w + NW_FB_TILE - 1) / NW_FB_TILE;
+	const unsigned nty = (g_fb_h + NW_FB_TILE - 1) / NW_FB_TILE;
+	for (unsigned ty = 0; ty < nty && n < max; ty++) {
+		for (unsigned tx = 0; tx < ntx && n < max; tx++) {
+			const unsigned i = ty * NW_FB_TILES_X + tx;
+			if (!(bits[i >> 5] & (1u << (i & 31u))))
+				continue;
+			int tw = (int)NW_FB_TILE;
+			int th = (int)NW_FB_TILE;
+			if ((unsigned)(tx * NW_FB_TILE + tw) > g_fb_w)
+				tw = (int)g_fb_w - (int)(tx * NW_FB_TILE);
+			if ((unsigned)(ty * NW_FB_TILE + th) > g_fb_h)
+				th = (int)g_fb_h - (int)(ty * NW_FB_TILE);
+			x[n] = (int)(tx * NW_FB_TILE);
+			y[n] = (int)(ty * NW_FB_TILE);
+			w[n] = tw;
+			h[n] = th;
+			n++;
+		}
+	}
+	return n;
+}
+
+int nw_fb_damage_collect(int *x, int *y, int *w, int *h, int max)
+{
+	return fb_collect_from(g_fb_tiles, x, y, w, h, max);
+}
+
+int nw_fb_damage_take(int *x, int *y, int *w, int *h, int max)
+{
+	uint32_t snap[sizeof(g_fb_tiles) / sizeof(g_fb_tiles[0])];
+	memcpy(snap, g_fb_tiles, sizeof(snap));
+	memset(g_fb_tiles, 0, sizeof(g_fb_tiles));
+	return fb_collect_from(snap, x, y, w, h, max);
+}
+
+void nw_fb_damage_clear(void)
+{
+	memset(g_fb_tiles, 0, sizeof(g_fb_tiles));
+}
+
+void nw_fb_damage_note_upload(uint64_t bytes)
+{
+	g_fb_upload += bytes;
+}
+
+uint64_t nw_fb_damage_upload_bytes(void)
+{
+	return g_fb_upload;
+}
+
+uint64_t nw_fb_damage_marks(void)
+{
+	return g_fb_marks;
 }

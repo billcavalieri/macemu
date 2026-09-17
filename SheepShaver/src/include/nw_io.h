@@ -37,7 +37,7 @@
  * WP4: nw_pa_kind() is the one physical decode. RAM/ROM/SheepMem/FB/KDP
  * hits are pointer math (vm_*); I/O hits the trap table below; everything
  * else is the unclaimed default. ROM is not writable (a store is dropped).
- * NW_PA_FB is the bank WP5 will mark for damage tracking.
+ * NW_PA_FB is the bank WP5 marks for 64-pixel damage tiles.
  */
 enum {
 	NW_PA_NONE = 0,
@@ -115,5 +115,21 @@ void nw_io_reset(void);
  * occurrences are logged (NW-BOOT IO lines) so the next gate is named. */
 uint32_t nw_io_read(uint32_t pa, int size, uint32_t pc);
 void nw_io_write(uint32_t pa, int size, uint32_t value, uint32_t pc);
+
+/* WP5: 64-pixel tiles covering the New World frame buffer. Stores that
+ * land in the layout mark tiles; present consumes them. */
+enum { NW_FB_TILE = 64, NW_FB_TILES_X = 32, NW_FB_TILES_Y = 32 };
+void nw_fb_damage_layout(uint32_t base, uint32_t rowbytes, uint32_t width,
+			 uint32_t height, uint32_t bpp);
+void nw_fb_damage_store(uint32_t pa, unsigned nbytes);
+void nw_fb_damage_rect(int x, int y, int w, int h);
+void nw_fb_damage_pixmap(uint32_t dest_base, int x, int y, int w, int h);
+int nw_fb_damage_any(void);
+int nw_fb_damage_collect(int *x, int *y, int *w, int *h, int max);
+int nw_fb_damage_take(int *x, int *y, int *w, int *h, int max);
+void nw_fb_damage_clear(void);
+void nw_fb_damage_note_upload(uint64_t bytes);
+uint64_t nw_fb_damage_upload_bytes(void);
+uint64_t nw_fb_damage_marks(void);
 
 #endif

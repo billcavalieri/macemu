@@ -344,6 +344,15 @@ uint32_t nw_ppc_mfspr(int rd, int spr);
 uint32_t nw_ppc_mtspr(int spr, int rs);
 uint32_t nw_ppc_lfd(int frd, int ra, int d);
 uint32_t nw_ppc_stfd(int frs, int ra, int d);
+uint32_t nw_ppc_lfs(int frd, int ra, int d);
+uint32_t nw_ppc_stfs(int frs, int ra, int d);
+uint32_t nw_ppc_lfsx(int frd, int ra, int rb);
+uint32_t nw_ppc_stfsx(int frs, int ra, int rb);
+uint32_t nw_ppc_fsubs(int frd, int fra, int frb);
+uint32_t nw_ppc_fdivs(int frd, int fra, int frb);
+uint32_t nw_ppc_fmuls(int frd, int fra, int frc);
+uint32_t nw_ppc_fmadds(int frd, int fra, int frc, int frb);
+uint32_t nw_ppc_fneg(int frd, int frb);
 uint32_t nw_ppc_mullw(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_mulhwu(int rd, int ra, int rb, int rc);
 

@@ -78,6 +78,7 @@
 #include "rom_patches.h"
 #include "nw_script.h"
 #include "nw_boot_contract.h"
+#include "nw_io.h"
 #endif
 
 #define DEBUG 0
@@ -159,6 +160,10 @@ static SDL_Renderer * sdl_renderer = NULL;			// Handle to SDL2 renderer
 static SDL_threadID sdl_renderer_thread_id = 0;		// Thread ID where the SDL_renderer was created, and SDL_renderer ops should run (for compatibility w/ d3d9)
 static SDL_Texture * sdl_texture = NULL;			// Handle to a GPU texture, with which to draw guest_surface to
 static SDL_Rect sdl_update_video_rect = {0,0,0,0};  // Union of all rects to update, when updating sdl_texture
+#ifdef SHEEPSHAVER
+static SDL_Rect nw_present_rects[NW_FB_TILES_X * NW_FB_TILES_Y];
+static int nw_present_n;
+#endif
 static SDL_mutex * sdl_update_video_mutex = NULL;   // Mutex to protect sdl_update_video_rect
 static int screen_depth;							// Depth of current screen
 #ifdef SHEEPSHAVER
@@ -260,6 +265,7 @@ static void (*video_refresh)(void);
 static int redraw_func(void *arg);
 static int present_sdl_video();
 static void handle_events(void);
+static void handle_palette_changes(void);
 static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event);
 static bool is_fullscreen(SDL_Window *);
 
@@ -612,6 +618,16 @@ static void set_mac_frame_buffer(SDL_monitor_desc &monitor, int depth, bool nati
 	InitFrameBufferMapping();
 #else
 	monitor.set_mac_frame_base(Host2MacAddr(the_buffer));
+#endif
+#ifdef SHEEPSHAVER
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		const VIDEO_MODE &mode = monitor.get_current_mode();
+		uint32 bpp = VIDEO_MODE_X ? VIDEO_MODE_ROW_BYTES / VIDEO_MODE_X : 4;
+		if (!bpp)
+			bpp = 4;
+		nw_fb_damage_layout(monitor.get_mac_frame_base(), VIDEO_MODE_ROW_BYTES,
+				    VIDEO_MODE_X, VIDEO_MODE_Y, bpp);
+	}
 #endif
 	D(bug("monitor.mac_frame_base = %08x\n", monitor.get_mac_frame_base()));
 }
@@ -996,6 +1012,47 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
 
 static int present_sdl_video()
 {
+#ifdef SHEEPSHAVER
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		if (!sdl_renderer || !sdl_texture || !guest_surface)
+			return -1;
+		SDL_assert(SDL_ThreadID() == sdl_renderer_thread_id);
+		SDL_LockMutex(sdl_update_video_mutex);
+		const int n = nw_present_n;
+		SDL_Rect local[NW_FB_TILES_X * NW_FB_TILES_Y];
+		if (n > 0)
+			memcpy(local, nw_present_rects, (size_t)n * sizeof(SDL_Rect));
+		nw_present_n = 0;
+		SDL_UnlockMutex(sdl_update_video_mutex);
+		if (n <= 0)
+			return 0;
+		SDL_SetRenderDrawColor(sdl_renderer, 0, 0, 0, 0);
+		SDL_RenderClear(sdl_renderer);
+		for (int i = 0; i < n; i++) {
+			SDL_Rect r = local[i];
+			if (r.w <= 0 || r.h <= 0)
+				continue;
+			uint8_t *srcPixels = (uint8_t *)host_surface->pixels +
+				r.y * host_surface->pitch +
+				r.x * host_surface->format->BytesPerPixel;
+			uint8_t *dstPixels;
+			int dstPitch;
+			if (SDL_LockTexture(sdl_texture, &r, (void **)&dstPixels, &dstPitch) < 0)
+				continue;
+			const int rowbytes = r.w * (int)host_surface->format->BytesPerPixel;
+			for (int y = 0; y < r.h; y++) {
+				memcpy(dstPixels, srcPixels, (size_t)rowbytes);
+				srcPixels += host_surface->pitch;
+				dstPixels += dstPitch;
+			}
+			SDL_UnlockTexture(sdl_texture);
+		}
+		if (SDL_RenderCopy(sdl_renderer, sdl_texture, NULL, NULL) != 0)
+			return -1;
+		SDL_RenderPresent(sdl_renderer);
+		return 0;
+	}
+#endif
 	if (SDL_RectEmpty(&sdl_update_video_rect)) return 0;
 	
 	if (!sdl_renderer || !sdl_texture || !guest_surface) {
@@ -1081,6 +1138,16 @@ void update_sdl_video(SDL_Surface *s, int numrects, SDL_Rect *rects)
     // MacsBug is running (and VideoInterrupt() might not get called)
     
     SDL_LockMutex(sdl_update_video_mutex);
+#ifdef SHEEPSHAVER
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		for (int i = 0; i < numrects; ++i) {
+			if (nw_present_n < NW_FB_TILES_X * NW_FB_TILES_Y)
+				nw_present_rects[nw_present_n++] = rects[i];
+		}
+		SDL_UnlockMutex(sdl_update_video_mutex);
+		return;
+	}
+#endif
     for (int i = 0; i < numrects; ++i) {
         SDL_UnionRect(&sdl_update_video_rect, &rects[i], &sdl_update_video_rect);
     }
@@ -1937,9 +2004,28 @@ void VideoHostPresent(void)
 	 * Debug hid that (tty-blocked CPU + dirty presents during boot log). */
 	SDL_PumpEvents();
 	handle_events();
+#ifdef SHEEPSHAVER
+	/* Redraw thread does not refresh New World (events are CPU-thread
+	 * only). Scan/copy dirty tiles here, then present. */
+	if (ROMType == ROMTYPE_NEWWORLD && video_refresh)
+		video_refresh();
+	if (ROMType == ROMTYPE_NEWWORLD)
+		handle_palette_changes();
+#endif
 	present_sdl_video();
 #if NW_BOOT_LOG
 	nw_event_frame();
+	{
+		static unsigned g_vp;
+		if (++g_vp >= 60) {
+			g_vp = 0;
+			printf("NW-BOOT G1: video upload %llu bytes marks %llu dirty %d\n",
+			       (unsigned long long)nw_fb_damage_upload_bytes(),
+			       (unsigned long long)nw_fb_damage_marks(),
+			       nw_fb_damage_any());
+			fflush(stdout);
+		}
+	}
 #endif
 }
 
@@ -2872,6 +2958,50 @@ static void update_display_static_bbox(driver_base *drv)
 	const VIDEO_MODE &mode = drv->mode;
 	bool blit = (int)VIDEO_MODE_DEPTH == VIDEO_DEPTH_16BIT;
 
+#ifdef SHEEPSHAVER
+	if (ROMType == ROMTYPE_NEWWORLD && nw_fb_damage_any()) {
+		const uint32 bytes_per_row = VIDEO_MODE_ROW_BYTES;
+		const uint32 bytes_per_pixel = bytes_per_row / VIDEO_MODE_X;
+		const uint32 dst_bytes_per_row = drv->s->pitch;
+		int xs[NW_FB_TILES_X * NW_FB_TILES_Y];
+		int ys[NW_FB_TILES_X * NW_FB_TILES_Y];
+		int ws[NW_FB_TILES_X * NW_FB_TILES_Y];
+		int hs[NW_FB_TILES_X * NW_FB_TILES_Y];
+		const int n = nw_fb_damage_take(xs, ys, ws, hs,
+						NW_FB_TILES_X * NW_FB_TILES_Y);
+		if (n > 0) {
+			SDL_Rect *boxes = (SDL_Rect *)alloca(sizeof(SDL_Rect) * n);
+			uint32 nr_boxes = 0;
+			if (SDL_MUSTLOCK(drv->s))
+				SDL_LockSurface(drv->s);
+			for (int i = 0; i < n; i++) {
+				const int x = xs[i], y = ys[i], w = ws[i], h = hs[i];
+				const int span = w * (int)bytes_per_pixel;
+				for (int j = y; j < y + h; j++) {
+					const uint32 yb = (uint32)j * bytes_per_row;
+					const uint32 dst_yb = (uint32)j * dst_bytes_per_row;
+					const uint32 xb = (uint32)x * bytes_per_pixel;
+					memcpy(&the_buffer_copy[yb + xb], &the_buffer[yb + xb], (size_t)span);
+					if (blit)
+						Screen_blit((uint8 *)drv->s->pixels + dst_yb + xb,
+							    the_buffer + yb + xb, span);
+				}
+				boxes[nr_boxes].x = x;
+				boxes[nr_boxes].y = y;
+				boxes[nr_boxes].w = w;
+				boxes[nr_boxes].h = h;
+				nr_boxes++;
+				nw_fb_damage_note_upload((uint64_t)span * (uint64_t)h);
+			}
+			if (SDL_MUSTLOCK(drv->s))
+				SDL_UnlockSurface(drv->s);
+			if (nr_boxes)
+				update_sdl_video(drv->s, nr_boxes, boxes);
+			return;
+		}
+	}
+#endif
+
 	// Allocate bounding boxes for SDL_UpdateRects()
 	const uint32 N_PIXELS = 64;
 	const uint32 n_x_boxes = (VIDEO_MODE_X + N_PIXELS - 1) / N_PIXELS;
@@ -3059,10 +3189,10 @@ static void VideoRefreshInit(void)
 
 static inline void do_video_refresh(void)
 {
-	/* New World drains the queue in VideoHostPresent (CPU / SetVideoMode
-	 * thread). Do not PeepEvents on the redraw thread as well. */
+	/* New World drains the queue and refreshes in VideoHostPresent. */
 #ifdef SHEEPSHAVER
-	if (ROMType != ROMTYPE_NEWWORLD)
+	if (ROMType == ROMTYPE_NEWWORLD)
+		return;
 #endif
 	handle_events();
 
@@ -3144,8 +3274,8 @@ void video_set_dirty_area(int x, int y, int w, int h)
 		return;
 	}
 #endif
-
-	// XXX handle dirty bounding boxes for non-VOSF modes
+	if (ROMType == ROMTYPE_NEWWORLD)
+		nw_fb_damage_rect(x, y, w, h);
 }
 #endif
 
