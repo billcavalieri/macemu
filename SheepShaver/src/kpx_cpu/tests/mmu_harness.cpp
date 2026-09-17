@@ -1605,6 +1605,17 @@ int main()
 			CHECK(x[0] == 0 && y[0] == 0);
 			CHECK(x[1] == 64 && y[1] == 0);
 		}
+		/* Cross-row: last pixel of row 63 onto first pixel of row 64.
+		 * Same-row stores miss this (x1 < x0, w <= 0, mark nothing). */
+		nw_fb_damage_clear();
+		CHECK(nw_fb_damage_any() == 0);
+		nw_fb_damage_store(0x50590000u + 63u * 2560u + 639u * 4u, 8);
+		{
+			int x[4], y[4], w[4], h[4];
+			CHECK(nw_fb_damage_collect(x, y, w, h, 4) == 2);
+			CHECK(x[0] == 576 && y[0] == 0);
+			CHECK(x[1] == 0 && y[1] == 64);
+		}
 		nw_fb_damage_rect(200, 100, 10, 10);
 		{
 			int x[8], y[8], w[8], h[8];

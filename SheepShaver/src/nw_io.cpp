@@ -334,7 +334,19 @@ void nw_fb_damage_store(uint32_t pa, unsigned nbytes)
 	const int x0 = (int)((off % g_fb_rowbytes) / g_fb_bpp);
 	const int y1 = (int)(last / g_fb_rowbytes);
 	const int x1 = (int)((last % g_fb_rowbytes) / g_fb_bpp);
-	nw_fb_damage_rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+	const int w = x1 - x0 + 1;
+	/* Same-row: one rect. Cross-row stores have x1 < x0 so w <= 0
+	 * and a single rect marks nothing; cover each row's span. */
+	if (w > 0 && y1 == y0) {
+		nw_fb_damage_rect(x0, y0, w, 1);
+		return;
+	}
+	if (y1 > y0) {
+		nw_fb_damage_rect(x0, y0, (int)g_fb_w - x0, 1);
+		for (int y = y0 + 1; y < y1; y++)
+			nw_fb_damage_rect(0, y, (int)g_fb_w, 1);
+		nw_fb_damage_rect(0, y1, x1 + 1, 1);
+	}
 }
 
 int nw_fb_damage_any(void)
