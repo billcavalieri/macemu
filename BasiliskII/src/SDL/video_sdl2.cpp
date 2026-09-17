@@ -163,6 +163,8 @@ static SDL_Rect sdl_update_video_rect = {0,0,0,0};  // Union of all rects to upd
 #ifdef SHEEPSHAVER
 static SDL_Rect nw_present_rects[NW_FB_TILES_X * NW_FB_TILES_Y];
 static int nw_present_n;
+static bool nw_present_need_clear = true;	// letterbox / first drawable
+static bool nw_renderer_software = false;
 #endif
 static SDL_mutex * sdl_update_video_mutex = NULL;   // Mutex to protect sdl_update_video_rect
 static int screen_depth;							// Depth of current screen
@@ -765,6 +767,9 @@ static void delete_sdl_video_surfaces()
 	if (sdl_texture) {
 		SDL_DestroyTexture(sdl_texture);
 		sdl_texture = NULL;
+#ifdef SHEEPSHAVER
+		nw_present_need_clear = true;
+#endif
 	}
 	
 	if (host_surface) {
@@ -787,6 +792,10 @@ static void delete_sdl_video_window()
 	if (sdl_renderer) {
 		SDL_DestroyRenderer(sdl_renderer);
 		sdl_renderer = NULL;
+#ifdef SHEEPSHAVER
+		nw_renderer_software = false;
+		nw_present_need_clear = true;
+#endif
 	}
 	
 	if (sdl_window) {
@@ -918,6 +927,10 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
 		memset(&info, 0, sizeof(info));
 		SDL_GetRendererInfo(sdl_renderer, &info);
 		printf("Using SDL_Renderer driver: %s\n", (info.name ? info.name : "(null)"));
+#ifdef SHEEPSHAVER
+		nw_renderer_software = (info.flags & SDL_RENDERER_SOFTWARE) != 0;
+		nw_present_need_clear = true;
+#endif
 	}
     
     if (!sdl_update_video_mutex) {
@@ -1026,8 +1039,8 @@ static int present_sdl_video()
 		SDL_UnlockMutex(sdl_update_video_mutex);
 		if (n <= 0)
 			return 0;
-		SDL_SetRenderDrawColor(sdl_renderer, 0, 0, 0, 0);
-		SDL_RenderClear(sdl_renderer);
+		SDL_Rect uni = {0, 0, 0, 0};
+		bool have_uni = false;
 		for (int i = 0; i < n; i++) {
 			SDL_Rect r = local[i];
 			if (r.w <= 0 || r.h <= 0)
@@ -1046,9 +1059,41 @@ static int present_sdl_video()
 				dstPixels += dstPitch;
 			}
 			SDL_UnlockTexture(sdl_texture);
+			if (!have_uni) {
+				uni = r;
+				have_uni = true;
+			} else {
+				SDL_UnionRect(&uni, &r, &uni);
+			}
 		}
-		if (SDL_RenderCopy(sdl_renderer, sdl_texture, NULL, NULL) != 0)
-			return -1;
+		if (!have_uni)
+			return 0;
+		/*
+		 * The streaming texture is retained; only dirty rects were
+		 * uploaded. SDL_RenderClear paints the window backbuffer black,
+		 * so a dest-rect copy of only the dirty union would flash
+		 * undamaged pixels unless the backbuffer is retained.
+		 *
+		 * SDL_RenderPresent leaves the window backbuffer undefined on
+		 * Metal and OpenGL (new drawable, letterbox included). Those
+		 * backends still Clear and copy the retained texture in full.
+		 * Software retains the backbuffer, so skip the clear and copy
+		 * only the dirty union when damage is partial.
+		 */
+		const int tex_w = guest_surface->w;
+		const int tex_h = guest_surface->h;
+		const bool partial = tex_w > 0 && tex_h > 0 &&
+			(uni.x > 0 || uni.y > 0 || uni.w < tex_w || uni.h < tex_h);
+		if (nw_renderer_software && !nw_present_need_clear && partial) {
+			if (SDL_RenderCopy(sdl_renderer, sdl_texture, &uni, &uni) != 0)
+				return -1;
+		} else {
+			SDL_SetRenderDrawColor(sdl_renderer, 0, 0, 0, 0);
+			SDL_RenderClear(sdl_renderer);
+			if (SDL_RenderCopy(sdl_renderer, sdl_texture, NULL, NULL) != 0)
+				return -1;
+			nw_present_need_clear = false;
+		}
 		SDL_RenderPresent(sdl_renderer);
 		return 0;
 	}
@@ -2525,6 +2570,9 @@ static void force_complete_window_refresh()
 		const int len = VIDEO_MODE_ROW_BYTES * VIDEO_MODE_Y;
 		for (int i = 0; i < len; i++)
 			the_buffer_copy[i] = !the_buffer[i];
+#ifdef SHEEPSHAVER
+		nw_present_need_clear = true;
+#endif
 	}
 }
 
@@ -2603,6 +2651,9 @@ static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event)
 					break;
 #endif
 				case SDL_WINDOWEVENT_RESIZED: {
+#ifdef SHEEPSHAVER
+					nw_present_need_clear = true;
+#endif
 					if (!redraw_thread_active) break;
 					// Handle changes of fullscreen.  This is done here, in
 					// on_sdl_event_generated() and not the main SDL_Event-processing
@@ -2972,19 +3023,30 @@ static void update_display_static_bbox(driver_base *drv)
 		if (n > 0) {
 			SDL_Rect *boxes = (SDL_Rect *)alloca(sizeof(SDL_Rect) * n);
 			uint32 nr_boxes = 0;
-			if (SDL_MUSTLOCK(drv->s))
+			/* 32-bit NW: host_surface is CreateRGBSurfaceFrom(the_buffer),
+			 * so the guest FB is already what present uploads. Copying
+			 * dirty spans into the_buffer_copy is a bounce, not a present
+			 * source. Skip it. the_buffer_copy stays the memcmp shadow;
+			 * unmarked chrome is still caught by the fallthrough below.
+			 * Depths where host_surface does not wrap the_buffer still
+			 * copy, and 16-bit still Screen_blits. */
+			const bool fb_is_host = host_surface && the_buffer &&
+				(uint8 *)host_surface->pixels == the_buffer;
+			if (!fb_is_host && SDL_MUSTLOCK(drv->s))
 				SDL_LockSurface(drv->s);
 			for (int i = 0; i < n; i++) {
 				const int x = xs[i], y = ys[i], w = ws[i], h = hs[i];
 				const int span = w * (int)bytes_per_pixel;
-				for (int j = y; j < y + h; j++) {
-					const uint32 yb = (uint32)j * bytes_per_row;
-					const uint32 dst_yb = (uint32)j * dst_bytes_per_row;
-					const uint32 xb = (uint32)x * bytes_per_pixel;
-					memcpy(&the_buffer_copy[yb + xb], &the_buffer[yb + xb], (size_t)span);
-					if (blit)
-						Screen_blit((uint8 *)drv->s->pixels + dst_yb + xb,
-							    the_buffer + yb + xb, span);
+				if (!fb_is_host) {
+					for (int j = y; j < y + h; j++) {
+						const uint32 yb = (uint32)j * bytes_per_row;
+						const uint32 dst_yb = (uint32)j * dst_bytes_per_row;
+						const uint32 xb = (uint32)x * bytes_per_pixel;
+						memcpy(&the_buffer_copy[yb + xb], &the_buffer[yb + xb], (size_t)span);
+						if (blit)
+							Screen_blit((uint8 *)drv->s->pixels + dst_yb + xb,
+								    the_buffer + yb + xb, span);
+					}
 				}
 				boxes[nr_boxes].x = x;
 				boxes[nr_boxes].y = y;
@@ -2993,7 +3055,7 @@ static void update_display_static_bbox(driver_base *drv)
 				nr_boxes++;
 				nw_fb_damage_note_upload((uint64_t)span * (uint64_t)h);
 			}
-			if (SDL_MUSTLOCK(drv->s))
+			if (!fb_is_host && SDL_MUSTLOCK(drv->s))
 				SDL_UnlockSurface(drv->s);
 			if (nr_boxes)
 				update_sdl_video(drv->s, nr_boxes, boxes);
