@@ -266,6 +266,8 @@ private:
 	int64 tb_offset_;		/* mtspr TBL/TBU: guest TB = host ticks + offset */
 #ifdef SHEEPSHAVER
 	uint32 last_fetch_pa_;
+	struct nw_jit_cpu *nw_jc_;
+	uint32 mm_ppc_pending_;
 #endif
 
 	/* MPC7400 (G4) implementation SPRs modelled as plain storage
@@ -354,6 +356,9 @@ public:
 	bool guest_data_probe(uint32 ea, unsigned width, bool is_store, uint32 *pa);
 #ifdef SHEEPSHAVER
 	int nw_jit_try(uint32 first_opcode);
+	void nw_mm_queue_ppc(uint32 proc) { mm_ppc_pending_ = proc; }
+	uint32 nw_mm_take_ppc() { uint32 p = mm_ppc_pending_; mm_ppc_pending_ = 0; return p; }
+	virtual void nw_invoke_mm_ppc(uint32 entry);
 	static uint32 jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault);
 	static void jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int *fault);
 	static uint32 jit_host_lwz_pa(void *host, uint32 pa, uint32 pc, int *fault);

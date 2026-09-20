@@ -145,14 +145,18 @@ void nw_jit_set_host_half(nw_jit_host_lh lh, nw_jit_host_sth16 sth);
 void nw_jit_set_host_byte(nw_jit_host_lb lb, nw_jit_host_stb8 stb);
 
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
-			  uint32_t msr_ir, uint32_t endian, int *n_out);
+			  uint32_t msr_ir, uint32_t endian, int *n_out,
+			  int *uses_fpr = 0, int *uses_vr = 0);
 void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
-		      uint32_t endian, nw_jit_fn fn, int n);
+		      uint32_t endian, nw_jit_fn fn, int n,
+		      uint32_t first_opcode = 0, int uses_fpr = 0, int uses_vr = 0);
 
 uint64_t nw_jit_exec_blocks(void);
 uint64_t nw_jit_exec_insns(void);
 void nw_jit_note_exec(int n);
-void nw_jit_note_exec_at(int n, uint32_t pc);
+void nw_jit_note_exec_at(int n, uint32_t pc, int uses_vr = 0);
+uint64_t nw_jit_bat_total(void);
+uint64_t nw_jit_bat_gen_bumps(void);
 
 /* C oracle: execute one opcode at cpu->pc. 0 = pc advanced, 1 = block
  * ended (b/blr), -1 = not in the 4a subset. */
@@ -220,9 +224,10 @@ struct nw_jit_dtlb_ent {
 	uint32_t ea_page;
 	uint32_t pa_page;
 	uint32_t flags;
-	uint32_t pad;
+	uint32_t sr_gen;	/* SR generation at fill; miss if VSID/Ks/Kp changed */
 	uint64_t host;		/* host pointer to the page, 0 if not inlineable */
-	uint64_t pad2;		/* 32-byte entry, index << 5 */
+	uint32_t bat_gen;	/* DBAT generation at fill; miss if any DBAT changed */
+	uint32_t pad2;
 };
 void nw_jit_dtlb_flush(void);
 void nw_jit_dtlb_flush_src(int src);
@@ -235,6 +240,22 @@ int nw_jit_dtlb_lookup(uint32_t ea, int is_store, uint32_t *pa);
 int nw_jit_dtlb_lookup_pr(uint32_t ea, int is_store, uint32_t *pa, int pr);
 uint64_t nw_jit_dtlb_hits(void);
 uint64_t nw_jit_dtlb_misses(void);
+uint64_t nw_jit_mtsr_total(void);
+uint64_t nw_jit_mtsr_vsid(void);
+void nw_jit_mtsr_note(unsigned sr, uint32_t old_val, uint32_t new_val);
+int nw_jit_cache_slots(void);
+
+/* Fetch ITLB: direct-mapped page-tag + PA. Not a second translator.
+ * guest_fetch hits here before ppc32_mmu::translate. Drop on tlbie,
+ * SR VSID/Ks/Kp, IBAT, and IR change. Size is not the JIT code cache. */
+enum { NW_JIT_ITLB_N = 256 };
+void nw_jit_itlb_flush(void);
+void nw_jit_itlb_fill(uint32_t ea, uint32_t pa);
+int nw_jit_itlb_lookup(uint32_t ea, uint32_t *pa);
+void nw_jit_itlb_drop_page(uint32_t ea);
+void nw_jit_itlb_note_msr(uint32_t old_msr, uint32_t new_msr);
+uint64_t nw_jit_itlb_hits(void);
+uint64_t nw_jit_itlb_misses(void);
 
 typedef uint32_t (*nw_jit_host_lwz_pa)(void *host, uint32_t pa, uint32_t pc, int *fault);
 typedef void (*nw_jit_host_stw_pa)(void *host, uint32_t pa, uint32_t val, uint32_t pc, int *fault);
@@ -418,6 +439,8 @@ uint32_t nw_ppc_vcmpequw(int vd, int va, int vb, int rc);
 uint32_t nw_ppc_vcmpequb(int vd, int va, int vb, int rc);
 uint32_t nw_ppc_vminsb(int vd, int va, int vb);
 uint32_t nw_ppc_vsr(int vd, int va, int vb);
+uint32_t nw_ppc_vsrw(int vd, int va, int vb);
+uint32_t nw_ppc_vspltisw(int vd, int simm);
 uint32_t nw_ppc_vsro(int vd, int va, int vb);
 uint32_t nw_ppc_vslo(int vd, int va, int vb);
 uint32_t nw_ppc_vspltisb(int vd, int simm);

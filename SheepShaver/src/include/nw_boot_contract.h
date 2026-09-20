@@ -383,6 +383,26 @@ void nw_log_translator_off(void);
  */
 void nw_event_exception(uint32_t srr0, uint32_t vector, uint32_t extra, int extra_valid);
 void nw_event_aline(uint32_t op, uint32_t pc68k, int handler);
+/* a22e BlockMoveData: host memmove on a translated identity range.
+ * Returns 1 if the copy ran, 0 if the range is outside mem. */
+int nw_blockmove_copy(uint8_t *mem, uint32_t mem_base, uint32_t mem_size,
+		      uint32_t dst, uint32_t src, uint32_t n);
+/* OS-trap register contract: D0=count, A0=src, A1=dst. On success
+ * *d0_out is 0 so the 68k handler copies 0 bytes. Negative D0 is
+ * reverse-copy: return 0 and leave D0 (68k still runs). */
+int nw_blockmove_regs(uint32_t d0, uint32_t a0, uint32_t a1,
+		      uint8_t *mem, uint32_t mem_base, uint32_t mem_size,
+		      uint32_t *d0_out);
+/* aafe MixedModeMagic: enter/leave counters, not a PPC mill. */
+void nw_mixedmode_enter(void);
+void nw_mixedmode_leave(void);
+uint64_t nw_mixedmode_enters(void);
+uint64_t nw_mixedmode_leaves(void);
+uint64_t nw_mixedmode_ppc_rds(void);
+/* Parse a Mixed Mode Routine Descriptor. 1 if goMixedModeTrap=AAFE,
+ * version 7, PowerPC ISA; writes procDescriptor to *proc_out. */
+int nw_mixedmode_rd_ppc(const uint8_t *rd, uint32_t rd_len, uint32_t *proc_out);
+void nw_mixedmode_note_ppc_rd(uint32_t pc68k, uint32_t proc);
 /* A-trap histogram: window 0 = first 60s (boot), 1 = later (folder-open / QT). */
 void nw_atrap_hist_reset(void);
 void nw_atrap_hist_set_elapsed(int seconds);
@@ -392,7 +412,9 @@ void nw_atrap_hist_dump(const char *why);
  * once per second. pc/msr are extra fields (the golden importer ignores
  * them) so a silent spin still names where the CPU is. nI is interpreter
  * ops, nF is VideoHostPresent calls (Debug / NW_BOOT_LOG only). */
-void nw_event_tick(uint32_t pc, uint32_t msr);
+void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, uint32_t tm_ticks);
+/* 1 if now_us is ≥ period_us after *last_us (or last is 0). Updates *last_us. */
+int nw_clock_sample_due(uint64_t now_us, uint64_t *last_us, uint64_t period_us);
 #if NW_BOOT_LOG
 void nw_event_insn(void);
 void nw_event_frame(void);

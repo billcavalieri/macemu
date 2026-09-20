@@ -2196,7 +2196,8 @@ int main()
 			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0);
 			nw_jit_dtlb_drop_bat(0x2u, NW_JIT_DTLB_FL_BAT); /* Vs, BL=0 */
 			CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa) == 0);
-			CHECK(nw_jit_dtlb_lookup(0x10000000u, 0, &pa) == 1);
+			CHECK(nw_jit_dtlb_lookup(0x10000000u, 0, &pa) == 0); /* gen miss */
+			CHECK(nw_jit_bat_gen_bumps() >= 1);
 
 			/* drop_page hits one slot */
 			nw_jit_dtlb_fill(0x10000000u, 0x3000u, 1, 0);
@@ -2232,6 +2233,55 @@ int main()
 			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0, 1);
 			CHECK(nw_jit_dtlb_lookup_pr(0x1000u, 0, &pa, 1) == 1);
 			CHECK(nw_jit_dtlb_lookup_pr(0x1000u, 0, &pa, 0) == 0);
+
+			/* ITLB: hit, miss, tlbie drop, SR VSID miss */
+			{
+				uint32_t ipa = 0;
+				nw_jit_itlb_flush();
+				CHECK(nw_jit_itlb_lookup(0x1004u, &ipa) == 0);
+				nw_jit_itlb_fill(0x1000u, 0x2000u);
+				CHECK(nw_jit_itlb_lookup(0x1004u, &ipa) == 1);
+				CHECK(ipa == 0x2004u);
+				CHECK(nw_jit_itlb_lookup(0x1004u, &ipa) == 1); /* sticky */
+				nw_jit_itlb_drop_page(0x1000u);
+				CHECK(nw_jit_itlb_lookup(0x1000u, &ipa) == 0);
+				nw_jit_itlb_fill(0x1000u, 0x2000u);
+				nw_jit_mtsr_note(0, 0x00000100u, 0x00000100u); /* same VSID */
+				CHECK(nw_jit_itlb_lookup(0x1000u, &ipa) == 1);
+				nw_jit_mtsr_note(0, 0x00000100u, 0x00000200u); /* VSID change */
+				CHECK(nw_jit_itlb_lookup(0x1000u, &ipa) == 0);
+			}
+
+			/* DTLB SR v2: T-bit noise does not miss; VSID change does */
+			nw_jit_dtlb_flush();
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0);
+			nw_jit_mtsr_note(0, 0x00000100u, 0x80000100u); /* T only */
+			CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa) == 1);
+			nw_jit_mtsr_note(0, 0x00000100u, 0x00000200u); /* VSID */
+			CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa) == 0);
+			CHECK(nw_jit_mtsr_total() >= 2);
+			CHECK(nw_jit_mtsr_vsid() >= 1);
+			CHECK(nw_jit_cache_slots() == 262144);
+			CHECK(NW_JIT_ITLB_N == 256);
+			CHECK(NW_JIT_DTLB_N == 1024);
+
+			/* interp mtsrin: T-bit noise keeps DTLB; VSID change misses */
+			{
+				uint32_t pa2 = 0;
+				nw_jit_dtlb_flush();
+				nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0);
+				memset(&a, 0, sizeof(a));
+				a.lr = 0x2000u;
+				a.sr[0] = 0x00000100u;
+				a.gpr[3] = 0x80000100u; /* T only */
+				a.gpr[4] = 0;
+				ops[0] = nw_ppc_mtsrin(3, 4);
+				CHECK(nw_jit_interp_n(&a, ops, 1, 0x2690u) == 1);
+				CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa2) == 1);
+				a.gpr[3] = 0x00000200u; /* VSID */
+				CHECK(nw_jit_interp_n(&a, ops, 1, 0x26a0u) == 1);
+				CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa2) == 0);
+			}
 		}
 
 		/* two lwz same EA: first miss fills, second hits */
@@ -3699,6 +3749,15 @@ int main()
 		CHECK(nw_jit_cache_get(0x1000u, 0x1000u + 16383u * 0x8000u, 0, 0, NULL) ==
 		      NW_JIT_INTERPRET);
 
+		/* Tombstone: invalidate one page; a later live in the probe still hits. */
+		nw_jit_reset();
+		nw_jit_cache_put(0x1000u, 0x1000u, 0, 0, NW_JIT_INTERPRET, 1);
+		nw_jit_cache_put(0x2000u, 0x2000u, 0, 0, NW_JIT_INTERPRET, 1);
+		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == NW_JIT_INTERPRET);
+		nw_jit_invalidate_page(0x1000u);
+		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == NULL);
+		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NW_JIT_INTERPRET);
+
 		/* Banked wrap: a block in bank 1 survives recycle of bank 0. */
 		{
 			nw_jit_reset();
@@ -5000,6 +5059,68 @@ int main()
 		CHECK(fn != NULL);
 		fn(&b);
 		CHECK(a.vr[3][0] == 0x02081840u && b.vr[3][0] == a.vr[3][0]);
+		CHECK(nw_ppc_vsrw(0, 0, 0) == 0x10000284u);
+		CHECK(nw_jit_op_supported(nw_ppc_vsrw(3, 1, 2)));
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.vr[1][0] = 0x80000000u;
+		a.vr[2][0] = 1;
+		ops[0] = nw_ppc_vsrw(3, 1, 2);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x2670u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x2670u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.vr[3][0] == 0x40000000u && b.vr[3][0] == a.vr[3][0]);
+		CHECK(nw_ppc_vspltisw(0, 0) == 0x1000038cu);
+		CHECK(nw_jit_op_supported(nw_ppc_vspltisw(3, 1)));
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		ops[0] = nw_ppc_vspltisw(3, 1);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x2680u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x2680u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.vr[3][0] == 1 && b.vr[3][0] == a.vr[3][0]);
+		CHECK(a.vr[3][3] == 1 && b.vr[3][3] == 1);
+		{
+			uint8_t ram[32];
+			memset(ram, 0, sizeof(ram));
+			memcpy(ram + 4, "Hello", 5);
+			CHECK(nw_blockmove_copy(ram, 0, sizeof(ram), 16, 4, 5) == 1);
+			CHECK(memcmp(ram + 16, "Hello", 5) == 0);
+			CHECK(nw_blockmove_copy(ram, 0, sizeof(ram), 100, 4, 5) == 0);
+			/* A22E register contract: D0=n, A0=src, A1=dst; skip sets D0=0 */
+			{
+				uint8_t r2[32];
+				uint32_t d0 = 0xdeadbeefu;
+				memset(r2, 0, sizeof(r2));
+				memcpy(r2 + 2, "ABCD", 4);
+				CHECK(nw_blockmove_regs(4, 2, 10, r2, 0, sizeof(r2), &d0) == 1);
+				CHECK(d0 == 0);
+				CHECK(memcmp(r2 + 10, "ABCD", 4) == 0);
+				d0 = 0xffffffffu; /* reverse; do not skip */
+				CHECK(nw_blockmove_regs(d0, 2, 10, r2, 0, sizeof(r2), &d0) == 0);
+				CHECK(d0 == 0xffffffffu);
+				d0 = 4;
+				CHECK(nw_blockmove_regs(4, 2, 100, r2, 0, sizeof(r2), &d0) == 0);
+				CHECK(d0 == 4);
+				memset(r2, 0, sizeof(r2));
+				memcpy(r2 + 8, "WXYZ", 4);
+				d0 = 4;
+				CHECK(nw_blockmove_regs(4, 8, 9, r2, 0, sizeof(r2), &d0) == 1); /* overlap */
+				CHECK(d0 == 0);
+				CHECK(memcmp(r2 + 9, "WXYZ", 4) == 0);
+			}
+			const uint64_t e0 = nw_mixedmode_enters();
+			nw_mixedmode_enter();
+			nw_mixedmode_leave();
+			CHECK(nw_mixedmode_enters() == e0 + 1);
+			CHECK(nw_mixedmode_leaves() >= 1);
+		}
 		CHECK(nw_jit_op_supported(nw_ppc_mulhw(4, 3, 5, 0)));
 		CHECK(nw_jit_op_supported(nw_ppc_mulhw(4, 3, 5, 1)));
 		memset(&a, 0, sizeof(a));
@@ -5285,6 +5406,34 @@ int main()
 		CHECK(nw_atrap_count(0xaafe, 0) == 2);
 		CHECK(nw_atrap_count(0xaafe, 1) == 1);
 		CHECK(nw_atrap_count(0xa22e, 1) == 1);
+		{
+			uint8_t rd[32];
+			memset(rd, 0, sizeof(rd));
+			rd[0] = 0xaa; rd[1] = 0xfe;
+			rd[2] = 7;
+			rd[17] = 1;
+			rd[20] = 0x00; rd[21] = 0x12; rd[22] = 0x34; rd[23] = 0x56;
+			uint32_t proc = 0;
+			CHECK(nw_mixedmode_rd_ppc(rd, 32, &proc) == 1);
+			CHECK(proc == 0x00123456u);
+			rd[17] = 0; /* 68k ISA */
+			CHECK(nw_mixedmode_rd_ppc(rd, 32, &proc) == 0);
+			rd[17] = 1;
+			rd[0] = 0xa0;
+			CHECK(nw_mixedmode_rd_ppc(rd, 32, &proc) == 0);
+			CHECK(nw_mixedmode_rd_ppc(rd, 16, &proc) == 0);
+		}
+		{
+			uint64_t last = 0;
+			CHECK(nw_clock_sample_due(50, &last, 100) == 1);
+			CHECK(last == 50);
+			CHECK(nw_clock_sample_due(149, &last, 100) == 0);
+			CHECK(last == 50);
+			CHECK(nw_clock_sample_due(150, &last, 100) == 1);
+			CHECK(last == 150);
+			CHECK(nw_clock_sample_due(150, NULL, 100) == 0);
+			CHECK(nw_clock_sample_due(200, &last, 0) == 0);
+		}
 
 		/* lswi / stswi: EA=RA_or_0, NB=0→32; RA not in dest */
 		{
@@ -5828,6 +5977,10 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_vsl(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_vslo(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_vsro(3, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_vsrw(3, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_vspltisw(3, 1)));
+		CHECK(!nw_jit_op_supported(nw_ppc_lhzux(4, 1, 2)));
+		CHECK(!nw_jit_op_supported(nw_ppc_stbux(3, 1, 2)));
 		CHECK(nw_jit_op_ends_block(nw_ppc_vslo(3, 1, 2)));
 		CHECK(nw_jit_op_ends_block(nw_ppc_vsro(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_vslb(3, 1, 2)));

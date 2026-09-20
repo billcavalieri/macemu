@@ -168,6 +168,7 @@ public:
 
 	// Execute ppc routine
 	void execute_ppc(uint32 entry);
+	virtual void nw_invoke_mm_ppc(uint32 entry);
 
 	// Execute MacOS/PPC code
 	uint32 execute_macos_code(uint32 tvect, int nargs, uint32 const *args);
@@ -724,6 +725,12 @@ inline void sheepshaver_cpu::execute_ppc(uint32 entry)
 
 	// Restore branch registers
 	lr() = saved_lr;
+}
+
+void sheepshaver_cpu::nw_invoke_mm_ppc(uint32 entry)
+{
+	execute_ppc(entry);
+	nw_mixedmode_leave();
 }
 
 void sheepshaver_cpu::call_get_resource(powerpc_cpu * cpu, uint32 old_get_resource) {

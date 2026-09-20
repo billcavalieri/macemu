@@ -1341,9 +1341,10 @@ void powerpc_cpu::execute_mtsr(uint32 opcode)
 		const unsigned i = rA_field::extract(opcode) & 0xfu;
 		const uint32 val = operand_RS::get(this, opcode);
 		ppc32_mmu &mmu = ppc32_guest_mmu();
-		if (mmu.sr(i) != val) {
+		const uint32 old = mmu.sr(i);
+		if (old != val) {
 			mmu.set_sr(i, val);
-			nw_jit_dtlb_drop_sr(i, NW_JIT_DTLB_FL_MTSR);
+			nw_jit_mtsr_note(i, old, val);
 		}
 	}
 	increment_pc(4);
@@ -1367,9 +1368,10 @@ void powerpc_cpu::execute_mtsrin(uint32 opcode)
 		const unsigned i = (ea >> 28) & 0xfu;
 		const uint32 val = operand_RS::get(this, opcode);
 		ppc32_mmu &mmu = ppc32_guest_mmu();
-		if (mmu.sr(i) != val) {
+		const uint32 old = mmu.sr(i);
+		if (old != val) {
 			mmu.set_sr(i, val);
-			nw_jit_dtlb_drop_sr(i, NW_JIT_DTLB_FL_MTSR);
+			nw_jit_mtsr_note(i, old, val);
 		}
 	}
 	increment_pc(4);

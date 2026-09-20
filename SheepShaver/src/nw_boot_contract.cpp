@@ -1331,20 +1331,162 @@ void nw_event_aline(uint32_t op, uint32_t pc68k, int handler)
 			printf("NW-BOOT G1: trap a148 Finder-info n=%llu pc68k=%08x handler=%d\n",
 			       (unsigned long long)n, (unsigned)pc68k, handler);
 	}
+	if (trap == 0xaafeu || trap == 0xa22eu) {
+		static uint64_t naa, nbm;
+		uint64_t *c = (trap == 0xaafeu) ? &naa : &nbm;
+		(*c)++;
+		if (*c == 1 || (*c % 10000ull) == 0)
+			printf("NW-BOOT G1: trap %04x n=%llu pc68k=%08x nkpc handler=%d\n",
+			       (unsigned)trap, (unsigned long long)*c,
+			       (unsigned)pc68k, handler);
+	}
 #else
 	(void)pc68k;
 	(void)handler;
 #endif
 }
 
-void nw_event_tick(uint32_t pc, uint32_t msr)
+int nw_blockmove_copy(uint8_t *mem, uint32_t mem_base, uint32_t mem_size,
+		      uint32_t dst, uint32_t src, uint32_t n)
+{
+	if (n == 0)
+		return 1;
+	if (!mem)
+		return 0;
+	const uint64_t s = src, d = dst, b = mem_base, e = (uint64_t)mem_base + mem_size;
+	if (s < b || d < b || s + n > e || d + n > e)
+		return 0;
+	memmove(mem + (dst - mem_base), mem + (src - mem_base), n);
+	return 1;
+}
+
+int nw_blockmove_regs(uint32_t d0, uint32_t a0, uint32_t a1,
+		      uint8_t *mem, uint32_t mem_base, uint32_t mem_size,
+		      uint32_t *d0_out)
+{
+	const int32_t n = (int32_t)d0;
+	if (n < 0) {
+		if (d0_out)
+			*d0_out = d0;
+		return 0;
+	}
+	if (!nw_blockmove_copy(mem, mem_base, mem_size, a1, a0, (uint32_t)n)) {
+		if (d0_out)
+			*d0_out = d0;
+		return 0;
+	}
+	if (d0_out)
+		*d0_out = 0;	/* skip 68k BlockMoveData: remaining count 0 */
+	return 1;
+}
+
+static uint64_t g_mm_enter, g_mm_leave, g_mm_ppc_rd;
+
+void nw_mixedmode_enter(void)
+{
+	g_mm_enter++;
+}
+
+void nw_mixedmode_leave(void)
+{
+	g_mm_leave++;
+}
+
+uint64_t nw_mixedmode_enters(void)
+{
+	return g_mm_enter;
+}
+
+uint64_t nw_mixedmode_leaves(void)
+{
+	return g_mm_leave;
+}
+
+uint64_t nw_mixedmode_ppc_rds(void)
+{
+	return g_mm_ppc_rd;
+}
+
+int nw_mixedmode_rd_ppc(const uint8_t *rd, uint32_t rd_len, uint32_t *proc_out)
+{
+	/* RoutineDescriptor + one RoutineRecord: 12 + 20 = 32 bytes. */
+	if (!rd || rd_len < 32)
+		return 0;
+	const uint16_t trap = (uint16_t)((rd[0] << 8) | rd[1]);
+	if (trap != 0xaafeu)
+		return 0;
+	if ((int8_t)rd[2] != 7)
+		return 0;
+	const int8_t isa = (int8_t)rd[17]; /* record[0].ISA */
+	if (isa != 1)	/* kPowerPCISA */
+		return 0;
+	const uint32_t proc = ((uint32_t)rd[20] << 24) | ((uint32_t)rd[21] << 16) |
+			      ((uint32_t)rd[22] << 8) | (uint32_t)rd[23];
+	if (proc_out)
+		*proc_out = proc;
+	return 1;
+}
+
+void nw_mixedmode_note_ppc_rd(uint32_t pc68k, uint32_t proc)
+{
+	g_mm_ppc_rd++;
+#if NW_BOOT_LOG
+	if (g_mm_ppc_rd == 1 || (g_mm_ppc_rd % 10000ull) == 0)
+		printf("NW-BOOT G1: mm-ppc n=%llu pc68k=%08x proc=%08x\n",
+		       (unsigned long long)g_mm_ppc_rd, (unsigned)pc68k, (unsigned)proc);
+#else
+	(void)pc68k;
+	(void)proc;
+#endif
+}
+
+int nw_clock_sample_due(uint64_t now_us, uint64_t *last_us, uint64_t period_us)
+{
+	if (!last_us || period_us == 0)
+		return 0;
+	if (*last_us != 0 && now_us >= *last_us && now_us - *last_us < period_us)
+		return 0;
+	*last_us = now_us;
+	return 1;
+}
+
+void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, uint32_t tm_ticks)
 {
 	if (!nw_jit_stats_wanted()) {
 #if !NW_BOOT_LOG
 		(void)pc;
 		(void)msr;
+		(void)host_us;
+		(void)mftb;
+		(void)tm_ticks;
 		return;
 #endif
+	}
+	static uint64_t last_clock_us, last_host_us, last_mftb, last_frames, last_codec, last_other;
+	if (nw_jit_stats_wanted() && nw_clock_sample_due(host_us, &last_clock_us, 100000ull)) {
+		const uint64_t d_us = (last_host_us && host_us >= last_host_us) ? host_us - last_host_us : 0;
+		const uint64_t d_tb = (last_mftb && mftb >= last_mftb) ? mftb - last_mftb : 0;
+		const uint64_t frames = nw_fb_fps_proxy_frames();
+		const uint64_t d_fr = (frames >= last_frames) ? frames - last_frames : 0;
+		const uint64_t codec = nw_jit_codec_insns();
+		const uint64_t other = nw_jit_other_insns();
+		const uint64_t d_codec = (codec >= last_codec) ? codec - last_codec : 0;
+		const uint64_t d_other = (other >= last_other) ? other - last_other : 0;
+		printf("NW-BOOT G1: clock10 host_us=%llu d_us=%llu mftb=%llu d_tb=%llu tm=%u fps_frames=%llu d_fr=%llu fps_flat=%u codec=%llu d_codec=%llu other=%llu d_other=%llu pc=%08x\n",
+		       (unsigned long long)host_us, (unsigned long long)d_us,
+		       (unsigned long long)mftb, (unsigned long long)d_tb,
+		       (unsigned)tm_ticks,
+		       (unsigned long long)frames, (unsigned long long)d_fr,
+		       nw_fb_fps_proxy_flat_max(),
+		       (unsigned long long)codec, (unsigned long long)d_codec,
+		       (unsigned long long)other, (unsigned long long)d_other,
+		       (unsigned)pc);
+		fflush(stdout);
+		last_host_us = host_us;
+		last_mftb = mftb;
+		last_frames = frames;
+		last_codec = codec;
+		last_other = other;
 	}
 	static time_t last;
 	struct timeval tv;
@@ -1363,6 +1505,14 @@ void nw_event_tick(uint32_t pc, uint32_t msr)
 	(void)msr;
 #endif
 	nw_fb_fps_proxy_tick();
+	if (nw_jit_stats_wanted()) {
+		printf("NW-BOOT G1: clock host_us=%llu mftb=%llu tm_ticks=%u fps_frames=%llu fps_flat=%u\n",
+		       (unsigned long long)host_us, (unsigned long long)mftb,
+		       (unsigned)tm_ticks,
+		       (unsigned long long)nw_fb_fps_proxy_frames(),
+		       nw_fb_fps_proxy_flat_max());
+		fflush(stdout);
+	}
 	static unsigned tsec;
 	if ((++tsec % 10u) == 0) {
 #if NW_BOOT_LOG

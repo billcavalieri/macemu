@@ -40,6 +40,7 @@
 #endif
 
 #ifdef SHEEPSHAVER
+#include "cpu_emulation.h"
 #include "nw_boot_contract.h"
 #include "nw_io.h"
 #include "nw_devices.h"
@@ -878,7 +879,13 @@ void powerpc_cpu::tick_decrementer()
 #if NW_BOOT_LOG
 	nw_script_tick();
 #endif
-	nw_event_tick(pc(), ppc32_guest_mmu().msr());
+	{
+		uint32 tm = 0;
+		if (RAMBaseHost)
+			tm = ReadMacInt32(0x16A);	/* Time Manager Ticks */
+		nw_event_tick(pc(), ppc32_guest_mmu().msr(),
+			      GetTicks_usec(), tb_ticks(), tm);
+	}
 #if defined(NW_BOOT_LOG) && NW_BOOT_LOG
 	{
 		static uint64_t last500;
@@ -919,6 +926,66 @@ void powerpc_cpu::take_async_exception()
 	take_dec();
 }
 
+#ifdef SHEEPSHAVER
+static int nw_aline_blockmove(powerpc_cpu *ppc)
+{
+	/* OS trap A22E: A0=src r16, A1=dst r17, D0=count r8. Mac LAs, not PPC DR. */
+	const uint32 src = ppc->gpr(16);
+	const uint32 dst = ppc->gpr(17);
+	const int32 n = (int32)ppc->gpr(8);
+	if (n <= 0 || n > 0x04000000)
+		return 0;
+	const uint32 spa = nw_la_to_pa(src);
+	const uint32 dpa = nw_la_to_pa(dst);
+	if (nw_pa_kind(spa) == NW_PA_IO || nw_pa_kind(dpa) == NW_PA_IO ||
+	    nw_pa_kind(spa) == NW_PA_NONE || nw_pa_kind(dpa) == NW_PA_NONE)
+		return 0;
+	uint8 *hs = vm_do_get_real_address(spa);
+	uint8 *hd = vm_do_get_real_address(dpa);
+	if (!hs || !hd)
+		return 0;
+	memmove(hd, hs, (size_t)n);
+	if (nw_pa_kind(dpa) == NW_PA_FB)
+		nw_fb_damage_store(dpa, (unsigned)n);
+	nw_jit_invalidate_range_src(dpa, (uint32)n, NW_JIT_FL_HOST);
+	ppc->gpr(8) = 0;	/* 68k remaining count; handler copies 0 */
+	return 1;
+}
+
+static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
+{
+	extern uint32 ROMBase;
+	if (pa < ROMBase + NW_EMU_ALINE_OS_FLAG ||
+	    pa > ROMBase + NW_EMU_ALINE_TOOL_AUTOPOP)
+		return;
+	const int h = nw_emu_aline_handler(pa - ROMBase);
+	if (h < 0 || vm_read_memory_4(pa) != NW_EMU_ALINE_ENTRY_OP)
+		return;
+	const uint32 trap = (ppc->gpr(29) >> 3) & 0xffffu;
+	nw_event_aline(trap, ppc->gpr(24) - 2u, h);
+	if (trap == 0xaafeu) {
+		nw_mixedmode_enter();
+		const uint32 rd_la = ppc->gpr(24) - 2u;
+		const uint32 rd_pa = nw_la_to_pa(rd_la);
+		uint8 rd[32];
+		int ok = 1;
+		for (unsigned i = 0; i < 32; i++) {
+			uint8 *hp = vm_do_get_real_address(rd_pa + i);
+			if (!hp) {
+				ok = 0;
+				break;
+			}
+			rd[i] = *hp;
+		}
+		uint32 proc = 0;
+		if (ok && nw_mixedmode_rd_ppc(rd, 32, &proc) && proc != 0)
+			nw_mixedmode_note_ppc_rd(rd_la, proc);
+	}
+	if (trap == 0xa22eu && h == 1)
+		nw_aline_blockmove(ppc);
+}
+#endif
+
 bool powerpc_cpu::guest_fetch(uint32 *opcode)
 {
 	if (!ppc32_guest_mmu_enabled()) {
@@ -928,6 +995,28 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 		*opcode = vm_read_memory_4(pc());
 		return true;
 	}
+#ifdef SHEEPSHAVER
+	{
+		uint32_t ipa;
+		if (nw_jit_itlb_lookup(pc(), &ipa)) {
+			last_fetch_pa_ = ipa;
+			const uint32 pa = ipa;
+			extern uint32 ROMBase, RAMBase, RAMSize;
+			const bool in_ram = pa >= RAMBase && pa < RAMBase + RAMSize;
+			const bool in_rom = pa >= ROMBase && pa < ROMBase + 0x500000u;
+			const bool in_low = pa < 0x4000u;
+			const bool in_thunks = pa - nw_thunk_area_base < nw_thunk_area_size;
+			if (!(in_ram || in_rom || in_low || in_thunks)) {
+				dar_ = pa;
+				take_exception(NW_VEC_MACHINE_CHECK, pc(), 0);
+				return false;
+			}
+			nw_aline_fastpath(this, pa);
+			*opcode = vm_read_memory_4(pa);
+			return true;
+		}
+	}
+#endif
 	ppc32_xlate_result r = ppc32_guest_mmu().translate(pc(), PPC32_XLATE_IR, 4);
 	if (!r.ok) {
 		take_isi(r.fault);
@@ -935,6 +1024,7 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 	}
 #ifdef SHEEPSHAVER
 	{
+		nw_jit_itlb_fill(pc(), r.pa);
 		last_fetch_pa_ = r.pa;
 		/* Fetch outside guest RAM/ROM (and SheepShaver's thunk area, which
 		 * the guest is handed by identity mapping) would read host memory.
@@ -951,14 +1041,7 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 			take_exception(NW_VEC_MACHINE_CHECK, pc(), 0);
 			return false;
 		}
-		/* 68k A-line dispatch inside the ROM's own emulator. Observation
-		 * only: op = (r29 >> 3) & 0xffff, A-line word at r24 - 2. */
-		if (pa >= ROMBase + NW_EMU_ALINE_OS_FLAG &&
-		    pa <= ROMBase + NW_EMU_ALINE_TOOL_AUTOPOP) {
-			const int h = nw_emu_aline_handler(pa - ROMBase);
-			if (h >= 0 && vm_read_memory_4(pa) == NW_EMU_ALINE_ENTRY_OP)
-				nw_event_aline((gpr(29) >> 3) & 0xffffu, gpr(24) - 2u, h);
-		}
+		nw_aline_fastpath(this, pa);
 	}
 #endif
 	*opcode = vm_read_memory_4(r.pa);
@@ -1070,7 +1153,8 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 		if (u == ou && l == ol)
 			return true;
 		mmu.set_ibat(i, u, l);
-		/* IBAT is instruction translation; the JIT DTLB is data-only. */
+		/* IBAT is instruction translation; drop the fetch ITLB. */
+		nw_jit_itlb_flush();
 		return true;
 	}
 	if (spr >= powerpc_registers::SPR_DBAT0U && spr <= powerpc_registers::SPR_DBAT3L) {
@@ -1149,11 +1233,26 @@ powerpc_cpu::powerpc_cpu(task_struct *parent_task)
 #endif
 	spcflags().init();
 	++ppc_refcount;
+#ifdef SHEEPSHAVER
+	nw_jc_ = 0;
+	mm_ppc_pending_ = 0;
+#endif
 	initialize();
 }
 
+#ifdef SHEEPSHAVER
+void powerpc_cpu::nw_invoke_mm_ppc(uint32 entry)
+{
+	(void)entry;
+}
+#endif
+
 powerpc_cpu::~powerpc_cpu()
 {
+#ifdef SHEEPSHAVER
+	free(nw_jc_);
+	nw_jc_ = 0;
+#endif
 	--ppc_refcount;
 #if PPC_PROFILE_COMPILE_TIME
 	clock_t emul_end_time = clock();
@@ -1520,6 +1619,7 @@ void powerpc_cpu::jit_host_mtmsr(void *host, uint32 msr)
 		/* IR|DR only. Do not use flush_if_pr: rfi shares that and CHK'd QT. */
 		if ((old ^ msr) & 0x00000030u)
 			nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_MTMSR);
+		nw_jit_itlb_note_msr(old, msr);
 	}
 	(void)ppc;
 }
@@ -1531,10 +1631,11 @@ void powerpc_cpu::jit_host_mtsr(void *host, uint32 sr, uint32 val)
 		return;
 	ppc32_mmu &mmu = ppc32_guest_mmu();
 	const unsigned i = sr & 0xfu;
-	if (mmu.sr(i) == val)
+	const uint32 old = mmu.sr(i);
+	if (old == val)
 		return;
 	mmu.set_sr(i, val);
-	nw_jit_dtlb_drop_sr(i, NW_JIT_DTLB_FL_MTSR);
+	nw_jit_mtsr_note(i, old, val);
 }
 
 uint32 powerpc_cpu::jit_host_mfsr(void *host, uint32 sr)
@@ -1667,6 +1768,7 @@ void powerpc_cpu::jit_host_rfi(void *host, struct nw_jit_cpu *cpu)
 		nw_log_msr_dr(ppc->srr1_);
 		nw_log_msr_write("rfi", ppc->srr0_, ppc->srr1_);
 		nw_jit_dtlb_flush_if_pr(old, ppc->srr1_, NW_JIT_DTLB_FL_RFI);
+		nw_jit_itlb_note_msr(old, ppc->srr1_);
 		cpu->pc = ppc->srr0_;
 		cpu->msr = ppc->srr1_;
 		return;
@@ -2253,13 +2355,24 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	uint32 ops[NW_JIT_MAX_BLOCK];
 	int n = 0;
 	int hit = 0;
-	nw_jit_fn fn = nw_jit_cache_get(phys_page, guest_pc, msr_ir, 0, &n);
+	int uses_fpr = 0, uses_vr = 0;
+	nw_jit_fn fn = nw_jit_cache_get(phys_page, guest_pc, msr_ir, 0, &n,
+					&uses_fpr, &uses_vr);
 	if (fn && n > 0 && n <= NW_JIT_MAX_BLOCK) {
 		hit = 1;
-		/* Hit: skip peek/mem_ok/sg_apply. Helpers take DSI (4d) or
-		 * return 0 for IO. ops[] from the fetched physical page. */
-		for (int i = 0; i < n; i++)
-			ops[i] = vm_read_memory_4(last_fetch_pa_ + (uint32)i * 4u);
+		/* ON hit: do not re-fetch ops[]. VERIFY still needs them for
+		 * the kpx compare loop. DSI width uses a lazy load of one word. */
+		if (mode == NW_JIT_VERIFY) {
+			for (int i = 0; i < n; i++)
+				ops[i] = vm_read_memory_4(last_fetch_pa_ + (uint32)i * 4u);
+		}
+#if NW_BOOT_LOG
+		{
+			static uint32 hit_pc_sample;
+			if ((++hit_pc_sample & 255u) == 0)
+				nw_jit_pc_hot(guest_pc, first_opcode);
+		}
+#endif
 	} else {
 		fn = NULL;
 		if (!nw_jit_op_supported(first_opcode)) {
@@ -2361,22 +2474,42 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		return 0;
 	}
 
-	nw_jit_cpu jc;
-	memset(&jc, 0, sizeof(jc));
+	if (!nw_jc_) {
+		nw_jc_ = (struct nw_jit_cpu *)calloc(1, sizeof(*nw_jc_));
+		if (!nw_jc_)
+			return 0;
+	}
+	struct nw_jit_cpu &jc = *nw_jc_;
+	const int full = (mode == NW_JIT_VERIFY);
+	if (!hit) {
+		uses_fpr = is_fp_insn(first_opcode);
+		uses_vr = is_altivec_insn(first_opcode);
+	}
+	jc.fault = 0;
+	jc.fault_ea = 0;
+	jc.fault_st = 0;
+	jc.dec_wr = 0;
+	jc.nstore = 0;
+	jc.reserve_valid = 0;
+	jc.reserve_ea = 0;
 	for (int i = 0; i < 32; i++)
 		jc.gpr[i] = gpr(i);
-	for (int i = 0; i < 32; i++) {
-		jc.vr[i][0] = vr(i).w[0];
-		jc.vr[i][1] = vr(i).w[1];
-		jc.vr[i][2] = vr(i).w[2];
-		jc.vr[i][3] = vr(i).w[3];
+	if (full || uses_vr) {
+		for (int i = 0; i < 32; i++) {
+			jc.vr[i][0] = vr(i).w[0];
+			jc.vr[i][1] = vr(i).w[1];
+			jc.vr[i][2] = vr(i).w[2];
+			jc.vr[i][3] = vr(i).w[3];
+		}
+		jc.vscr = vscr().get();
 	}
-	for (int i = 0; i < 32; i++)
-		jc.fpr[i] = fpr_dw(i);
+	if (full || uses_fpr) {
+		for (int i = 0; i < 32; i++)
+			jc.fpr[i] = fpr_dw(i);
+		jc.fpscr = fpscr();
+	}
 	jc.cr = cr().get();
 	jc.xer = xer().get();
-	jc.fpscr = fpscr();
-	jc.vscr = vscr().get();
 	jc.lr = lr();
 	jc.ctr = ctr();
 	jc.pc = pc();
@@ -2389,18 +2522,22 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	auto commit = [&]() {
 		for (int i = 0; i < 32; i++)
 			gpr(i) = jc.gpr[i];
-		for (int i = 0; i < 32; i++) {
-			vr(i).w[0] = jc.vr[i][0];
-			vr(i).w[1] = jc.vr[i][1];
-			vr(i).w[2] = jc.vr[i][2];
-			vr(i).w[3] = jc.vr[i][3];
+		if (full || uses_vr) {
+			for (int i = 0; i < 32; i++) {
+				vr(i).w[0] = jc.vr[i][0];
+				vr(i).w[1] = jc.vr[i][1];
+				vr(i).w[2] = jc.vr[i][2];
+				vr(i).w[3] = jc.vr[i][3];
+			}
+			vscr().set(jc.vscr);
 		}
-		for (int i = 0; i < 32; i++)
-			fpr_dw(i) = jc.fpr[i];
+		if (full || uses_fpr) {
+			for (int i = 0; i < 32; i++)
+				fpr_dw(i) = jc.fpr[i];
+			fpscr() = jc.fpscr;
+		}
 		cr().set(jc.cr);
 		xer().set(jc.xer);
-		fpscr() = jc.fpscr;
-		vscr().set(jc.vscr);
 		lr() = jc.lr;
 		ctr() = jc.ctr;
 		if (jc.dec_wr) {
@@ -2414,7 +2551,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	if (jc.fault) {
 		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_EXC) {
 			commit();
-			nw_jit_note_exec_at(n, guest_pc);
+			nw_jit_note_exec_at(n, guest_pc, uses_vr);
 #if NW_BOOT_LOG
 			for (int i = 0; i < n; i++)
 				nw_event_insn();
@@ -2424,7 +2561,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_SMC) {
 			commit();
 			pc() = jc.pc + 4u;
-			nw_jit_note_exec_at(n, guest_pc);
+			nw_jit_note_exec_at(n, guest_pc, uses_vr);
 #if NW_BOOT_LOG
 			for (int i = 0; i < n; i++)
 				nw_event_insn();
@@ -2435,8 +2572,12 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			unsigned dsi_w = 4;
 			uint32 fop = first_opcode;
 			if (jc.pc != guest_pc && jc.pc >= guest_pc &&
-			    jc.pc < guest_pc + (uint32)n * 4u && (jc.pc & 3u) == 0)
-				fop = ops[(int)((jc.pc - guest_pc) / 4u)];
+			    jc.pc < guest_pc + (uint32)n * 4u && (jc.pc & 3u) == 0) {
+				if (hit && mode == NW_JIT_ON)
+					fop = vm_read_memory_4(last_fetch_pa_ + (jc.pc - guest_pc));
+				else
+					fop = ops[(int)((jc.pc - guest_pc) / 4u)];
+			}
 			{
 				const int fprim = (int)(fop >> 26);
 				const int fxo = (int)((fop >> 1) & 0x3ff);
@@ -2464,7 +2605,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 					fflush(stdout);
 				}
 				take_data_dsi(jc.fault_ea, jc.fault_st != 0, xr.fault);
-				nw_jit_note_exec_at(n, guest_pc);
+				nw_jit_note_exec_at(n, guest_pc, uses_vr);
 				return 1;
 			}
 		}
@@ -2482,7 +2623,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		if (mode == NW_JIT_ON && jc.pc != guest_pc) {
 			commit();
 			pc() = jc.pc;
-			nw_jit_note_exec_at(n, guest_pc);
+			nw_jit_note_exec_at(n, guest_pc, uses_vr);
 			return 1;
 		}
 		nw_jit_verify_uncompared(jc.fault);
@@ -2494,7 +2635,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	if (mode == NW_JIT_ON) {
 		commit();
 		pc() = jc.pc;
-		nw_jit_note_exec_at(n, guest_pc);
+		nw_jit_note_exec_at(n, guest_pc, uses_vr);
 		{
 			static unsigned nlog;
 			if (nlog < 16u) {
