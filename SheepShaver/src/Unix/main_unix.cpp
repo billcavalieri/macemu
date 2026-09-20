@@ -1247,9 +1247,11 @@ int main(int argc, char **argv)
 				if (sz > fb_size)
 					fb_size = sz;
 			}
-			if (screen_base && fb_size)
-				nw_banks_set(NW_PA_FB, screen_base & ~0xfffu,
-				             ((screen_base & 0xfffu) + fb_size + 0xfffu) & ~0xfffu);
+			if (screen_base && fb_size) {
+				uint32 map = ((screen_base & 0xfffu) + fb_size + 0xfffu) & ~0xfffu;
+				map += 0x1000u;	/* exclusive-end DSI; see PatchROM extra[] */
+				nw_banks_set(NW_PA_FB, screen_base & ~0xfffu, map);
+			}
 		}
 		nw_banks_set(NW_PA_LOWMEM, 0, 0x4000);
 		nw_banks_set(NW_PA_KDP, KERNEL_DATA_BASE, KERNEL_AREA_SIZE);

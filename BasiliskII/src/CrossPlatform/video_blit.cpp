@@ -514,6 +514,7 @@ static Screen_blit_func_info Screen_blitters[] = {
 #else
 	{ 32, 0xff000000, 0x00ff0000, 0x0000ff00, Blit_RGB888_NBO	, Blit_Copy_Raw		},	// OK (NBO)
 #endif
+	{ 32, 0x00ff0000, 0x0000ff00, 0x000000ff, Blit_Copy_Raw	, Blit_Copy_Raw		},	/* SDL ARGB8888 LE */
 	{ 32, 0x0000ff, 0x00ff00, 0xff0000, Blit_BGR888_NBO	, Blit_BGR888_OBO	},	// NT
 #endif
 	{ 32, 0xff00, 0xff0000, 0xff000000, Blit_Copy_Raw   , Blit_Copy_Raw     }   // OK
@@ -604,14 +605,17 @@ bool Screen_blitter_init(VisualFormat const & visual_format, bool native_byte_or
 			}
 		}
 	
-		// No appropriate blitter found, dump RGB mask values and abort()
 		if (!blitter_found) {
-			fprintf(stderr, "### No appropriate blitter found\n");
-			fprintf(stderr, "\tR/G/B mask values  : 0x%06x, 0x%06x, 0x%06x (depth = %d)\n",
-				visualFormat.Rmask, visualFormat.Gmask, visualFormat.Bmask, visualFormat.depth);
-			fprintf(stderr, "\tR/G/B shift values : %d/%d/%d\n",
-				visualFormat.Rshift, visualFormat.Gshift, visualFormat.Bshift);
-			abort();
+			if (visualFormat.depth == 24 || visualFormat.depth == 32) {
+				Screen_blit = Blit_Copy_Raw;
+			} else {
+				fprintf(stderr, "### No appropriate blitter found\n");
+				fprintf(stderr, "\tR/G/B mask values  : 0x%06x, 0x%06x, 0x%06x (depth = %d)\n",
+					visualFormat.Rmask, visualFormat.Gmask, visualFormat.Bmask, visualFormat.depth);
+				fprintf(stderr, "\tR/G/B shift values : %d/%d/%d\n",
+					visualFormat.Rshift, visualFormat.Gshift, visualFormat.Bshift);
+				abort();
+			}
 		}
 	}
 #else

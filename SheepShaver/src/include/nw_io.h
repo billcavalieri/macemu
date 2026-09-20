@@ -115,6 +115,7 @@ void nw_io_reset(void);
  * occurrences are logged (NW-BOOT IO lines) so the next gate is named. */
 uint32_t nw_io_read(uint32_t pa, int size, uint32_t pc);
 void nw_io_write(uint32_t pa, int size, uint32_t value, uint32_t pc);
+uint32_t nw_io_last_pc(void);	/* PC of the last dispatched I/O access */
 
 /* WP5: 64-pixel tiles covering the New World frame buffer. Stores that
  * land in the layout mark tiles; present consumes them. */
@@ -131,5 +132,17 @@ void nw_fb_damage_clear(void);
 void nw_fb_damage_note_upload(uint64_t bytes);
 uint64_t nw_fb_damage_upload_bytes(void);
 uint64_t nw_fb_damage_marks(void);
+void nw_fb_fps_proxy_sample(const uint8_t *fb, uint32_t pitch, uint32_t w, uint32_t h);
+void nw_fb_fps_proxy_tick(void);
+uint64_t nw_fb_fps_proxy_frames(void);
+unsigned nw_fb_fps_proxy_flat_max(void);
+
+/* Mac 32-bit FB pixel is XRGB in memory (byte0 unused, 1=R, 2=G, 3=B),
+ * the same layout take_shot dumps and an SDL ARGB8888 texture expects. */
+void nw_fb_mac32_rgb(const uint8_t *px, uint8_t *r, uint8_t *g, uint8_t *b);
+void nw_fb_pack_mac32(uint8_t *px, uint8_t r, uint8_t g, uint8_t b);
+/* Expand 8-bit indices through a 256-entry RGB CLUT into Mac 32-bit pixels. */
+void nw_fb_expand_clut8_to_mac32(uint8_t *dst32, const uint8_t *src8, int npix,
+				 const uint8_t pal_rgb[256 * 3]);
 
 #endif

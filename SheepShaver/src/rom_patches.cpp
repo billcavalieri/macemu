@@ -785,7 +785,11 @@ static bool patch_nanokernel_boot(void)
 		}
 		if (screen_base && fb_size) {
 			extra[n_extra].la = extra[n_extra].pa = screen_base & ~0xfffu;
+			/* Page-exact sizes (1024x768x32 = 0x300000) have no
+			 * rounding slack. Guest 68k then DSIs the exclusive end
+			 * (50890000); that DSI fails, 0x700, VBL IACK without EOI. */
 			extra[n_extra].size = ((screen_base & 0xfffu) + fb_size + 0xfffu) & ~0xfffu;
+			extra[n_extra].size += 0x1000u;
 			n_extra++;
 		}
 		/*
@@ -851,20 +855,16 @@ static bool patch_nanokernel_boot(void)
 				       bp.parcels ? "present" : "missing", (unsigned)bp.parcels_size);
 				return false;
 			}
-#if NW_BOOT_LOG
 			printf("NW-BOOT G1: boot-info tree %d nodes, %#x bytes, parcels %u bytes, display %ux%ux%u lb %u @%08x\n",
 			       nw_bootinfo_count_nodes(Mac2HostAddr(NW_BOOTINFO_LA), NW_BOOTINFO_TREE_MAX), (unsigned)tree_end,
 			       (unsigned)bp.parcels_size, bp.fb_width, bp.fb_height, bp.fb_depth, bp.fb_linebytes,
 			       (unsigned)bp.fb_la);
-#endif
 		}
 		int n = nw_fill_config_info_be(ROMBaseHost + 0x30d000, &ci);
-#if NW_BOOT_LOG
 		printf("NW-BOOT G1: ConfigInfo page map %d entries rom=%08x ram=%08x+%08x sheep=%08x+%x fb=%08x+%x\n",
 		       n, (unsigned)ROMBase, (unsigned)RAMBase, (unsigned)RAMSize,
 		       (unsigned)SheepMem::Base(), (unsigned)SheepMem::Size(),
 		       (unsigned)screen_base, (unsigned)fb_size);
-#endif
 		if (n < 0 || !nw_config_info_pagemap_ok(ROMBaseHost + 0x30d000)) {
 			printf("NW-BOOT G1: ConfigInfo page map fill failed (%d)\n", n);
 			return false;

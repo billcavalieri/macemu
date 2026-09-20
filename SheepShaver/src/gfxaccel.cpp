@@ -24,6 +24,10 @@
 #include "video.h"
 #include "video_defs.h"
 #include "nw_io.h"
+#include "main.h"
+#include "cpu_emulation.h"
+#include "emul_op.h"
+#include "macos_util.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -36,21 +40,16 @@
 // Return bytes per pixel for requested depth
 static inline int bytes_per_pixel(int depth)
 {
-	int bpp;
 	switch (depth) {
 	case 8:
-		bpp = 1;
-		break;
+		return 1;
 	case 15: case 16:
-		bpp = 2;
-		break;
+		return 2;
 	case 24: case 32:
-		bpp = 4;
-		break;
+		return 4;
 	default:
-		abort();
+		return 0;	/* 1/2/4-bit packed; not a byte pixel */
 	}
-	return bpp;
 }
 
 // Pass-through dirty areas to redraw functions
@@ -353,34 +352,54 @@ void NQD_bitblt(uint32 p)
 	D(bug(" src addr %08x, dest addr %08x\n", ReadMacInt32(p + acclSrcBaseAddr), ReadMacInt32(p + acclDestBaseAddr)));
 	D(bug(" src X %d, src Y %d, dest X %d, dest Y %d\n", src_X, src_Y, dest_X, dest_Y));
 	D(bug(" width %d, height %d\n", width, height));
+	if (width <= 0 || height <= 0)
+		return;
 
-	// And perform the blit
-	const int bpp = bytes_per_pixel(ReadMacInt32(p + acclSrcPixelSize));
-	width *= bpp;
-	if ((int32)ReadMacInt32(p + acclSrcRowBytes) > 0) {
-		const int src_row_bytes = (int32)ReadMacInt32(p + acclSrcRowBytes);
-		const int dst_row_bytes = (int32)ReadMacInt32(p + acclDestRowBytes);
-		uint8 *src = Mac2HostAddr(ReadMacInt32(p + acclSrcBaseAddr) + (src_Y * src_row_bytes) + (src_X * bpp));
-		uint8 *dst = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) + (dest_Y * dst_row_bytes) + (dest_X * bpp));
-		nqd_mark_written(dst, width / bpp, height, bpp);
+	const int src_bpp = bytes_per_pixel((int)ReadMacInt32(p + acclSrcPixelSize));
+	const int dst_bpp = bytes_per_pixel((int)ReadMacInt32(p + acclDestPixelSize));
+	if (src_bpp <= 0 || dst_bpp <= 0)
+		return;
+	const int src_row_signed = (int32)ReadMacInt32(p + acclSrcRowBytes);
+	const int dst_row_signed = (int32)ReadMacInt32(p + acclDestRowBytes);
+	const int src_row_bytes = src_row_signed < 0 ? -src_row_signed : src_row_signed;
+	const int dst_row_bytes = dst_row_signed < 0 ? -dst_row_signed : dst_row_signed;
+	const int down = src_row_signed < 0;
+	uint8 *src = Mac2HostAddr(ReadMacInt32(p + acclSrcBaseAddr) +
+		((down ? src_Y + height - 1 : src_Y) * src_row_bytes) + (src_X * src_bpp));
+	uint8 *dst = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) +
+		((down ? dest_Y + height - 1 : dest_Y) * dst_row_bytes) + (dest_X * dst_bpp));
+	uint8 *dst0 = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) +
+		(dest_Y * dst_row_bytes) + (dest_X * dst_bpp));
+	nqd_mark_written(dst0, width, height, dst_bpp);
+	const int sstep = down ? -src_row_bytes : src_row_bytes;
+	const int dstep = down ? -dst_row_bytes : dst_row_bytes;
+	if (src_bpp == dst_bpp) {
+		const int span = width * src_bpp;
 		for (int i = 0; i < height; i++) {
-			memmove(dst, src, width);
-			src += src_row_bytes;
-			dst += dst_row_bytes;
+			memmove(dst, src, (size_t)span);
+			src += sstep;
+			dst += dstep;
 		}
+		return;
 	}
-	else {
-		const int src_row_bytes = -(int32)ReadMacInt32(p + acclSrcRowBytes);
-		const int dst_row_bytes = -(int32)ReadMacInt32(p + acclDestRowBytes);
-		uint8 *src = Mac2HostAddr(ReadMacInt32(p + acclSrcBaseAddr) + ((src_Y + height - 1) * src_row_bytes) + (src_X * bpp));
-		uint8 *dst = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) + ((dest_Y + height - 1) * dst_row_bytes) + (dest_X * bpp));
-		uint8 *dst0 = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) + (dest_Y * dst_row_bytes) + (dest_X * bpp));
-		nqd_mark_written(dst0, width / bpp, height, bpp);
-		for (int i = height - 1; i >= 0; i--) {
-			memmove(dst, src, width);
-			src -= src_row_bytes;
-			dst -= dst_row_bytes;
+	if (dst_bpp != 4 || (src_bpp != 1 && src_bpp != 2))
+		return;
+	for (int i = 0; i < height; i++) {
+		if (src_bpp == 1) {
+			for (int x = 0; x < width; x++)
+				nw_fb_pack_mac32(dst + x * 4, mac_pal[src[x]].red,
+						 mac_pal[src[x]].green, mac_pal[src[x]].blue);
+		} else {
+			for (int x = 0; x < width; x++) {
+				const uint16 v = (uint16)((src[x * 2] << 8) | src[x * 2 + 1]);
+				const uint8 r = (uint8)(((v >> 10) & 31) * 8);
+				const uint8 g = (uint8)(((v >> 5) & 31) * 8);
+				const uint8 b = (uint8)((v & 31) * 8);
+				nw_fb_pack_mac32(dst + x * 4, r, g, b);
+			}
 		}
+		src += sstep;
+		dst += dstep;
 	}
 }
 
@@ -405,24 +424,69 @@ void NQD_bitblt(uint32 p)
   50 : hilite
 */
 
+#if NW_BOOT_LOG
+static void nqd_trace_bitblt(uint32 p, int native)
+{
+	static unsigned n;
+	if (n >= 400u)
+		return;
+	n++;
+	const uint32 dest = ReadMacInt32(p + acclDestBaseAddr);
+	const uint32 src = ReadMacInt32(p + acclSrcBaseAddr);
+	const int16 dest_X = (int16)ReadMacInt16(p + acclDestRect + 2) - (int16)ReadMacInt16(p + acclDestBoundsRect + 2);
+	const int16 dest_Y = (int16)ReadMacInt16(p + acclDestRect + 0) - (int16)ReadMacInt16(p + acclDestBoundsRect + 0);
+	const int16 width  = (int16)ReadMacInt16(p + acclDestRect + 6) - (int16)ReadMacInt16(p + acclDestRect + 2);
+	const int16 height = (int16)ReadMacInt16(p + acclDestRect + 4) - (int16)ReadMacInt16(p + acclDestRect + 0);
+	const int16 src_X  = (int16)ReadMacInt16(p + acclSrcRect + 2) - (int16)ReadMacInt16(p + acclSrcBoundsRect + 2);
+	const int16 src_Y  = (int16)ReadMacInt16(p + acclSrcRect + 0) - (int16)ReadMacInt16(p + acclSrcBoundsRect + 0);
+	const int16 db_t = (int16)ReadMacInt16(p + acclDestBoundsRect + 0);
+	const int16 db_l = (int16)ReadMacInt16(p + acclDestBoundsRect + 2);
+	const int16 db_b = (int16)ReadMacInt16(p + acclDestBoundsRect + 4);
+	const int16 db_r = (int16)ReadMacInt16(p + acclDestBoundsRect + 6);
+	const int16 sb_t = (int16)ReadMacInt16(p + acclSrcBoundsRect + 0);
+	const int16 sb_l = (int16)ReadMacInt16(p + acclSrcBoundsRect + 2);
+	const int16 sb_b = (int16)ReadMacInt16(p + acclSrcBoundsRect + 4);
+	const int16 sb_r = (int16)ReadMacInt16(p + acclSrcBoundsRect + 6);
+	printf("NW-BOOT G1: bitblt %s dest %08x xy %d,%d %dx%d drow %d dbounds %d,%d %dx%d src %08x xy %d,%d srow %d sbounds %d,%d %dx%d mode %d depth %d\n",
+	       native ? "nq" : "cpu",
+	       (unsigned)dest, dest_X, dest_Y, width, height,
+	       (int)ReadMacInt32(p + acclDestRowBytes),
+	       db_l, db_t, db_r - db_l, db_b - db_t,
+	       (unsigned)src, src_X, src_Y,
+	       (int)ReadMacInt32(p + acclSrcRowBytes),
+	       sb_l, sb_t, sb_r - sb_l, sb_b - sb_t,
+	       (int)ReadMacInt32(p + acclTransferMode),
+	       (int)ReadMacInt32(p + acclSrcPixelSize));
+}
+#endif
+
 bool NQD_bitblt_hook(uint32 p)
 {
 	D(bug("accl_draw_hook %08x\n", p));
 	NQD_set_dirty_area(p);
 
-	// Check if we can accelerate this bitblt
+	const uint32 src_ps = ReadMacInt32(p + acclSrcPixelSize);
+	const uint32 dst_ps = ReadMacInt32(p + acclDestPixelSize);
+	/* 8/16-bit Appearance chrome into a 32-bit FB. Same-depth 32-bit
+	 * srcCopy stays in ROM so ShieldCursor still wraps window blits. */
+	const int expand32 = dst_ps == 32 && (src_ps == 8 || src_ps == 15 || src_ps == 16);
 	if (ReadMacInt32(p + 0x018) + ReadMacInt32(p + 0x128) == 0 &&
 		ReadMacInt32(p + 0x130) == 0 &&
-		ReadMacInt32(p + acclSrcPixelSize) >= 8 &&
-		ReadMacInt32(p + acclSrcPixelSize) == ReadMacInt32(p + acclDestPixelSize) &&
-		(int32)(ReadMacInt32(p + acclSrcRowBytes) ^ ReadMacInt32(p + acclDestRowBytes)) >= 0 &&	// same sign?
-		ReadMacInt32(p + acclTransferMode) == 0 &&												// srcCopy?
+		expand32 &&
+		(int32)(ReadMacInt32(p + acclSrcRowBytes) ^ ReadMacInt32(p + acclDestRowBytes)) >= 0 &&
+		ReadMacInt32(p + acclTransferMode) == 0 &&
 		(int32)ReadMacInt32(p + 0x15c) > 0) {
 
 		// Yes, set function pointer
 		WriteMacInt32(p + acclDrawProc, NativeTVECT(NATIVE_NQD_BITBLT));
+#if NW_BOOT_LOG
+		nqd_trace_bitblt(p, 1);
+#endif
 		return true;
 	}
+#if NW_BOOT_LOG
+	nqd_trace_bitblt(p, 0);
+#endif
 	return false;
 }
 
@@ -447,39 +511,119 @@ bool NQD_sync_hook(uint32 arg)
  *	Install Native QuickDraw acceleration hooks
  */
 
-void VideoInstallAccel(void)
+static void pixmap_rgb8(uint32 pm, int idx, uint8 *r, uint8 *g, uint8 *b)
 {
-	// Install acceleration hooks
-	if (PrefsFindBool("gfxaccel")) {
-		D(bug("Video: Installing acceleration hooks\n"));
-		uint32 base;
-
-		SheepVar bitblt_hook_info(sizeof(accl_hook_info));
-		base = bitblt_hook_info.addr();
-		WriteMacInt32(base + 0, NativeTVECT(NATIVE_NQD_BITBLT_HOOK));
-		WriteMacInt32(base + 4, NativeTVECT(NATIVE_NQD_SYNC_HOOK));
-		WriteMacInt32(base + 8, ACCL_BITBLT);
-		NQDMisc(6, bitblt_hook_info.addr());
-
-		SheepVar fillrect_hook_info(sizeof(accl_hook_info));
-		base = fillrect_hook_info.addr();
-		WriteMacInt32(base + 0, NativeTVECT(NATIVE_NQD_FILLRECT_HOOK));
-		WriteMacInt32(base + 4, NativeTVECT(NATIVE_NQD_SYNC_HOOK));
-		WriteMacInt32(base + 8, ACCL_FILLRECT);
-		NQDMisc(6, fillrect_hook_info.addr());
-
-		for (int op = 0; op < 8; op++) {
-			switch (op) {
-			case ACCL_BITBLT:
-			case ACCL_FILLRECT:
-				continue;
+	idx &= 255;
+	const uint32 h = ReadMacInt32(pm + 42);
+	if (h) {
+		const uint32 ct = ReadMacInt32(h);
+		if (ct) {
+			const int n = (int)ReadMacInt16(ct + 6) + 1;
+			if (idx < n) {
+				const uint32 e = ct + 8 + (uint32)idx * 8u;
+				*r = (uint8)(ReadMacInt16(e + 2) >> 8);
+				*g = (uint8)(ReadMacInt16(e + 4) >> 8);
+				*b = (uint8)(ReadMacInt16(e + 6) >> 8);
+				return;
 			}
-			SheepVar unknown_hook_info(sizeof(accl_hook_info));
-			base = unknown_hook_info.addr();
-			WriteMacInt32(base + 0, NativeTVECT(NATIVE_NQD_UNKNOWN_HOOK));
-			WriteMacInt32(base + 4, NativeTVECT(NATIVE_NQD_SYNC_HOOK));
-			WriteMacInt32(base + 8, op);
-			NQDMisc(6, unknown_hook_info.addr());
 		}
 	}
+	*r = mac_pal[idx].red;
+	*g = mac_pal[idx].green;
+	*b = mac_pal[idx].blue;
+}
+
+int NQD_copybits_expand(uint32 srcBits, uint32 dstBits, uint32 srcRect,
+			uint32 dstRect, int16 mode, uint32 maskRgn)
+{
+	if (!srcBits || !dstBits || !srcRect || !dstRect || mode != 0 || maskRgn)
+		return 0;
+	const int16 srb = (int16)ReadMacInt16(srcBits + 4);
+	const int16 drb = (int16)ReadMacInt16(dstBits + 4);
+	if (srb >= 0 || drb >= 0)
+		return 0;
+	const int src_ps = (int)ReadMacInt16(srcBits + 32);
+	const int dst_ps = (int)ReadMacInt16(dstBits + 32);
+	const int src_bpp = bytes_per_pixel(src_ps);
+	const int dst_bpp = bytes_per_pixel(dst_ps);
+	if (dst_bpp != 4 || (src_bpp != 1 && src_bpp != 2))
+		return 0;
+	const int16 st = (int16)ReadMacInt16(srcRect + 0);
+	const int16 sl = (int16)ReadMacInt16(srcRect + 2);
+	const int16 sb = (int16)ReadMacInt16(srcRect + 4);
+	const int16 sr = (int16)ReadMacInt16(srcRect + 6);
+	const int16 dt = (int16)ReadMacInt16(dstRect + 0);
+	const int16 dl = (int16)ReadMacInt16(dstRect + 2);
+	const int16 db = (int16)ReadMacInt16(dstRect + 4);
+	const int16 dr = (int16)ReadMacInt16(dstRect + 6);
+	const int width = (int)sr - (int)sl;
+	const int height = (int)sb - (int)st;
+	if (width <= 0 || height <= 0 || width != (int)dr - (int)dl ||
+	    height != (int)db - (int)dt)
+		return 0;
+	const int16 sbt = (int16)ReadMacInt16(srcBits + 6);
+	const int16 sbl = (int16)ReadMacInt16(srcBits + 8);
+	const int16 dbt = (int16)ReadMacInt16(dstBits + 6);
+	const int16 dbl = (int16)ReadMacInt16(dstBits + 8);
+	const int src_X = (int)sl - (int)sbl;
+	const int src_Y = (int)st - (int)sbt;
+	const int dest_X = (int)dl - (int)dbl;
+	const int dest_Y = (int)dt - (int)dbt;
+	const int src_row = (int)srb & 0x3fff;
+	const int dst_row = (int)drb & 0x3fff;
+	if (src_row < width * src_bpp || dst_row < width * dst_bpp)
+		return 0;
+	uint8 *src = Mac2HostAddr(ReadMacInt32(srcBits) +
+				  (uint32)(src_Y * src_row + src_X * src_bpp));
+	uint8 *dst = Mac2HostAddr(ReadMacInt32(dstBits) +
+				  (uint32)(dest_Y * dst_row + dest_X * dst_bpp));
+	if (!src || !dst)
+		return 0;
+	nqd_mark_written(dst, width, height, dst_bpp);
+	for (int y = 0; y < height; y++) {
+		if (src_bpp == 1) {
+			for (int x = 0; x < width; x++) {
+				uint8 r, g, b;
+				pixmap_rgb8(srcBits, src[x], &r, &g, &b);
+				nw_fb_pack_mac32(dst + x * 4, r, g, b);
+			}
+		} else {
+			for (int x = 0; x < width; x++) {
+				const uint16 v = (uint16)((src[x * 2] << 8) | src[x * 2 + 1]);
+				nw_fb_pack_mac32(dst + x * 4,
+						 (uint8)(((v >> 10) & 31) * 8),
+						 (uint8)(((v >> 5) & 31) * 8),
+						 (uint8)((v & 31) * 8));
+			}
+		}
+		src += src_row;
+		dst += dst_row;
+	}
+	if (ReadMacInt32(dstBits) == screen_base)
+		video_set_dirty_area(dest_X, dest_Y, width, height);
+#if NW_BOOT_LOG
+	static unsigned nlog;
+	if (nlog < 40u) {
+		nlog++;
+		printf("NW-BOOT G1: copybits expand %d→32 %dx%d dest %08x\n",
+		       src_ps, width, height, (unsigned)ReadMacInt32(dstBits));
+		fflush(stdout);
+	}
+#endif
+	return 1;
+}
+
+void VideoInstallAccel(void)
+{
+	/*
+	 * Do not Execute68kTrap from here. PatchAfterStartup runs from
+	 * 68k accRun → EMUL_OP → ExecuteNative (another nested 68k mixed
+	 * mode). GetTrapAddress/SetToolTrap on that stack wedges the
+	 * New World 68k emulator; Finder then never launches apps.
+	 * QT controller chrome is JIT fadds/fsubs, not this trap.
+	 */
+#if NW_BOOT_LOG
+	printf("NW-BOOT G1: VideoInstallAccel (no 68k CopyBits trap)\n");
+	fflush(stdout);
+#endif
 }

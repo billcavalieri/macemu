@@ -1014,7 +1014,6 @@ void init_emul_ppc(void)
 		memcpy(vm_do_get_real_address(NW_CI_PA), ROMBaseHost + NW_CONFIGINFO_OFFSET, NW_CI_SIZE);
 		ppc_cpu->set_register(powerpc_registers::GPR(3), any_register((uint32)NW_CI_PA));
 		nw_log_g1_hwinit();
-#if NW_BOOT_LOG
 		{
 			char buf[128];
 			snprintf(buf, sizeof(buf), "G1: NKSystemInfo r5=%08x bank=%08x+%08x vectors@0 from ROM+%06x r9=%08x",
@@ -1022,7 +1021,6 @@ void init_emul_ppc(void)
 				 (unsigned)hwinfo);
 			nw_boot_log(buf);
 		}
-#endif
 	} else {
 		nw_log_translator_off();
 	}

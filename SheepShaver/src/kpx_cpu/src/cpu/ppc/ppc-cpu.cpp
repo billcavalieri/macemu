@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
 #include "vm_alloc.h"
 #include "cpu/vm.hpp"
 #include "cpu/ppc/ppc-cpu.hpp"
@@ -360,10 +361,18 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_isync(powerpc_cpu::jit_host_isync);
 		nw_jit_set_host_mtmsr(powerpc_cpu::jit_host_mtmsr);
 		nw_jit_set_host_mtsr(powerpc_cpu::jit_host_mtsr);
+		nw_jit_set_host_mfsr(powerpc_cpu::jit_host_mfsr);
 		nw_jit_set_host_trap(powerpc_cpu::jit_host_trap);
+		nw_jit_set_host_sc(powerpc_cpu::jit_host_sc);
 		nw_jit_set_host_mtspr(powerpc_cpu::jit_host_mtspr);
 		nw_jit_set_host_lvx(powerpc_cpu::jit_host_lvx);
 		nw_jit_set_host_stvx(powerpc_cpu::jit_host_stvx);
+		nw_jit_set_host_vmx(powerpc_cpu::jit_host_vmx);
+		nw_jit_set_host_rfi(powerpc_cpu::jit_host_rfi);
+		nw_jit_set_host_icbi(powerpc_cpu::jit_host_icbi);
+		nw_jit_set_host_tlbie(powerpc_cpu::jit_host_tlbie);
+		nw_jit_set_host_lwarx(powerpc_cpu::jit_host_lwarx);
+		nw_jit_set_host_stwcx(powerpc_cpu::jit_host_stwcx);
 		nw_jit_set_host_lfd(powerpc_cpu::jit_host_lfd);
 		nw_jit_set_host_stfd(powerpc_cpu::jit_host_stfd);
 		nw_jit_set_host_half(powerpc_cpu::jit_host_lh, powerpc_cpu::jit_host_sth);
@@ -511,15 +520,25 @@ void powerpc_cpu::take_sc()
 	take_exception(NW_VEC_SYSCALL, sc_pc + 4, 0, sc_pc);
 }
 
+#ifdef SHEEPSHAVER
+static uint64_t g_vec500, g_vec900;
+#endif
+
 void powerpc_cpu::take_dec()
 {
 	dec_pending_ = false;
+#ifdef SHEEPSHAVER
+	g_vec900++;
+#endif
 	take_exception(NW_VEC_DECREMENTER, pc(), 0);
 }
 
 void powerpc_cpu::take_external()
 {
 	/* Level-sensitive: the line stays asserted until the handler's IACK. */
+#ifdef SHEEPSHAVER
+	g_vec500++;
+#endif
 	take_exception(NW_VEC_EXTERNAL, pc(), 0);
 }
 
@@ -860,6 +879,22 @@ void powerpc_cpu::tick_decrementer()
 	nw_script_tick();
 #endif
 	nw_event_tick(pc(), ppc32_guest_mmu().msr());
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+	{
+		static uint64_t last500;
+		static time_t last;
+		const time_t now = time(NULL);
+		if (now != last) {
+			last = now;
+			if (g_vec500 == last500 && g_vec900)
+				printf("NW-BOOT G1: 900-only r24=%08x pc=%08x n500=%llu n900=%llu ext=%d\n",
+				       (unsigned)gpr(24), (unsigned)pc(),
+				       (unsigned long long)g_vec500, (unsigned long long)g_vec900,
+				       nw_io_ext_irq);
+			last500 = g_vec500;
+		}
+	}
+#endif
 #endif
 }
 
@@ -1313,6 +1348,19 @@ void * PF_CONVENTION powerpc_cpu::compile_chain_block(block_info *sbi)
 #endif
 
 #ifdef SHEEPSHAVER
+/* 68k emu polls VIA/PMU/SCC/PCI. skip_io used to punt those loads to kpx
+ * (one insn/block). Do the access here so the JIT can keep the loop. */
+static uint32 jit_io_load(uint32 pa, int size, uint32 pc, int *fault)
+{
+	*fault = 0;
+	return nw_io_read(pa, size, pc);
+}
+static void jit_io_store(uint32 pa, int size, uint32 val, uint32 pc, int *fault)
+{
+	*fault = 0;
+	nw_io_write(pa, size, val, pc);
+}
+
 uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
@@ -1324,10 +1372,8 @@ uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
 		return 0;
 	}
 	const int kind = nw_pa_kind(pa);
-	if (kind == NW_PA_IO) {
-		*fault = 2;
-		return 0;
-	}
+	if (kind == NW_PA_IO)
+		return jit_io_load(pa, 4, pc, fault);
 	if (kind == NW_PA_NONE) {
 		*fault = 1;
 		return 0;
@@ -1344,14 +1390,13 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
 	uint32 pa;
-	(void)pc;
 	if (!ppc->guest_data_probe(ea, 4, true, &pa)) {
 		*fault = 1;
 		return;
 	}
 	const int kind = nw_pa_kind(pa);
 	if (kind == NW_PA_IO) {
-		*fault = 2;
+		jit_io_store(pa, 4, val, pc, fault);
 		return;
 	}
 	if (kind == NW_PA_ROM)
@@ -1381,10 +1426,8 @@ uint32 powerpc_cpu::jit_host_lwz_pa(void *host, uint32 pa, uint32 pc, int *fault
 	(void)pc;
 	(void)ppc;
 	const int kind = nw_pa_kind(pa);
-	if (kind == NW_PA_IO) {
-		*fault = 2;
-		return 0;
-	}
+	if (kind == NW_PA_IO)
+		return jit_io_load(pa, 4, pc, fault);
 	if (kind == NW_PA_NONE) {
 		*fault = 1;
 		return 0;
@@ -1398,7 +1441,7 @@ void powerpc_cpu::jit_host_stw_pa(void *host, uint32 pa, uint32 val, uint32 pc, 
 	(void)pc;
 	const int kind = nw_pa_kind(pa);
 	if (kind == NW_PA_IO) {
-		*fault = 2;
+		jit_io_store(pa, 4, val, pc, fault);
 		return;
 	}
 	if (kind == NW_PA_ROM)
@@ -1474,7 +1517,9 @@ void powerpc_cpu::jit_host_mtmsr(void *host, uint32 msr)
 		nw_log_msr_dr(msr);
 		nw_log_msr_write("mtmsr", ppc->pc(), msr);
 #endif
-		nw_jit_dtlb_flush_if_pr(old, msr, NW_JIT_DTLB_FL_MTMSR);
+		/* IR|DR only. Do not use flush_if_pr: rfi shares that and CHK'd QT. */
+		if ((old ^ msr) & 0x00000030u)
+			nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_MTMSR);
 	}
 	(void)ppc;
 }
@@ -1492,11 +1537,26 @@ void powerpc_cpu::jit_host_mtsr(void *host, uint32 sr, uint32 val)
 	nw_jit_dtlb_drop_sr(i, NW_JIT_DTLB_FL_MTSR);
 }
 
+uint32 powerpc_cpu::jit_host_mfsr(void *host, uint32 sr)
+{
+	(void)host;
+	if (!ppc32_guest_mmu_enabled())
+		return 0;
+	return ppc32_guest_mmu().sr(sr & 0xfu);
+}
+
 void powerpc_cpu::jit_host_trap(void *host, uint32 guest_pc)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
 	ppc->pc() = guest_pc;
 	ppc->take_program(0x00020000u);
+}
+
+void powerpc_cpu::jit_host_sc(void *host, uint32 guest_pc)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	ppc->pc() = guest_pc;
+	ppc->take_sc();
 }
 
 void powerpc_cpu::jit_host_mtspr(void *host, uint32 spr, uint32 val)
@@ -1566,6 +1626,111 @@ void powerpc_cpu::jit_host_stvx(void *host, uint32 ea, const uint32 *w, uint32 p
 	if (*fault)
 		return;
 	jit_host_stw(host, ea + 12, w[3], pc, fault);
+}
+
+void powerpc_cpu::jit_host_vmx(void *host, uint32 op, struct nw_jit_cpu *cpu)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	if (!ppc || !cpu)
+		return;
+	for (int i = 0; i < 32; i++)
+		ppc->gpr(i) = cpu->gpr[i];
+	for (int i = 0; i < 32; i++) {
+		ppc->vr(i).w[0] = cpu->vr[i][0];
+		ppc->vr(i).w[1] = cpu->vr[i][1];
+		ppc->vr(i).w[2] = cpu->vr[i][2];
+		ppc->vr(i).w[3] = cpu->vr[i][3];
+	}
+	const uint32 saved = ppc->pc();
+	const instr_info_t *ii = ppc->decode(op);
+	if (ii)
+		ii->execute(ppc, op);
+	ppc->pc() = saved;
+	for (int i = 0; i < 32; i++)
+		cpu->gpr[i] = ppc->gpr(i);
+	for (int i = 0; i < 32; i++) {
+		cpu->vr[i][0] = ppc->vr(i).w[0];
+		cpu->vr[i][1] = ppc->vr(i).w[1];
+		cpu->vr[i][2] = ppc->vr(i).w[2];
+		cpu->vr[i][3] = ppc->vr(i).w[3];
+	}
+}
+
+void powerpc_cpu::jit_host_rfi(void *host, struct nw_jit_cpu *cpu)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	if (!ppc || !cpu)
+		return;
+	if (ppc32_guest_mmu_enabled()) {
+		const uint32 old = ppc32_guest_mmu().msr();
+		ppc32_guest_mmu().set_msr(ppc->srr1_);
+		nw_log_msr_dr(ppc->srr1_);
+		nw_log_msr_write("rfi", ppc->srr0_, ppc->srr1_);
+		nw_jit_dtlb_flush_if_pr(old, ppc->srr1_, NW_JIT_DTLB_FL_RFI);
+		cpu->pc = ppc->srr0_;
+		cpu->msr = ppc->srr1_;
+		return;
+	}
+	cpu->pc += 4;
+}
+
+void powerpc_cpu::jit_host_icbi(void *host, uint32 ea)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	if (!ppc)
+		return;
+	uint32 pa;
+	if (ppc->guest_data_probe(ea, 4, false, &pa))
+		nw_jit_invalidate_page_src(pa, NW_JIT_FL_ICBI);
+}
+
+void powerpc_cpu::jit_host_tlbie(void *host, uint32 ea)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	if (!ppc)
+		return;
+	if (ppc32_guest_mmu_enabled()) {
+		ppc32_guest_mmu().tlbie(ea);
+		nw_jit_dtlb_drop_page(ea, NW_JIT_DTLB_FL_TLB);
+		ppc->invalidate_cache();
+	}
+}
+
+uint32 powerpc_cpu::jit_host_lwarx(void *host, uint32 ea, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	(void)pc;
+	uint32 pa;
+	if (!ppc->guest_data_probe(ea, 4, false, &pa)) {
+		*fault = 1;
+		return 0;
+	}
+	uint32 v = vm_read_memory_4(pa);
+	ppc->regs().reserve_valid = 1;
+	ppc->regs().reserve_addr = pa;
+	return v;
+}
+
+int powerpc_cpu::jit_host_stwcx(void *host, uint32 ea, uint32 val, uint32 pc, int *fault)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	(void)pc;
+	uint32 pa;
+	if (!ppc->guest_data_probe(ea, 4, true, &pa)) {
+		*fault = 1;
+		return 0;
+	}
+	int eq = 0;
+	if (ppc->regs().reserve_valid && ppc->regs().reserve_addr == pa) {
+		vm_write_memory_4(pa, val);
+		if (nw_pa_kind(pa) == NW_PA_FB)
+			nw_fb_damage_store(pa, 4);
+		else
+			nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+		eq = 1;
+	}
+	ppc->regs().reserve_valid = 0;
+	return eq;
 }
 
 void powerpc_cpu::jit_host_lfd(void *host, uint32 fd, uint32 ea, uint32 pc, int *fault, uint64 *out)
@@ -1641,10 +1806,8 @@ uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)
 		return 0;
 	}
 	const int kind = nw_pa_kind(pa);
-	if (kind == NW_PA_IO) {
-		*fault = 2;
-		return 0;
-	}
+	if (kind == NW_PA_IO)
+		return jit_io_load(pa, 2, pc, fault);
 	if (kind == NW_PA_NONE) {
 		*fault = 1;
 		return 0;
@@ -1663,7 +1826,7 @@ void powerpc_cpu::jit_host_sth(void *host, uint32 ea, uint32 val, uint32 pc, int
 	}
 	const int kind = nw_pa_kind(pa);
 	if (kind == NW_PA_IO) {
-		*fault = 2;
+		jit_io_store(pa, 2, val, pc, fault);
 		return;
 	}
 	if (kind == NW_PA_ROM)
@@ -1691,10 +1854,8 @@ uint32 powerpc_cpu::jit_host_lb(void *host, uint32 ea, uint32 pc, int *fault)
 		return 0;
 	}
 	const int kind = nw_pa_kind(pa);
-	if (kind == NW_PA_IO) {
-		*fault = 2;
-		return 0;
-	}
+	if (kind == NW_PA_IO)
+		return jit_io_load(pa, 1, pc, fault);
 	if (kind == NW_PA_NONE) {
 		*fault = 1;
 		return 0;
@@ -1713,7 +1874,7 @@ void powerpc_cpu::jit_host_stb(void *host, uint32 ea, uint32 val, uint32 pc, int
 	}
 	const int kind = nw_pa_kind(pa);
 	if (kind == NW_PA_IO) {
-		*fault = 2;
+		jit_io_store(pa, 1, val, pc, fault);
 		return;
 	}
 	if (kind == NW_PA_ROM)
@@ -1734,8 +1895,10 @@ void powerpc_cpu::jit_host_stb(void *host, uint32 ea, uint32 val, uint32 pc, int
 static int nw_jit_pa_ok(uint32 pa, int is_st)
 {
 	const int kind = nw_pa_kind(pa);
-	if (kind == NW_PA_IO || kind == NW_PA_NONE)
+	if (kind == NW_PA_NONE)
 		return 0;
+	if (kind == NW_PA_IO)
+		return 2;	/* pack this op, then end the block */
 	if (is_st && !nw_pa_writable(pa))
 		return 0;
 	return 1;
@@ -1749,7 +1912,9 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		;
 	else if (prim == 36 || prim == 37)
 		is_st = 1;
-	else if (prim == 31 && ((op >> 1) & 0x3ff) == 23) {
+	else if (prim == 31 && (((op >> 1) & 0x3ff) == 23 ||
+				 ((op >> 1) & 0x3ff) == 55 ||
+				 ((op >> 1) & 0x3ff) == 20)) {
 		const int ra = (int)((op >> 16) & 0x1f);
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
@@ -1758,7 +1923,8 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 			return 0;
 		return nw_jit_pa_ok(pa, 0);
 	}
-	else if (prim == 31 && ((op >> 1) & 0x3ff) == 87) {
+	else if (prim == 31 && (((op >> 1) & 0x3ff) == 87 ||
+				 ((op >> 1) & 0x3ff) == 119)) {
 		const int ra = (int)((op >> 16) & 0x1f);
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
@@ -1767,7 +1933,18 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 			return 0;
 		return nw_jit_pa_ok(pa, 0);
 	}
-	else if (prim == 31 && ((op >> 1) & 0x3ff) == 151) {
+	else if (prim == 31 && ((op >> 1) & 0x3ff) == 215) {
+		const int ra = (int)((op >> 16) & 0x1f);
+		const int rb = (int)((op >> 11) & 0x1f);
+		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
+		uint32 pa;
+		if (!ppc->guest_data_probe(ea, 1, true, &pa))
+			return 0;
+		return nw_jit_pa_ok(pa, 1);
+	}
+	else if (prim == 31 && (((op >> 1) & 0x3ff) == 151 ||
+				 ((op >> 1) & 0x3ff) == 150 ||
+				 ((op >> 1) & 0x3ff) == 183)) {
 		const int ra = (int)((op >> 16) & 0x1f);
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
@@ -1785,7 +1962,9 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 			return 0;
 		return nw_jit_pa_ok(pa, 1);
 	}
-	else if (prim == 31 && (((op >> 1) & 0x3ff) == 343 ||
+	else if (prim == 31 && (((op >> 1) & 0x3ff) == 279 ||
+				 ((op >> 1) & 0x3ff) == 311 ||
+				 ((op >> 1) & 0x3ff) == 343 ||
 				 ((op >> 1) & 0x3ff) == 375)) {
 		const int ra = (int)((op >> 16) & 0x1f);
 		const int rb = (int)((op >> 11) & 0x1f);
@@ -1795,6 +1974,24 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 			return 0;
 		return nw_jit_pa_ok(pa, 0);
 	}
+	else if (prim == 31 && ((op >> 1) & 0x3ff) == 599) {
+		const int ra = (int)((op >> 16) & 0x1f);
+		const int rb = (int)((op >> 11) & 0x1f);
+		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
+		uint32 pa;
+		if (!ppc->guest_data_probe(ea, 8, false, &pa))
+			return 0;
+		return nw_jit_pa_ok(pa, 0);
+	}
+	else if (prim == 31 && ((op >> 1) & 0x3ff) == 727) {
+		const int ra = (int)((op >> 16) & 0x1f);
+		const int rb = (int)((op >> 11) & 0x1f);
+		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
+		uint32 pa;
+		if (!ppc->guest_data_probe(ea, 8, true, &pa))
+			return 0;
+		return nw_jit_pa_ok(pa, 1);
+	}
 	else if (prim == 33)
 		;
 	else if (prim == 34)
@@ -1802,14 +1999,16 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 	else if (prim == 38 || prim == 39) {
 		width = 1;
 		is_st = 1;
-	} else if (prim == 40 || prim == 42 || prim == 43)
+	} else if (prim == 40 || prim == 41 || prim == 42 || prim == 43)
 		width = 2;
 	else if (prim == 44 || prim == 45) {
 		width = 2;
 		is_st = 1;
-	} else if (prim == 50)
+	} else if (prim == 49)
+		width = 4;
+	else if (prim == 50 || prim == 51)
 		width = 8;
-	else if (prim == 54) {
+	else if (prim == 54 || prim == 55) {
 		width = 8;
 		is_st = 1;
 	} else if (prim == 46 || prim == 47) {
@@ -1927,14 +2126,22 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 		sg[ra] = nw_jit_rotl32(sg[rd], (uint32)sh) & nw_jit_mask((uint32)mb, (uint32)me);
 		return;
 	}
-	if (prim == 31 && xo == 266) {
+	if (prim == 31 && (xo == 266 || xo == 778)) {
 		sg[rd] = sg[ra] + sg[rb];
+		return;
+	}
+	if (prim == 31 && xo == 183 && ra) {
+		sg[ra] = sg[ra] + sg[rb];
+		return;
+	}
+	if (prim == 8) {
+		sg[rd] = (uint32)simm - sg[ra];
 		return;
 	}
 	if (prim == 32 || prim == 33) {
 		const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0))
+		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0) == 1)
 			sg[rd] = vm_read_memory_4(pa);
 		if (prim == 33 && ra)
 			sg[ra] = ea;
@@ -1943,32 +2150,74 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 	if (prim == 34) {
 		const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 1, false, &pa) && nw_jit_pa_ok(pa, 0))
+		if (ppc->guest_data_probe(ea, 1, false, &pa) && nw_jit_pa_ok(pa, 0) == 1)
 			sg[rd] = vm_read_memory_1(pa);
 		return;
 	}
 	if (prim == 31 && xo == 87) {
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 1, false, &pa) && nw_jit_pa_ok(pa, 0))
+		if (ppc->guest_data_probe(ea, 1, false, &pa) && nw_jit_pa_ok(pa, 0) == 1)
 			sg[rd] = vm_read_memory_1(pa);
+		return;
+	}
+	if (prim == 31 && xo == 119) {
+		const uint32 ea = sg[ra] + sg[rb];
+		uint32 pa;
+		if (ppc->guest_data_probe(ea, 1, false, &pa) && nw_jit_pa_ok(pa, 0) == 1) {
+			sg[rd] = vm_read_memory_1(pa);
+			if (ra)
+				sg[ra] = ea;
+		}
+		return;
+	}
+	if (prim == 31 && xo == 311) {
+		const uint32 ea = sg[ra] + sg[rb];
+		uint32 pa;
+		if (ppc->guest_data_probe(ea, 2, false, &pa) && nw_jit_pa_ok(pa, 0) == 1) {
+			sg[rd] = vm_read_memory_2(pa);
+			if (ra)
+				sg[ra] = ea;
+		}
 		return;
 	}
 	if ((prim == 37 || prim == 39 || prim == 45) && ra) {
 		sg[ra] = (ra ? sg[ra] : 0) + (uint32)simm;
 		return;
 	}
+	if ((prim == 41 || prim == 49 || prim == 51 || prim == 55) && ra) {
+		const uint32 ea = sg[ra] + (uint32)simm;
+		unsigned w = (prim == 41) ? 2u : (prim == 49) ? 4u : 8u;
+		int st = (prim == 55);
+		uint32 pa;
+		if (ppc->guest_data_probe(ea, w, st != 0, &pa) && nw_jit_pa_ok(pa, st) == 1) {
+			if (prim == 41)
+				sg[rd] = vm_read_memory_2(pa);
+			sg[ra] = ea;
+		}
+		return;
+	}
+	if (prim == 31 && xo == 55) {
+		const uint32 ea = sg[ra] + sg[rb];
+		uint32 pa;
+		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0) == 1) {
+			sg[rd] = vm_read_memory_4(pa);
+			if (ra)
+				sg[ra] = ea;
+		}
+		return;
+	}
 	if (prim == 31 && xo == 23) {
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0))
+		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0) == 1)
 			sg[rd] = vm_read_memory_4(pa);
 		return;
 	}
 	if (prim == 31 && (xo == 343 || xo == 375)) {
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 2, false, &pa) && nw_jit_pa_ok(pa, 0))
+		if (ppc->guest_data_probe(ea, 2, false, &pa) && nw_jit_pa_ok(pa, 0) == 1)
 			sg[rd] = (uint32)(int32)(int16)vm_read_memory_2(pa);
 		if (xo == 375 && ra)
 			sg[ra] = ea;
@@ -1997,7 +2246,10 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 
 	const uint32 guest_pc = pc();
 	const uint32 phys_page = last_fetch_pa_ & ~0xfffu;
-	const uint32 msr_ir = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_IR) ? 1u : 0u;
+	const uint32 msr = ppc32_guest_mmu().msr();
+	const uint32 msr_ir = ((msr & ppc32_mmu::MSR_IR) ? 1u : 0u) |
+			      ((msr & ppc32_mmu::MSR_DR) ? 2u : 0u) |
+			      ((msr & ppc32_mmu::MSR_PR) ? 4u : 0u);
 	uint32 ops[NW_JIT_MAX_BLOCK];
 	int n = 0;
 	int hit = 0;
@@ -2011,7 +2263,29 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	} else {
 		fn = NULL;
 		if (!nw_jit_op_supported(first_opcode)) {
-			nw_jit_note_skip_unsup(first_opcode);
+			nw_jit_skip_raw_once(first_opcode, guest_pc);
+			if ((first_opcode >> 26) == 6) {
+				static int op6_id;
+				if (!op6_id) {
+					op6_id = 1;
+					printf("NW-BOOT G1: op6 id pc=%08x op=%08x msr=%08x IR=%u DR=%u PR=%u\n",
+					       (unsigned)guest_pc, (unsigned)first_opcode,
+					       (unsigned)msr,
+					       (msr & ppc32_mmu::MSR_IR) ? 1u : 0u,
+					       (msr & ppc32_mmu::MSR_DR) ? 1u : 0u,
+					       (msr & ppc32_mmu::MSR_PR) ? 1u : 0u);
+					for (int k = -4; k <= 4; k++) {
+						uint32 w = 0;
+						const uint32 ea = guest_pc + (uint32)k * 4u;
+						const int ok = nw_jit_peek(ea, &w);
+						printf("NW-BOOT G1: op6 word %+d ea=%08x %s %08x\n",
+						       k, (unsigned)ea, ok ? "ok" : "fail",
+						       (unsigned)w);
+					}
+					fflush(stdout);
+				}
+			}
+			nw_jit_note_skip_unsup(first_opcode, 1);
 			return 0;
 		}
 		if (!nw_jit_op_dispatch(first_opcode)) {
@@ -2022,38 +2296,55 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		uint32 sg[32];
 		for (int i = 0; i < 32; i++)
 			sg[i] = gpr(i);
-		if (!nw_jit_op_mem_ok(this, first_opcode, sg)) {
-			const int prim0 = (int)(first_opcode >> 26);
-			const int ra = (int)((first_opcode >> 16) & 0x1f);
-			const int simm = (int16_t)(first_opcode & 0xffffu);
-			const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
-			uint32 pa = 0;
-			guest_data_probe(ea, 4, prim0 == 36, &pa);
-			nw_jit_verify_uncompared(nw_pa_kind(pa) == NW_PA_IO ? 2 : 1);
-			return 0;
-		}
+		{
+			const int mok0 = nw_jit_op_mem_ok(this, first_opcode, sg);
+			if (mok0 == 0) {
+				const int prim0 = (int)(first_opcode >> 26);
+				const int ra = (int)((first_opcode >> 16) & 0x1f);
+				const int simm = (int16_t)(first_opcode & 0xffffu);
+				const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
+				uint32 pa = 0;
+				guest_data_probe(ea, 4, prim0 == 36, &pa);
+				if (nw_pa_kind(pa) == NW_PA_IO) {
+					nw_jit_verify_uncompared(2);
+					nw_jit_note_skip_io(ea, guest_pc);
+				} else
+					nw_jit_verify_uncompared(1);
+				return 0;
+			}
 
-		ops[0] = first_opcode;
-		n = 1;
-		nw_jit_sg_apply(this, sg, ops[0]);
-		while (n < NW_JIT_MAX_BLOCK && !nw_jit_op_ends_block(ops[n - 1])) {
-			const uint32 ea = guest_pc + (uint32)n * 4u;
-			if ((ea & ~0xfffu) != (guest_pc & ~0xfffu))
-				break;
-			uint32 op;
-			if (!nw_jit_peek(ea, &op))
-				break;
-			/* Do not mix FP/AltiVec into an integer block. A codec
-			 * loop that starts with FP or VMX may keep packing those. */
-			if ((is_altivec_insn(op) || is_fp_insn(op)) &&
-			    !is_altivec_insn(ops[0]) && !is_fp_insn(ops[0]))
-				break;
-			if (!nw_jit_op_dispatch(op))
-				break;
-			if (!nw_jit_op_mem_ok(this, op, sg))
-				break;
-			ops[n++] = op;
-			nw_jit_sg_apply(this, sg, op);
+			ops[0] = first_opcode;
+			n = 1;
+			nw_jit_sg_apply(this, sg, ops[0]);
+			if (mok0 != 2) {
+				while (n < NW_JIT_MAX_BLOCK && !nw_jit_op_ends_block(ops[n - 1])) {
+					const uint32 ea = guest_pc + (uint32)n * 4u;
+					if ((ea & ~0xfffu) != (guest_pc & ~0xfffu))
+						break;
+					uint32 op;
+					if (!nw_jit_peek(ea, &op))
+						break;
+					/* Integer, FP, and VMX stay in separate blocks.
+					 * MSR[FP]/MSR[VEC] are only tested on the first op;
+					 * an lfd…lvx block with VEC off would run VMX with
+					 * no 0xf20, so the NK never saves VRs on switch. */
+					if (is_altivec_insn(op) != is_altivec_insn(ops[0]) ||
+					    is_fp_insn(op) != is_fp_insn(ops[0]))
+						break;
+					if (!nw_jit_op_dispatch(op)) {
+						nw_jit_skip_raw_once(op, guest_pc + (uint32)n * 4u);
+						nw_jit_note_skip_unsup(op, (unsigned)n);
+						break;
+					}
+					const int mok = nw_jit_op_mem_ok(this, op, sg);
+					if (mok == 0)
+						break;
+					ops[n++] = op;
+					nw_jit_sg_apply(this, sg, op);
+					if (mok == 2)
+						break;
+				}
+			}
 		}
 
 		fn = nw_jit_compile(ops, n, guest_pc, phys_page, msr_ir, 0);
@@ -2084,6 +2375,8 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		jc.fpr[i] = fpr_dw(i);
 	jc.cr = cr().get();
 	jc.xer = xer().get();
+	jc.fpscr = fpscr();
+	jc.vscr = vscr().get();
 	jc.lr = lr();
 	jc.ctr = ctr();
 	jc.pc = pc();
@@ -2093,93 +2386,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	nw_jit_cpu_bind(&jc);
 	fn(&jc);
 
-	if (jc.fault) {
-		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_EXC) {
-			for (int i = 0; i < 32; i++)
-				gpr(i) = jc.gpr[i];
-			cr().set(jc.cr);
-			xer().set(jc.xer);
-			lr() = jc.lr;
-			ctr() = jc.ctr;
-			if (jc.dec_wr) {
-				if ((dec_ & 0x80000000u) == 0 && (jc.dec & 0x80000000u))
-					dec_pending_ = true;
-				dec_ = jc.dec;
-				dec_tb_base_ = tb_ticks();
-			}
-			nw_jit_note_exec(n);
-#if NW_BOOT_LOG
-			for (int i = 0; i < n; i++)
-				nw_event_insn();
-#endif
-			return 1;
-		}
-		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_SMC) {
-			for (int i = 0; i < 32; i++)
-				gpr(i) = jc.gpr[i];
-			cr().set(jc.cr);
-			xer().set(jc.xer);
-			lr() = jc.lr;
-			ctr() = jc.ctr;
-			pc() = jc.pc + 4u;
-			if (jc.dec_wr) {
-				if ((dec_ & 0x80000000u) == 0 && (jc.dec & 0x80000000u))
-					dec_pending_ = true;
-				dec_ = jc.dec;
-				dec_tb_base_ = tb_ticks();
-			}
-			nw_jit_note_exec(n);
-#if NW_BOOT_LOG
-			for (int i = 0; i < n; i++)
-				nw_event_insn();
-#endif
-			return 1;
-		}
-		if (mode == NW_JIT_ON && jc.fault == 1 && ppc32_guest_mmu_enabled()) {
-			const ppc32_xlate_result xr = ppc32_guest_mmu().translate(
-				jc.fault_ea, PPC32_XLATE_DR, 4, jc.fault_st != 0);
-			if (!xr.ok) {
-				for (int i = 0; i < 32; i++)
-					gpr(i) = jc.gpr[i];
-				cr().set(jc.cr);
-				xer().set(jc.xer);
-				lr() = jc.lr;
-				ctr() = jc.ctr;
-				pc() = jc.pc;
-				if (jc.dec_wr) {
-					if ((dec_ & 0x80000000u) == 0 && (jc.dec & 0x80000000u))
-						dec_pending_ = true;
-					dec_ = jc.dec;
-					dec_tb_base_ = tb_ticks();
-				}
-				static unsigned ndsi_log;
-				if (ndsi_log < 8u) {
-					ndsi_log++;
-					printf("NW-BOOT G1: jit dsi #%u pc=%08x ea=%08x st=%u\n",
-					       ndsi_log, (unsigned)jc.pc,
-					       (unsigned)jc.fault_ea, (unsigned)jc.fault_st);
-					fflush(stdout);
-				}
-				take_data_dsi(jc.fault_ea, jc.fault_st != 0, xr.fault);
-				nw_jit_note_exec(n);
-				return 1;
-			}
-		}
-		static unsigned nskip_log;
-		nskip_log++;
-		if (nskip_log <= 8u) {
-			printf("NW-BOOT JIT verify skip-%s #%u pc=%08x op=%08x n=%d\n",
-			       jc.fault == 2 ? "io" : "dsi", nskip_log,
-			       (unsigned)guest_pc, (unsigned)first_opcode, n);
-			fflush(stdout);
-		}
-		nw_jit_verify_uncompared(jc.fault);
-		/* VERIFY / IO / unmapped PA: guest follows kpx so SIGSEGV
-		 * recovery stays on the interpreter path. */
-		return 0;
-	}
-
-	if (mode == NW_JIT_ON) {
+	auto commit = [&]() {
 		for (int i = 0; i < 32; i++)
 			gpr(i) = jc.gpr[i];
 		for (int i = 0; i < 32; i++) {
@@ -2192,18 +2399,102 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			fpr_dw(i) = jc.fpr[i];
 		cr().set(jc.cr);
 		xer().set(jc.xer);
+		fpscr() = jc.fpscr;
+		vscr().set(jc.vscr);
 		lr() = jc.lr;
 		ctr() = jc.ctr;
-		pc() = jc.pc;
 		if (jc.dec_wr) {
-			/* Same edge as mtspr_oea: 0→1 MSB latches DEC, tb_base = now. */
 			if ((dec_ & 0x80000000u) == 0 && (jc.dec & 0x80000000u))
 				dec_pending_ = true;
 			dec_ = jc.dec;
 			dec_tb_base_ = tb_ticks();
 		}
-		nw_jit_note_exec(n);
+	};
+
+	if (jc.fault) {
+		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_EXC) {
+			commit();
+			nw_jit_note_exec_at(n, guest_pc);
 #if NW_BOOT_LOG
+			for (int i = 0; i < n; i++)
+				nw_event_insn();
+#endif
+			return 1;
+		}
+		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_SMC) {
+			commit();
+			pc() = jc.pc + 4u;
+			nw_jit_note_exec_at(n, guest_pc);
+#if NW_BOOT_LOG
+			for (int i = 0; i < n; i++)
+				nw_event_insn();
+#endif
+			return 1;
+		}
+		if (mode == NW_JIT_ON && jc.fault == 1 && ppc32_guest_mmu_enabled()) {
+			unsigned dsi_w = 4;
+			uint32 fop = first_opcode;
+			if (jc.pc != guest_pc && jc.pc >= guest_pc &&
+			    jc.pc < guest_pc + (uint32)n * 4u && (jc.pc & 3u) == 0)
+				fop = ops[(int)((jc.pc - guest_pc) / 4u)];
+			{
+				const int fprim = (int)(fop >> 26);
+				const int fxo = (int)((fop >> 1) & 0x3ff);
+				if (fprim == 34 || fprim == 35 ||
+				    (fprim == 31 && (fxo == 87 || fxo == 119)))
+					dsi_w = 1;
+				else if (fprim == 40 || fprim == 41 || fprim == 42 || fprim == 43 ||
+					 (fprim == 31 && (fxo == 279 || fxo == 311 ||
+							  fxo == 343 || fxo == 375)))
+					dsi_w = 2;
+				else if (fprim == 50 || fprim == 51 || fprim == 54 || fprim == 55)
+					dsi_w = 8;
+			}
+			const ppc32_xlate_result xr = ppc32_guest_mmu().translate(
+				jc.fault_ea, PPC32_XLATE_DR, dsi_w, jc.fault_st != 0);
+			if (!xr.ok) {
+				commit();
+				pc() = jc.pc;
+				static unsigned ndsi_log;
+				if (ndsi_log < 8u) {
+					ndsi_log++;
+					printf("NW-BOOT G1: jit dsi #%u pc=%08x ea=%08x st=%u\n",
+					       ndsi_log, (unsigned)jc.pc,
+					       (unsigned)jc.fault_ea, (unsigned)jc.fault_st);
+					fflush(stdout);
+				}
+				take_data_dsi(jc.fault_ea, jc.fault_st != 0, xr.fault);
+				nw_jit_note_exec_at(n, guest_pc);
+				return 1;
+			}
+		}
+		static unsigned nskip_log;
+		nskip_log++;
+		if (nskip_log <= 8u) {
+			printf("NW-BOOT JIT verify skip-%s #%u pc=%08x op=%08x n=%d\n",
+			       jc.fault == 2 ? "io" : "dsi", nskip_log,
+			       (unsigned)guest_pc, (unsigned)first_opcode, n);
+			fflush(stdout);
+		}
+		/* Mid-block IO: keep stores already done, resume at the
+		 * faulting insn (return 1 so execute() fetches that opcode).
+		 * First-insn skip: pc unchanged, return 0, kpx does it. */
+		if (mode == NW_JIT_ON && jc.pc != guest_pc) {
+			commit();
+			pc() = jc.pc;
+			nw_jit_note_exec_at(n, guest_pc);
+			return 1;
+		}
+		nw_jit_verify_uncompared(jc.fault);
+		if (jc.fault == 2)
+			nw_jit_note_skip_io(jc.fault_ea, jc.pc);
+		return 0;
+	}
+
+	if (mode == NW_JIT_ON) {
+		commit();
+		pc() = jc.pc;
+		nw_jit_note_exec_at(n, guest_pc);
 		{
 			static unsigned nlog;
 			if (nlog < 16u) {
@@ -2213,6 +2504,9 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 				       (unsigned)jc.pc);
 				fflush(stdout);
 			}
+		}
+#if NW_BOOT_LOG
+		{
 			for (int i = 0; i < n; i++) {
 				nw_event_insn();
 				if (!hit)
@@ -2243,18 +2537,37 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		bits |= 4u;
 	if (jc.xer != xer().get())
 		bits |= 8u;
+	if (jc.fpscr != fpscr())
+		bits |= 1024u;
+	if (jc.msr != ppc32_guest_mmu().msr())
+		bits |= 2048u;
 	if (jc.lr != lr())
 		bits |= 16u;
 	if (jc.ctr != ctr())
 		bits |= 32u;
 	if (jc.dec != dec_)
 		bits |= 64u;
-	int dg = -1;
+	int dg = -1, df = -1, dv = -1;
 	for (int i = 0; i < 32; i++) {
 		if (jc.gpr[i] != gpr(i)) {
 			bits |= 128u;
 			if (dg < 0)
 				dg = i;
+		}
+	}
+	for (int i = 0; i < 32; i++) {
+		if (jc.fpr[i] != fpr_dw(i)) {
+			bits |= 256u;
+			if (df < 0)
+				df = i;
+		}
+	}
+	for (int i = 0; i < 32; i++) {
+		if (jc.vr[i][0] != vr(i).w[0] || jc.vr[i][1] != vr(i).w[1] ||
+		    jc.vr[i][2] != vr(i).w[2] || jc.vr[i][3] != vr(i).w[3]) {
+			bits |= 512u;
+			if (dv < 0)
+				dv = i;
 		}
 	}
 	nw_jit_verify_note(ops, n, bits != 0);
@@ -2289,15 +2602,27 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			printf("NW-BOOT JIT verify miss #%u uniq=%d n=%u ninsns=%d pc=%08x op=%08x bits=%x\n",
 			       nmiss, slot + 1, slot >= 0 ? uniq[slot].n : 0u, n,
 			       (unsigned)guest_pc, (unsigned)first_opcode, bits);
-			printf("NW-BOOT JIT verify jit pc=%08x cr=%08x xer=%08x lr=%08x ctr=%08x dec=%08x\n",
-			       (unsigned)jc.pc, (unsigned)jc.cr, (unsigned)jc.xer,
-			       (unsigned)jc.lr, (unsigned)jc.ctr, (unsigned)jc.dec);
-			printf("NW-BOOT JIT verify kpx pc=%08x cr=%08x xer=%08x lr=%08x ctr=%08x dec=%08x\n",
-			       (unsigned)pc(), (unsigned)cr().get(), (unsigned)xer().get(),
-			       (unsigned)lr(), (unsigned)ctr(), (unsigned)dec_);
+			printf("NW-BOOT JIT verify jit pc=%08x cr=%08x xer=%08x fpscr=%08x lr=%08x ctr=%08x dec=%08x msr=%08x\n",
+			       (unsigned)jc.pc, (unsigned)jc.cr, (unsigned)jc.xer, (unsigned)jc.fpscr,
+			       (unsigned)jc.lr, (unsigned)jc.ctr, (unsigned)jc.dec, (unsigned)jc.msr);
+			printf("NW-BOOT JIT verify kpx pc=%08x cr=%08x xer=%08x fpscr=%08x lr=%08x ctr=%08x dec=%08x msr=%08x\n",
+			       (unsigned)pc(), (unsigned)cr().get(), (unsigned)xer().get(), (unsigned)fpscr(),
+			       (unsigned)lr(), (unsigned)ctr(), (unsigned)dec_,
+			       (unsigned)ppc32_guest_mmu().msr());
 			if (dg >= 0)
 				printf("NW-BOOT JIT verify gpr%d jit=%08x kpx=%08x\n",
 				       dg, (unsigned)jc.gpr[dg], (unsigned)gpr(dg));
+			if (df >= 0)
+				printf("NW-BOOT JIT verify fpr%d jit=%016llx kpx=%016llx\n",
+				       df, (unsigned long long)jc.fpr[df],
+				       (unsigned long long)fpr_dw(df));
+			if (dv >= 0)
+				printf("NW-BOOT JIT verify vr%d jit=%08x%08x%08x%08x kpx=%08x%08x%08x%08x\n",
+				       dv,
+				       (unsigned)jc.vr[dv][0], (unsigned)jc.vr[dv][1],
+				       (unsigned)jc.vr[dv][2], (unsigned)jc.vr[dv][3],
+				       (unsigned)vr(dv).w[0], (unsigned)vr(dv).w[1],
+				       (unsigned)vr(dv).w[2], (unsigned)vr(dv).w[3]);
 			if (bits & 4u) {
 				const int ra = (int)((first_opcode >> 16) & 0x1f);
 				const int rb = (int)((first_opcode >> 11) & 0x1f);

@@ -156,6 +156,8 @@ extern void NQDMisc(uint32 arg1, uintptr arg2);
 // Native QuickDraw acceleration callbacks
 extern bool NQD_sync_hook(uint32);
 extern bool NQD_bitblt_hook(uint32);
+extern int NQD_copybits_expand(uint32 srcBits, uint32 dstBits, uint32 srcRect,
+			       uint32 dstRect, int16 mode, uint32 maskRgn);
 extern bool NQD_fillrect_hook(uint32);
 extern bool NQD_unknown_hook(uint32);
 extern void NQD_bitblt(uint32);

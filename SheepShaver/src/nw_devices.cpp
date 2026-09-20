@@ -162,12 +162,22 @@ static void pic_reset(void)
 
 static void pic_write_ivpr(int n, uint32_t v)
 {
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+	const uint32_t old = pic.src[n].ivpr;
+#endif
 	const uint32_t writable = (uint32_t)NW_OPENPIC_IVPR_MASK | NW_OPENPIC_IVPR_PRIORITY |
 				  NW_OPENPIC_IVPR_SENSE | NW_OPENPIC_IVPR_POLARITY | NW_OPENPIC_IVPR_VECTOR;
 	pic.src[n].ivpr = (pic.src[n].ivpr & NW_OPENPIC_IVPR_ACTIVITY) | (v & writable);
 	if (n >= NW_OPENPIC_NSRC)
 		pic.src[n].ivpr &= ~(uint32_t)(NW_OPENPIC_IVPR_SENSE | NW_OPENPIC_IVPR_POLARITY);
 	pic_update();
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+	if (n == NW_VBL_IRQ && ((old ^ pic.src[n].ivpr) & (uint32_t)NW_OPENPIC_IVPR_MASK))
+		printf("NW-BOOT G1: vbl ivpr_mask %d -> %d pc=%08x ivpr=%08x\n",
+		       (old & (uint32_t)NW_OPENPIC_IVPR_MASK) != 0,
+		       (pic.src[n].ivpr & (uint32_t)NW_OPENPIC_IVPR_MASK) != 0,
+		       (unsigned)nw_io_last_pc(), (unsigned)pic.src[n].ivpr);
+#endif
 }
 
 static void pic_write_idr(int n, uint32_t v)
@@ -195,25 +205,47 @@ static uint32_t pic_iack(void)
 {
 	nw_io_ext_irq = 0;
 	const int r = highest_raised();
-	if (r < 0)
-		return pic.spve;
-	struct pic_src *s = &pic.src[r];
-	if (prio(s->ivpr) <= (int)pic.ctpr)
-		return pic.spve;
-	s->servicing = 1;
-	if (!is_level(r))
-		s->pending = 0;
-	pic_update();
-	nw_io_ext_irq = 0;		/* stays low until EOI or a CTPR change */
-	return s->ivpr & NW_OPENPIC_IVPR_VECTOR;
+	int src = -1;
+	uint32_t vec = pic.spve;
+	if (r >= 0 && prio(pic.src[r].ivpr) > (int)pic.ctpr) {
+		struct pic_src *s = &pic.src[r];
+		s->servicing = 1;
+		if (!is_level(r))
+			s->pending = 0;
+		pic_update();
+		nw_io_ext_irq = 0;		/* stays low until EOI or a CTPR change */
+		vec = s->ivpr & NW_OPENPIC_IVPR_VECTOR;
+		src = r;
+	}
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+	{
+		static unsigned n;
+		n++;
+		if (n <= 32u || src == NW_VBL_IRQ)
+			printf("NW-BOOT G1: pic_iack n=%u src=%d vec=%02x pc=%08x ctpr=%u vbl_serv=%d ext=%d\n",
+			       n, src, (unsigned)vec, (unsigned)nw_io_last_pc(),
+			       (unsigned)pic.ctpr, pic.src[NW_VBL_IRQ].servicing, nw_io_ext_irq);
+	}
+#endif
+	return vec;
 }
 
 static void pic_eoi(void)
 {
-	int which;
+	int which = -1;
 	if (servicing_priority(&which) >= 0)
 		pic.src[which].servicing = 0;
 	pic_update();
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+	{
+		static unsigned n;
+		n++;
+		if (n <= 32u || which == NW_VBL_IRQ)
+			printf("NW-BOOT G1: pic_eoi n=%u src=%d pc=%08x vbl_serv=%d ext=%d\n",
+			       n, which, (unsigned)nw_io_last_pc(),
+			       pic.src[NW_VBL_IRQ].servicing, nw_io_ext_irq);
+	}
+#endif
 }
 
 static uint32_t timer_tccr(int t)
@@ -276,6 +308,21 @@ static void vbl_tick(void)
 		return;
 	}
 	vbl_next += period;
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+	{
+		static unsigned n;
+		int which = -1;
+		servicing_priority(&which);
+		const uint32_t iv = pic.src[NW_VBL_IRQ].ivpr;
+		n++;
+		if (n <= 8u || (n % 60u) == 0 || !vbl_enabled || pic.src[NW_VBL_IRQ].servicing)
+			printf("NW-BOOT G1: vbl_tick n=%u en=%d ivpr=%08x mask=%d serv=%d serv_src=%d ctpr=%u ext=%d\n",
+			       n, vbl_enabled, (unsigned)iv,
+			       (iv & (uint32_t)NW_OPENPIC_IVPR_MASK) != 0,
+			       pic.src[NW_VBL_IRQ].servicing, which,
+			       (unsigned)pic.ctpr, nw_io_ext_irq);
+	}
+#endif
 	if (vbl_enabled)
 		pic_set_irq(NW_VBL_IRQ, 1);
 }
@@ -323,10 +370,20 @@ static void pic_cpu_write(uint32_t off, uint32_t v)
 		if (v & 1)
 			pic_set_irq(NW_OPENPIC_IPI0 + (int)((off & 0xf0) - 0x40) / 0x10, 1);
 		break;
-	case 0x80:
+	case 0x80: {
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+		const uint32_t old = pic.ctpr;
+#endif
 		pic.ctpr = v & 0xf;
 		pic_update();
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+		if (old != pic.ctpr)
+			printf("NW-BOOT G1: pic_ctpr %u -> %u pc=%08x ext=%d\n",
+			       (unsigned)old, (unsigned)pic.ctpr,
+			       (unsigned)nw_io_last_pc(), nw_io_ext_irq);
+#endif
 		break;
+	}
 	case 0xb0:
 		pic_eoi();
 		break;

@@ -349,6 +349,10 @@ void ExitAll(void)
 
 void PatchAfterStartup(void)
 {
+	static int once;
+	if (once)
+		return;
+	once = 1;
 	ExecuteNative(NATIVE_VIDEO_INSTALL_ACCEL);
 	InstallExtFS();
 }

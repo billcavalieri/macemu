@@ -5,6 +5,7 @@
 #include "nw_boot_contract.h"
 #include "nw_devices.h"
 #include "nw_jit.h"
+#include "nw_io.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1042,20 +1043,17 @@ const char *nw_boot_line_g2_translator_off(void)
 
 
 /*
- *  Boot log. NW_BOOT_LOG=1 on the Xcode SheepShaver Debug configuration.
- *  Everything goes to stdout prefixed "NW-BOOT " so a hang-capped run's
- *  stdout is the log newworldview reads.
+ *  Boot identity/handoff log. Always printed so a Release run still names
+ *  the ROM, banks, JIT mode, and first translations. Prefixed "NW-BOOT "
+ *  so a hang-capped run's stdout is the log newworldview reads.
+ *  High-volume mill traces stay behind NW_BOOT_LOG.
  */
 
 void nw_boot_log(const char *line)
 {
-#if NW_BOOT_LOG
 	if (line)
 		printf("NW-BOOT %s\n", line);
 	fflush(stdout);
-#else
-	(void)line;
-#endif
 }
 
 static const char *nw_rom_wrap_name(const uint8_t *file, size_t file_size)
@@ -1270,15 +1268,70 @@ void nw_event_exception(uint32_t srr0, uint32_t vector, uint32_t extra, int extr
 #endif
 }
 
+static uint64_t g_atrap[2][4096];
+static int g_atrap_elapsed = -1;
+static time_t g_atrap_t0;
+
+void nw_atrap_hist_reset(void)
+{
+	memset(g_atrap, 0, sizeof(g_atrap));
+	g_atrap_elapsed = -1;
+	g_atrap_t0 = 0;
+}
+
+void nw_atrap_hist_set_elapsed(int seconds)
+{
+	g_atrap_elapsed = seconds;
+}
+
+static int nw_atrap_window(void)
+{
+	if (g_atrap_elapsed >= 0)
+		return g_atrap_elapsed >= 60 ? 1 : 0;
+	if (!g_atrap_t0)
+		g_atrap_t0 = time(NULL);
+	return ((time(NULL) - g_atrap_t0) >= 60) ? 1 : 0;
+}
+
+uint64_t nw_atrap_count(uint16_t trap, int window)
+{
+	if (window < 0 || window > 1)
+		return 0;
+	return g_atrap[window][trap & 0xfffu];
+}
+
+void nw_atrap_hist_dump(const char *why)
+{
+	static const uint16_t hot[] = { 0xaafe, 0xa22e, 0xa148, 0xa96f, 0xa82a, 0xa88f };
+	printf("NW-BOOT G1: atrap %s boot", why ? why : "?");
+	for (size_t i = 0; i < sizeof(hot) / sizeof(hot[0]); i++)
+		printf(" %04x=%llu", (unsigned)hot[i],
+		       (unsigned long long)g_atrap[0][hot[i] & 0xfffu]);
+	printf(" later");
+	for (size_t i = 0; i < sizeof(hot) / sizeof(hot[0]); i++)
+		printf(" %04x=%llu", (unsigned)hot[i],
+		       (unsigned long long)g_atrap[1][hot[i] & 0xfffu]);
+	printf("\n");
+	fflush(stdout);
+}
+
 void nw_event_aline(uint32_t op, uint32_t pc68k, int handler)
 {
+	const uint16_t trap = (uint16_t)(op & 0xffffu);
+	g_atrap[nw_atrap_window()][trap & 0xfffu]++;
 #if NW_BOOT_LOG
 	nw_event_na++;
 	if (nw_boot_log_stream())
-		printf("NW-BOOT A %04x %08x %d\n", (unsigned)(op & 0xffffu),
+		printf("NW-BOOT A %04x %08x %d\n", (unsigned)trap,
 		       (unsigned)pc68k, handler);
+	if (trap == 0xa148u) {
+		static uint64_t n;
+		n++;
+		if (n == 1 || (n % 10000ull) == 0)
+			printf("NW-BOOT G1: trap a148 Finder-info n=%llu pc68k=%08x handler=%d\n",
+			       (unsigned long long)n, (unsigned)pc68k, handler);
+	}
 #else
-	(void)op;
 	(void)pc68k;
 	(void)handler;
 #endif
@@ -1309,11 +1362,13 @@ void nw_event_tick(uint32_t pc, uint32_t msr)
 	(void)pc;
 	(void)msr;
 #endif
+	nw_fb_fps_proxy_tick();
 	static unsigned tsec;
 	if ((++tsec % 10u) == 0) {
 #if NW_BOOT_LOG
 		nw_jit_pc_hot_dump("tick");
 #endif
 		nw_jit_stats_print("tick");
+		nw_atrap_hist_dump("tick");
 	}
 }

@@ -344,7 +344,9 @@ int nw_htab_gate_pass(const struct nw_htab_gate *gate);
 uint32_t nw_be32_load(const uint8_t *mem, uint32_t off);
 void nw_be32_store(uint8_t *mem, uint32_t off, uint32_t value);
 
-/* Debug-only live boot log (NW_BOOT_LOG=1 on Xcode SheepShaver Debug). */
+/* Boot identity/handoff log. Always printed (Debug and Release).
+ * Mill traces (PCTRACE, bitblt, event stream, NW_SCRIPT) stay behind
+ * NW_BOOT_LOG=1 on the Xcode SheepShaver Debug configuration. */
 const char *nw_boot_line_credits(void);
 const char *nw_boot_line_g0_newworld(void);
 const char *nw_boot_line_g1_tree(void);
@@ -381,6 +383,11 @@ void nw_log_translator_off(void);
  */
 void nw_event_exception(uint32_t srr0, uint32_t vector, uint32_t extra, int extra_valid);
 void nw_event_aline(uint32_t op, uint32_t pc68k, int handler);
+/* A-trap histogram: window 0 = first 60s (boot), 1 = later (folder-open / QT). */
+void nw_atrap_hist_reset(void);
+void nw_atrap_hist_set_elapsed(int seconds);
+uint64_t nw_atrap_count(uint16_t trap, int window);
+void nw_atrap_hist_dump(const char *why);
 /* Periodic `T <epoch_ms> <nX> <nA> <pc> <msr> <nI> <nF>` tick, at most
  * once per second. pc/msr are extra fields (the golden importer ignores
  * them) so a silent spin still names where the CPU is. nI is interpreter

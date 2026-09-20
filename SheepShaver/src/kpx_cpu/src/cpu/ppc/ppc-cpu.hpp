@@ -36,6 +36,10 @@
 #include "cpu/ppc/ppc-mmu.hpp"
 #include <vector>
 
+#ifdef SHEEPSHAVER
+struct nw_jit_cpu;
+#endif
+
 class powerpc_cpu
 #ifndef SHEEPSHAVER
 	: public basic_cpu
@@ -358,10 +362,18 @@ public:
 	static void jit_host_isync(void *host);
 	static void jit_host_mtmsr(void *host, uint32 msr);
 	static void jit_host_mtsr(void *host, uint32 sr, uint32 val);
+	static uint32 jit_host_mfsr(void *host, uint32 sr);
 	static void jit_host_trap(void *host, uint32 guest_pc);
+	static void jit_host_sc(void *host, uint32 guest_pc);
 	static void jit_host_mtspr(void *host, uint32 spr, uint32 val);
 	static void jit_host_lvx(void *host, uint32 vd, uint32 ea, uint32 pc, int *fault, uint32 *out);
 	static void jit_host_stvx(void *host, uint32 ea, const uint32 *w, uint32 pc, int *fault);
+	static void jit_host_vmx(void *host, uint32 op, struct nw_jit_cpu *cpu);
+	static void jit_host_rfi(void *host, struct nw_jit_cpu *cpu);
+	static void jit_host_icbi(void *host, uint32 ea);
+	static void jit_host_tlbie(void *host, uint32 ea);
+	static uint32 jit_host_lwarx(void *host, uint32 ea, uint32 pc, int *fault);
+	static int jit_host_stwcx(void *host, uint32 ea, uint32 val, uint32 pc, int *fault);
 	static void jit_host_lfd(void *host, uint32 fd, uint32 ea, uint32 pc, int *fault, uint64 *out);
 	static void jit_host_stfd(void *host, uint32 ea, uint64 val, uint32 pc, int *fault);
 	static uint32 jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault);

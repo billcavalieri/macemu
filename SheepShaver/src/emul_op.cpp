@@ -512,6 +512,16 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 			r->d[0] = (uint32)-2;
 			break;
 
+		case OP_COPYBITS_EXPAND:
+			r->d[0] = (uint32)NQD_copybits_expand(
+				ReadMacInt32(r->a[7] + 4),
+				ReadMacInt32(r->a[7] + 8),
+				ReadMacInt32(r->a[7] + 12),
+				ReadMacInt32(r->a[7] + 16),
+				(int16)ReadMacInt16(r->a[7] + 20),
+				ReadMacInt32(r->a[7] + 22));
+			break;
+
 		default:
 			printf("FATAL: EMUL_OP called with bogus selector %08x\n", selector);
 			QuitEmulator();

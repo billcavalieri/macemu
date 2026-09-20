@@ -163,6 +163,8 @@ static SDL_Rect sdl_update_video_rect = {0,0,0,0};  // Union of all rects to upd
 #ifdef SHEEPSHAVER
 static SDL_Rect nw_present_rects[NW_FB_TILES_X * NW_FB_TILES_Y];
 static int nw_present_n;
+static bool nw_present_need_clear = true;	/* letterbox / first drawable */
+static bool nw_renderer_software = false;
 #endif
 static SDL_mutex * sdl_update_video_mutex = NULL;   // Mutex to protect sdl_update_video_rect
 static int screen_depth;							// Depth of current screen
@@ -765,6 +767,9 @@ static void delete_sdl_video_surfaces()
 	if (sdl_texture) {
 		SDL_DestroyTexture(sdl_texture);
 		sdl_texture = NULL;
+#ifdef SHEEPSHAVER
+		nw_present_need_clear = true;
+#endif
 	}
 	
 	if (host_surface) {
@@ -787,6 +792,10 @@ static void delete_sdl_video_window()
 	if (sdl_renderer) {
 		SDL_DestroyRenderer(sdl_renderer);
 		sdl_renderer = NULL;
+#ifdef SHEEPSHAVER
+		nw_renderer_software = false;
+		nw_present_need_clear = true;
+#endif
 	}
 	
 	if (sdl_window) {
@@ -918,6 +927,10 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
 		memset(&info, 0, sizeof(info));
 		SDL_GetRendererInfo(sdl_renderer, &info);
 		printf("Using SDL_Renderer driver: %s\n", (info.name ? info.name : "(null)"));
+#ifdef SHEEPSHAVER
+		nw_renderer_software = (info.flags & SDL_RENDERER_SOFTWARE) != 0;
+		nw_present_need_clear = true;
+#endif
 	}
     
     if (!sdl_update_video_mutex) {
@@ -925,11 +938,10 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
     }
 
 	SDL_assert(sdl_texture == NULL);
-#ifdef ENABLE_VOSF
-	sdl_texture = SDL_CreateTexture(sdl_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height);
-#else
+	/* Mac 32-bit FB is XRGB in memory (00,R,G,B). SDL packed BGRA8888
+	 * on LE stores as A,R,G,B, so a raw copy matches take_shot.
+	 * ARGB8888 packed LE is B,G,R,A and zeros blue (yellow desktop). */
 	sdl_texture = SDL_CreateTexture(sdl_renderer, SDL_PIXELFORMAT_BGRA8888, SDL_TEXTUREACCESS_STREAMING, width, height);
-#endif
     if (!sdl_texture) {
         shutdown_sdl_video();
         return NULL;
@@ -961,6 +973,8 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
 #ifdef ENABLE_VOSF
 			guest_surface = SDL_CreateRGBSurface(0, width, height, 32, 0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000);
 #else
+			/* Masks must match Screen_blitters. Present memcpy ignores
+			 * them; the texture is BGRA8888 so Mac 00,R,G,B is A,R,G,B. */
 			guest_surface = SDL_CreateRGBSurfaceFrom(the_buffer, width, height, 32, pitch, 0xff000000, 0x00ff0000, 0x0000ff00, 0x000000ff);
 #endif
 			host_surface = guest_surface;
@@ -1026,12 +1040,33 @@ static int present_sdl_video()
 		SDL_UnlockMutex(sdl_update_video_mutex);
 		if (n <= 0)
 			return 0;
-		SDL_SetRenderDrawColor(sdl_renderer, 0, 0, 0, 0);
-		SDL_RenderClear(sdl_renderer);
+		SDL_Rect uni = {0, 0, 0, 0};
+		bool have_uni = false;
+		const int fb_w = guest_surface->w;
+		const int fb_h = guest_surface->h;
+		const bool need_blit = (host_surface != guest_surface);
+		if (need_blit)
+			LOCK_PALETTE;
 		for (int i = 0; i < n; i++) {
 			SDL_Rect r = local[i];
 			if (r.w <= 0 || r.h <= 0)
 				continue;
+			if (r.x < 0) { r.w += r.x; r.x = 0; }
+			if (r.y < 0) { r.h += r.y; r.y = 0; }
+			if (r.x + r.w > fb_w)
+				r.w = fb_w - r.x;
+			if (r.y + r.h > fb_h)
+				r.h = fb_h - r.y;
+			if (r.w <= 0 || r.h <= 0)
+				continue;
+			/* 8-bit (and other) guest surfaces keep a separate
+			 * host_surface in texture format. BlitSurface applies
+			 * the CLUT. 32-bit aliases the_buffer and copies raw. */
+			if (need_blit) {
+				SDL_Rect d = r;
+				if (SDL_BlitSurface(guest_surface, &r, host_surface, &d) != 0)
+					continue;
+			}
 			uint8_t *srcPixels = (uint8_t *)host_surface->pixels +
 				r.y * host_surface->pitch +
 				r.x * host_surface->format->BytesPerPixel;
@@ -1046,9 +1081,43 @@ static int present_sdl_video()
 				dstPixels += dstPitch;
 			}
 			SDL_UnlockTexture(sdl_texture);
+			if (!have_uni) {
+				uni = r;
+				have_uni = true;
+			} else {
+				SDL_UnionRect(&uni, &r, &uni);
+			}
 		}
-		if (SDL_RenderCopy(sdl_renderer, sdl_texture, NULL, NULL) != 0)
-			return -1;
+		if (need_blit)
+			UNLOCK_PALETTE;
+		if (!have_uni)
+			return 0;
+		/*
+		 * The streaming texture is retained; only dirty rects were
+		 * uploaded. SDL_RenderClear paints the window backbuffer black,
+		 * so a dest-rect copy of only the dirty union would flash
+		 * undamaged pixels unless the backbuffer is retained.
+		 *
+		 * SDL_RenderPresent leaves the window backbuffer undefined on
+		 * Metal and OpenGL (new drawable, letterbox included). Those
+		 * backends still Clear and copy the retained texture in full.
+		 * Software retains the backbuffer, so skip the clear and copy
+		 * only the dirty union when damage is partial.
+		 */
+		const int tex_w = guest_surface->w;
+		const int tex_h = guest_surface->h;
+		const bool partial = tex_w > 0 && tex_h > 0 &&
+			(uni.x > 0 || uni.y > 0 || uni.w < tex_w || uni.h < tex_h);
+		if (nw_renderer_software && !nw_present_need_clear && partial) {
+			if (SDL_RenderCopy(sdl_renderer, sdl_texture, &uni, &uni) != 0)
+				return -1;
+		} else {
+			SDL_SetRenderDrawColor(sdl_renderer, 0, 0, 0, 0);
+			SDL_RenderClear(sdl_renderer);
+			if (SDL_RenderCopy(sdl_renderer, sdl_texture, NULL, NULL) != 0)
+				return -1;
+			nw_present_need_clear = false;
+		}
 		SDL_RenderPresent(sdl_renderer);
 		return 0;
 	}
@@ -1365,12 +1434,18 @@ void driver_base::update_palette(void)
 
 	if ((int)VIDEO_MODE_DEPTH <= VIDEO_DEPTH_8BIT) {
 		SDL_SetSurfacePalette(s, sdl_palette);
+		if (guest_surface && guest_surface != s)
+			SDL_SetSurfacePalette(guest_surface, sdl_palette);
 		SDL_LockMutex(sdl_update_video_mutex);
 		sdl_update_video_rect.x = 0;
 		sdl_update_video_rect.y = 0;
 		sdl_update_video_rect.w = VIDEO_MODE_X;
 		sdl_update_video_rect.h = VIDEO_MODE_Y;
 		SDL_UnlockMutex(sdl_update_video_mutex);
+#ifdef SHEEPSHAVER
+		if (ROMType == ROMTYPE_NEWWORLD)
+			nw_present_need_clear = true;
+#endif
 	}
 }
 
@@ -2013,6 +2088,12 @@ void VideoHostPresent(void)
 		handle_palette_changes();
 #endif
 	present_sdl_video();
+#ifdef SHEEPSHAVER
+	if (ROMType == ROMTYPE_NEWWORLD && the_buffer && guest_surface)
+		nw_fb_fps_proxy_sample(the_buffer, (uint32_t)guest_surface->pitch,
+				       (uint32_t)guest_surface->w,
+				       (uint32_t)guest_surface->h);
+#endif
 #if NW_BOOT_LOG
 	nw_event_frame();
 	{
@@ -2118,12 +2199,14 @@ void SDL_monitor_desc::set_palette(uint8 *pal, int num_in)
 		p++;
 	}
 
-	// Recalculate pixel color expansion map
+	// Recalculate pixel color expansion map. Direct 32-bit still
+	// keeps a CLUT: boot pixmaps and QT chrome often blit 8-bit
+	// through ExpandMap / BlitSurface even when the FB is 32-bit.
+	for (int i=0; i<256; i++) {
+		int c = i & (num_in-1);
+		ExpandMap[i] = SDL_MapRGB(drv->s->format, pal[c*3+0], pal[c*3+1], pal[c*3+2]);
+	}
 	if (!IsDirectMode(mode)) {
-		for (int i=0; i<256; i++) {
-			int c = i & (num_in-1); // If there are less than 256 colors, we repeat the first entries (this makes color expansion easier)
-			ExpandMap[i] = SDL_MapRGB(drv->s->format, pal[c*3+0], pal[c*3+1], pal[c*3+2]);
-		}
 
 #ifdef ENABLE_VOSF
 		if (use_vosf) {
@@ -2525,6 +2608,9 @@ static void force_complete_window_refresh()
 		const int len = VIDEO_MODE_ROW_BYTES * VIDEO_MODE_Y;
 		for (int i = 0; i < len; i++)
 			the_buffer_copy[i] = !the_buffer[i];
+#ifdef SHEEPSHAVER
+		nw_present_need_clear = true;
+#endif
 	}
 }
 
@@ -2603,6 +2689,9 @@ static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event)
 					break;
 #endif
 				case SDL_WINDOWEVENT_RESIZED: {
+#ifdef SHEEPSHAVER
+					nw_present_need_clear = true;
+#endif
 					if (!redraw_thread_active) break;
 					// Handle changes of fullscreen.  This is done here, in
 					// on_sdl_event_generated() and not the main SDL_Event-processing
@@ -2972,19 +3061,30 @@ static void update_display_static_bbox(driver_base *drv)
 		if (n > 0) {
 			SDL_Rect *boxes = (SDL_Rect *)alloca(sizeof(SDL_Rect) * n);
 			uint32 nr_boxes = 0;
-			if (SDL_MUSTLOCK(drv->s))
+			/* 32-bit NW: host_surface is CreateRGBSurfaceFrom(the_buffer),
+			 * so the guest FB is already what present uploads. Copying
+			 * dirty spans into the_buffer_copy is a bounce, not a present
+			 * source. Skip it. the_buffer_copy stays the memcmp shadow;
+			 * unmarked chrome is still caught by the fallthrough below.
+			 * Depths where host_surface does not wrap the_buffer still
+			 * copy, and 16-bit still Screen_blits. */
+			const bool fb_is_host = host_surface && the_buffer &&
+				(uint8 *)host_surface->pixels == the_buffer;
+			if (!fb_is_host && SDL_MUSTLOCK(drv->s))
 				SDL_LockSurface(drv->s);
 			for (int i = 0; i < n; i++) {
 				const int x = xs[i], y = ys[i], w = ws[i], h = hs[i];
 				const int span = w * (int)bytes_per_pixel;
-				for (int j = y; j < y + h; j++) {
-					const uint32 yb = (uint32)j * bytes_per_row;
-					const uint32 dst_yb = (uint32)j * dst_bytes_per_row;
-					const uint32 xb = (uint32)x * bytes_per_pixel;
-					memcpy(&the_buffer_copy[yb + xb], &the_buffer[yb + xb], (size_t)span);
-					if (blit)
-						Screen_blit((uint8 *)drv->s->pixels + dst_yb + xb,
-							    the_buffer + yb + xb, span);
+				if (!fb_is_host) {
+					for (int j = y; j < y + h; j++) {
+						const uint32 yb = (uint32)j * bytes_per_row;
+						const uint32 dst_yb = (uint32)j * dst_bytes_per_row;
+						const uint32 xb = (uint32)x * bytes_per_pixel;
+						memcpy(&the_buffer_copy[yb + xb], &the_buffer[yb + xb], (size_t)span);
+						if (blit)
+							Screen_blit((uint8 *)drv->s->pixels + dst_yb + xb,
+								    the_buffer + yb + xb, span);
+					}
 				}
 				boxes[nr_boxes].x = x;
 				boxes[nr_boxes].y = y;
@@ -2993,11 +3093,12 @@ static void update_display_static_bbox(driver_base *drv)
 				nr_boxes++;
 				nw_fb_damage_note_upload((uint64_t)span * (uint64_t)h);
 			}
-			if (SDL_MUSTLOCK(drv->s))
+			if (!fb_is_host && SDL_MUSTLOCK(drv->s))
 				SDL_UnlockSurface(drv->s);
 			if (nr_boxes)
 				update_sdl_video(drv->s, nr_boxes, boxes);
-			return;
+			/* Fall through to memcmp so chrome not covered by the
+			 * CopyBits rect still matches the_buffer. */
 		}
 	}
 #endif

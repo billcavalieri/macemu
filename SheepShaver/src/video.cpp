@@ -37,6 +37,7 @@
 #include "thunks.h"
 #include "rom_patches.h"
 #include "nw_devices.h"
+#include "nw_io.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -238,6 +239,8 @@ static int16 VideoOpen(uint32 pb, VidLocals *csSave)
 	csSave->saveBaseAddr = screen_base;
 	csSave->saveData = VModes[cur_mode].viAppleID;// First mode ...
 	csSave->saveMode = VModes[cur_mode].viAppleMode;
+	save_conf_id = csSave->saveData;
+	save_conf_mode = csSave->saveMode;
 	csSave->savePage = 0;
 	csSave->saveVidParms = 0;			// Add the right table
 	csSave->luminanceMapping = false;
@@ -512,6 +515,9 @@ static int16 VideoControl(uint32 pb, VidLocals *csSave)
 				p += VModes[cur_mode].viRowBytes;
 				pat = ~pat;
 			}
+			if (ROMType == ROMTYPE_NEWWORLD)
+				nw_fb_damage_rect(0, 0, VModes[cur_mode].viXsize,
+						  VModes[cur_mode].viYsize);
 			return noErr;
 		}
 
@@ -523,6 +529,11 @@ static int16 VideoControl(uint32 pb, VidLocals *csSave)
 		case cscSetInterrupt:						// SetInterrupt
 			D(bug("SetInterrupt\n"));
 			csSave->interruptsEnabled = !ReadMacInt8(param);
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+			printf("NW-BOOT G1: cscSetInterrupt param=%u enabled=%d installed=%d\n",
+			       (unsigned)ReadMacInt8(param), csSave->interruptsEnabled,
+			       nw_vbl_installed ? 1 : 0);
+#endif
 			if (ROMType == ROMTYPE_NEWWORLD && nw_vbl_installed)
 				nw_display_vbl_enable(csSave->interruptsEnabled);
 			return noErr;
@@ -1018,23 +1029,21 @@ static int16 VideoStatus(uint32 pb, VidLocals *csSave)
 			for (int i=0; VModes[i].viType!=DIS_INVALID; i++) {
 				if (ReadMacInt32(param + csTimingMode) == VModes[i].viAppleID) {
 					uint32 timing = timingUnknown;
-					uint32 flags = (1<<kModeValid) | (1<<kShowModeNow);
+					uint32 flags = (1<<kModeValid) | (1<<kModeSafe) | (1<<kShowModeNow);
+					if (VModes[i].viAppleID == (uint32)save_conf_id)
+						flags |= (1<<kModeDefault);
 					switch (VModes[i].viAppleID) {
 						case APPLE_640x480:
 							timing = timingVESA_640x480_75hz;
-							flags |= (1<<kModeSafe);
 							break;
 						case APPLE_W_640x480:
 							timing = timingVESA_640x480_60hz;
-							flags |= (1<<kModeSafe);
 							break;
 						case APPLE_800x600:
 							timing = timingVESA_800x600_75hz;
-							flags |= (1<<kModeSafe);
 							break;
 						case APPLE_W_800x600:
 							timing = timingVESA_800x600_60hz;
-							flags |= (1<<kModeSafe);
 							break;
 						case APPLE_1024x768:
 							timing = timingVESA_1024x768_75hz;

@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "nw_io.h"
+#include "nw_jit.h"
 
 enum { NW_IO_MAX_DEVICES = 32, NW_IO_LOG_MAX = 64, NW_IO_PAGES_MAX = 128,	/* 7 models + 16 flash aliases */
        NW_BANKS_MAX = 8 };
@@ -32,6 +33,12 @@ static int g_log_count;
 static uint32_t g_pages[NW_IO_PAGES_MAX];
 static int g_npages;
 int nw_io_ext_irq;
+static uint32_t g_io_pc;
+
+uint32_t nw_io_last_pc(void)
+{
+	return g_io_pc;
+}
 
 struct nw_bank {
 	int kind;
@@ -47,8 +54,16 @@ static uint32_t g_fb_w;
 static uint32_t g_fb_h;
 static uint32_t g_fb_bpp;
 static uint32_t g_fb_tiles[(NW_FB_TILES_X * NW_FB_TILES_Y + 31) / 32];
+enum { NW_FB_RECTS = 48 };
+static int g_fb_rx[NW_FB_RECTS], g_fb_ry[NW_FB_RECTS], g_fb_rw[NW_FB_RECTS], g_fb_rh[NW_FB_RECTS];
+static int g_fb_nrects;
 static uint64_t g_fb_marks;
 static uint64_t g_fb_upload;
+static uint32_t g_fps_hash;
+static uint64_t g_fps_frames, g_fps_frames_sec;
+static uint64_t g_fps_upload_mark;
+static unsigned g_fps_flat, g_fps_flat_max;
+static int g_fps_have;
 
 static void fb_damage_reset(void)
 {
@@ -58,8 +73,14 @@ static void fb_damage_reset(void)
 	g_fb_h = 0;
 	g_fb_bpp = 0;
 	memset(g_fb_tiles, 0, sizeof(g_fb_tiles));
+	g_fb_nrects = 0;
 	g_fb_marks = 0;
 	g_fb_upload = 0;
+	g_fps_hash = 0;
+	g_fps_frames = g_fps_frames_sec = 0;
+	g_fps_upload_mark = 0;
+	g_fps_flat = g_fps_flat_max = 0;
+	g_fps_have = 0;
 }
 
 void nw_io_reset(void)
@@ -231,6 +252,7 @@ static void log_unclaimed(char rw, uint32_t pa, int size, uint32_t value, uint32
 
 uint32_t nw_io_read(uint32_t pa, int size, uint32_t pc)
 {
+	g_io_pc = pc;
 	if (nw_pa_kind(pa) != NW_PA_IO)
 		return 0;
 	const struct nw_io_device *d = find(pa);
@@ -242,6 +264,7 @@ uint32_t nw_io_read(uint32_t pa, int size, uint32_t pc)
 
 void nw_io_write(uint32_t pa, int size, uint32_t value, uint32_t pc)
 {
+	g_io_pc = pc;
 	if (nw_pa_kind(pa) != NW_PA_IO)
 		return;
 	const struct nw_io_device *d = find(pa);
@@ -270,6 +293,7 @@ void nw_fb_damage_layout(uint32_t base, uint32_t rowbytes, uint32_t width,
 	g_fb_h = height;
 	g_fb_bpp = bpp ? bpp : 4;
 	memset(g_fb_tiles, 0, sizeof(g_fb_tiles));
+	g_fb_nrects = 0;
 	/* Mode change: the new buffer must be uploaded. First layout
 	 * leaves tiles clear so we do not present a black frame. */
 	if (had && width && height)
@@ -292,6 +316,20 @@ void nw_fb_damage_rect(int x, int y, int w, int h)
 		y1 = (int)g_fb_h - 1;
 	if (x1 < x || y1 < y)
 		return;
+	const int rw = x1 - x + 1;
+	const int rh = y1 - y + 1;
+	/* CopyBits-sized rects stay exact so a movie blit does not pull
+	 * neighbouring chrome into a 64-pixel tile. Pixel stores still
+	 * use tiles. */
+	if (rw >= 8 && rh >= 8 && g_fb_nrects < NW_FB_RECTS) {
+		g_fb_rx[g_fb_nrects] = x;
+		g_fb_ry[g_fb_nrects] = y;
+		g_fb_rw[g_fb_nrects] = rw;
+		g_fb_rh[g_fb_nrects] = rh;
+		g_fb_nrects++;
+		g_fb_marks++;
+		return;
+	}
 	const int tx0 = x / NW_FB_TILE;
 	const int ty0 = y / NW_FB_TILE;
 	const int tx1 = x1 / NW_FB_TILE;
@@ -351,6 +389,8 @@ void nw_fb_damage_store(uint32_t pa, unsigned nbytes)
 
 int nw_fb_damage_any(void)
 {
+	if (g_fb_nrects)
+		return 1;
 	for (unsigned i = 0; i < sizeof(g_fb_tiles) / sizeof(g_fb_tiles[0]); i++) {
 		if (g_fb_tiles[i])
 			return 1;
@@ -388,20 +428,44 @@ static int fb_collect_from(const uint32_t *bits, int *x, int *y, int *w, int *h,
 
 int nw_fb_damage_collect(int *x, int *y, int *w, int *h, int max)
 {
+	if (g_fb_nrects > 0 && x && y && w && h && max > 0) {
+		const int n = g_fb_nrects < max ? g_fb_nrects : max;
+		for (int i = 0; i < n; i++) {
+			x[i] = g_fb_rx[i];
+			y[i] = g_fb_ry[i];
+			w[i] = g_fb_rw[i];
+			h[i] = g_fb_rh[i];
+		}
+		return n;
+	}
 	return fb_collect_from(g_fb_tiles, x, y, w, h, max);
 }
 
 int nw_fb_damage_take(int *x, int *y, int *w, int *h, int max)
 {
+	if (g_fb_nrects > 0 && x && y && w && h && max > 0) {
+		const int n = g_fb_nrects < max ? g_fb_nrects : max;
+		for (int i = 0; i < n; i++) {
+			x[i] = g_fb_rx[i];
+			y[i] = g_fb_ry[i];
+			w[i] = g_fb_rw[i];
+			h[i] = g_fb_rh[i];
+		}
+		g_fb_nrects = 0;
+		memset(g_fb_tiles, 0, sizeof(g_fb_tiles));
+		return n;
+	}
 	uint32_t snap[sizeof(g_fb_tiles) / sizeof(g_fb_tiles[0])];
 	memcpy(snap, g_fb_tiles, sizeof(snap));
 	memset(g_fb_tiles, 0, sizeof(g_fb_tiles));
+	g_fb_nrects = 0;
 	return fb_collect_from(snap, x, y, w, h, max);
 }
 
 void nw_fb_damage_clear(void)
 {
 	memset(g_fb_tiles, 0, sizeof(g_fb_tiles));
+	g_fb_nrects = 0;
 }
 
 void nw_fb_damage_note_upload(uint64_t bytes)
@@ -417,4 +481,99 @@ uint64_t nw_fb_damage_upload_bytes(void)
 uint64_t nw_fb_damage_marks(void)
 {
 	return g_fb_marks;
+}
+
+void nw_fb_fps_proxy_sample(const uint8_t *fb, uint32_t pitch, uint32_t w, uint32_t h)
+{
+	if (!fb || w < 32 || h < 32 || pitch == 0)
+		return;
+	const uint32_t x0 = w / 4u;
+	const uint32_t y0 = h / 6u;
+	const uint32_t rw = w / 2u;
+	const uint32_t rh = h / 2u;
+	const unsigned bpp = (w && pitch / w >= 1u) ? (unsigned)(pitch / w) : 4u;
+	uint32_t hash = 2166136261u;
+	for (uint32_t y = y0; y < y0 + rh && y < h; y += 4u) {
+		const uint8_t *row = fb + (size_t)y * pitch + (size_t)x0 * bpp;
+		for (uint32_t x = 0; x < rw && x0 + x < w; x += 4u) {
+			const uint8_t *p = row + (size_t)x * bpp;
+			hash ^= p[0]; hash *= 16777619u;
+			if (bpp > 1) { hash ^= p[1]; hash *= 16777619u; }
+			if (bpp > 2) { hash ^= p[2]; hash *= 16777619u; }
+		}
+	}
+	if (g_fps_have && hash != g_fps_hash) {
+		g_fps_frames++;
+		g_fps_frames_sec++;
+	}
+	g_fps_hash = hash;
+	g_fps_have = 1;
+}
+
+void nw_fb_fps_proxy_tick(void)
+{
+	const uint64_t up = g_fb_upload;
+	const uint64_t dbytes = (up >= g_fps_upload_mark) ? (up - g_fps_upload_mark) : 0;
+	g_fps_upload_mark = up;
+	if (g_fps_frames_sec == 0)
+		g_fps_flat++;
+	else {
+		if (g_fps_flat > g_fps_flat_max)
+			g_fps_flat_max = g_fps_flat;
+		g_fps_flat = 0;
+	}
+	if (nw_jit_stats_wanted()) {
+		printf("NW-BOOT G1: qt_fps_proxy frames=%llu dbytes=%llu hash=%08x flat=%u\n",
+		       (unsigned long long)g_fps_frames_sec,
+		       (unsigned long long)dbytes,
+		       (unsigned)g_fps_hash,
+		       g_fps_flat);
+		fflush(stdout);
+	}
+	g_fps_frames_sec = 0;
+}
+
+uint64_t nw_fb_fps_proxy_frames(void)
+{
+	return g_fps_frames;
+}
+
+unsigned nw_fb_fps_proxy_flat_max(void)
+{
+	return g_fps_flat_max;
+}
+
+void nw_fb_mac32_rgb(const uint8_t *px, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+	if (!px)
+		return;
+	if (r)
+		*r = px[1];
+	if (g)
+		*g = px[2];
+	if (b)
+		*b = px[3];
+}
+
+void nw_fb_pack_mac32(uint8_t *px, uint8_t r, uint8_t g, uint8_t b)
+{
+	if (!px)
+		return;
+	px[0] = 0;
+	px[1] = r;
+	px[2] = g;
+	px[3] = b;
+}
+
+void nw_fb_expand_clut8_to_mac32(uint8_t *dst32, const uint8_t *src8, int npix,
+				 const uint8_t pal_rgb[256 * 3])
+{
+	if (!dst32 || !src8 || !pal_rgb || npix <= 0)
+		return;
+	for (int i = 0; i < npix; i++) {
+		const unsigned c = src8[i];
+		nw_fb_pack_mac32(dst32 + (size_t)i * 4u,
+				 pal_rgb[c * 3u], pal_rgb[c * 3u + 1u],
+				 pal_rgb[c * 3u + 2u]);
+	}
 }

@@ -40,6 +40,7 @@ using std::vector;
 #include "macos_util.h"
 #include "sys.h"
 #include "prefs.h"
+#include "rom_patches.h"
 #include "disk.h"
 
 #define DEBUG 0
@@ -371,6 +372,9 @@ int16 DiskControl(uint32 pb, uint32 dce)
 
 		case 65: {	// Periodic action (accRun, "insert" disks on startup)
 			mount_mountable_volumes();
+			/* NW: post-FSM startup work (.Sony is OW-only); OW still uses Sony accRun */
+			if (ROMType == ROMTYPE_NEWWORLD)
+				PatchAfterStartup();
 			WriteMacInt16(dce + dCtlFlags, ReadMacInt16(dce + dCtlFlags) & ~0x2000);	// Disable periodic action
 			acc_run_called = true;
 			return noErr;

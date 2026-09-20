@@ -1320,7 +1320,8 @@ void powerpc_cpu::execute_mtmsr(uint32 opcode)
 		nw_log_msr_dr(msr);
 		nw_log_msr_write("mtmsr", pc(), msr);
 #endif
-		nw_jit_dtlb_flush_if_pr(old, msr, NW_JIT_DTLB_FL_MTMSR);
+		if ((old ^ msr) & 0x00000030u)
+			nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_MTMSR);
 	}
 	increment_pc(4);
 }

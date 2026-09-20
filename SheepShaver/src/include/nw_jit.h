@@ -27,6 +27,7 @@
 
 /*
  * Translation cache key: (phys_page, guest_pc, msr_ir, endian).
+ * msr_ir is a packed IR|DR<<1|PR<<2 mask (not EE/FP/VEC).
  * endian 0 = guest big-endian (the only mode 4a/4b emits).
  * The C interpreter is the oracle; the ARM64 emitter must match it
  * on GPR/CR/XER/LR/CTR/PC/DEC. dyngen is not used.
@@ -49,6 +50,9 @@ struct nw_jit_cpu {
 	uint64_t fpr[32];	/* IEEE754 bits, PowerPC dw order */
 	uint32_t cr;
 	uint32_t xer;
+	uint32_t fpscr;
+	uint32_t vscr;
+	uint32_t sr[16];	/* harness / no-host mtsrin path */
 	uint32_t lr;
 	uint32_t ctr;
 	uint32_t pc;
@@ -58,6 +62,8 @@ struct nw_jit_cpu {
 	uint32_t fault_ea;
 	uint32_t fault_st;	/* 1 if the faulting access was a store */
 	uint32_t dec_wr;	/* 1 if this block executed mtspr DEC */
+	uint32_t reserve_valid;
+	uint32_t reserve_ea;
 	uint8_t *mem;
 	uint32_t mem_base;
 	uint32_t mem_size;
@@ -113,11 +119,20 @@ enum {
 void nw_jit_verify_note(const uint32_t *ops, int n, int miss);
 void nw_jit_verify_fail(void);
 void nw_jit_verify_skip(int mem);
-void nw_jit_note_skip_unsup(uint32_t op);
+void nw_jit_note_skip_unsup(uint32_t op, unsigned packed);
+/* One-shot raw skip word + pc for unnamed prim-4 buckets and prim 6. */
+void nw_jit_skip_raw_once(uint32_t op, uint32_t pc);
+int nw_jit_skip_raw_last(uint32_t *op, uint32_t *pc, char *name, size_t n);
 void nw_jit_verify_uncompared(int fault);	/* 1 = DSI probe, 2 = I/O skip */
+void nw_jit_note_skip_io(uint32_t ea, uint32_t pc);
 void nw_jit_verify_dump(const char *why);
 void nw_jit_pc_hot(uint32_t pc, uint32_t op);
 void nw_jit_pc_hot_dump(const char *why);
+void nw_jit_summary_print(const char *why);
+uint64_t nw_jit_skip_n(uint32_t op);
+uint64_t nw_jit_skip_lost(uint32_t op);
+uint64_t nw_jit_codec_insns(void);
+uint64_t nw_jit_other_insns(void);
 
 typedef uint32_t (*nw_jit_host_lwz)(void *host, uint32_t ea, uint32_t pc, int *fault);
 typedef void (*nw_jit_host_stw)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
@@ -137,6 +152,7 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 uint64_t nw_jit_exec_blocks(void);
 uint64_t nw_jit_exec_insns(void);
 void nw_jit_note_exec(int n);
+void nw_jit_note_exec_at(int n, uint32_t pc);
 
 /* C oracle: execute one opcode at cpu->pc. 0 = pc advanced, 1 = block
  * ended (b/blr), -1 = not in the 4a subset. */
@@ -235,14 +251,31 @@ typedef void (*nw_jit_host_mtmsr)(void *host, uint32_t msr);
 void nw_jit_set_host_mtmsr(nw_jit_host_mtmsr fn);
 typedef void (*nw_jit_host_mtsr)(void *host, uint32_t sr, uint32_t val);
 void nw_jit_set_host_mtsr(nw_jit_host_mtsr fn);
+typedef uint32_t (*nw_jit_host_mfsr)(void *host, uint32_t sr);
+void nw_jit_set_host_mfsr(nw_jit_host_mfsr fn);
 typedef void (*nw_jit_host_trap)(void *host, uint32_t guest_pc);
 void nw_jit_set_host_trap(nw_jit_host_trap fn);
+typedef void (*nw_jit_host_sc)(void *host, uint32_t guest_pc);
+void nw_jit_set_host_sc(nw_jit_host_sc fn);
 typedef void (*nw_jit_host_mtspr)(void *host, uint32_t spr, uint32_t val);
 void nw_jit_set_host_mtspr(nw_jit_host_mtspr fn);
 typedef void (*nw_jit_host_lvx)(void *host, uint32_t vd, uint32_t ea, uint32_t pc, int *fault, uint32_t *out);
 void nw_jit_set_host_lvx(nw_jit_host_lvx fn);
 typedef void (*nw_jit_host_stvx)(void *host, uint32_t ea, const uint32_t *w, uint32_t pc, int *fault);
 void nw_jit_set_host_stvx(nw_jit_host_stvx fn);
+typedef void (*nw_jit_host_vmx)(void *host, uint32_t op, struct nw_jit_cpu *cpu);
+void nw_jit_set_host_vmx(nw_jit_host_vmx fn);
+typedef void (*nw_jit_host_rfi)(void *host, struct nw_jit_cpu *cpu);
+void nw_jit_set_host_rfi(nw_jit_host_rfi fn);
+typedef void (*nw_jit_host_icbi)(void *host, uint32_t ea);
+void nw_jit_set_host_icbi(nw_jit_host_icbi fn);
+/* Same work as kpx execute_tlbie: mmu.tlbie + DTLB drop_page, no PC bump. */
+typedef void (*nw_jit_host_tlbie)(void *host, uint32_t ea);
+void nw_jit_set_host_tlbie(nw_jit_host_tlbie fn);
+typedef uint32_t (*nw_jit_host_lwarx)(void *host, uint32_t ea, uint32_t pc, int *fault);
+void nw_jit_set_host_lwarx(nw_jit_host_lwarx fn);
+typedef int (*nw_jit_host_stwcx)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
+void nw_jit_set_host_stwcx(nw_jit_host_stwcx fn);
 typedef void (*nw_jit_host_lfd)(void *host, uint32_t fd, uint32_t ea, uint32_t pc, int *fault, uint64_t *out);
 void nw_jit_set_host_lfd(nw_jit_host_lfd fn);
 typedef void (*nw_jit_host_stfd)(void *host, uint32_t ea, uint64_t val, uint32_t pc, int *fault);
@@ -263,7 +296,9 @@ uint32_t nw_ppc_add(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_addc(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_addco(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_subfe(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_subfeo(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_subf(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_subfo(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_subfc(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_rlwinm(int ra, int rs, int sh, int mb, int me);
 uint32_t nw_ppc_rlwnm(int ra, int rs, int rb, int mb, int me);
@@ -276,7 +311,9 @@ uint32_t nw_ppc_lbz(int rd, int ra, int d);
 uint32_t nw_ppc_lbzu(int rd, int ra, int d);
 uint32_t nw_ppc_lbzx(int rd, int ra, int rb);
 uint32_t nw_ppc_lvx(int vd, int ra, int rb);
+uint32_t nw_ppc_lvxl(int vd, int ra, int rb);
 uint32_t nw_ppc_stvx(int vs, int ra, int rb);
+uint32_t nw_ppc_stvxl(int vs, int ra, int rb);
 uint32_t nw_ppc_stb(int rs, int ra, int d);
 uint32_t nw_ppc_stbu(int rs, int ra, int d);
 uint32_t nw_ppc_stw(int rs, int ra, int d);
@@ -312,6 +349,7 @@ uint32_t nw_ppc_cmpli(int crfd, int ra, unsigned uimm);
 uint32_t nw_ppc_cmpl(int crfd, int ra, int rb);
 uint32_t nw_ppc_mtcrf(int crm, int rs);
 uint32_t nw_ppc_mfcr(int rd);
+uint32_t nw_ppc_mcrf(int crfd, int crfs);
 uint32_t nw_ppc_crnor(int crbd, int crba, int crbb);
 uint32_t nw_ppc_crxor(int crbd, int crba, int crbb);
 uint32_t nw_ppc_creqv(int crbd, int crba, int crbb);
@@ -328,15 +366,20 @@ uint32_t nw_ppc_sraw(int ra, int rs, int rb, int rc);
 uint32_t nw_ppc_srawi(int ra, int rs, int sh, int rc);
 uint32_t nw_ppc_sync(void);
 uint32_t nw_ppc_dss(void);
+uint32_t nw_ppc_dst(int ra, int rb, int strm);
+uint32_t nw_ppc_dstst(int ra, int rb, int strm);
 uint32_t nw_ppc_dcbt(int ra, int rb);
 uint32_t nw_ppc_dcbtst(int ra, int rb);
 uint32_t nw_ppc_dcbf(int ra, int rb);
 uint32_t nw_ppc_eieio(void);
 uint32_t nw_ppc_dcbz(int ra, int rb);
 uint32_t nw_ppc_mtsr(int sr, int rs);
+uint32_t nw_ppc_mtsrin(int rs, int rb);
+uint32_t nw_ppc_mfsrin(int rd, int rb);
 uint32_t nw_ppc_twi(int to, int ra, int simm);
 uint32_t nw_ppc_mtmsr(int rs);
 uint32_t nw_ppc_isync(void);
+uint32_t nw_ppc_tlbie(int rb);
 uint32_t nw_ppc_b(int disp, int lk);
 uint32_t nw_ppc_bc(int bo, int bi, int disp);
 uint32_t nw_ppc_blr(void);
@@ -346,15 +389,84 @@ uint32_t nw_ppc_lfd(int frd, int ra, int d);
 uint32_t nw_ppc_stfd(int frs, int ra, int d);
 uint32_t nw_ppc_lfs(int frd, int ra, int d);
 uint32_t nw_ppc_stfs(int frs, int ra, int d);
+uint32_t nw_ppc_lfsu(int frd, int ra, int d);
+uint32_t nw_ppc_lfdu(int frd, int ra, int d);
+uint32_t nw_ppc_stfdu(int frs, int ra, int d);
+uint32_t nw_ppc_lhzu(int rd, int ra, int d);
+uint32_t nw_ppc_vaddubm(int vd, int va, int vb);
 uint32_t nw_ppc_lfsx(int frd, int ra, int rb);
 uint32_t nw_ppc_stfsx(int frs, int ra, int rb);
-uint32_t nw_ppc_fsubs(int frd, int fra, int frb);
 uint32_t nw_ppc_fdivs(int frd, int fra, int frb);
+uint32_t nw_ppc_fsubs(int frd, int fra, int frb);
+uint32_t nw_ppc_fadds(int frd, int fra, int frb);
 uint32_t nw_ppc_fmuls(int frd, int fra, int frc);
 uint32_t nw_ppc_fmadds(int frd, int fra, int frc, int frb);
+uint32_t nw_ppc_fmsubs(int frd, int fra, int frc, int frb);
+uint32_t nw_ppc_fnmsubs(int frd, int fra, int frc, int frb);
+uint32_t nw_ppc_lfdx(int frd, int ra, int rb);
+uint32_t nw_ppc_stfdx(int frs, int ra, int rb);
+uint32_t nw_ppc_fmadd(int frd, int fra, int frc, int frb);
+uint32_t nw_ppc_fcmpo(int crfd, int fra, int frb);
+uint32_t nw_ppc_fcmpu(int crfd, int fra, int frb);
+uint32_t nw_ppc_fabs(int frd, int frb);
+uint32_t nw_ppc_vand(int vd, int va, int vb);
+uint32_t nw_ppc_vandc(int vd, int va, int vb);
+uint32_t nw_ppc_vxor(int vd, int va, int vb);
+uint32_t nw_ppc_vsububm(int vd, int va, int vb);
+uint32_t nw_ppc_vslh(int vd, int va, int vb);
+uint32_t nw_ppc_vcmpequw(int vd, int va, int vb, int rc);
+uint32_t nw_ppc_vcmpequb(int vd, int va, int vb, int rc);
+uint32_t nw_ppc_vminsb(int vd, int va, int vb);
+uint32_t nw_ppc_vsr(int vd, int va, int vb);
+uint32_t nw_ppc_vsro(int vd, int va, int vb);
+uint32_t nw_ppc_vslo(int vd, int va, int vb);
+uint32_t nw_ppc_vspltisb(int vd, int simm);
+uint32_t nw_ppc_vspltw(int vd, int uimm, int vb);
+uint32_t nw_ppc_vspltb(int vd, int uimm, int vb);
+uint32_t nw_ppc_vsl(int vd, int va, int vb);
+uint32_t nw_ppc_mtvscr(int vb);
+uint32_t nw_ppc_mfvscr(int vd);
+uint32_t nw_ppc_vsldoi(int vd, int va, int vb, int shb);
+uint32_t nw_ppc_vmladduhm(int vd, int va, int vb, int vc);
+uint32_t nw_ppc_vsubshs(int vd, int va, int vb);
+uint32_t nw_ppc_vmrghb(int vd, int va, int vb);
+uint32_t nw_ppc_vmrglb(int vd, int va, int vb);
+uint32_t nw_ppc_vsrb(int vd, int va, int vb);
+uint32_t nw_ppc_vslb(int vd, int va, int vb);
+uint32_t nw_ppc_adde(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_addeo(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_eqv(int ra, int rs, int rb);
+uint32_t nw_ppc_nand(int ra, int rs, int rb);
 uint32_t nw_ppc_fneg(int frd, int frb);
+uint32_t nw_ppc_fmr(int frd, int frb);
+uint32_t nw_ppc_frsp(int frd, int frb);
+uint32_t nw_ppc_mffs(int frd);
+uint32_t nw_ppc_fnmsub(int frd, int fra, int frc, int frb);
+uint32_t nw_ppc_mtfsf(int fm, int frb);
+uint32_t nw_ppc_vadduwm(int vd, int va, int vb);
+uint32_t nw_ppc_vsraw(int vd, int va, int vb);
+uint32_t nw_ppc_vpkswss(int vd, int va, int vb);
 uint32_t nw_ppc_mullw(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_mulhwu(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_mulhw(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_lhzx(int rd, int ra, int rb);
+uint32_t nw_ppc_lhzux(int rd, int ra, int rb);
+uint32_t nw_ppc_lwbrx(int rd, int ra, int rb);
+uint32_t nw_ppc_subfic(int rd, int ra, int simm);
+uint32_t nw_ppc_stbx(int rs, int ra, int rb);
+uint32_t nw_ppc_stbux(int rs, int ra, int rb);
+uint32_t nw_ppc_stwux(int rs, int ra, int rb);
+uint32_t nw_ppc_lwzux(int rd, int ra, int rb);
+uint32_t nw_ppc_lbzux(int rd, int ra, int rb);
+uint32_t nw_ppc_divwu(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_divwuo(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_divw(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_divwo(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_lswi(int rd, int ra, int nb);
+uint32_t nw_ppc_stswi(int rs, int ra, int nb);
+uint32_t nw_ppc_mfmsr(int rd);
+uint32_t nw_ppc_mftb(int rd, int tbr);
+uint32_t nw_ppc_sc(void);
 
 enum {
 	NW_PPC_SPR_XER = 1,
