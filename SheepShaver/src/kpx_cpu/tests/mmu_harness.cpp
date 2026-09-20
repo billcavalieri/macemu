@@ -3758,6 +3758,28 @@ int main()
 		CHECK(nw_jit_cache_get(0x1000u, 0x1000u, 0, 0, NULL) == NULL);
 		CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NW_JIT_INTERPRET);
 
+		/* Fall-through chain_pc: two addi, no terminator. Uncond b. */
+		{
+			uint32_t cops[2];
+			cops[0] = nw_ppc_addi(3, 0, 1);
+			cops[1] = nw_ppc_addi(3, 3, 1);
+			nw_jit_reset();
+			nw_jit_fn cfn = nw_jit_compile(cops, 2, 0x2700u, 0x2000u, 0, 0);
+			CHECK(cfn != NULL);
+			uint32_t ch = 0;
+			int cn = 0;
+			CHECK(nw_jit_cache_get(0x2000u, 0x2700u, 0, 0, &cn, NULL, NULL, &ch) == cfn);
+			CHECK(cn == 2);
+			CHECK(ch == 0x2708u);
+			cops[0] = nw_ppc_b(16, 0);
+			cfn = nw_jit_compile(cops, 1, 0x2800u, 0x2000u, 0, 0);
+			CHECK(cfn != NULL);
+			ch = 0;
+			CHECK(nw_jit_cache_get(0x2000u, 0x2800u, 0, 0, &cn, NULL, NULL, &ch) == cfn);
+			CHECK(ch == 0x2810u);
+			CHECK(nw_jit_chain_hops() == 0);
+		}
+
 		/* Banked wrap: a block in bank 1 survives recycle of bank 0. */
 		{
 			nw_jit_reset();

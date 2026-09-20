@@ -152,6 +152,7 @@ struct nw_jit_entry {
 	uint32_t phys_page, guest_pc, msr_ir, endian;
 	nw_jit_fn fn;
 	uint32_t first_opcode;
+	uint32_t chain_pc;	/* fall-through or uncond b target; 0 = no chain */
 	uint8_t used;		/* 0 empty (stop), 1 live, 2 tombstone (skip) */
 	uint8_t n;
 	uint8_t uses_fpr;
@@ -171,6 +172,7 @@ static uint64_t g_flush_calls[NW_JIT_FL_N];	/* invalidate calls, by cause */
 static uint64_t g_compiles;
 static uint64_t g_evict, g_recompile_n;
 static uint64_t g_exec_blocks, g_exec_insns;
+static uint64_t g_chain_hops;
 static uint64_t g_code_emitted, g_compiles_at_wrap, g_wraps;
 static int g_occ_max;
 static uint64_t g_dtlb_fl[NW_JIT_DTLB_FL_N];
@@ -1817,6 +1819,7 @@ void nw_jit_reset(void)
 	g_skip_raw_pc = 0;
 	g_skip_raw_nm[0] = 0;
 	g_codec_insns = g_other_insns = 0;
+	g_chain_hops = 0;
 	g_codec_insns_tick = g_other_insns_tick = 0;
 	memset(g_dtlb_h, 0, sizeof(g_dtlb_h));
 	memset(g_io_h, 0, sizeof(g_io_h));
@@ -2413,13 +2416,14 @@ void nw_jit_summary_print(const char *why)
 {
 	const uint64_t tot = g_dtlb_hit + g_dtlb_miss;
 	const unsigned miss_pct = tot ? (unsigned)((g_dtlb_miss * 1000ull) / tot) : 0;
-	printf("NW-BOOT G1: jit summary %s skip_unsup %llu skip_io %llu dtlb_miss %u/1000 wrap %llu occ_max %d\n",
+	printf("NW-BOOT G1: jit summary %s skip_unsup %llu skip_io %llu dtlb_miss %u/1000 wrap %llu occ_max %d chain %llu\n",
 	       why ? why : "?",
 	       (unsigned long long)g_v_skip_unsup,
 	       (unsigned long long)g_v_skip_io,
 	       miss_pct,
 	       (unsigned long long)g_wraps,
-	       g_occ_max);
+	       g_occ_max,
+	       (unsigned long long)g_chain_hops);
 	{
 		const uint64_t it = g_itlb_hit + g_itlb_miss;
 		const unsigned im = it ? (unsigned)((g_itlb_miss * 1000ull) / it) : 0;
@@ -2875,6 +2879,17 @@ uint64_t nw_jit_exec_blocks(void)
 uint64_t nw_jit_exec_insns(void)
 {
 	return g_exec_insns;
+}
+
+uint64_t nw_jit_chain_hops(void)
+{
+	return g_chain_hops;
+}
+
+void nw_jit_note_chain(int hops)
+{
+	if (hops > 0)
+		g_chain_hops += (uint64_t)hops;
 }
 
 static int pc_is_codec(uint32_t pc)
@@ -3567,7 +3582,7 @@ int nw_jit_op_ends_block(uint32_t op)
 
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 			  uint32_t msr_ir, uint32_t endian, int *n_out,
-			  int *uses_fpr, int *uses_vr)
+			  int *uses_fpr, int *uses_vr, uint32_t *chain_pc)
 {
 	int i = cache_slot(phys_page, guest_pc, msr_ir, endian);
 	static uint32_t hit_sample;
@@ -3587,6 +3602,8 @@ nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 				*uses_fpr = g_cache[j].uses_fpr;
 			if (uses_vr)
 				*uses_vr = g_cache[j].uses_vr;
+			if (chain_pc)
+				*chain_pc = g_cache[j].chain_pc;
 			return g_cache[j].fn;
 		}
 	}
@@ -3595,7 +3612,8 @@ nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 
 void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 		      uint32_t endian, nw_jit_fn fn, int n,
-		      uint32_t first_opcode, int uses_fpr, int uses_vr)
+		      uint32_t first_opcode, int uses_fpr, int uses_vr,
+		      uint32_t chain_pc)
 {
 	int i = cache_slot(phys_page, guest_pc, msr_ir, endian);
 	int slot = -1, reuse = -1;
@@ -3648,6 +3666,7 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 	g_cache[slot].first_opcode = first_opcode;
 	g_cache[slot].uses_fpr = uses_fpr ? 1 : 0;
 	g_cache[slot].uses_vr = uses_vr ? 1 : 0;
+	g_cache[slot].chain_pc = chain_pc;
 	g_cache[slot].used = NW_JIT_USED_LIVE;
 	g_cache[slot].n = (uint8_t)(n < 0 ? 0 : n > 255 ? 255 : n);
 	if (!same) {
@@ -9815,6 +9834,25 @@ static int is_term(uint32_t op)
 	return prim == 18 || (prim == 19 && (xo == 16 || xo == 528) && rd == 20);
 }
 
+static uint32_t block_chain_pc(const uint32_t *ops, int n, uint32_t guest_pc)
+{
+	if (n <= 0 || !ops)
+		return 0;
+	const uint32_t last = ops[n - 1];
+	const uint32_t last_pc = guest_pc + (uint32_t)(n - 1) * 4u;
+	const int prim = (int)(last >> 26);
+	if (prim == 18 && (last & 1u) == 0) {
+		const int32_t li = ((int32_t)(last << 6)) >> 6; /* 26-bit; low 2 = AA/LK */
+		const uint32_t disp = (uint32_t)li & ~3u;
+		if (last & 2u)
+			return disp;
+		return last_pc + disp;
+	}
+	if (is_term(last) || nw_jit_op_ends_block(last))
+		return 0;
+	return guest_pc + (uint32_t)n * 4u;
+}
+
 static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 {
 	if (!code_ready() || n <= 0)
@@ -9934,7 +9972,8 @@ nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
 	if (prim == 31 && (xo == 535 || xo == 567 || xo == 599 || xo == 631 ||
 			   xo == 663 || xo == 695 || xo == 727 || xo == 759 || xo == 983))
 		uses_fpr = 1;
-	nw_jit_cache_put(phys_page, guest_pc, msr_ir, endian, fn, n, op0, uses_fpr, uses_vr);
+	nw_jit_cache_put(phys_page, guest_pc, msr_ir, endian, fn, n, op0, uses_fpr, uses_vr,
+			 block_chain_pc(ops, n, guest_pc));
 	return fn;
 }
 

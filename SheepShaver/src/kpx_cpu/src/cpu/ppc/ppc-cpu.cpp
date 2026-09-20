@@ -591,7 +591,13 @@ void powerpc_cpu::execute_trap(uint32 opcode)
 		((to & 0x02) && (uint32)a < (uint32)b) ||
 		((to & 0x01) && (uint32)a > (uint32)b);
 	if (trap && ppc32_guest_mmu_enabled()) {
+		const uint32 crv = cr().get();
+		const uint32 ctrv = ctr();
 		take_program(0x00020000u);
+		/* 68k-emu tw (6806e8c0..) is program, not illegal. NK reads
+		 * SRR0/SRR1; keep CR/CTR as the interrupted context. */
+		cr().set(crv);
+		ctr() = ctrv;
 		return;
 	}
 	increment_pc(4);
@@ -950,6 +956,16 @@ static int nw_aline_blockmove(powerpc_cpu *ppc)
 	nw_jit_invalidate_range_src(dpa, (uint32)n, NW_JIT_FL_HOST);
 	ppc->gpr(8) = 0;	/* 68k remaining count; handler copies 0 */
 	return 1;
+}
+
+/* The PA range guest_fetch hands to nw_aline_fastpath. A chained block must
+ * not start inside it: a hop skips guest_fetch, so the trap would be neither
+ * counted nor accelerated. */
+static bool nw_aline_dispatch_pa(uint32 pa)
+{
+	extern uint32 ROMBase;
+	return pa >= ROMBase + NW_EMU_ALINE_OS_FLAG &&
+	       pa <= ROMBase + NW_EMU_ALINE_TOOL_AUTOPOP;
 }
 
 static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
@@ -1650,7 +1666,11 @@ void powerpc_cpu::jit_host_trap(void *host, uint32 guest_pc)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
 	ppc->pc() = guest_pc;
+	const uint32 crv = ppc->cr().get();
+	const uint32 ctrv = ppc->ctr();
 	ppc->take_program(0x00020000u);
+	ppc->cr().set(crv);
+	ppc->ctr() = ctrv;
 }
 
 void powerpc_cpu::jit_host_sc(void *host, uint32 guest_pc)
@@ -2356,8 +2376,9 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	int n = 0;
 	int hit = 0;
 	int uses_fpr = 0, uses_vr = 0;
+	uint32_t chain_pc = 0;
 	nw_jit_fn fn = nw_jit_cache_get(phys_page, guest_pc, msr_ir, 0, &n,
-					&uses_fpr, &uses_vr);
+					&uses_fpr, &uses_vr, &chain_pc);
 	if (fn && n > 0 && n <= NW_JIT_MAX_BLOCK) {
 		hit = 1;
 		/* ON hit: do not re-fetch ops[]. VERIFY still needs them for
@@ -2517,7 +2538,6 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	jc.msr = ppc32_guest_mmu().msr();
 	jc.host = this;
 	nw_jit_cpu_bind(&jc);
-	fn(&jc);
 
 	auto commit = [&]() {
 		for (int i = 0; i < 32; i++)
@@ -2548,6 +2568,83 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		}
 	};
 
+	fn(&jc);
+	int n_total = n;
+	uint32 dsi_block_pc = guest_pc;
+	int dsi_block_n = n;
+	/* Run the successor block (fall-through or uncond b target) without
+	 * returning to execute(). execute() tests MSR[VEC]/MSR[FP] against the
+	 * class of every block's first opcode and takes 0xf20/0x800 there, so a
+	 * hop must decline a successor whose class is disabled: running VMX with
+	 * MSR[VEC]=0 skips the 0xf20 the NK uses to latch "this task uses
+	 * vectors", and VRs are then not saved across a context switch. A block
+	 * ends at a class change, so the fall-through chain_pc is usually exactly
+	 * that first lvx/lfd — which is why ungated hops inverted QuickDraw. */
+	if (mode == NW_JIT_ON && !jc.fault) {
+		int hops = 0;
+		while (hops < 8 && chain_pc && !jc.fault && jc.pc == chain_pc) {
+			/* Re-read MSR: hop 1 may have run mtmsr/rfi via a host
+			 * helper, which changes both the class gate and the key. */
+			const uint32 hmsr = ppc32_guest_mmu().msr();
+			const uint32 hmsr_ir = ((hmsr & ppc32_mmu::MSR_IR) ? 1u : 0u) |
+					       ((hmsr & ppc32_mmu::MSR_DR) ? 2u : 0u) |
+					       ((hmsr & ppc32_mmu::MSR_PR) ? 4u : 0u);
+			uint32_t npa = 0;
+			if (!nw_jit_itlb_lookup(jc.pc, &npa))
+				break;
+			if (nw_aline_dispatch_pa(npa))
+				break;
+			int n2 = 0, f2 = 0, v2 = 0;
+			uint32_t chain2 = 0;
+			nw_jit_fn next = nw_jit_cache_get(npa & ~0xfffu, jc.pc, hmsr_ir, 0,
+							 &n2, &f2, &v2, &chain2);
+			if (!next || next == NW_JIT_INTERPRET ||
+			    n2 <= 0 || n2 > NW_JIT_MAX_BLOCK)
+				break;
+			if (v2 && !(hmsr & NW_MSR_VEC))
+				break;
+			if (f2 && !(hmsr & ppc32_mmu::MSR_FP))
+				break;
+			commit();
+			/* commit() applied this block's mtspr DEC and rebased
+			 * dec_tb_base_. Leaving dec_wr set would re-apply the same
+			 * DEC on every later hop and pin the decrementer. */
+			jc.dec_wr = 0;
+			jc.dec = dec_;
+			pc() = jc.pc;
+			if (f2 && !uses_fpr) {
+				for (int i = 0; i < 32; i++)
+					jc.fpr[i] = fpr_dw(i);
+				jc.fpscr = fpscr();
+				uses_fpr = 1;
+			}
+			if (v2 && !uses_vr) {
+				for (int i = 0; i < 32; i++) {
+					jc.vr[i][0] = vr(i).w[0];
+					jc.vr[i][1] = vr(i).w[1];
+					jc.vr[i][2] = vr(i).w[2];
+					jc.vr[i][3] = vr(i).w[3];
+				}
+				jc.vscr = vscr().get();
+				uses_vr = 1;
+			}
+			jc.fault = 0;
+			jc.fault_ea = 0;
+			jc.fault_st = 0;
+			jc.nstore = 0;
+			dsi_block_pc = jc.pc;
+			dsi_block_n = n2;
+			last_fetch_pa_ = npa;
+			next(&jc);
+			n_total += n2;
+			chain_pc = chain2;
+			hops++;
+		}
+		if (hops)
+			nw_jit_note_chain(hops);
+		n = n_total;
+	}
+
 	if (jc.fault) {
 		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_EXC) {
 			commit();
@@ -2571,12 +2668,14 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		if (mode == NW_JIT_ON && jc.fault == 1 && ppc32_guest_mmu_enabled()) {
 			unsigned dsi_w = 4;
 			uint32 fop = first_opcode;
-			if (jc.pc != guest_pc && jc.pc >= guest_pc &&
-			    jc.pc < guest_pc + (uint32)n * 4u && (jc.pc & 3u) == 0) {
-				if (hit && mode == NW_JIT_ON)
-					fop = vm_read_memory_4(last_fetch_pa_ + (jc.pc - guest_pc));
+			/* dsi_block_pc/dsi_block_n name the block that faulted, which
+			 * after a hop is not the one first_opcode came from. */
+			if (jc.pc >= dsi_block_pc &&
+			    jc.pc < dsi_block_pc + (uint32)dsi_block_n * 4u && (jc.pc & 3u) == 0) {
+				if (mode == NW_JIT_ON)
+					fop = vm_read_memory_4(last_fetch_pa_ + (jc.pc - dsi_block_pc));
 				else
-					fop = ops[(int)((jc.pc - guest_pc) / 4u)];
+					fop = ops[(int)((jc.pc - dsi_block_pc) / 4u)];
 			}
 			{
 				const int fprim = (int)(fop >> 26);
