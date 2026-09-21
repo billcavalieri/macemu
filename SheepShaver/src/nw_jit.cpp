@@ -253,7 +253,8 @@ static nw_jit_host_sth16 g_host_sth16;
 static nw_jit_host_lb g_host_lb;
 static nw_jit_host_stb8 g_host_stb;
 
-static struct nw_jit_dtlb_ent g_dtlb[NW_JIT_DTLB_N];
+enum { NW_JIT_DTLB_WAYS = 2 };
+static struct nw_jit_dtlb_ent g_dtlb[NW_JIT_DTLB_N][NW_JIT_DTLB_WAYS];
 static_assert(sizeof(struct nw_jit_dtlb_ent) == 32, "dtlb entry is 32 bytes");
 static uint64_t g_dtlb_hit, g_dtlb_miss;
 /* VSID|Ks|Kp|N: translation-relevant SR bits. T and reserved noise does not drop. */
@@ -2835,9 +2836,11 @@ void nw_jit_dtlb_drop_sr(unsigned sr, int src)
 	g_dtlb_fl[src]++;
 	const uint32_t seg = (sr & 0xfu) << 28;
 	for (int i = 0; i < NW_JIT_DTLB_N; i++) {
-		if ((g_dtlb[i].flags & NW_JIT_DTLB_VALID) &&
-		    (g_dtlb[i].ea_page & 0xf0000000u) == seg)
-			g_dtlb[i].flags = 0;
+		for (int w = 0; w < NW_JIT_DTLB_WAYS; w++) {
+			if ((g_dtlb[i][w].flags & NW_JIT_DTLB_VALID) &&
+			    (g_dtlb[i][w].ea_page & 0xf0000000u) == seg)
+				g_dtlb[i][w].flags = 0;
+		}
 	}
 }
 
@@ -2858,9 +2861,12 @@ void nw_jit_dtlb_drop_page(uint32_t ea, int src)
 		src = NW_JIT_DTLB_FL_OTHER;
 	g_dtlb_fl[src]++;
 	const unsigned i = (ea >> 12) & (NW_JIT_DTLB_N - 1u);
-	if ((g_dtlb[i].flags & NW_JIT_DTLB_VALID) &&
-	    g_dtlb[i].ea_page == (ea & ~0xfffu))
-		g_dtlb[i].flags = 0;
+	const uint32_t page = ea & ~0xfffu;
+	for (int w = 0; w < NW_JIT_DTLB_WAYS; w++) {
+		if ((g_dtlb[i][w].flags & NW_JIT_DTLB_VALID) &&
+		    g_dtlb[i][w].ea_page == page)
+			g_dtlb[i][w].flags = 0;
+	}
 	nw_jit_itlb_drop_page(ea);
 }
 
@@ -2907,11 +2913,20 @@ void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host, int
 	}
 dtlb_h_done:
 	const unsigned i = (ea >> 12) & (NW_JIT_DTLB_N - 1u);
-	g_dtlb[i].ea_page = ea & ~0xfffu;
-	g_dtlb[i].pa_page = pa & ~0xfffu;
-	g_dtlb[i].host = host;
-	g_dtlb[i].sr_gen = g_sr_gen[(ea >> 28) & 0xfu];
-	g_dtlb[i].bat_gen = via_bat ? g_bat_gen : 0;
+	const uint32_t page = ea & ~0xfffu;
+	int slot = NW_JIT_DTLB_WAYS - 1;
+	for (int w = 0; w < NW_JIT_DTLB_WAYS; w++) {
+		if (!(g_dtlb[i][w].flags & NW_JIT_DTLB_VALID) ||
+		    g_dtlb[i][w].ea_page == page) {
+			slot = w;
+			break;
+		}
+	}
+	g_dtlb[i][slot].ea_page = page;
+	g_dtlb[i][slot].pa_page = pa & ~0xfffu;
+	g_dtlb[i][slot].host = host;
+	g_dtlb[i][slot].sr_gen = g_sr_gen[(ea >> 28) & 0xfu];
+	g_dtlb[i][slot].bat_gen = via_bat ? g_bat_gen : 0;
 	uint32_t flags = NW_JIT_DTLB_VALID;
 	if (writable)
 		flags |= NW_JIT_DTLB_WRITE;
@@ -2921,26 +2936,31 @@ dtlb_h_done:
 		flags |= NW_JIT_DTLB_PR;
 	if (via_bat)
 		flags |= NW_JIT_DTLB_BAT;
-	g_dtlb[i].flags = flags;
+	g_dtlb[i][slot].flags = flags;
 }
 
 int nw_jit_dtlb_lookup_pr(uint32_t ea, int is_store, uint32_t *pa, int pr)
 {
 	const unsigned i = (ea >> 12) & (NW_JIT_DTLB_N - 1u);
-	const struct nw_jit_dtlb_ent *e = &g_dtlb[i];
-	if (!(e->flags & NW_JIT_DTLB_VALID) || e->ea_page != (ea & ~0xfffu))
-		return 0;
-	if (e->sr_gen != g_sr_gen[(ea >> 28) & 0xfu])
-		return 0;
-	if ((e->flags & NW_JIT_DTLB_BAT) && e->bat_gen != g_bat_gen)
-		return 0;
-	if (((e->flags & NW_JIT_DTLB_PR) != 0) != (pr != 0))
-		return 0;
-	if (is_store && !(e->flags & NW_JIT_DTLB_WRITE))
-		return 0;
-	if (pa)
-		*pa = e->pa_page | (ea & 0xfffu);
-	return 1;
+	const uint32_t page = ea & ~0xfffu;
+	const uint32_t sr = g_sr_gen[(ea >> 28) & 0xfu];
+	for (int w = 0; w < NW_JIT_DTLB_WAYS; w++) {
+		const struct nw_jit_dtlb_ent *e = &g_dtlb[i][w];
+		if (!(e->flags & NW_JIT_DTLB_VALID) || e->ea_page != page)
+			continue;
+		if (e->sr_gen != sr)
+			return 0;
+		if ((e->flags & NW_JIT_DTLB_BAT) && e->bat_gen != g_bat_gen)
+			return 0;
+		if (((e->flags & NW_JIT_DTLB_PR) != 0) != (pr != 0))
+			return 0;
+		if (is_store && !(e->flags & NW_JIT_DTLB_WRITE))
+			return 0;
+		if (pa)
+			*pa = e->pa_page | (ea & 0xfffu);
+		return 1;
+	}
+	return 0;
 }
 
 int nw_jit_dtlb_lookup(uint32_t ea, int is_store, uint32_t *pa)
@@ -7378,6 +7398,10 @@ struct emit {
 	int just_set_pc;
 	int last_st_r;
 	int last_st_wt;
+	/* Guest GPR cached in x21–x24 for this block. Memory stays current
+	 * on every store; a BLR drops the cache because helpers write gpr[]. */
+	int pin_gpr[4];
+	int pin_next;
 };
 
 static int emit_imm32(struct emit *e, int rd, uint32_t v);
@@ -7390,6 +7414,12 @@ static int emit_w(struct emit *e, uint32_t w)
 	if (e->p >= e->end)
 		return 0;
 	*e->p++ = w;
+	/* BLR Xn. Helpers read and write cpu->gpr; callee-saved pins would
+	 * be stale after the call. */
+	if ((w & 0xfffffc1fu) == 0xd63f0000u) {
+		for (int i = 0; i < 4; i++)
+			e->pin_gpr[i] = -1;
+	}
 	return 1;
 }
 
@@ -7675,7 +7705,8 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store)
 		return 0;
 	if (!emit_w(e, a64_and_dtlb_idx(W9, W9)))
 		return 0;
-	if (!emit_w(e, a64_add_x_lsl(X11, X10, 9, 5)))
+	/* Set stride is 2×32. Way 1 is +32; tag miss on way 0 tries way 1. */
+	if (!emit_w(e, a64_add_x_lsl(X11, X10, 9, 6)))
 		return 0;
 	if (!emit_w(e, a64_ldr_w(W12, X11, 0)))
 		return 0;
@@ -7683,9 +7714,20 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store)
 		return 0;
 	if (!emit_w(e, a64_cmp_w(W12, W13)))
 		return 0;
+	uint32_t *tag0_eq = e->p;
+	if (!emit_w(e, a64_b_cond(0, 0)))		/* B.EQ checks */
+		return 0;
+	if (!emit_w(e, 0x9100816bu))			/* ADD X11, X11, #32 */
+		return 0;
+	if (!emit_w(e, a64_ldr_w(W12, X11, 0)))
+		return 0;
+	if (!emit_w(e, a64_cmp_w(W12, W13)))
+		return 0;
 	uint32_t *tag_ne = e->p;
 	if (!emit_w(e, a64_b_cond(1, 0)))
 		return 0;
+	uint32_t *checks = e->p;
+	*tag0_eq = a64_b_cond(0, (int)(checks - tag0_eq));
 	if (!emit_w(e, a64_ldr_w(W12, X11, 8)))
 		return 0;
 	uint32_t *nv = e->p;
@@ -7790,16 +7832,45 @@ static int emit_imm32(struct emit *e, int rd, uint32_t v)
 	return emit_w(e, a64_movk(rd, v >> 16, 1));
 }
 
+static int pin_find(struct emit *e, int r)
+{
+	for (int i = 0; i < 4; i++) {
+		if (e->pin_gpr[i] == r)
+			return i;
+	}
+	return -1;
+}
+
+static int pin_hold(struct emit *e, int wt, int r)
+{
+	int s = pin_find(e, r);
+	if (s < 0) {
+		s = e->pin_next & 3;
+		e->pin_next++;
+	}
+	if (!emit_w(e, a64_orr_reg(21 + s, 31, wt)))
+		return 0;
+	e->pin_gpr[s] = r;
+	return 1;
+}
+
 static int emit_load_gpr(struct emit *e, int wt, int r)
 {
 	if (e->last_st_r == r && e->last_st_wt == wt)
 		return 1;
-	return emit_w(e, a64_ldr_w(wt, X0, (uint32_t)offsetof(struct nw_jit_cpu, gpr) + (uint32_t)r * 4u));
+	const int s = pin_find(e, r);
+	if (s >= 0)
+		return emit_w(e, a64_orr_reg(wt, 31, 21 + s));
+	if (!emit_w(e, a64_ldr_w(wt, X0, (uint32_t)offsetof(struct nw_jit_cpu, gpr) + (uint32_t)r * 4u)))
+		return 0;
+	return pin_hold(e, wt, r);
 }
 
 static int emit_store_gpr(struct emit *e, int wt, int r)
 {
 	if (!emit_w(e, a64_str_w(wt, X0, (uint32_t)offsetof(struct nw_jit_cpu, gpr) + (uint32_t)r * 4u)))
+		return 0;
+	if (!pin_hold(e, wt, r))
 		return 0;
 	e->last_st_r = r;
 	e->last_st_wt = wt;
@@ -7849,9 +7920,14 @@ static int emit_imm64(struct emit *e, int xd, uint64_t v)
 
 static int emit_prologue(struct emit *e)
 {
-	if (!emit_w(e, 0xa9bf7bfdu))		/* stp x29, x30, [sp, #-32]! */
+	/* 64-byte frame: x29/x30, x19, and pin regs x21–x24. */
+	if (!emit_w(e, 0xa9bc7bfdu))		/* stp x29, x30, [sp, #-64]! */
 		return 0;
 	if (!emit_w(e, 0xf9000bf3u))		/* str x19, [sp, #16] */
+		return 0;
+	if (!emit_w(e, 0xa9025bf5u))		/* stp x21, x22, [sp, #32] */
+		return 0;
+	if (!emit_w(e, 0xa90363f7u))		/* stp x23, x24, [sp, #48] */
 		return 0;
 	if (!emit_w(e, 0xaa0003f3u))		/* mov x19, x0 */
 		return 0;
@@ -7871,11 +7947,20 @@ static int emit_prologue(struct emit *e)
 	return 1;
 }
 
-static int emit_ret(struct emit *e)
+static int emit_pop_frame(struct emit *e)
 {
+	if (!emit_w(e, 0xa9425bf5u))		/* ldp x21, x22, [sp, #32] */
+		return 0;
+	if (!emit_w(e, 0xa94363f7u))		/* ldp x23, x24, [sp, #48] */
+		return 0;
 	if (!emit_w(e, 0xf9400bf3u))		/* ldr x19, [sp, #16] */
 		return 0;
-	if (!emit_w(e, 0xa8c17bfdu))		/* ldp x29, x30, [sp], #32 */
+	return emit_w(e, 0xa8c47bfdu);		/* ldp x29, x30, [sp], #64 */
+}
+
+static int emit_ret(struct emit *e)
+{
+	if (!emit_pop_frame(e))
 		return 0;
 	return emit_w(e, 0xd65f03c0u);		/* ret */
 }
@@ -7911,9 +7996,7 @@ static int emit_chain_epilogue(struct emit *e, uint32_t chain_pc)
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
-	if (!emit_w(e, 0xf9400bf3u))
-		return 0;
-	if (!emit_w(e, 0xa8c17bfdu))
+	if (!emit_pop_frame(e))
 		return 0;
 	if (!emit_w(e, a64_br(X1)))
 		return 0;
@@ -11322,6 +11405,8 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 	e.just_set_pc = 0;
 	e.last_st_r = -1;
 	e.last_st_wt = -1;
+	e.pin_gpr[0] = e.pin_gpr[1] = e.pin_gpr[2] = e.pin_gpr[3] = -1;
+	e.pin_next = 0;
 	if (n > 0) {
 		const uint32_t op0 = ops[0];
 		const int prim = (int)(op0 >> 26);

@@ -2350,6 +2350,15 @@ int main()
 			nw_jit_dtlb_flush();
 			CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa) == 0);
 
+			/* Same (ea>>12)&1023 set: way 1 keeps the first page. */
+			nw_jit_dtlb_flush();
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0);
+			nw_jit_dtlb_fill(0x401000u, 0x5000u, 1, 0);
+			CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa) == 1);
+			CHECK(pa == 0x2000u);
+			CHECK(nw_jit_dtlb_lookup(0x401000u, 0, &pa) == 1);
+			CHECK(pa == 0x5000u);
+
 			/* drop_sr keeps other segments (distinct DTLB slots) */
 			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0);
 			nw_jit_dtlb_fill(0x10000000u, 0x3000u, 1, 0);

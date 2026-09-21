@@ -240,8 +240,9 @@ int nw_jit_stats_wanted(void);
 
 /*
  * JIT data TLB: same EA→PA map as ppc32_mmu::translate (filled only after
- * a successful probe). Direct-mapped, 1024 entries (ARM index mask
- * must match a64_and_dtlb_idx). Not a second translator.
+ * a successful probe). 1024 sets, 2 ways. Index is still (ea>>12)&1023;
+ * the second way holds the page the 68k emulator aliases onto that set.
+ * Not a second translator.
  * Hit is inlined; miss calls the C helper, which walks and fills.
  * Flush on tlbia/SDR1; mtsr drops that SR's entries; DBAT drops its
  * EA range; tlbie drops one page. Entries are tagged with MSR[PR]; a
