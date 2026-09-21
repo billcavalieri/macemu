@@ -700,9 +700,10 @@ void powerpc_cpu::take_program(uint32 srr1_bits)
  * reached from 0x3147f0, which does `mtcrf 0x3f,r7` and only falls into
  * the fast path when Flags bit 8 (GlobalFlagSystem) is set.
  *
- * n=1 RunAlternateContext (Mixed Mode enter) and n=4
- * PrioritizeInterrupts only. n=0 ReturnFromExceptionFastPath, n=2 Reset,
- * n=15 Crash and n=3..9 (tw700f PowerDispatch) stay on the 0x700 vector.
+ * Measured unpaid tw: n=0 ~2.5 M but almost all fail GlobalFlagSystem
+ * (remill-kcall-n0 hit=2, 19–48 s stall worse). n=3 VMDispatch 130 k
+ * in the t+8–18 s frames=30 window. Widen n=3 with the same ProgramInt
+ * decline. n=0/n=2/n=15 and n=5..9 stay on the 0x700 vector.
  *
  * Dead ends, all of them the v1 KDP offsets feeding the NK zeros:
  * tw700d r10=srr0 retrapped; tw700e / cs-p21-after-r10plus4 r10=twi+4
@@ -728,7 +729,7 @@ int powerpc_cpu::programint_kcall_fast(void)
 		}
 	}
 #endif
-	if (n != 1u && n != 4u)
+	if (n != 1u && n != 3u && n != 4u)
 		return 0;
 	const uint32 kdp = sprg(0);
 	if (!kdp)
