@@ -6059,10 +6059,13 @@ int main()
 			nw_jit_note_skip_unsup(skipop, 12);
 			CHECK(nw_jit_skip_n(skipop) == 2);
 			CHECK(nw_jit_skip_lost(skipop) == 16);
-			nw_jit_note_exec_at(10, 0x01060000u);
-			nw_jit_note_exec_at(5, 0x68000000u);
+			nw_jit_note_exec_at(10, 0x01060000u, 1);
+			nw_jit_note_exec_at(5, 0x68000000u, 0);
 			CHECK(nw_jit_codec_insns() == 10);
 			CHECK(nw_jit_other_insns() == 5);
+			CHECK(nw_jit_kcall_fast() == 0);
+			nw_jit_note_kcall_fast();
+			CHECK(nw_jit_kcall_fast() == 1);
 			uint8_t fb[64 * 64 * 4];
 			memset(fb, 0x40, sizeof(fb));
 			nw_fb_fps_proxy_sample(fb, 64u * 4u, 64, 64);

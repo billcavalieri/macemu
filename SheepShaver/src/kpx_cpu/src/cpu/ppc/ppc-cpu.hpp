@@ -368,13 +368,18 @@ public:
 	static void jit_host_mtmsr(void *host, uint32 msr);
 	static void jit_host_mtsr(void *host, uint32 sr, uint32 val);
 	static uint32 jit_host_mfsr(void *host, uint32 sr);
-	static void jit_host_trap(void *host, uint32 guest_pc);
+	static void jit_host_trap(void *host, struct nw_jit_cpu *cpu);
 	static void jit_host_sc(void *host, uint32 guest_pc);
 	static void jit_host_mtspr(void *host, uint32 spr, uint32 val);
 	static void jit_host_lvx(void *host, uint32 vd, uint32 ea, uint32 pc, int *fault, uint32 *out);
 	static void jit_host_stvx(void *host, uint32 ea, const uint32 *w, uint32 pc, int *fault);
 	static void jit_host_vmx(void *host, uint32 op, struct nw_jit_cpu *cpu);
 	static void jit_host_rfi(void *host, struct nw_jit_cpu *cpu);
+	static void *jit_host_chain(void *host, struct nw_jit_cpu *cpu,
+				    uint32 chain_pc, int *n2,
+				    int *uses_fpr, int *uses_vr,
+				    uint32 *dsi_pc, uint32 *chain2,
+				    int cur_fpr, int cur_vr);
 	static void jit_host_icbi(void *host, uint32 ea);
 	static void jit_host_tlbie(void *host, uint32 ea);
 	static uint32 jit_host_lwarx(void *host, uint32 ea, uint32 pc, int *fault);

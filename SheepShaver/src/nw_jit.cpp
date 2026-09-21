@@ -139,6 +139,7 @@ void nw_jit_helper_mtsrin(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t rb);
 void nw_jit_helper_mfsrin(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t rb);
 void nw_jit_helper_lwbrx(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ea);
 void nw_jit_helper_sc(struct nw_jit_cpu *cpu);
+void *nw_jit_helper_chain(struct nw_jit_cpu *cpu, uint32_t chain_pc, uint32_t cur_class);
 
 enum { NW_JIT_CODE_SIZE = 1 << 25, NW_JIT_CACHE = 262144, NW_JIT_PROBE = 16 };
 enum { NW_JIT_USED_EMPTY = 0, NW_JIT_USED_LIVE = 1, NW_JIT_USED_TOMB = 2 };
@@ -173,6 +174,9 @@ static uint64_t g_compiles;
 static uint64_t g_evict, g_recompile_n;
 static uint64_t g_exec_blocks, g_exec_insns;
 static uint64_t g_chain_hops;
+static int g_tail_hops, g_tail_n, g_tail_dsi_n, g_tail_fpr, g_tail_vr;
+static uint32_t g_tail_dsi_pc;
+enum { NW_JIT_TAIL_MAX = 1 };
 static uint64_t g_code_emitted, g_compiles_at_wrap, g_wraps;
 static int g_occ_max;
 static uint64_t g_dtlb_fl[NW_JIT_DTLB_FL_N];
@@ -196,6 +200,7 @@ static nw_jit_host_lvx g_host_lvx;
 static nw_jit_host_stvx g_host_stvx;
 static nw_jit_host_vmx g_host_vmx;
 static nw_jit_host_rfi g_host_rfi;
+static nw_jit_host_chain g_host_chain;
 static nw_jit_host_icbi g_host_icbi;
 static nw_jit_host_tlbie g_host_tlbie;
 static nw_jit_host_lwarx g_host_lwarx;
@@ -367,6 +372,7 @@ static struct {
 } g_skip[NW_JIT_SKIPN];
 static uint64_t g_codec_insns, g_other_insns;
 static uint64_t g_codec_insns_tick, g_other_insns_tick;
+static uint64_t g_kcall_fast;
 enum { NW_JIT_DTLBH = 16, NW_JIT_IOH = 16 };
 static struct {
 	uint32_t page;
@@ -477,7 +483,7 @@ int nw_jit_helper_twi(struct nw_jit_cpu *cpu, uint32_t to, uint32_t a, uint32_t 
 	if (!trap)
 		return 0;
 	if (g_host_trap && cpu->host)
-		g_host_trap(cpu->host, cpu->pc);
+		g_host_trap(cpu->host, cpu);
 	cpu->fault = NW_JIT_FAULT_EXC;
 	return 1;
 }
@@ -1819,7 +1825,10 @@ void nw_jit_reset(void)
 	g_skip_raw_pc = 0;
 	g_skip_raw_nm[0] = 0;
 	g_codec_insns = g_other_insns = 0;
+	g_kcall_fast = 0;
 	g_chain_hops = 0;
+	g_tail_hops = g_tail_n = g_tail_dsi_n = g_tail_fpr = g_tail_vr = 0;
+	g_tail_dsi_pc = 0;
 	g_codec_insns_tick = g_other_insns_tick = 0;
 	memset(g_dtlb_h, 0, sizeof(g_dtlb_h));
 	memset(g_io_h, 0, sizeof(g_io_h));
@@ -2432,10 +2441,11 @@ void nw_jit_summary_print(const char *why)
 		       (unsigned long long)g_mtsr_vsid, (unsigned long long)g_mtsr_total,
 		       (unsigned long long)g_bat_bumps, (unsigned long long)g_bat_total);
 	}
-	printf("NW-BOOT G1: jit summary %s codec %llu other %llu qt_fps_proxy frames=%llu flat_max=%u upload=%llu\n",
+	printf("NW-BOOT G1: jit summary %s codec %llu other %llu kcall_fast %llu qt_fps_proxy frames=%llu flat_max=%u upload=%llu\n",
 	       why ? why : "?",
 	       (unsigned long long)g_codec_insns,
 	       (unsigned long long)g_other_insns,
+	       (unsigned long long)g_kcall_fast,
 	       (unsigned long long)nw_fb_fps_proxy_frames(),
 	       nw_fb_fps_proxy_flat_max(),
 	       (unsigned long long)nw_fb_damage_upload_bytes());
@@ -2617,6 +2627,69 @@ void nw_jit_set_host_vmx(nw_jit_host_vmx fn)
 void nw_jit_set_host_rfi(nw_jit_host_rfi fn)
 {
 	g_host_rfi = fn;
+}
+
+void nw_jit_set_host_chain(nw_jit_host_chain fn)
+{
+	g_host_chain = fn;
+}
+
+void nw_jit_tail_begin(void)
+{
+	g_tail_hops = g_tail_n = g_tail_dsi_n = g_tail_fpr = g_tail_vr = 0;
+	g_tail_dsi_pc = 0;
+}
+
+int nw_jit_tail_n(void)
+{
+	return g_tail_n;
+}
+
+void nw_jit_tail_dsi(uint32_t *pc, int *n)
+{
+	if (pc)
+		*pc = g_tail_dsi_pc;
+	if (n)
+		*n = g_tail_dsi_n;
+}
+
+void nw_jit_tail_class(int *fpr, int *vr)
+{
+	if (fpr)
+		*fpr = g_tail_fpr;
+	if (vr)
+		*vr = g_tail_vr;
+}
+
+void *nw_jit_helper_chain(struct nw_jit_cpu *cpu, uint32_t chain_pc, uint32_t cur_class)
+{
+	if (g_mode != NW_JIT_ON || !cpu || cpu->fault)
+		return NULL;
+	if (!chain_pc || cpu->pc != chain_pc)
+		return NULL;
+	if (g_tail_hops >= NW_JIT_TAIL_MAX)
+		return NULL;
+	if (!g_host_chain || !cpu->host)
+		return NULL;
+	const int cur_fpr = (cur_class & 1u) ? 1 : 0;
+	const int cur_vr = (cur_class & 2u) ? 1 : 0;
+	int n2 = 0, f2 = 0, v2 = 0;
+	uint32_t dsi_pc = 0, chain2 = 0;
+	void *next = g_host_chain(cpu->host, cpu, chain_pc, &n2, &f2, &v2,
+				  &dsi_pc, &chain2, cur_fpr, cur_vr);
+	if (!next || next == (void *)NW_JIT_INTERPRET || n2 <= 0)
+		return NULL;
+	g_tail_hops++;
+	g_tail_n += n2;
+	g_tail_dsi_pc = dsi_pc;
+	g_tail_dsi_n = n2;
+	if (f2 || cur_fpr)
+		g_tail_fpr = 1;
+	if (v2 || cur_vr)
+		g_tail_vr = 1;
+	nw_jit_note_chain(1);
+	(void)chain2;
+	return next;
 }
 
 void nw_jit_set_host_icbi(nw_jit_host_icbi fn)
@@ -2892,23 +2965,29 @@ void nw_jit_note_chain(int hops)
 		g_chain_hops += (uint64_t)hops;
 }
 
-static int pc_is_codec(uint32_t pc)
-{
-	return (pc & 0xff000000u) == 0x01000000u ||
-	       (pc & 0xffff0000u) == 0x00390000u ||
-	       (pc & 0xffff0000u) == 0x003d0000u;
-}
-
 void nw_jit_note_exec_at(int n, uint32_t pc, int uses_vr)
 {
+	(void)pc;
 	if (n <= 0)
 		return;
 	g_exec_blocks++;
 	g_exec_insns += (uint64_t)n;
-	if (uses_vr || pc_is_codec(pc))
+	/* Codec = AltiVec-class blocks only. Heap bands 0x01/0x0039/0x003d
+	 * move between soaks and must not be the compared number. */
+	if (uses_vr)
 		g_codec_insns += (uint64_t)n;
 	else
 		g_other_insns += (uint64_t)n;
+}
+
+void nw_jit_note_kcall_fast(void)
+{
+	g_kcall_fast++;
+}
+
+uint64_t nw_jit_kcall_fast(void)
+{
+	return g_kcall_fast;
 }
 
 uint64_t nw_jit_bat_total(void)
@@ -6481,7 +6560,7 @@ int nw_jit_interp_n(struct nw_jit_cpu *cpu, const uint32_t *ops, int n, uint32_t
 
 enum {
 	W0 = 0, W1 = 1, W2 = 2, W3 = 3, W4 = 4, W5 = 5, W8 = 8, W9 = 9, W10 = 10, W11 = 11, W12 = 12, W13 = 13, W14 = 14,
-	X0 = 0, X9 = 9, X10 = 10, X11 = 11, X12 = 12, X13 = 13, X19 = 19
+	X0 = 0, X1 = 1, X9 = 9, X10 = 10, X11 = 11, X12 = 12, X13 = 13, X19 = 19
 };
 
 struct emit {
@@ -6489,6 +6568,8 @@ struct emit {
 	uint32_t *end;
 	uint32_t *fault_br[NW_JIT_MAX_BLOCK];
 	int nfault;
+	int uses_fpr;
+	int uses_vr;
 };
 
 static int emit_imm32(struct emit *e, int rd, uint32_t v);
@@ -6690,6 +6771,16 @@ static uint32_t a64_cbnz(int rt, int imm19)
 static uint32_t a64_cbnz64(int rt, int imm19)
 {
 	return 0xb5000000u | (((uint32_t)imm19 & 0x7ffffu) << 5) | (uint32_t)rt;
+}
+
+static uint32_t a64_cbz64(int rt, int imm19)
+{
+	return 0xb4000000u | (((uint32_t)imm19 & 0x7ffffu) << 5) | (uint32_t)rt;
+}
+
+static uint32_t a64_br(int xn)
+{
+	return 0xd61f0000u | ((uint32_t)xn << 5);
 }
 
 static uint32_t a64_b_cond(int cond, int imm19)
@@ -6965,6 +7056,47 @@ static int emit_ret(struct emit *e)
 	if (!emit_w(e, 0xa8c17bfdu))		/* ldp x29, x30, [sp], #32 */
 		return 0;
 	return emit_w(e, 0xd65f03c0u);		/* ret */
+}
+
+/*
+ * Pop this frame, x0=cpu, br to the successor prologue. JIT br/blr
+ * without this pop nested frames and blacked or died in NK. Cap is
+ * NW_JIT_TAIL_MAX (start at 1).
+ */
+static int emit_chain_epilogue(struct emit *e, uint32_t chain_pc)
+{
+	if (!chain_pc)
+		return emit_ret(e);
+	uint32_t cur_class = 0;
+	if (e->uses_fpr)
+		cur_class |= 1u;
+	if (e->uses_vr)
+		cur_class |= 2u;
+	if (!emit_w(e, 0xaa1303e0u))
+		return 0;
+	if (!emit_imm32(e, W1, chain_pc))
+		return 0;
+	if (!emit_imm32(e, W2, cur_class))
+		return 0;
+	if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_chain))
+		return 0;
+	if (!emit_w(e, 0xd63f0120u))
+		return 0;
+	uint32_t *cbz = e->p;
+	if (!emit_w(e, a64_cbz64(X0, 0)))
+		return 0;
+	if (!emit_w(e, 0xaa0003e1u))
+		return 0;
+	if (!emit_w(e, 0xaa1303e0u))
+		return 0;
+	if (!emit_w(e, 0xf9400bf3u))
+		return 0;
+	if (!emit_w(e, 0xa8c17bfdu))
+		return 0;
+	if (!emit_w(e, a64_br(X1)))
+		return 0;
+	*cbz = a64_cbz64(X0, (int)(e->p - cbz));
+	return emit_ret(e);
 }
 
 static int emit_fault_check(struct emit *e)
@@ -8036,6 +8168,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		}
 		if (!emit_set_pc(e, (uint32_t)(pc + disp)))
 			return 0;
+		if ((op & 1) == 0)
+			return emit_chain_epilogue(e, (uint32_t)(pc + disp));
 		return emit_ret(e);
 	}
 	if (prim == 19 && xo == 0) {
@@ -9885,6 +10019,22 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 	e.p = (uint32_t *)(g_code + g_code_used);
 	e.end = (uint32_t *)(g_code + NW_JIT_CODE_SIZE);
 	e.nfault = 0;
+	e.uses_fpr = 0;
+	e.uses_vr = 0;
+	if (n > 0) {
+		const uint32_t op0 = ops[0];
+		const int prim = (int)(op0 >> 26);
+		const int xo = (int)((op0 >> 1) & 0x3ff);
+		e.uses_vr = (prim == 4);
+		if (prim == 31 && (xo == 6 || xo == 38 || xo == 7 || xo == 39 || xo == 71 ||
+				   xo == 103 || xo == 359 || xo == 135 || xo == 167 || xo == 199 ||
+				   xo == 231 || xo == 487))
+			e.uses_vr = 1;
+		e.uses_fpr = (prim >= 48 && prim <= 55) || prim == 59 || prim == 63;
+		if (prim == 31 && (xo == 535 || xo == 567 || xo == 599 || xo == 631 ||
+				   xo == 663 || xo == 695 || xo == 727 || xo == 759 || xo == 983))
+			e.uses_fpr = 1;
+	}
 	uint32_t *start = e.p;
 	if (!emit_prologue(&e)) {
 #ifdef __APPLE__
@@ -9908,7 +10058,7 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 			return NULL;
 		}
 		uint32_t *epilogue = e.p;
-		if (!emit_ret(&e)) {
+		if (!emit_chain_epilogue(&e, block_chain_pc(ops, n, guest_pc))) {
 #ifdef __APPLE__
 			pthread_jit_write_protect_np(1);
 #endif

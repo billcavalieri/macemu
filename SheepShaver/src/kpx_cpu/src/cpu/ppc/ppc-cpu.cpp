@@ -370,6 +370,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_stvx(powerpc_cpu::jit_host_stvx);
 		nw_jit_set_host_vmx(powerpc_cpu::jit_host_vmx);
 		nw_jit_set_host_rfi(powerpc_cpu::jit_host_rfi);
+		nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
 		nw_jit_set_host_icbi(powerpc_cpu::jit_host_icbi);
 		nw_jit_set_host_tlbie(powerpc_cpu::jit_host_tlbie);
 		nw_jit_set_host_lwarx(powerpc_cpu::jit_host_lwarx);
@@ -573,6 +574,7 @@ void powerpc_cpu::take_program(uint32 srr1_bits)
 	 * [44] illegal = 0x00080000. */
 	take_exception(NW_VEC_PROGRAM, pc(), srr1_bits);
 }
+
 
 void powerpc_cpu::execute_trap(uint32 opcode)
 {
@@ -1662,12 +1664,14 @@ uint32 powerpc_cpu::jit_host_mfsr(void *host, uint32 sr)
 	return ppc32_guest_mmu().sr(sr & 0xfu);
 }
 
-void powerpc_cpu::jit_host_trap(void *host, uint32 guest_pc)
+void powerpc_cpu::jit_host_trap(void *host, struct nw_jit_cpu *cpu)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
-	ppc->pc() = guest_pc;
-	const uint32 crv = ppc->cr().get();
-	const uint32 ctrv = ppc->ctr();
+	if (!ppc || !cpu)
+		return;
+	ppc->pc() = cpu->pc;
+	const uint32 crv = cpu->cr;
+	const uint32 ctrv = cpu->ctr;
 	ppc->take_program(0x00020000u);
 	ppc->cr().set(crv);
 	ppc->ctr() = ctrv;
@@ -1794,6 +1798,102 @@ void powerpc_cpu::jit_host_rfi(void *host, struct nw_jit_cpu *cpu)
 		return;
 	}
 	cpu->pc += 4;
+}
+
+void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
+				  uint32 chain_pc, int *n2,
+				  int *uses_fpr, int *uses_vr,
+				  uint32 *dsi_pc, uint32 *chain2,
+				  int cur_fpr, int cur_vr)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	if (!ppc || !cpu || !ppc32_guest_mmu_enabled())
+		return NULL;
+	if (cpu->pc != chain_pc || cpu->fault)
+		return NULL;
+	if (ppc->async_exception_pending() &&
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE))
+		return NULL;
+	const uint32 hmsr = ppc32_guest_mmu().msr();
+	const uint32 hmsr_ir = ((hmsr & ppc32_mmu::MSR_IR) ? 1u : 0u) |
+			       ((hmsr & ppc32_mmu::MSR_DR) ? 2u : 0u) |
+			       ((hmsr & ppc32_mmu::MSR_PR) ? 4u : 0u);
+	uint32_t npa = 0;
+	if (!nw_jit_itlb_lookup(cpu->pc, &npa))
+		return NULL;
+	if (nw_aline_dispatch_pa(npa))
+		return NULL;
+	int nn = 0, f2 = 0, v2 = 0;
+	uint32_t ch2 = 0;
+	nw_jit_fn next = nw_jit_cache_get(npa & ~0xfffu, cpu->pc, hmsr_ir, 0,
+					  &nn, &f2, &v2, &ch2);
+	if (!next || next == NW_JIT_INTERPRET ||
+	    nn <= 0 || nn > NW_JIT_MAX_BLOCK)
+		return NULL;
+	if (v2 && !(hmsr & NW_MSR_VEC))
+		return NULL;
+	if (f2 && !(hmsr & ppc32_mmu::MSR_FP))
+		return NULL;
+	for (int i = 0; i < 32; i++)
+		ppc->gpr(i) = cpu->gpr[i];
+	ppc->cr().set(cpu->cr);
+	ppc->xer().set(cpu->xer);
+	ppc->lr() = cpu->lr;
+	ppc->ctr() = cpu->ctr;
+	if (cpu->dec_wr) {
+		if ((ppc->dec_ & 0x80000000u) == 0 && (cpu->dec & 0x80000000u))
+			ppc->dec_pending_ = true;
+		ppc->dec_ = cpu->dec;
+		ppc->dec_tb_base_ = ppc->tb_ticks();
+		cpu->dec_wr = 0;
+		cpu->dec = ppc->dec_;
+	}
+	ppc->pc() = cpu->pc;
+	/* Same marshalling as the C hop loop. Copy-out live jc FP/VR so a
+	 * VMX/FP tail does not leave ppc stale; copy-in only when this
+	 * block did not already have that class in jc. Copy-in on a live
+	 * VMX block overwrote glyph VRs with pre-block ppc and smeared
+	 * Finder/menu text. */
+	if (cur_fpr) {
+		for (int i = 0; i < 32; i++)
+			ppc->fpr_dw(i) = cpu->fpr[i];
+		ppc->fpscr() = cpu->fpscr;
+	}
+	if (cur_vr) {
+		for (int i = 0; i < 32; i++) {
+			ppc->vr(i).w[0] = cpu->vr[i][0];
+			ppc->vr(i).w[1] = cpu->vr[i][1];
+			ppc->vr(i).w[2] = cpu->vr[i][2];
+			ppc->vr(i).w[3] = cpu->vr[i][3];
+		}
+		ppc->vscr().set(cpu->vscr);
+	}
+	if (f2 && !cur_fpr) {
+		for (int i = 0; i < 32; i++)
+			cpu->fpr[i] = ppc->fpr_dw(i);
+		cpu->fpscr = ppc->fpscr();
+	}
+	if (v2 && !cur_vr) {
+		for (int i = 0; i < 32; i++) {
+			cpu->vr[i][0] = ppc->vr(i).w[0];
+			cpu->vr[i][1] = ppc->vr(i).w[1];
+			cpu->vr[i][2] = ppc->vr(i).w[2];
+			cpu->vr[i][3] = ppc->vr(i).w[3];
+		}
+		cpu->vscr = ppc->vscr().get();
+	}
+	ppc->last_fetch_pa_ = npa;
+	if (n2)
+		*n2 = nn;
+	if (uses_fpr)
+		*uses_fpr = f2;
+	if (uses_vr)
+		*uses_vr = v2;
+	if (dsi_pc)
+		*dsi_pc = cpu->pc;
+	if (chain2)
+		*chain2 = ch2;
+	return (void *)next;
 }
 
 void powerpc_cpu::jit_host_icbi(void *host, uint32 ea)
@@ -2568,10 +2668,29 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		}
 	};
 
+	nw_jit_tail_begin();
 	fn(&jc);
 	int n_total = n;
 	uint32 dsi_block_pc = guest_pc;
 	int dsi_block_n = n;
+	{
+		const int extra = nw_jit_tail_n();
+		if (extra > 0) {
+			n_total += extra;
+			uint32_t dpc = 0;
+			int dn = 0, tf = 0, tv = 0;
+			nw_jit_tail_dsi(&dpc, &dn);
+			nw_jit_tail_class(&tf, &tv);
+			if (dpc) {
+				dsi_block_pc = dpc;
+				dsi_block_n = dn;
+			}
+			if (tf)
+				uses_fpr = 1;
+			if (tv)
+				uses_vr = 1;
+		}
+	}
 	/* Run the successor block (fall-through or uncond b target) without
 	 * returning to execute(). execute() tests MSR[VEC]/MSR[FP] against the
 	 * class of every block's first opcode and takes 0xf20/0x800 there, so a

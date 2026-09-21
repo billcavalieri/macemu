@@ -154,11 +154,17 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 		      uint32_t chain_pc = 0);
 uint64_t nw_jit_chain_hops(void);
 void nw_jit_note_chain(int hops);
+void nw_jit_tail_begin(void);
+int nw_jit_tail_n(void);
+void nw_jit_tail_dsi(uint32_t *pc, int *n);
+void nw_jit_tail_class(int *fpr, int *vr);
 
 uint64_t nw_jit_exec_blocks(void);
 uint64_t nw_jit_exec_insns(void);
 void nw_jit_note_exec(int n);
 void nw_jit_note_exec_at(int n, uint32_t pc, int uses_vr = 0);
+void nw_jit_note_kcall_fast(void);
+uint64_t nw_jit_kcall_fast(void);
 uint64_t nw_jit_bat_total(void);
 uint64_t nw_jit_bat_gen_bumps(void);
 
@@ -278,7 +284,7 @@ typedef void (*nw_jit_host_mtsr)(void *host, uint32_t sr, uint32_t val);
 void nw_jit_set_host_mtsr(nw_jit_host_mtsr fn);
 typedef uint32_t (*nw_jit_host_mfsr)(void *host, uint32_t sr);
 void nw_jit_set_host_mfsr(nw_jit_host_mfsr fn);
-typedef void (*nw_jit_host_trap)(void *host, uint32_t guest_pc);
+typedef void (*nw_jit_host_trap)(void *host, struct nw_jit_cpu *cpu);
 void nw_jit_set_host_trap(nw_jit_host_trap fn);
 typedef void (*nw_jit_host_sc)(void *host, uint32_t guest_pc);
 void nw_jit_set_host_sc(nw_jit_host_sc fn);
@@ -292,6 +298,12 @@ typedef void (*nw_jit_host_vmx)(void *host, uint32_t op, struct nw_jit_cpu *cpu)
 void nw_jit_set_host_vmx(nw_jit_host_vmx fn);
 typedef void (*nw_jit_host_rfi)(void *host, struct nw_jit_cpu *cpu);
 void nw_jit_set_host_rfi(nw_jit_host_rfi fn);
+typedef void *(*nw_jit_host_chain)(void *host, struct nw_jit_cpu *cpu,
+				   uint32_t chain_pc, int *n2,
+				   int *uses_fpr, int *uses_vr,
+				   uint32_t *dsi_pc, uint32_t *chain2,
+				   int cur_fpr, int cur_vr);
+void nw_jit_set_host_chain(nw_jit_host_chain fn);
 typedef void (*nw_jit_host_icbi)(void *host, uint32_t ea);
 void nw_jit_set_host_icbi(nw_jit_host_icbi fn);
 /* Same work as kpx execute_tlbie: mmu.tlbie + DTLB drop_page, no PC bump. */
