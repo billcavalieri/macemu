@@ -298,6 +298,9 @@ private:
 	bool async_exception_pending() const;	/* external line or decrementer */
 	void take_async_exception();
 	void take_program(uint32 srr1_bits);
+#ifdef SHEEPSHAVER
+	int programint_kcall_fast(void);
+#endif
 	void tick_decrementer();
 	uint32 tau_read(int idx) const;	/* THRM1/THRM2 with the comparison result */
 	bool mfspr_oea(uint32 spr, uint32 *value) const;
@@ -353,7 +356,8 @@ public:
 	bool guest_mmu_enabled() const { return ppc32_guest_mmu_enabled(); }
 	bool guest_fetch(uint32 *opcode);
 	bool guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa);
-	bool guest_data_probe(uint32 ea, unsigned width, bool is_store, uint32 *pa);
+	bool guest_data_probe(uint32 ea, unsigned width, bool is_store, uint32 *pa,
+			      int *via_bat = 0);
 #ifdef SHEEPSHAVER
 	int nw_jit_try(uint32 first_opcode);
 	void nw_mm_queue_ppc(uint32 proc) { mm_ppc_pending_ = proc; }

@@ -42,7 +42,7 @@
  * host writes into guest RAM drop that page. 4d: ON DSI from a helper
  * takes the exception with SRR0 = the faulting PC (same as kpx).
  */
-enum { NW_JIT_MAX_BLOCK = 16 };
+enum { NW_JIT_MAX_BLOCK = 32 };
 
 struct nw_jit_cpu {
 	uint32_t gpr[32];
@@ -108,6 +108,8 @@ int nw_jit_op_dispatch(uint32_t op);
  * block). Stores do not end the block; a store into the executing page
  * sets fault SMC and the ON path commits pc = store+4. */
 int nw_jit_op_ends_block(uint32_t op);
+/* GPRs the opcode reads or writes. Unrecognized ops return ~0u. */
+uint32_t nw_jit_op_gpr_mask(uint32_t op);
 
 enum {
 	NW_JIT_FAULT_DSI = 1,
@@ -119,7 +121,9 @@ enum {
 void nw_jit_verify_note(const uint32_t *ops, int n, int miss);
 void nw_jit_verify_fail(void);
 void nw_jit_verify_skip(int mem);
-void nw_jit_note_skip_unsup(uint32_t op, unsigned packed);
+void nw_jit_note_skip_unsup(uint32_t op, unsigned packed, uint32_t pc = 0);
+uint32_t nw_jit_skip_op(uint32_t op);
+uint32_t nw_jit_skip_pc(uint32_t op);
 /* One-shot raw skip word + pc for unnamed prim-4 buckets and prim 6. */
 void nw_jit_skip_raw_once(uint32_t op, uint32_t pc);
 int nw_jit_skip_raw_last(uint32_t *op, uint32_t *pc, char *name, size_t n);
@@ -147,11 +151,13 @@ void nw_jit_set_host_byte(nw_jit_host_lb lb, nw_jit_host_stb8 stb);
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 			  uint32_t msr_ir, uint32_t endian, int *n_out,
 			  int *uses_fpr = 0, int *uses_vr = 0,
-			  uint32_t *chain_pc = 0);
+			  uint32_t *chain_pc = 0, uint32_t *gpr_mask = 0,
+			  int16_t *chain_disp = 0);
 void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 		      uint32_t endian, nw_jit_fn fn, int n,
 		      uint32_t first_opcode = 0, int uses_fpr = 0, int uses_vr = 0,
-		      uint32_t chain_pc = 0);
+		      uint32_t chain_pc = 0, uint32_t gpr_mask = 0xffffffffu,
+		      int16_t chain_disp = 0);
 uint64_t nw_jit_chain_hops(void);
 void nw_jit_note_chain(int hops);
 void nw_jit_tail_begin(void);
@@ -194,6 +200,35 @@ enum {
 	NW_JIT_FL_OTHER,
 	NW_JIT_FL_N
 };
+
+enum {
+	NW_JIT_CUT_ENDS_BLOCK = 0,
+	NW_JIT_CUT_PAGE_CROSS,
+	NW_JIT_CUT_PEEK_FAIL,
+	NW_JIT_CUT_CLASS_CHANGE,
+	NW_JIT_CUT_UNSUP_NEXT,
+	NW_JIT_CUT_MEM_OK0,
+	NW_JIT_CUT_MEM_OK2,
+	NW_JIT_CUT_MAX_BLOCK,
+	NW_JIT_CUT_FIRST_OP_IO,
+	NW_JIT_CUT_N
+};
+enum {
+	NW_JIT_HOP_CAP = 0,
+	NW_JIT_HOP_NO_CHAIN_PC,
+	NW_JIT_HOP_PC_MISMATCH,
+	NW_JIT_HOP_ITLB_MISS,
+	NW_JIT_HOP_ALINE,
+	NW_JIT_HOP_CACHE_MISS,
+	NW_JIT_HOP_VEC_GATE,
+	NW_JIT_HOP_FP_GATE,
+	NW_JIT_HOP_COMPILE_NULL,
+	NW_JIT_HOP_N
+};
+void nw_jit_note_cut(int reason);
+void nw_jit_note_hop_stop(int reason);
+uint64_t nw_jit_cut_count(int reason);
+uint64_t nw_jit_hop_stop_count(int reason);
 void nw_jit_invalidate_page(uint32_t phys_page);
 void nw_jit_invalidate_page_src(uint32_t phys_page, int src);
 void nw_jit_invalidate_range_src(uint32_t pa, uint32_t nbytes, int src);
@@ -228,7 +263,8 @@ enum {
 	NW_JIT_DTLB_VALID = 1u,
 	NW_JIT_DTLB_WRITE = 2u,
 	NW_JIT_DTLB_HOST = 4u,	/* host page pointer is live; ARM ldr/str */
-	NW_JIT_DTLB_PR = 8u	/* filled with MSR[PR]=1; miss if current PR differs */
+	NW_JIT_DTLB_PR = 8u,	/* filled with MSR[PR]=1; miss if current PR differs */
+	NW_JIT_DTLB_BAT = 16u	/* filled from a BAT; miss if bat_gen changed */
 };
 struct nw_jit_dtlb_ent {
 	uint32_t ea_page;
@@ -245,7 +281,8 @@ void nw_jit_dtlb_flush_if_pr(uint32_t old_msr, uint32_t new_msr, int src);
 void nw_jit_dtlb_drop_sr(unsigned sr, int src);
 void nw_jit_dtlb_drop_bat(uint32_t upper, int src);
 void nw_jit_dtlb_drop_page(uint32_t ea, int src);
-void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host, int pr = 0);
+void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host, int pr = 0,
+		     int via_bat = 0);
 int nw_jit_dtlb_lookup(uint32_t ea, int is_store, uint32_t *pa);
 int nw_jit_dtlb_lookup_pr(uint32_t ea, int is_store, uint32_t *pa, int pr);
 uint64_t nw_jit_dtlb_hits(void);
@@ -337,6 +374,7 @@ uint32_t nw_ppc_subfeo(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_subf(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_subfo(int rd, int ra, int rb, int rc);
 uint32_t nw_ppc_subfc(int rd, int ra, int rb, int rc);
+uint32_t nw_ppc_subfze(int rd, int ra, int rc);
 uint32_t nw_ppc_rlwinm(int ra, int rs, int sh, int mb, int me);
 uint32_t nw_ppc_rlwnm(int ra, int rs, int rb, int mb, int me);
 uint32_t nw_ppc_lmw(int rd, int ra, int d);
@@ -357,6 +395,7 @@ uint32_t nw_ppc_stw(int rs, int ra, int d);
 uint32_t nw_ppc_stwu(int rs, int ra, int d);
 uint32_t nw_ppc_stwx(int rs, int ra, int rb);
 uint32_t nw_ppc_sthx(int rs, int ra, int rb);
+uint32_t nw_ppc_sthux(int rs, int ra, int rb);
 uint32_t nw_ppc_lwzx(int rd, int ra, int rb);
 uint32_t nw_ppc_lhax(int rd, int ra, int rb);
 uint32_t nw_ppc_lhaux(int rd, int ra, int rb);
@@ -402,6 +441,7 @@ uint32_t nw_ppc_srw(int ra, int rs, int rb, int rc);
 uint32_t nw_ppc_sraw(int ra, int rs, int rb, int rc);
 uint32_t nw_ppc_srawi(int ra, int rs, int sh, int rc);
 uint32_t nw_ppc_sync(void);
+uint32_t nw_ppc_tlbsync(void);
 uint32_t nw_ppc_dss(void);
 uint32_t nw_ppc_dst(int ra, int rb, int strm);
 uint32_t nw_ppc_dstst(int ra, int rb, int strm);

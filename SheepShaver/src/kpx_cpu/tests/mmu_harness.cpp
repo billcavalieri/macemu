@@ -607,6 +607,7 @@ int main()
 			mmu.translate(0x80000010u, PPC32_XLATE_DR, 4);
 		CHECK(hit.ok);
 		CHECK(hit.pa == 0x00020010u);
+		CHECK(hit.via_bat);
 
 		/* Same EA via HTAB would map elsewhere; BAT wins on a cold TLB. */
 		mmu.set_sr(8, 0x00000001u);
@@ -617,6 +618,7 @@ int main()
 			mmu.translate(0x80000010u, PPC32_XLATE_DR, 4);
 		CHECK(bat_first.ok);
 		CHECK(bat_first.pa == 0x00020010u);
+		CHECK(bat_first.via_bat);
 	}
 
 	/* ---- HTAB primary hash ---- */
@@ -636,6 +638,7 @@ int main()
 			mmu.translate(ea | 0x20u, PPC32_XLATE_DR, 4);
 		CHECK(hit.ok);
 		CHECK(hit.pa == ((rpn << 12) | 0x20u));
+		CHECK(!hit.via_bat);
 	}
 
 	/* ---- HTAB secondary hash (primary empty) ---- */
@@ -2192,11 +2195,13 @@ int main()
 			CHECK(nw_jit_dtlb_lookup(0x10000000u, 0, &pa) == 1);
 			CHECK(pa == 0x3000u);
 
-			/* drop_bat 128 KiB at 0; SR1 page survives */
-			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0);
+			/* drop_bat: BAT-sourced entry misses; page-table SR1 survives */
+			nw_jit_dtlb_fill(0x1000u, 0x2000u, 1, 0, 0, 1);
+			nw_jit_dtlb_fill(0x10000000u, 0x3000u, 1, 0);
 			nw_jit_dtlb_drop_bat(0x2u, NW_JIT_DTLB_FL_BAT); /* Vs, BL=0 */
 			CHECK(nw_jit_dtlb_lookup(0x1000u, 0, &pa) == 0);
-			CHECK(nw_jit_dtlb_lookup(0x10000000u, 0, &pa) == 0); /* gen miss */
+			CHECK(nw_jit_dtlb_lookup(0x10000000u, 0, &pa) == 1);
+			CHECK(pa == 0x3000u);
 			CHECK(nw_jit_bat_gen_bumps() >= 1);
 
 			/* drop_page hits one slot */
@@ -2845,6 +2850,21 @@ int main()
 		CHECK(fn != NULL);
 		fn(&b);
 		CHECK(a.gpr[3] == 0x1111u && b.gpr[3] == 0x1111u);
+
+		/* tlbsync is a barrier like sync; GPRs unchanged */
+		CHECK(nw_ppc_tlbsync() == 0x7c00046cu);
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0x1111u;
+		ops[0] = nw_ppc_tlbsync();
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x2350u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x2350u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[3] == 0x1111u && b.gpr[3] == 0x1111u);
+		CHECK(b.pc == 0x2000u);
 
 		/* dss is a nop; GPRs unchanged; does not end the block */
 		memset(&a, 0, sizeof(a));
@@ -3771,6 +3791,12 @@ int main()
 			CHECK(nw_jit_cache_get(0x2000u, 0x2700u, 0, 0, &cn, NULL, NULL, &ch) == cfn);
 			CHECK(cn == 2);
 			CHECK(ch == 0x2708u);
+			{
+				uint32_t gm = 0;
+				CHECK(nw_jit_cache_get(0x2000u, 0x2700u, 0, 0, &cn, NULL, NULL, NULL, &gm) == cfn);
+				CHECK(gm == (1u << 3));
+				CHECK(nw_jit_op_gpr_mask(nw_ppc_addi(3, 3, 1)) == (1u << 3));
+			}
 			cops[0] = nw_ppc_b(16, 0);
 			cfn = nw_jit_compile(cops, 1, 0x2800u, 0x2000u, 0, 0);
 			CHECK(cfn != NULL);
@@ -3778,6 +3804,32 @@ int main()
 			CHECK(nw_jit_cache_get(0x2000u, 0x2800u, 0, 0, &cn, NULL, NULL, &ch) == cfn);
 			CHECK(ch == 0x2810u);
 			CHECK(nw_jit_chain_hops() == 0);
+			cops[0] = nw_ppc_bc(NW_PPC_BO_TRUE, 0, 16);
+			cfn = nw_jit_compile(cops, 1, 0x2900u, 0x2000u, 0, 0);
+			CHECK(cfn != NULL);
+			ch = 0;
+			int16_t cd = 0;
+			CHECK(nw_jit_cache_get(0x2000u, 0x2900u, 0, 0, &cn, NULL, NULL, &ch,
+					       NULL, &cd) == cfn);
+			CHECK(ch == 0);
+			CHECK(cd == 16);
+			cops[0] = nw_ppc_bclr(NW_PPC_BO_ALWAYS, 0);
+			cfn = nw_jit_compile(cops, 1, 0x2a00u, 0x2000u, 0, 0);
+			CHECK(cfn != NULL);
+			cd = 0;
+			ch = 0xffffu;
+			CHECK(nw_jit_cache_get(0x2000u, 0x2a00u, 0, 0, &cn, NULL, NULL, &ch,
+					       NULL, &cd) == cfn);
+			CHECK(ch == 0);
+			CHECK(cd == 1);
+			cops[0] = nw_ppc_bcctr(NW_PPC_BO_ALWAYS, 0);
+			cfn = nw_jit_compile(cops, 1, 0x2b00u, 0x2000u, 0, 0);
+			CHECK(cfn != NULL);
+			cd = 0;
+			CHECK(nw_jit_cache_get(0x2000u, 0x2b00u, 0, 0, &cn, NULL, NULL, &ch,
+					       NULL, &cd) == cfn);
+			CHECK(cd == 3);
+			CHECK(sizeof(int16_t) == 2);
 		}
 
 		/* Banked wrap: a block in bank 1 survives recycle of bank 0. */
@@ -3813,6 +3865,10 @@ int main()
 			CHECK(kc.gpr[3] == 1 && kc.pc == 0x3000u);
 			nw_jit_invalidate_page(0x2000u);
 			CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == NULL);
+			/* Smaller banks wrap later relative to a given PC, so
+			 * 0x1a00 from the fill loop can still be live. Reset
+			 * so later opcode tests do not cache-hit addi+blr. */
+			nw_jit_reset();
 		}
 
 		/* addze r4, r3: +CA, wrap CA, addze. CR0 */
@@ -3854,6 +3910,64 @@ int main()
 		CHECK(fn != NULL);
 		fn(&b);
 		CHECK(a.gpr[4] == 0 && (a.cr >> 28) == 2 && b.cr == a.cr);
+
+		/* subfze r4, r3: ~RA + CA, wrap CA, subfze. CR0 */
+		CHECK(nw_ppc_subfze(8, 5, 0) == 0x7d050190u);
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 5;
+		a.xer = 0x20000000u;
+		ops[0] = nw_ppc_subfze(4, 3, 0);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x2320u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x2320u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0xfffffffbU && !(a.xer & 0x20000000u));
+		CHECK(b.gpr[4] == a.gpr[4] && b.xer == a.xer && b.pc == a.pc);
+
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		a.gpr[3] = 0;
+		a.xer = 0x20000000u;
+		ops[0] = nw_ppc_subfze(4, 3, 0);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x2330u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x2330u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0 && (a.xer & 0x20000000u));
+		CHECK(b.gpr[4] == 0 && b.xer == a.xer);
+
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		ops[0] = nw_ppc_subfze(4, 3, 1);
+		ops[1] = nw_ppc_blr();
+		b = a;
+		CHECK(nw_jit_interp_n(&a, ops, 2, 0x2340u) == 1);
+		fn = nw_jit_compile(ops, 2, 0x2340u, 0x1000u, 0, 0);
+		CHECK(fn != NULL);
+		fn(&b);
+		CHECK(a.gpr[4] == 0xffffffffu && (a.cr >> 28) == 8 && b.cr == a.cr);
+
+		/* MAX_BLOCK 32: 31 addi + blr still compile; DSI resume uses n not the bound. */
+		{
+			uint32_t longops[NW_JIT_MAX_BLOCK];
+			CHECK(NW_JIT_MAX_BLOCK == 32);
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			for (int i = 0; i < 31; i++)
+				longops[i] = nw_ppc_addi(3, 3, 1);
+			longops[31] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, longops, 32, 0x2400u) == 1);
+			fn = nw_jit_compile(longops, 32, 0x2400u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(a.gpr[3] == 31 && b.gpr[3] == 31 && b.pc == 0x2000u);
+		}
 
 		/* lwarx / stwcx. on RAM: match stores and sets EQ; mismatch does not */
 		{
@@ -5158,7 +5272,8 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[4] == 0xffffffffu && b.gpr[4] == a.gpr[4]);
 		CHECK(nw_jit_op_supported(nw_ppc_lhzx(3, 1, 2)));
-		CHECK(!nw_jit_op_supported(nw_ppc_lhzux(4, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_lhzux(4, 1, 2)));
+		CHECK(!nw_jit_op_supported(nw_ppc_lhzux(4, 0, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lwbrx(3, 1, 2)));
 
 		memset(&a, 0, sizeof(a));
@@ -5557,7 +5672,51 @@ int main()
 			CHECK(b.pc == 0x2000u); /* blr must run; W10 must stay fault */
 			CHECK(nw_ppc_stbux(0, 0, 0) == 0x7c0001eeu);
 			CHECK(!nw_jit_op_supported(nw_ppc_stbux(3, 0, 2)));
-			CHECK(!nw_jit_op_supported(nw_ppc_stbux(3, 1, 2)));
+			CHECK(nw_jit_op_supported(nw_ppc_stbux(3, 1, 2)));
+			CHECK(nw_ppc_stbux(7, 5, 4) == 0x7ce521eeu);
+
+			memset(ram, 0, sizeof(ram));
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = sizeof(ram);
+			a.gpr[1] = 8;
+			a.gpr[2] = 4;
+			a.gpr[3] = 0xab;
+			ops[0] = nw_ppc_stbux(3, 1, 2);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x2300u) == 1);
+			CHECK(ram[12] == 0xab && a.gpr[1] == 12);
+			fn = nw_jit_compile(ops, 2, 0x2300u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(ram[12] == 0xab && b.gpr[1] == 12);
+			CHECK(b.pc == 0x2000u);
+
+			CHECK(nw_ppc_sthux(7, 10, 5) == 0x7cea2b6eu);
+			CHECK(nw_jit_op_supported(nw_ppc_sthux(3, 1, 2)));
+			CHECK(!nw_jit_op_supported(nw_ppc_sthux(3, 0, 2)));
+			memset(ram, 0, sizeof(ram));
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = sizeof(ram);
+			a.gpr[1] = 8;
+			a.gpr[2] = 4;
+			a.gpr[3] = 0xabcd;
+			ops[0] = nw_ppc_sthux(3, 1, 2);
+			ops[1] = nw_ppc_blr();
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x2310u) == 1);
+			CHECK(ram[12] == 0xab && ram[13] == 0xcd && a.gpr[1] == 12);
+			fn = nw_jit_compile(ops, 2, 0x2310u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(ram[12] == 0xab && ram[13] == 0xcd && b.gpr[1] == 12);
+			CHECK(b.pc == 0x2000u);
 
 			ops[0] = nw_ppc_addi(1, 1, 0);
 			ops[1] = nw_ppc_lbzux(4, 1, 2);
@@ -5577,6 +5736,25 @@ int main()
 			fn(&b);
 			CHECK(a.gpr[4] == 0xabu && a.gpr[1] == 12 && a.gpr[5] == 12);
 			CHECK(b.gpr[4] == a.gpr[4] && b.gpr[1] == a.gpr[1] && b.gpr[5] == a.gpr[5]);
+			CHECK(b.pc == 0x2000u);
+			ram[12] = 0xab;
+			ram[13] = 0xcd;
+			ops[0] = nw_ppc_lhzux(4, 1, 2);
+			ops[1] = nw_ppc_blr();
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram;
+			a.mem_base = 0;
+			a.mem_size = sizeof(ram);
+			a.gpr[1] = 8;
+			a.gpr[2] = 4;
+			b = a;
+			CHECK(nw_jit_interp_n(&a, ops, 2, 0x1d80u) == 1);
+			CHECK(a.gpr[4] == 0xabcdu && a.gpr[1] == 12);
+			fn = nw_jit_compile(ops, 2, 0x1d80u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(b.gpr[4] == 0xabcdu && b.gpr[1] == 12);
 			CHECK(b.pc == 0x2000u);
 
 			memset(&a, 0, sizeof(a));
@@ -5958,11 +6136,16 @@ int main()
 		CHECK(nw_jit_op_supported(0x10000029u));	/* vmsumshs */
 		CHECK(nw_jit_op_supported(nw_ppc_subfic(4, 3, 1)));
 		CHECK(nw_jit_op_supported(nw_ppc_stbx(3, 1, 2)));
-		CHECK(!nw_jit_op_supported(nw_ppc_stbux(3, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_stbux(3, 1, 2)));
 		CHECK(!nw_jit_op_supported(0x7c0001eeu));
+		CHECK(nw_jit_op_supported(nw_ppc_sthux(3, 1, 2)));
+		CHECK(!nw_jit_op_supported(nw_ppc_sthux(3, 0, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_subfze(4, 3, 0)));
+		CHECK(nw_jit_op_supported(nw_ppc_tlbsync()));
 		CHECK(nw_jit_op_supported(nw_ppc_lbzux(3, 1, 2)));
 		CHECK(!nw_jit_op_supported(nw_ppc_lbzux(3, 0, 2)));
-		CHECK(!nw_jit_op_supported(nw_ppc_lhzux(4, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_lhzux(4, 1, 2)));
+		CHECK(!nw_jit_op_supported(nw_ppc_lhzux(4, 0, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lwzux(4, 1, 2)));
 		CHECK(!nw_jit_op_supported(0x7c00006eu));
 		CHECK(nw_jit_op_supported(nw_ppc_add(4, 3, 5, 0) | (1u << 10)));
@@ -6001,14 +6184,16 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_vsro(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_vsrw(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_vspltisw(3, 1)));
-		CHECK(!nw_jit_op_supported(nw_ppc_lhzux(4, 1, 2)));
-		CHECK(!nw_jit_op_supported(nw_ppc_stbux(3, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_lhzux(4, 1, 2)));
+		CHECK(!nw_jit_op_supported(nw_ppc_lhzux(4, 0, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_stbux(3, 1, 2)));
 		CHECK(nw_jit_op_ends_block(nw_ppc_vslo(3, 1, 2)));
 		CHECK(nw_jit_op_ends_block(nw_ppc_vsro(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_vslb(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_mulhw(4, 3, 5, 1)));
 		CHECK(nw_jit_op_supported(nw_ppc_lhzx(3, 1, 2)));
-		CHECK(!nw_jit_op_supported(nw_ppc_lhzux(4, 1, 2)));
+		CHECK(nw_jit_op_supported(nw_ppc_lhzux(4, 1, 2)));
+		CHECK(!nw_jit_op_supported(nw_ppc_lhzux(4, 0, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_lwbrx(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_mtsrin(3, 4)));
 		CHECK(nw_jit_op_supported(nw_ppc_mfsrin(3, 4)));
@@ -6055,10 +6240,18 @@ int main()
 			const uint32_t skipop = 0x7c000238u; /* eqv r0,r0,r0 */
 			nw_jit_reset();
 			CHECK(nw_jit_skip_n(skipop) == 0);
-			nw_jit_note_skip_unsup(skipop, 4);
-			nw_jit_note_skip_unsup(skipop, 12);
+			nw_jit_note_skip_unsup(skipop, 4, 0x12340000u);
+			nw_jit_note_skip_unsup(skipop, 12, 0x56780000u);
 			CHECK(nw_jit_skip_n(skipop) == 2);
 			CHECK(nw_jit_skip_lost(skipop) == 16);
+			CHECK(nw_jit_skip_op(skipop) == skipop);
+			CHECK(nw_jit_skip_pc(skipop) == 0x12340000u);
+			CHECK(nw_jit_cut_count(NW_JIT_CUT_PAGE_CROSS) == 0);
+			nw_jit_note_cut(NW_JIT_CUT_PAGE_CROSS);
+			CHECK(nw_jit_cut_count(NW_JIT_CUT_PAGE_CROSS) == 1);
+			CHECK(nw_jit_hop_stop_count(NW_JIT_HOP_CAP) == 0);
+			nw_jit_note_hop_stop(NW_JIT_HOP_CAP);
+			CHECK(nw_jit_hop_stop_count(NW_JIT_HOP_CAP) == 1);
 			nw_jit_note_exec_at(10, 0x01060000u, 1);
 			nw_jit_note_exec_at(5, 0x68000000u, 0);
 			CHECK(nw_jit_codec_insns() == 10);

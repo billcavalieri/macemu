@@ -1233,12 +1233,29 @@ static int nw_boot_log_stream(void)
 		cached = getenv("NW_BOOT_LOG_TTY") ? 1 : !isatty(STDOUT_FILENO);
 	return cached;
 }
+
+static int nw_boot_log_verbose(void)
+{
+	static int cached = -1;
+	if (cached < 0)
+		cached = getenv("NW_BOOT_LOG_VERBOSE") ? 1 : 0;
+	return cached;
+}
 #endif
 
 void nw_event_insn(void)
 {
 #if NW_BOOT_LOG
 	nw_event_ni++;
+#endif
+}
+
+void nw_event_insns(unsigned n)
+{
+#if NW_BOOT_LOG
+	nw_event_ni += n;
+#else
+	(void)n;
 #endif
 }
 
@@ -1253,7 +1270,7 @@ void nw_event_exception(uint32_t srr0, uint32_t vector, uint32_t extra, int extr
 {
 #if NW_BOOT_LOG
 	nw_event_nx++;
-	if (nw_boot_log_stream()) {
+	if (nw_boot_log_stream() && nw_boot_log_verbose()) {
 		if (extra_valid)
 			printf("NW-BOOT X E %08x %08x %08x\n", (unsigned)srr0,
 			       (unsigned)vector, (unsigned)extra);
@@ -1321,7 +1338,7 @@ void nw_event_aline(uint32_t op, uint32_t pc68k, int handler)
 	g_atrap[nw_atrap_window()][trap & 0xfffu]++;
 #if NW_BOOT_LOG
 	nw_event_na++;
-	if (nw_boot_log_stream())
+	if (nw_boot_log_stream() && nw_boot_log_verbose())
 		printf("NW-BOOT A %04x %08x %d\n", (unsigned)trap,
 		       (unsigned)pc68k, handler);
 	if (trap == 0xa148u) {

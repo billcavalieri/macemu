@@ -43,6 +43,22 @@ enum {
 	NW_KDP_PTEGMASK = 0x6a0,
 	NW_KDP_HTABORG = 0x6a4,
 
+	/* NK KernelData (elliotnunn/NanoKernel Defines.s). Palaver for
+	 * 68k-emu twi r31,n at 0x6806e8c0 uses these; do not jump
+	 * KCallTbl without ContextPtr and r7–r13 in the CB. */
+	NW_KDP_SAVED_R1 = 0x004,
+	NW_KDP_SAVED_R6 = 0x018,
+	NW_KDP_KCALLTBL = 0x5f0,
+	NW_KDP_SYS_CONTEXT_PTR = 0x658,	/* physical SysContextPtr */
+	NW_KDP_CONTEXT_PTR = 0x65c,
+	NW_KDP_FLAGS = 0x660,
+	NW_CB_R7 = 0x13c,		/* CB.r7+4; each GPR is an 8-byte slot */
+	NW_EMU_KCALL_BASE = 0x6806e8c0u,
+	NW_EMU_KCALL_N = 16,
+	NW_KCALL_RETURN_FROM_EXCEPTION = 0,
+	NW_KCALL_RESET = 2,
+	NW_KCALL_CRASH = 15,
+
 	/* SheepShaver OF / NKHWInfo seed at KDP+0xb80. Signature is +0x070. */
 	NW_KDP_HWINFO_BASE = 0xb80,
 	NW_KDP_HNFO_SIGNATURE = 0xb80 + 0x070,	/* 0xbf0 */
@@ -417,6 +433,7 @@ void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, u
 int nw_clock_sample_due(uint64_t now_us, uint64_t *last_us, uint64_t period_us);
 #if NW_BOOT_LOG
 void nw_event_insn(void);
+void nw_event_insns(unsigned n);
 void nw_event_frame(void);
 #endif
 

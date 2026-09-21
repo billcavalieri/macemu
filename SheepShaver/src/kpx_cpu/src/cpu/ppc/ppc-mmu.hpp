@@ -54,6 +54,7 @@ struct ppc32_xlate_result {
 	bool ok;
 	uint32_t pa;
 	uint32_t fault;
+	bool via_bat;	/* DBAT/IBAT, not the page table — DTLB bat_gen applies */
 };
 
 class ppc32_mmu

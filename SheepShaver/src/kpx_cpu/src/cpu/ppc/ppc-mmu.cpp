@@ -319,6 +319,7 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 	r.ok = false;
 	r.pa = 0;
 	r.fault = 0;
+	r.via_bat = false;
 
 	if (width == 0)
 		return r;
@@ -341,6 +342,7 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 		}
 		r.ok = true;
 		r.pa = pa;
+		r.via_bat = true;
 		return r;
 	}
 
