@@ -373,6 +373,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
 		nw_jit_set_host_icbi(powerpc_cpu::jit_host_icbi);
 		nw_jit_set_host_tlbie(powerpc_cpu::jit_host_tlbie);
+		nw_jit_set_host_tlbia(powerpc_cpu::jit_host_tlbia);
 		nw_jit_set_host_lwarx(powerpc_cpu::jit_host_lwarx);
 		nw_jit_set_host_stwcx(powerpc_cpu::jit_host_stwcx);
 		nw_jit_set_host_lfd(powerpc_cpu::jit_host_lfd);
@@ -2022,6 +2023,17 @@ void powerpc_cpu::jit_host_tlbie(void *host, uint32 ea)
 	if (ppc32_guest_mmu_enabled()) {
 		ppc32_guest_mmu().tlbie(ea);
 		nw_jit_dtlb_drop_page(ea, NW_JIT_DTLB_FL_TLB);
+		ppc->invalidate_cache();
+	}
+}
+
+void powerpc_cpu::jit_host_tlbia(void *host)
+{
+	powerpc_cpu *ppc = (powerpc_cpu *)host;
+	if (!ppc)
+		return;
+	if (ppc32_guest_mmu_enabled()) {
+		ppc32_guest_mmu().tlbia();
 		ppc->invalidate_cache();
 	}
 }

@@ -386,6 +386,7 @@ public:
 				    int cur_fpr, int cur_vr);
 	static void jit_host_icbi(void *host, uint32 ea);
 	static void jit_host_tlbie(void *host, uint32 ea);
+	static void jit_host_tlbia(void *host);
 	static uint32 jit_host_lwarx(void *host, uint32 ea, uint32 pc, int *fault);
 	static int jit_host_stwcx(void *host, uint32 ea, uint32 val, uint32 pc, int *fault);
 	static void jit_host_lfd(void *host, uint32 fd, uint32 ea, uint32 pc, int *fault, uint64 *out);

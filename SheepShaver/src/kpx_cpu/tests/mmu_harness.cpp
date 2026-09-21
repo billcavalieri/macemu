@@ -164,6 +164,169 @@ static void program_pte(uint8_t *ram, uint32_t sdr1, uint32_t vsid,
 	be32_store(ram, pteg + 4, pte_word1(rpn));
 }
 
+/* === G2 jit-av-sweep helpers (file scope) === */
+/* PASTEABLE AltiVec mill-debt wave — table + encode + test loop
+ * 123 names with no ops[0]=nw_ppc_* MMUTest yet (todo-before-sweep / untested).
+ * Wave1 = pure VR ops (skip JIT_AV_MEM_X). Wave2 = MEM_X with guest RAM.
+ */
+
+enum jit_av_kind {
+	JIT_AV_VX = 0, JIT_AV_VXR, JIT_AV_VA, JIT_AV_SPLAT_U, JIT_AV_SPLAT_S,
+	JIT_AV_VX_VB, JIT_AV_MEM_X, JIT_AV_MFVSCR, JIT_AV_MTVSCR
+};
+struct jit_av_case { const char *name; int kind; int prim; int xo; };
+
+static uint32_t jit_av_encode(const struct jit_av_case *c, int vd, int va, int vb, int vc)
+{
+	const uint32_t p = (uint32_t)c->prim << 26;
+	switch (c->kind) {
+	case JIT_AV_VX: case JIT_AV_VXR:
+		return p | ((uint32_t)vd<<21) | ((uint32_t)va<<16) | ((uint32_t)vb<<11) | (uint32_t)c->xo;
+	case JIT_AV_VA:
+		return p | ((uint32_t)vd<<21) | ((uint32_t)va<<16) | ((uint32_t)vb<<11) | ((uint32_t)vc<<6) | (uint32_t)(c->xo & 63);
+	case JIT_AV_SPLAT_U:
+		return p | ((uint32_t)vd<<21) | ((uint32_t)(va&31)<<16) | ((uint32_t)vb<<11) | (uint32_t)c->xo;
+	case JIT_AV_SPLAT_S:
+		return p | ((uint32_t)vd<<21) | ((uint32_t)(va&31)<<16) | (uint32_t)c->xo;
+	case JIT_AV_VX_VB:
+		return p | ((uint32_t)vd<<21) | ((uint32_t)vb<<11) | (uint32_t)c->xo;
+	case JIT_AV_MEM_X:
+		return p | ((uint32_t)vd<<21) | ((uint32_t)va<<16) | ((uint32_t)vb<<11) | ((uint32_t)c->xo<<1);
+	case JIT_AV_MFVSCR: return p | ((uint32_t)vd<<21) | (uint32_t)c->xo;
+	case JIT_AV_MTVSCR: return p | ((uint32_t)vb<<11) | (uint32_t)c->xo;
+	default: return 0;
+	}
+}
+
+static const struct jit_av_case jit_av_sweep_cases[] = {
+	{ "lvebx", JIT_AV_MEM_X, 31, 7 },
+	{ "lvehx", JIT_AV_MEM_X, 31, 39 },
+	{ "lvewx", JIT_AV_MEM_X, 31, 71 },
+	{ "lvsl", JIT_AV_MEM_X, 31, 6 },
+	{ "lvsr", JIT_AV_MEM_X, 31, 38 },
+	{ "stvebx", JIT_AV_MEM_X, 31, 135 },
+	{ "stvehx", JIT_AV_MEM_X, 31, 167 },
+	{ "stvewx", JIT_AV_MEM_X, 31, 199 },
+	{ "vaddcuw", JIT_AV_VX, 4, 384 },
+	{ "vaddfp", JIT_AV_VX, 4, 10 },
+	{ "vaddsbs", JIT_AV_VX, 4, 768 },
+	{ "vaddshs", JIT_AV_VX, 4, 832 },
+	{ "vaddsws", JIT_AV_VX, 4, 896 },
+	{ "vaddubs", JIT_AV_VX, 4, 512 },
+	{ "vadduhm", JIT_AV_VX, 4, 64 },
+	{ "vadduhs", JIT_AV_VX, 4, 576 },
+	{ "vadduws", JIT_AV_VX, 4, 640 },
+	{ "vavgsb", JIT_AV_VX, 4, 1282 },
+	{ "vavgsh", JIT_AV_VX, 4, 1346 },
+	{ "vavgsw", JIT_AV_VX, 4, 1410 },
+	{ "vavgub", JIT_AV_VX, 4, 1026 },
+	{ "vavguh", JIT_AV_VX, 4, 1090 },
+	{ "vavguw", JIT_AV_VX, 4, 1154 },
+	{ "vcfsx", JIT_AV_SPLAT_U, 4, 842 },
+	{ "vcfux", JIT_AV_SPLAT_U, 4, 778 },
+	{ "vcmpbfp", JIT_AV_VXR, 4, 966 },
+	{ "vcmpeqfp", JIT_AV_VXR, 4, 198 },
+	{ "vcmpequh", JIT_AV_VXR, 4, 70 },
+	{ "vcmpgefp", JIT_AV_VXR, 4, 454 },
+	{ "vcmpgtfp", JIT_AV_VXR, 4, 710 },
+	{ "vcmpgtsb", JIT_AV_VXR, 4, 774 },
+	{ "vcmpgtsh", JIT_AV_VXR, 4, 838 },
+	{ "vcmpgtsw", JIT_AV_VXR, 4, 902 },
+	{ "vcmpgtub", JIT_AV_VXR, 4, 518 },
+	{ "vcmpgtuh", JIT_AV_VXR, 4, 582 },
+	{ "vcmpgtuw", JIT_AV_VXR, 4, 646 },
+	{ "vctsxs", JIT_AV_SPLAT_U, 4, 970 },
+	{ "vctuxs", JIT_AV_SPLAT_U, 4, 906 },
+	{ "vexptefp", JIT_AV_VX_VB, 4, 394 },
+	{ "vlogefp", JIT_AV_VX_VB, 4, 458 },
+	{ "vmaddfp", JIT_AV_VA, 4, 46 },
+	{ "vmaxfp", JIT_AV_VX, 4, 1034 },
+	{ "vmaxsb", JIT_AV_VX, 4, 258 },
+	{ "vmaxsh", JIT_AV_VX, 4, 322 },
+	{ "vmaxsw", JIT_AV_VX, 4, 386 },
+	{ "vmaxub", JIT_AV_VX, 4, 2 },
+	{ "vmaxuh", JIT_AV_VX, 4, 66 },
+	{ "vmaxuw", JIT_AV_VX, 4, 130 },
+	{ "vmhaddshs", JIT_AV_VA, 4, 32 },
+	{ "vmhraddshs", JIT_AV_VA, 4, 33 },
+	{ "vminfp", JIT_AV_VX, 4, 1098 },
+	{ "vminsh", JIT_AV_VX, 4, 834 },
+	{ "vminsw", JIT_AV_VX, 4, 898 },
+	{ "vminub", JIT_AV_VX, 4, 514 },
+	{ "vminuh", JIT_AV_VX, 4, 578 },
+	{ "vminuw", JIT_AV_VX, 4, 642 },
+	{ "vmrghh", JIT_AV_VX, 4, 76 },
+	{ "vmrghw", JIT_AV_VX, 4, 140 },
+	{ "vmrglh", JIT_AV_VX, 4, 332 },
+	{ "vmrglw", JIT_AV_VX, 4, 396 },
+	{ "vmsummbm", JIT_AV_VA, 4, 37 },
+	{ "vmsumshm", JIT_AV_VA, 4, 40 },
+	{ "vmsumshs", JIT_AV_VA, 4, 41 },
+	{ "vmsumubm", JIT_AV_VA, 4, 36 },
+	{ "vmsumuhm", JIT_AV_VA, 4, 38 },
+	{ "vmsumuhs", JIT_AV_VA, 4, 39 },
+	{ "vmulesb", JIT_AV_VX, 4, 776 },
+	{ "vmulesh", JIT_AV_VX, 4, 840 },
+	{ "vmuleub", JIT_AV_VX, 4, 520 },
+	{ "vmuleuh", JIT_AV_VX, 4, 584 },
+	{ "vmulosb", JIT_AV_VX, 4, 264 },
+	{ "vmulosh", JIT_AV_VX, 4, 328 },
+	{ "vmuloub", JIT_AV_VX, 4, 8 },
+	{ "vmulouh", JIT_AV_VX, 4, 72 },
+	{ "vnmsubfp", JIT_AV_VA, 4, 47 },
+	{ "vnor", JIT_AV_VX, 4, 1284 },
+	{ "vor", JIT_AV_VX, 4, 1156 },
+	{ "vperm", JIT_AV_VA, 4, 43 },
+	{ "vpkpx", JIT_AV_VX, 4, 782 },
+	{ "vpkshss", JIT_AV_VX, 4, 398 },
+	{ "vpkshus", JIT_AV_VX, 4, 270 },
+	{ "vpkswus", JIT_AV_VX, 4, 334 },
+	{ "vpkuhum", JIT_AV_VX, 4, 14 },
+	{ "vpkuhus", JIT_AV_VX, 4, 142 },
+	{ "vpkuwum", JIT_AV_VX, 4, 78 },
+	{ "vpkuwus", JIT_AV_VX, 4, 206 },
+	{ "vrefp", JIT_AV_VX_VB, 4, 266 },
+	{ "vrfim", JIT_AV_VX_VB, 4, 714 },
+	{ "vrfin", JIT_AV_VX_VB, 4, 522 },
+	{ "vrfip", JIT_AV_VX_VB, 4, 650 },
+	{ "vrfiz", JIT_AV_VX_VB, 4, 586 },
+	{ "vrlb", JIT_AV_VX, 4, 4 },
+	{ "vrlh", JIT_AV_VX, 4, 68 },
+	{ "vrlw", JIT_AV_VX, 4, 132 },
+	{ "vrsqrtefp", JIT_AV_VX_VB, 4, 330 },
+	{ "vsel", JIT_AV_VA, 4, 42 },
+	{ "vslw", JIT_AV_VX, 4, 388 },
+	{ "vsplth", JIT_AV_SPLAT_U, 4, 588 },
+	{ "vspltish", JIT_AV_SPLAT_S, 4, 844 },
+	{ "vsr", JIT_AV_VX, 4, 708 },
+	{ "vsrab", JIT_AV_VX, 4, 772 },
+	{ "vsrah", JIT_AV_VX, 4, 836 },
+	{ "vsrh", JIT_AV_VX, 4, 580 },
+	{ "vsubcuw", JIT_AV_VX, 4, 1408 },
+	{ "vsubfp", JIT_AV_VX, 4, 74 },
+	{ "vsubsbs", JIT_AV_VX, 4, 1792 },
+	{ "vsubsws", JIT_AV_VX, 4, 1920 },
+	{ "vsububs", JIT_AV_VX, 4, 1536 },
+	{ "vsubuhm", JIT_AV_VX, 4, 1088 },
+	{ "vsubuhs", JIT_AV_VX, 4, 1600 },
+	{ "vsubuwm", JIT_AV_VX, 4, 1152 },
+	{ "vsubuws", JIT_AV_VX, 4, 1664 },
+	{ "vsumsws", JIT_AV_VX, 4, 1928 },
+	{ "vsum2sws", JIT_AV_VX, 4, 1672 },
+	{ "vsum4sbs", JIT_AV_VX, 4, 1800 },
+	{ "vsum4shs", JIT_AV_VX, 4, 1608 },
+	{ "vsum4ubs", JIT_AV_VX, 4, 1544 },
+	{ "vupkhpx", JIT_AV_VX, 4, 846 },
+	{ "vupkhsb", JIT_AV_VX, 4, 526 },
+	{ "vupkhsh", JIT_AV_VX, 4, 590 },
+	{ "vupklpx", JIT_AV_VX, 4, 974 },
+	{ "vupklsb", JIT_AV_VX, 4, 654 },
+	{ "vupklsh", JIT_AV_VX, 4, 718 },
+};
+enum { JIT_AV_SWEEP_N = (int)(sizeof(jit_av_sweep_cases)/sizeof(jit_av_sweep_cases[0])) };
+/* === end G2 helpers === */
+
+
 int main()
 {
 	/* ---- G1 New World boot contract (no guest ROM) ---- */
@@ -4161,7 +4324,7 @@ int main()
 		b = a;
 		CHECK(nw_ppc_fmr(0, 0) == 0xfc000090u);
 		CHECK(nw_jit_op_supported(nw_ppc_fmr(3, 1)));
-		CHECK(!nw_jit_op_supported(nw_ppc_fmr(3, 1) | 1u));
+		CHECK(nw_jit_op_supported(nw_ppc_fmr(3, 1) | 1u));
 		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1c38u) == 1);
 		fn = nw_jit_compile(ops, 2, 0x1c38u, 0x1000u, 0, 0);
 		CHECK(fn != NULL);
@@ -4178,7 +4341,7 @@ int main()
 		b = a;
 		CHECK(nw_ppc_fabs(0, 0) == 0xfc000210u);
 		CHECK(nw_jit_op_supported(nw_ppc_fabs(3, 1)));
-		CHECK(!nw_jit_op_supported(nw_ppc_fabs(3, 1) | 1u));
+		CHECK(nw_jit_op_supported(nw_ppc_fabs(3, 1) | 1u));
 		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1f00u) == 1);
 		fn = nw_jit_compile(ops, 2, 0x1f00u, 0x1000u, 0, 0);
 		CHECK(fn != NULL);
@@ -4321,7 +4484,7 @@ int main()
 		b = a;
 		CHECK(nw_ppc_mtfsf(0xff, 3) == 0xfdfe1d8eu);
 		CHECK(nw_jit_op_supported(nw_ppc_mtfsf(0xff, 3)));
-		CHECK(!nw_jit_op_supported(nw_ppc_mtfsf(0xff, 3) | 1u));
+		CHECK(nw_jit_op_supported(nw_ppc_mtfsf(0xff, 3) | 1u));
 		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1c3cu) == 1);
 		fn = nw_jit_compile(ops, 2, 0x1c3cu, 0x1000u, 0, 0);
 		CHECK(fn != NULL);
@@ -4337,7 +4500,7 @@ int main()
 		b = a;
 		CHECK(nw_ppc_frsp(0, 0) == 0xfc000018u);
 		CHECK(nw_jit_op_supported(nw_ppc_frsp(3, 1)));
-		CHECK(!nw_jit_op_supported(nw_ppc_frsp(3, 1) | 1u));
+		CHECK(nw_jit_op_supported(nw_ppc_frsp(3, 1) | 1u));
 		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1d00u) == 1);
 		fn = nw_jit_compile(ops, 2, 0x1d00u, 0x1000u, 0, 0);
 		CHECK(fn != NULL);
@@ -4367,7 +4530,7 @@ int main()
 		b = a;
 		CHECK(nw_ppc_mffs(0) == 0xfc00048eu);
 		CHECK(nw_jit_op_supported(nw_ppc_mffs(3)));
-		CHECK(!nw_jit_op_supported(nw_ppc_mffs(3) | 1u));
+		CHECK(nw_jit_op_supported(nw_ppc_mffs(3) | 1u));
 		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1d20u) == 1);
 		fn = nw_jit_compile(ops, 2, 0x1d20u, 0x1000u, 0, 0);
 		CHECK(fn != NULL);
@@ -4386,7 +4549,7 @@ int main()
 		b = a;
 		CHECK(nw_ppc_fnmsub(0, 0, 0, 0) == 0xfc00003cu);
 		CHECK(nw_jit_op_supported(nw_ppc_fnmsub(3, 1, 4, 2)));
-		CHECK(!nw_jit_op_supported(nw_ppc_fnmsub(3, 1, 4, 2) | 1u));
+		CHECK(nw_jit_op_supported(nw_ppc_fnmsub(3, 1, 4, 2) | 1u));
 		CHECK(nw_jit_interp_n(&a, ops, 2, 0x1d30u) == 1);
 		fn = nw_jit_compile(ops, 2, 0x1d30u, 0x1000u, 0, 0);
 		CHECK(fn != NULL);
@@ -6404,6 +6567,147 @@ int main()
 		CHECK(fn != NULL);
 		fn(&b);
 		CHECK(a.pc == 0x1610u && b.pc == a.pc && a.gpr[3] == 4 && b.gpr[3] == 4);
+	}
+
+	/* G2 jit-av-sweep — AltiVec mill-debt wave1 (skip MEM_X) */
+	{
+		nw_jit_reset();
+		struct nw_jit_cpu a, b;
+		uint32_t ops[2];
+
+		int av_fail = 0, av_run = 0, av_skip = 0;
+		for (int i = 0; i < JIT_AV_SWEEP_N; i++) {
+			const struct jit_av_case *c = &jit_av_sweep_cases[i];
+			if (c->kind == JIT_AV_MEM_X) { av_skip++; continue; }
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			for (int w = 0; w < 4; w++) {
+				a.vr[1][w] = 0x01020304u + (uint32_t)w * 0x1010101u;
+				a.vr[2][w] = 0x05060708u + (uint32_t)w * 0x01010101u;
+				a.vr[4][w] = 0x0a0b0c0du;
+			}
+			/* FP-friendly lanes */
+			a.vr[1][0] = 0x3f800000u; /* 1.0f */
+			a.vr[2][0] = 0x40000000u; /* 2.0f */
+			a.vr[1][1] = 0x40400000u; /* 3.0f */
+			a.vr[2][1] = 0x40800000u; /* 4.0f */
+			uint32_t op;
+			switch (c->kind) {
+			case JIT_AV_SPLAT_S: op = jit_av_encode(c, 3, 5, 0, 0); break;
+			case JIT_AV_SPLAT_U: op = jit_av_encode(c, 3, 2, 1, 0); break;
+			case JIT_AV_VX_VB:   op = jit_av_encode(c, 3, 0, 1, 0); break;
+			case JIT_AV_MFVSCR:  op = jit_av_encode(c, 3, 0, 0, 0); break;
+			case JIT_AV_MTVSCR:  op = jit_av_encode(c, 0, 0, 2, 0); break;
+			default:             op = jit_av_encode(c, 3, 1, 2, 4); break;
+			}
+			if (!nw_jit_op_supported(op)) {
+				printf("FAIL jit-av-%s not in allowlist op=%08x\n", c->name, (unsigned)op);
+				av_fail++;
+				continue;
+			}
+			ops[0] = op;
+			ops[1] = nw_ppc_blr();
+			b = a;
+			const uint32_t pc = 0x3000u + (uint32_t)i * 0x10u;
+			if (nw_jit_interp_n(&a, ops, 2, pc) != 1) {
+				printf("FAIL jit-av-%s interp_n\n", c->name);
+				av_fail++;
+				continue;
+			}
+			nw_jit_fn fn = nw_jit_compile(ops, 2, pc, 0x1000u, 0, 0);
+			if (!fn) {
+				printf("FAIL jit-av-%s compile_null\n", c->name);
+				av_fail++;
+				continue;
+			}
+			fn(&b);
+			int same = (a.vscr == b.vscr) && (a.pc == b.pc);
+			for (int w = 0; w < 4; w++)
+				if (a.vr[3][w] != b.vr[3][w]) same = 0;
+			/* compares may write CR; check CR0 nibble at least */
+			if ((a.cr ^ b.cr) & 0xf0000000u) same = 0;
+			av_run++;
+			if (!same) {
+				printf("FAIL jit-av-%s interp vr3=%08x_%08x_%08x_%08x jit=%08x_%08x_%08x_%08x vscr %08x/%08x cr %08x/%08x\n",
+				       c->name,
+				       a.vr[3][0], a.vr[3][1], a.vr[3][2], a.vr[3][3],
+				       b.vr[3][0], b.vr[3][1], b.vr[3][2], b.vr[3][3],
+				       (unsigned)a.vscr, (unsigned)b.vscr,
+				       (unsigned)a.cr, (unsigned)b.cr);
+				av_fail++;
+			}
+		}
+		printf("G2 jit-av-sweep run=%d skip_mem=%d fail=%d\n", av_run, av_skip, av_fail);
+		CHECK(av_fail == 0);
+		CHECK(av_skip == 8);
+	}
+
+	/* G2 jit-av-sweep — wave2 MEM_X (guest RAM EA + RA/RB like lvx/stvx) */
+	{
+		nw_jit_reset();
+		struct nw_jit_cpu a, b;
+		uint32_t ops[2];
+		int av_fail = 0, av_run = 0, av_skip = 0;
+		for (int i = 0; i < JIT_AV_SWEEP_N; i++) {
+			const struct jit_av_case *c = &jit_av_sweep_cases[i];
+			if (c->kind != JIT_AV_MEM_X)
+				continue;
+			uint8_t ram_a[64], ram_b[64];
+			memset(ram_a, 0x11, sizeof(ram_a));
+			for (int k = 0; k < 16; k++)
+				ram_a[16 + k] = (uint8_t)(0xa0 + k);
+			memcpy(ram_b, ram_a, sizeof(ram_a));
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.mem = ram_a;
+			a.mem_base = 0;
+			a.mem_size = 64;
+			a.gpr[1] = 16;	/* RA, EA = RA+RB like lvx vD,r1,r2 */
+			a.gpr[2] = 0;
+			for (int w = 0; w < 4; w++)
+				a.vr[3][w] = 0xdeadbeefu;
+			const uint32_t op = jit_av_encode(c, 3, 1, 2, 0);
+			if (!nw_jit_op_supported(op)) {
+				printf("FAIL jit-av-%s not in allowlist op=%08x\n", c->name, (unsigned)op);
+				av_fail++;
+				continue;
+			}
+			ops[0] = op;
+			ops[1] = nw_ppc_blr();
+			b = a;
+			b.mem = ram_b;
+			const uint32_t pc = 0x4000u + (uint32_t)i * 0x10u;
+			if (nw_jit_interp_n(&a, ops, 2, pc) != 1) {
+				printf("FAIL jit-av-%s interp_n\n", c->name);
+				av_fail++;
+				continue;
+			}
+			nw_jit_fn fn = nw_jit_compile(ops, 2, pc, 0x1000u, 0, 0);
+			if (!fn) {
+				printf("FAIL jit-av-%s compile_null\n", c->name);
+				av_fail++;
+				continue;
+			}
+			fn(&b);
+			int same = (a.vscr == b.vscr) && (a.pc == b.pc) && (a.fault == b.fault);
+			for (int w = 0; w < 4; w++)
+				if (a.vr[3][w] != b.vr[3][w]) same = 0;
+			if (memcmp(ram_a, ram_b, sizeof(ram_a)) != 0)
+				same = 0;
+			av_run++;
+			if (!same) {
+				printf("FAIL jit-av-%s interp vr3=%08x_%08x_%08x_%08x jit=%08x_%08x_%08x_%08x vscr %08x/%08x cr %08x/%08x\n",
+				       c->name,
+				       a.vr[3][0], a.vr[3][1], a.vr[3][2], a.vr[3][3],
+				       b.vr[3][0], b.vr[3][1], b.vr[3][2], b.vr[3][3],
+				       (unsigned)a.vscr, (unsigned)b.vscr,
+				       (unsigned)a.cr, (unsigned)b.cr);
+				av_fail++;
+			}
+		}
+		printf("G2 jit-av-sweep run=%d skip_mem=%d fail=%d\n", av_run, av_skip, av_fail);
+		CHECK(av_fail == 0);
+		CHECK(av_run == 8);
 	}
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);

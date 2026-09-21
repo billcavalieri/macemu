@@ -346,6 +346,8 @@ void nw_jit_set_host_icbi(nw_jit_host_icbi fn);
 /* Same work as kpx execute_tlbie: mmu.tlbie + DTLB drop_page, no PC bump. */
 typedef void (*nw_jit_host_tlbie)(void *host, uint32_t ea);
 void nw_jit_set_host_tlbie(nw_jit_host_tlbie fn);
+typedef void (*nw_jit_host_tlbia)(void *host);
+void nw_jit_set_host_tlbia(nw_jit_host_tlbia fn);
 typedef uint32_t (*nw_jit_host_lwarx)(void *host, uint32_t ea, uint32_t pc, int *fault);
 void nw_jit_set_host_lwarx(nw_jit_host_lwarx fn);
 typedef int (*nw_jit_host_stwcx)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
