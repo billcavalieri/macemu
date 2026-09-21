@@ -1329,6 +1329,12 @@ void nw_atrap_hist_dump(const char *why)
 		printf(" %04x=%llu", (unsigned)hot[i],
 		       (unsigned long long)g_atrap[1][hot[i] & 0xfffu]);
 	printf("\n");
+	printf("NW-BOOT G1: mm %s enter=%llu leave=%llu ppc_rd=%llu kcall_fast=%llu\n",
+	       why ? why : "?",
+	       (unsigned long long)nw_mixedmode_enters(),
+	       (unsigned long long)nw_mixedmode_leaves(),
+	       (unsigned long long)nw_mixedmode_ppc_rds(),
+	       (unsigned long long)nw_jit_kcall_fast());
 	fflush(stdout);
 }
 

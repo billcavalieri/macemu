@@ -49,9 +49,38 @@ enum {
 	NW_KDP_SAVED_R1 = 0x004,
 	NW_KDP_SAVED_R6 = 0x018,
 	NW_KDP_KCALLTBL = 0x5f0,
+	NW_KDP_NKCALL_COUNTS = 0xe40,	/* NKInfo.NanoKernelCallCounts */
 	NW_KDP_SYS_CONTEXT_PTR = 0x658,	/* physical SysContextPtr */
 	NW_KDP_CONTEXT_PTR = 0x65c,
 	NW_KDP_FLAGS = 0x660,
+	/*
+	 * The three above are NK **v1** (elliotnunn master / Piltdown Man).
+	 * The 9.2.1 Mac OS ROM ships v2, which keeps the hot interrupt
+	 * fields just *below* the KDP page pointer. Its ProgramInt
+	 * (ROM 0x3146e0) opens with `bl LoadInterruptRegisters`
+	 * (ROM 0x313d60), which does
+	 *   mfsprg r1,0 / stw r6,0x18(r1) / mfsprg r6,1 / stw r6,0x4(r1)
+	 *   lwz r6,-0x14(r1)   <- ContextPtr
+	 *   stw r0,0x104(r6) / stw r7..r13,0x13c..0x16c(r6) / li r0,0
+	 *   mfsrr0 r10 / mfsrr1 r11 / mfcr r13 / mfsprg r12,2
+	 *   lwz r7,-0x10(r1)   <- Flags
+	 *   lwz r1,-0x4(r1)    <- KDP self
+	 * Measured live (cs-p21-kdpprobe5): -0x14 = 2fbff100,
+	 * -0x10 = 00a80007, -0x04 = 2fbfe000, while v1's +0x65c and +0x660
+	 * read 0 for the whole session. A palaver built on the v1 offsets
+	 * hands the NK ContextPtr 0 and Flags 0, so its own
+	 * `bt CR2.LT` (GlobalFlagSystem) misses and ProgramInt takes
+	 * illegalTrap instead of the KCall fast path.
+	 */
+	NW_KDP_V2_CONTEXT_PTR = -0x14,
+	NW_KDP_V2_FLAGS = -0x10,
+	NW_KDP_V2_SELF = -0x04,
+	/* Flags bits ProgramInt tests after `mtcrf 0x3f,r7` (bit 0 = MSB):
+	 * bit 8 GlobalFlagSystem must be set (emulator context is running),
+	 * bit 16 sends it to illegalTrap. */
+	NW_KDP_FLAG_SYSTEM = 0x00800000,
+	NW_KDP_FLAG_NO_KCALL = 0x00008000,
+	NW_CB_R0 = 0x104,
 	NW_CB_R7 = 0x13c,		/* CB.r7+4; each GPR is an 8-byte slot */
 	NW_EMU_KCALL_BASE = 0x6806e8c0u,
 	NW_EMU_KCALL_N = 16,

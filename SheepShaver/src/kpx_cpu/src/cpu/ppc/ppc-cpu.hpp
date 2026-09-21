@@ -353,6 +353,7 @@ public:
 	void execute_trap(uint32 opcode);
 	uint32 sprg(unsigned i) const { return sprg_[i & 3]; }
 	uint32 debug_lr() const { return lr(); }
+	uint32 debug_cr() const { return cr().get(); }
 	bool guest_mmu_enabled() const { return ppc32_guest_mmu_enabled(); }
 	bool guest_fetch(uint32 *opcode);
 	bool guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa);

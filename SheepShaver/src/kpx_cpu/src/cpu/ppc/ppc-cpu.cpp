@@ -394,49 +394,78 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 static void nw_trace_pc(powerpc_cpu &cpu, uint32 pc)
 {
 	extern uint32 ROMBase;
-	enum { RING = 96 };
+	enum { RING = 256 };
 	static uint32 from[RING], to[RING];
 	static unsigned head, count;
 	static uint32 prev;
-	static int dumped;
+	static int dumped, dumped_panic;
 
 	if (prev != 0 && pc != prev + 4) {
-		from[head] = prev;
-		to[head] = pc;
-		head = (head + 1) % RING;
-		if (count < RING)
-			count++;
+		/* The NK's debug printer loops thousands of times per message;
+		 * keeping it would flush the path that led there out of the
+		 * ring. */
+		const uint32 f = prev - ROMBase, t = pc - ROMBase;
+		const bool print_loop = f >= 0x325500u && f < 0x328000u &&
+					t >= 0x325500u && t < 0x328000u;
+		if (!print_loop) {
+			from[head] = prev;
+			to[head] = pc;
+			head = (head + 1) % RING;
+			if (count < RING)
+				count++;
+		}
 	}
 	prev = pc;
 	const uint32 off = pc - ROMBase;
+	char buf[256];
+	const char *why = 0;
 	/* NK panic / debugger entry (saves all GPRs to KDP+0x700). */
 	if (off == 0x326420u || off == 0x326428u) {
 		static int n;
 		if (n < 4) {
 			n++;
-			char buf[160];
 			snprintf(buf, sizeof(buf),
 				 "NKPANIC entry=%08x lr=%08x r1=%08x r3=%08x r8=%08x r9=%08x sprg0=%08x msr=%08x",
 				 (unsigned)pc, (unsigned)cpu.debug_lr(), (unsigned)cpu.gpr(1),
 				 (unsigned)cpu.gpr(3), (unsigned)cpu.gpr(8), (unsigned)cpu.gpr(9),
 				 (unsigned)cpu.sprg(0), (unsigned)ppc32_guest_mmu().msr());
 			nw_boot_log(buf);
+			/* The NK prints its panic text a character at a time out
+			 * of ROM; r8 walks that string. */
+			const uint32 msg = (cpu.gpr(8) - 0x140u) & ~0xfu;
+			for (unsigned line = 0; line < 5u; line++) {
+				const uint32 a = msg + line * 96u;
+				char txt[100];
+				unsigned k = 0;
+				for (unsigned b = 0; b < 96u; b++) {
+					const uint32 w = vm_read_memory_4((a + b) & ~3u);
+					const unsigned c = (w >> (8u * (3u - ((a + b) & 3u)))) & 0xffu;
+					txt[k++] = (c >= 0x20u && c < 0x7fu) ? (char)c : '.';
+				}
+				txt[k] = 0;
+				snprintf(buf, sizeof(buf), "NKPANIC msg@%08x \"%s\"", (unsigned)a, txt);
+				nw_boot_log(buf);
+			}
+			if (!dumped_panic) {
+				dumped_panic = 1;
+				why = "NKPANIC";
+			}
 		}
 	}
-	if (dumped)
-		return;
-	if (off >= 0x325500u && off < 0x326000u) {
+	if (!why && !dumped && off >= 0x325500u && off < 0x326000u) {
 		dumped = 1;
-		char buf[96];
-		snprintf(buf, sizeof(buf), "PCTRACE enter NK debug region pc=%08x (%u transfers)",
-			 (unsigned)pc, count);
+		why = "NK debug region";
+	}
+	if (!why)
+		return;
+	snprintf(buf, sizeof(buf), "PCTRACE enter %s pc=%08x (%u transfers)",
+		 why, (unsigned)pc, count);
+	nw_boot_log(buf);
+	unsigned i = (head + RING - count) % RING;
+	for (unsigned n = 0; n < count; n++, i = (i + 1) % RING) {
+		snprintf(buf, sizeof(buf), "PCTRACE %08x -> %08x",
+			 (unsigned)from[i], (unsigned)to[i]);
 		nw_boot_log(buf);
-		unsigned i = (head + RING - count) % RING;
-		for (unsigned n = 0; n < count; n++, i = (i + 1) % RING) {
-			snprintf(buf, sizeof(buf), "PCTRACE %08x -> %08x",
-				 (unsigned)from[i], (unsigned)to[i]);
-			nw_boot_log(buf);
-		}
 	}
 }
 #endif
@@ -569,6 +598,91 @@ uint32 powerpc_cpu::tau_read(int idx) const
 	return v;
 }
 
+#ifdef SHEEPSHAVER
+/* 68k-emu twi table at 0x6806e8c0: per-n trap / palaver hit / ctx miss. */
+static uint64 g_tw_emu[NW_EMU_KCALL_N];
+static uint64 g_kcall_seen[NW_EMU_KCALL_N];
+static uint64 g_kcall_hit[NW_EMU_KCALL_N];
+static uint64 g_kcall_miss_ctx[NW_EMU_KCALL_N];
+
+static unsigned emu_kcall_n(uint32 src)
+{
+	if (src < (uint32)NW_EMU_KCALL_BASE ||
+	    src >= (uint32)NW_EMU_KCALL_BASE + (uint32)NW_EMU_KCALL_N * 4u ||
+	    (src & 3u) != 0)
+		return ~0u;
+	return (src - (uint32)NW_EMU_KCALL_BASE) / 4u;
+}
+
+static void note_tw_emu(uint32 src)
+{
+	const unsigned n = emu_kcall_n(src);
+	if (n < (unsigned)NW_EMU_KCALL_N)
+		g_tw_emu[n]++;
+}
+
+static void kcall_hist_dump(const char *why)
+{
+	printf("NW-BOOT G1: kcall %s", why ? why : "?");
+	for (unsigned n = 0; n < (unsigned)NW_EMU_KCALL_N; n++) {
+		if (!g_tw_emu[n] && !g_kcall_seen[n] && !g_kcall_hit[n] && !g_kcall_miss_ctx[n])
+			continue;
+		printf(" n%u tw=%llu seen=%llu hit=%llu miss=%llu", n,
+		       (unsigned long long)g_tw_emu[n],
+		       (unsigned long long)g_kcall_seen[n],
+		       (unsigned long long)g_kcall_hit[n],
+		       (unsigned long long)g_kcall_miss_ctx[n]);
+	}
+	printf(" mm enter=%llu leave=%llu ppc_rd=%llu fast=%llu\n",
+	       (unsigned long long)nw_mixedmode_enters(),
+	       (unsigned long long)nw_mixedmode_leaves(),
+	       (unsigned long long)nw_mixedmode_ppc_rds(),
+	       (unsigned long long)nw_jit_kcall_fast());
+	fflush(stdout);
+}
+
+#if NW_BOOT_LOG
+/*
+ * NW_KDP_CONTEXT_PTR is an NK v1 offset (elliotnunn/NanoKernel master
+ * Defines.s); the 9.2.1 ROM ships v2, where it reads 0 for the whole
+ * Finder session (cs-p21-baseline/after). Let the ROM name its own
+ * offset: the 0x700 vector's ProgramInt starts with the standard
+ * palaver, so the first `lwz r6,imm(r1)` (0x80c1xxxx) is KDP.ContextPtr
+ * in this NK. Also dump the KDP window so a CB-looking pointer can be
+ * told apart from Flags.
+ */
+static void kdp_probe_dump(const char *why, uint32 kdp, uint32 vectbl)
+{
+	printf("NW-BOOT G1: kdp probe %s base=%08x\n", why ? why : "?", (unsigned)kdp);
+	/* NK v2 LoadInterruptRegisters: ContextPtr at -0x14, Flags at -0x10,
+	 * handler base at -0x4. */
+	printf("NW-BOOT G1: kdp-20 %08x %08x %08x %08x  -10 %08x %08x %08x %08x\n",
+	       (unsigned)vm_read_memory_4(kdp - 0x20u), (unsigned)vm_read_memory_4(kdp - 0x1cu),
+	       (unsigned)vm_read_memory_4(kdp - 0x18u), (unsigned)vm_read_memory_4(kdp - 0x14u),
+	       (unsigned)vm_read_memory_4(kdp - 0x10u), (unsigned)vm_read_memory_4(kdp - 0x0cu),
+	       (unsigned)vm_read_memory_4(kdp - 0x08u), (unsigned)vm_read_memory_4(kdp - 0x04u));
+	for (uint32 off = 0x5f0; off < 0x6b0; off += 16)
+		printf("NW-BOOT G1: kdp+%03x %08x %08x %08x %08x\n", (unsigned)off,
+		       (unsigned)vm_read_memory_4(kdp + off),
+		       (unsigned)vm_read_memory_4(kdp + off + 4),
+		       (unsigned)vm_read_memory_4(kdp + off + 8),
+		       (unsigned)vm_read_memory_4(kdp + off + 12));
+	/* The 0x700 stub dispatches through VecTbl (SPRG3) + 0x1c; ProgramInt
+	 * opens with `bl LoadInterruptRegisters`. */
+	const uint32 target = vectbl ? vm_read_memory_4(vectbl + 0x1cu) : 0;
+	const uint32 w0 = target ? vm_read_memory_4(target) : 0;
+	uint32 loadint = 0;
+	if ((w0 & 0xfc000003u) == 0x48000001u) {
+		const int32 li = (int32)((w0 & 0x03fffffcu) << 6) >> 6;
+		loadint = target + (uint32)li;
+	}
+	printf("NW-BOOT G1: vectbl=%08x program=%08x loadint=%08x\n",
+	       (unsigned)vectbl, (unsigned)target, (unsigned)loadint);
+	fflush(stdout);
+}
+#endif
+#endif
+
 void powerpc_cpu::take_program(uint32 srr1_bits)
 {
 	/* SRR1[46] trap = 0x00020000, [45] privileged = 0x00040000,
@@ -578,89 +692,171 @@ void powerpc_cpu::take_program(uint32 srr1_bits)
 
 #ifdef SHEEPSHAVER
 /*
- * After take_program, palaver then jump KCallTbl[n] only when
- * ContextPtr (+0x65c) is live. remill-tw700g: +0x65c stays 0, palaver
- * misses, 0x700 runs, CS boots (PNG 49498). Do not use SysContextPtr
- * (+0x658) as a stand-in: jump hung at 503191d8 (tw700f); fill then
- * leave pc at 0x700 blacked (tw700h). Never dispatch Reset or
- * SystemCrash. Bare KCallTbl jump (no palaver) blacked.
+ * Host ProgramInt for 68k-emu twi r31,n, built from the 9.2.1 ROM's own
+ * NK v2 handler: LoadInterruptRegisters (ROM 0x313d60) then the KCall
+ * fast path (ROM 0x314800):
+ *   add r8,r8,r1 / NKCallCounts++ / lwz r10,KCallTbl(r8) / mtlr r10
+ *   mr r10,r12 (resume at the emulator's LR) / rlwimi r7,r7,27,26,26 / blr
+ * reached from 0x3147f0, which does `mtcrf 0x3f,r7` and only falls into
+ * the fast path when Flags bit 8 (GlobalFlagSystem) is set.
+ *
+ * n=1 RunAlternateContext (Mixed Mode enter) and n=4
+ * PrioritizeInterrupts only. n=0 ReturnFromExceptionFastPath, n=2 Reset,
+ * n=15 Crash and n=3..9 (tw700f PowerDispatch) stay on the 0x700 vector.
+ *
+ * Dead ends, all of them the v1 KDP offsets feeding the NK zeros:
+ * tw700d r10=srr0 retrapped; tw700e / cs-p21-after-r10plus4 r10=twi+4
+ * walked into Reset; cs-p21-after-r10lr and -fill used SysContextPtr as
+ * the CB with Flags read from +0x660 (= 0), so the NK took illegalTrap
+ * and ReturnFromInt-spun (mm enter=1, pc stuck 6806e444).
  */
 int powerpc_cpu::programint_kcall_fast(void)
 {
 	if (!ppc32_guest_mmu_enabled())
 		return 0;
 	const uint32 src = srr0_;
-	if (src < (uint32)NW_EMU_KCALL_BASE ||
-	    src >= (uint32)NW_EMU_KCALL_BASE + (uint32)NW_EMU_KCALL_N * 4u ||
-	    (src & 3u) != 0)
+	const unsigned n = emu_kcall_n(src);
+	if (n >= (unsigned)NW_EMU_KCALL_N)
 		return 0;
-	const unsigned n = (src - (uint32)NW_EMU_KCALL_BASE) / 4u;
-	/* remill-tw700e: +4 stopped the twi retry; n=3..9 each fired
-	 * once then hung in n=5 PowerDispatch at 503191d8, black FB.
-	 * Only Mixed Mode (1) and PrioritizeInterrupts (4) are the CS
-	 * kcalls; leave the rest to the 0x700 vector. */
+	g_kcall_seen[n]++;
+#if NW_BOOT_LOG
+	{
+		static int probed_first_tw;
+		if (!probed_first_tw && sprg(0)) {
+			probed_first_tw = 1;
+			kdp_probe_dump("first-tw", sprg(0), sprg(3));
+		}
+	}
+#endif
 	if (n != 1u && n != 4u)
 		return 0;
 	const uint32 kdp = sprg(0);
 	if (!kdp)
 		return 0;
-	uint32 ctx = vm_read_memory_4(kdp + (uint32)NW_KDP_CONTEXT_PTR);
-	const uint32 kcall = vm_read_memory_4(kdp + (uint32)NW_KDP_KCALLTBL + n * 4u);
-	/* remill-tw700g: +0x65c stays 0 for the whole mill; palaver
-	 * returns here and 0x700 runs. Do not fill or jump
-	 * SysContextPtr (+0x658): jump hung at 503191d8 (tw700f) and
-	 * fill-without-jump (tw700h) overwrote live emu GPRs. */
+	const uint32 ctx = vm_read_memory_4(kdp + (uint32)NW_KDP_V2_CONTEXT_PTR);
+	const uint32 flags = vm_read_memory_4(kdp + (uint32)NW_KDP_V2_FLAGS);
+	const uint32 base = vm_read_memory_4(kdp + (uint32)NW_KDP_V2_SELF);
+#if NW_BOOT_LOG
+	/* Differential: NW_KCALL_FAST=0 leaves the trap on the 0x700 vector,
+	 * so the next log line shows what the ROM's own LoadInterruptRegisters
+	 * wrote into the CB for the previous trap. */
+	{
+		static int enabled = -1;
+		if (enabled < 0) {
+			const char *e = getenv("NW_KCALL_FAST");
+			enabled = (e && e[0] == '0') ? 0 : 1;
+		}
+		static unsigned ntrace;
+		if (n == 1u && ntrace < 2u) {
+			ntrace++;
+			printf("NW-BOOT G1: kcall_state #%u n=%u srr0=%08x srr1=%08x msr=%08x cr=%08x xer=%08x lr=%08x ctr=%08x\n",
+			       ntrace, n, (unsigned)srr0_, (unsigned)srr1_,
+			       (unsigned)ppc32_guest_mmu().msr(), (unsigned)cr().get(),
+			       (unsigned)xer().get(), (unsigned)lr(), (unsigned)ctr());
+			printf("NW-BOOT G1: kcall_state #%u r0=%08x r1=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x r13=%08x\n",
+			       ntrace, (unsigned)gpr(0), (unsigned)gpr(1), (unsigned)gpr(3),
+			       (unsigned)gpr(4), (unsigned)gpr(5), (unsigned)gpr(6),
+			       (unsigned)gpr(7), (unsigned)gpr(8), (unsigned)gpr(9),
+			       (unsigned)gpr(10), (unsigned)gpr(11), (unsigned)gpr(12),
+			       (unsigned)gpr(13));
+			if (ctx)
+				printf("NW-BOOT G1: kcall_state #%u cb r0=%08x r7=%08x r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x r13=%08x kdp r1=%08x r6=%08x\n",
+				       ntrace,
+				       (unsigned)vm_read_memory_4(ctx + (uint32)NW_CB_R0),
+				       (unsigned)vm_read_memory_4(ctx + (uint32)NW_CB_R7),
+				       (unsigned)vm_read_memory_4(ctx + (uint32)NW_CB_R7 + 8u),
+				       (unsigned)vm_read_memory_4(ctx + (uint32)NW_CB_R7 + 16u),
+				       (unsigned)vm_read_memory_4(ctx + (uint32)NW_CB_R7 + 24u),
+				       (unsigned)vm_read_memory_4(ctx + (uint32)NW_CB_R7 + 32u),
+				       (unsigned)vm_read_memory_4(ctx + (uint32)NW_CB_R7 + 40u),
+				       (unsigned)vm_read_memory_4(ctx + (uint32)NW_CB_R7 + 48u),
+				       (unsigned)vm_read_memory_4(kdp + (uint32)NW_KDP_SAVED_R1),
+				       (unsigned)vm_read_memory_4(kdp + (uint32)NW_KDP_SAVED_R6));
+			fflush(stdout);
+		}
+		if (!enabled)
+			return 0;
+	}
+#endif
+	const uint32 kcall = base ? vm_read_memory_4(base + (uint32)NW_KDP_KCALLTBL + n * 4u) : 0;
+	/* Refuse exactly what ProgramInt refuses, so a state the NK would
+	 * have sent to illegalTrap still reaches the 0x700 vector. */
+	const bool ok = ctx != 0 && kcall != 0 && base == kdp &&
+			(flags & (uint32)NW_KDP_FLAG_SYSTEM) != 0 &&
+			(flags & (uint32)NW_KDP_FLAG_NO_KCALL) == 0;
 #if NW_BOOT_LOG
 	{
 		static unsigned nmiss;
-		if (!ctx || !kcall) {
+		if (!ok) {
+			g_kcall_miss_ctx[n]++;
 			if (nmiss < 16u) {
 				nmiss++;
-				printf("NW-BOOT G1: kcall_miss #%u n=%u src=%08x kdp=%08x ctx=%08x kcall=%08x\n",
+				if (nmiss == 1u)
+					kdp_probe_dump("first-miss", kdp, sprg(3));
+				printf("NW-BOOT G1: kcall_miss #%u n=%u src=%08x kdp=%08x ctx=%08x flags=%08x base=%08x kcall=%08x lr=%08x\n",
 				       nmiss, n, (unsigned)src, (unsigned)kdp, (unsigned)ctx,
-				       (unsigned)kcall);
+				       (unsigned)flags, (unsigned)base, (unsigned)kcall,
+				       (unsigned)lr());
 				fflush(stdout);
 			}
 			return 0;
 		}
 	}
 #else
-	if (!ctx || !kcall)
+	if (!ok) {
+		g_kcall_miss_ctx[n]++;
 		return 0;
+	}
 #endif
-	vm_write_memory_4(kdp + (uint32)NW_KDP_SAVED_R1, gpr(1));
-	vm_write_memory_4(kdp + (uint32)NW_KDP_SAVED_R6, gpr(6));
-	for (int r = 7; r <= 13; r++)
-		vm_write_memory_4(ctx + (uint32)NW_CB_R7 + (uint32)(r - 7) * 8u, gpr(r));
+	/* LoadInterruptRegisters. SPRG1/SPRG2 are what the 0x700 stub would
+	 * have saved before the handler ran. */
+	const uint32 r1_save = gpr(1);
 	const uint32 lr_save = lr();
 	const uint32 cr_save = cr().get();
-	uint32 flags = vm_read_memory_4(kdp + (uint32)NW_KDP_FLAGS);
-	uint32 rot = (flags << 8) | (flags >> 24);
-	flags = (flags & ~0x80000000u) | (rot & 0x80000000u);
-	rot = (flags << 27) | (flags >> 5);
-	flags = (flags & ~0x00000020u) | (rot & 0x00000020u);
-	gpr(1) = kdp;
+	vm_write_memory_4(kdp + (uint32)NW_KDP_SAVED_R6, gpr(6));
+	vm_write_memory_4(kdp + (uint32)NW_KDP_SAVED_R1, r1_save);
+	vm_write_memory_4(ctx + (uint32)NW_CB_R0, gpr(0));
+	for (int r = 7; r <= 13; r++)
+		vm_write_memory_4(ctx + (uint32)NW_CB_R7 + (uint32)(r - 7) * 8u, gpr(r));
+	sprg_[1] = r1_save;
+	sprg_[2] = lr_save;
+	gpr(0) = 0;
 	gpr(6) = ctx;
-	gpr(7) = flags;
-	/* LoadInterruptRegisters: r10=SRR0, r11=SRR1, r12=LR, r13=CR.
-	 * remill-tw700d: r10=srr0 (the twi) and n=3 rfi'd back into the
-	 * same twi — black FB, log ~19MB/s. Trap handlers must resume
-	 * at twi+4. */
-	gpr(10) = src + 4u;
-	srr0_ = src + 4u;
 	gpr(11) = srr1_;
 	gpr(12) = lr_save;
 	gpr(13) = cr_save;
+	gpr(1) = base;
+	/* KCall fast path: NanoKernelCallCounts[n]++, resume at the
+	 * emulator's LR, r8 = &KCallTbl entry. */
+	const uint32 r8 = base + n * 4u;
+	const uint32 cnt_ea = r8 + (uint32)NW_KDP_NKCALL_COUNTS;
+	vm_write_memory_4(cnt_ea, vm_read_memory_4(cnt_ea) + 1u);
+	gpr(8) = r8;
+	/* CR2..7 are `mtcrf 0x3f,r7` with the pre-rlwimi Flags; CR0 and CR1
+	 * are the dispatch's own `cmplwi r8,0xc` and `cmplwi cr1,r8,0x40`. */
+	const uint32 tw = n * 4u;
+	uint32 cr0 = tw < 0xcu ? 0x8u : (tw == 0xcu ? 0x2u : 0x4u);
+	uint32 cr1 = tw < 0x40u ? 0x8u : (tw == 0x40u ? 0x2u : 0x4u);
+	if (xer().get() & 0x80000000u) {
+		cr0 |= 1u;
+		cr1 |= 1u;
+	}
+	cr().set((cr0 << 28) | (cr1 << 24) | (flags & 0x00ffffffu));
+	/* rlwimi r7,r7,27,26,26: rotating left 27 puts bit 21 into bit 26. */
+	gpr(7) = (flags & ~0x00000020u) | ((flags & 0x00000400u) >> 5);
+	gpr(10) = lr_save;
+	lr() = kcall;
 	pc() = kcall;
+	g_kcall_hit[n]++;
 	nw_jit_note_kcall_fast();
 #if NW_BOOT_LOG
 	{
 		static unsigned nlog;
 		if (nlog < 8u) {
 			nlog++;
-			printf("NW-BOOT G1: kcall_fast #%u n=%u src=%08x kdp=%08x ctx=%08x -> %08x\n",
+			printf("NW-BOOT G1: kcall_fast #%u n=%u src=%08x kdp=%08x ctx=%08x flags=%08x lr=%08x -> %08x\n",
 			       nlog, n, (unsigned)src, (unsigned)kdp, (unsigned)ctx,
-			       (unsigned)kcall);
+			       (unsigned)flags, (unsigned)lr_save, (unsigned)kcall);
 			fflush(stdout);
 		}
 	}
@@ -686,6 +882,9 @@ void powerpc_cpu::execute_trap(uint32 opcode)
 		((to & 0x02) && (uint32)a < (uint32)b) ||
 		((to & 0x01) && (uint32)a > (uint32)b);
 	if (trap && ppc32_guest_mmu_enabled()) {
+#ifdef SHEEPSHAVER
+		note_tw_emu(pc());
+#endif
 		const uint32 crv = cr().get();
 		const uint32 ctrv = ctr();
 		take_program(0x00020000u);
@@ -997,6 +1196,9 @@ void powerpc_cpu::tick_decrementer()
 		const time_t now = time(NULL);
 		if (now != last) {
 			last = now;
+			static unsigned kdump;
+			if ((++kdump % 10u) == 0)
+				kcall_hist_dump("tick");
 			if (g_vec500 == last500 && g_vec900)
 				printf("NW-BOOT G1: 900-only r24=%08x pc=%08x n500=%llu n900=%llu ext=%d\n",
 				       (unsigned)gpr(24), (unsigned)pc(),
@@ -1369,6 +1571,7 @@ void powerpc_cpu::nw_invoke_mm_ppc(uint32 entry)
 powerpc_cpu::~powerpc_cpu()
 {
 #ifdef SHEEPSHAVER
+	kcall_hist_dump("exit");
 	free(nw_jc_);
 	nw_jc_ = 0;
 #endif
@@ -1773,6 +1976,7 @@ void powerpc_cpu::jit_host_trap(void *host, struct nw_jit_cpu *cpu)
 	if (!ppc || !cpu)
 		return;
 	ppc->pc() = cpu->pc;
+	note_tw_emu(cpu->pc);
 	const uint32 crv = cpu->cr;
 	const uint32 ctrv = cpu->ctr;
 	ppc->take_program(0x00020000u);
