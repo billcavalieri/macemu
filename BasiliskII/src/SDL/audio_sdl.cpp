@@ -29,6 +29,9 @@
 #include "user_strings.h"
 #include "audio.h"
 #include "audio_defs.h"
+#if defined(SHEEPSHAVER)
+#include "nw_io.h"
+#endif
 
 #define DEBUG 0
 #include "debug.h"
@@ -231,6 +234,14 @@ static void stream_func(void *arg, uint8 *stream, int stream_len)
 		// Trigger audio interrupt to get new buffer
 		D(bug("stream: triggering irq\n"));
 		SetInterruptFlag(INTFLAG_AUDIO);
+		{
+			static int n_set;
+			if (n_set < 4) {
+				n_set++;
+				printf("NW-BOOT G1: audio-irq set #%d sources=%d\n", n_set, AudioStatus.num_sources);
+				fflush(stdout);
+			}
+		}
 		TriggerInterrupt();
 		D(bug("stream: waiting for ack\n"));
 		SDL_SemWait(audio_irq_done_sem);
@@ -255,6 +266,24 @@ static void stream_func(void *arg, uint8 *stream, int stream_len)
 				for (int i = 0; i < work_size; i += 2)
 					audio_mix_buf[i] = audio_mix_buf[i + 1] = src[i >> 1];
 			else memcpy(audio_mix_buf, src, work_size);
+			{
+				static int n_pcm;
+				if (n_pcm < 4 && work_size >= 2) {
+					int peak = 0;
+					for (int i = 0; i + 1 < work_size; i += 2) {
+						int s = (int)((audio_mix_buf[i] << 8) | audio_mix_buf[i + 1]);
+						if (s & 0x8000)
+							s -= 0x10000;
+						if (s < 0)
+							s = -s;
+						if (s > peak)
+							peak = s;
+					}
+					n_pcm++;
+					printf("NW-BOOT G1: audio-pcm #%d bytes=%d peak=%d\n", n_pcm, work_size, peak);
+					fflush(stdout);
+				}
+			}
 			memset((uint8 *)stream, silence_byte, stream_len);
 			SDL_MixAudio(stream, audio_mix_buf, work_size, get_audio_volume());
 
@@ -263,7 +292,18 @@ static void stream_func(void *arg, uint8 *stream, int stream_len)
 		} else
 			goto silence;
 
-	} else {
+	}
+#if defined(SHEEPSHAVER)
+	else if (nw_sheepblaster_pull((uint8 *)stream, stream_len) > 0) {
+		static int n_sb;
+		if (n_sb < 4) {
+			n_sb++;
+			printf("NW-BOOT G1: sheepblaster out #%d bytes=%d\n", n_sb, stream_len);
+			fflush(stdout);
+		}
+	}
+#endif
+	else {
 
 		// Audio not active, play silence
 		silence: memset(stream, silence_byte, stream_len);
@@ -283,6 +323,14 @@ static void stream_func(void *arg, uint8 *stream, int stream_len)
 void AudioInterrupt(void)
 {
 	D(bug("AudioInterrupt\n"));
+	{
+		static int n_run;
+		if (n_run < 4) {
+			n_run++;
+			printf("NW-BOOT G1: audio-irq run #%d mixer=%08x\n", n_run, (unsigned)AudioStatus.mixer);
+			fflush(stdout);
+		}
+	}
 
 	// Get data from apple mixer
 	if (AudioStatus.mixer) {

@@ -81,6 +81,7 @@ static bool patch_nanokernel_boot(void);
 static bool patch_68k_emul(void);
 static bool patch_nanokernel(void);
 static bool patch_68k(void);
+static void patch_rom_sound(void);
 static bool nw_patch_68k_drivers(void);
 
 /*
@@ -716,6 +717,9 @@ bool PatchROM(void)
 		}
 		printf("NW-BOOT G1: patch_68k incomplete (New World, continuing)\n");
 	}
+	/* Sound component rewrite sits past the VIA search that fails on
+	 * this ROM. Run it anyway. */
+	patch_rom_sound();
 
 #ifdef M68K_BREAK_POINT
 	// Install 68k breakpoint
@@ -2641,14 +2645,24 @@ static bool patch_68k(void)
 		}
 	}
 
+	patch_rom_sound();
+	return true;
+}
+
+static void patch_rom_sound(void)
+{
 	// Construct list of all sifters used by sound components in ROM
 	D(bug("Searching for sound components with type sdev in ROM\n"));
+	int found = 0;
 	uint32 thing = find_rom_resource(FOURCC('t','h','n','g'));
 	while (thing) {
 		thing += ROMBase;
 		D(bug(" found %c%c%c%c %c%c%c%c\n", ReadMacInt8(thing), ReadMacInt8(thing + 1), ReadMacInt8(thing + 2), ReadMacInt8(thing + 3), ReadMacInt8(thing + 4), ReadMacInt8(thing + 5), ReadMacInt8(thing + 6), ReadMacInt8(thing + 7)));
-		if (ReadMacInt32(thing) == FOURCC('s','d','e','v') && ReadMacInt32(thing + 4) == FOURCC('s','i','n','g')) {
+		if (ReadMacInt32(thing) == FOURCC('s','d','e','v') &&
+		    (ReadMacInt32(thing + 4) == FOURCC('s','i','n','g') ||
+		     ReadMacInt32(thing + 4) == FOURCC('a','w','a','c'))) {
 			WriteMacInt32(thing + 4, FOURCC('a','w','g','c'));
+			found++;
 			D(bug(" found sdev component at offset %08x in ROM\n", thing));
 			AddSifter(ReadMacInt32(thing + componentResType), ReadMacInt16(thing + componentResID));
 			if (ReadMacInt32(thing + componentPFCount))
@@ -2656,6 +2670,8 @@ static bool patch_68k(void)
 		}
 		thing = find_rom_resource(FOURCC('t','h','n','g'), 4711, true);
 	}
+	printf("NW-BOOT G1: audio-rom sdev=%d\n", found);
+	fflush(stdout);
 
 	// Patch component code
 	D(bug("Patching sifters in ROM\n"));
@@ -2675,8 +2691,6 @@ static bool patch_68k(void)
 			*wp++ = htons(0x4e74); *wp++ = htons(0x0008);	// rtd #8
 		}
 	}
-	
-	return true;
 }
 
 

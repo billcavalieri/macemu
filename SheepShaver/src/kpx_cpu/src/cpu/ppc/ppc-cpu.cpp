@@ -1281,6 +1281,24 @@ void powerpc_cpu::tick_decrementer()
 	nw_devices_tick();
 	nw_host_tick();
 	nw_script_tick();
+	if (nw_sheepblaster_tracing()) {
+		static time_t sb_last;
+		static int sb_n;
+		const time_t sb_now = time(NULL);
+		if (sb_now != sb_last && sb_n < 12) {
+			sb_last = sb_now;
+			sb_n++;
+			printf("NW-BOOT G1: sheepblaster stuck #%d pc=%08x r24=%08x r1=%08x",
+			       sb_n, (unsigned)pc(), (unsigned)gpr(24), (unsigned)gpr(1));
+			if (sb_n == 1) {
+				printf(" bytes");
+				for (int i = 0; i < 16; i++)
+					printf(" %02x", ReadMacInt8(gpr(24) + i));
+			}
+			printf("\n");
+			fflush(stdout);
+		}
+	}
 	{
 		uint32 tm = 0;
 		if (RAMBaseHost)

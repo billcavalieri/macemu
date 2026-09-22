@@ -75,7 +75,9 @@ enum {
 	NW_IO_UNIN_SIZE = 0x1000u,
 	NW_IO_PCI_CONFIG_ADDR = 0xf2800000u,		/* uni-north PCI host bridge (pci@f2000000) */
 	NW_IO_PCI_CONFIG_DATA = 0xf2c00000u,
-	NW_IO_PCI_CONFIG_SIZE = 0x1000u
+	NW_IO_PCI_CONFIG_SIZE = 0x1000u,
+	NW_IO_SHEEPBLASTER_BASE = 0x8001a000u,
+	NW_IO_SHEEPBLASTER_SIZE = 0x1000u
 };
 
 /*
@@ -116,6 +118,26 @@ void nw_io_reset(void);
 uint32_t nw_io_read(uint32_t pa, int size, uint32_t pc);
 void nw_io_write(uint32_t pa, int size, uint32_t value, uint32_t pc);
 uint32_t nw_io_last_pc(void);	/* PC of the last dispatched I/O access */
+
+/* SheepBlaster: playback FIFO. Samples are S16BE stereo. */
+void nw_sheepblaster_init(void);
+int nw_sheepblaster_ready(void);
+void nw_sheepblaster_set_ready(int on);
+void nw_sheepblaster_set_trace(int on);
+int nw_sheepblaster_tracing(void);
+void nw_sheepblaster_set_target(uint32_t component);
+uint32_t nw_sheepblaster_target(void);
+int32_t nw_sheepblaster_delegate(uint32_t params, uint32_t target);
+void nw_sheepblaster_enable(int on);
+void nw_sheepblaster_submit(const uint8_t *be, uint32_t frames);
+/* format is 'twos', 'raw ', or 'sowt'. rate_fixed is 16.16 Hz.
+ * Output is always 44100 Hz stereo, which is what the host plays. */
+/* Returns how many 44100 Hz stereo frames were queued. */
+int nw_sheepblaster_play(const uint8_t *bytes, uint32_t frames,
+	uint32_t format, int channels, int bits, uint32_t rate_fixed);
+/* Frames waiting in the ring. The host plays 44100 of them per second. */
+int nw_sheepblaster_pending(void);
+int nw_sheepblaster_pull(uint8_t *dst, int bytes);
 
 /* WP5: 64-pixel tiles covering the New World frame buffer. Stores that
  * land in the layout mark tiles; present consumes them. */

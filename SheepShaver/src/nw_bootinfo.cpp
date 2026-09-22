@@ -467,6 +467,13 @@ Node *build_machine(const nw_bootinfo_params *p)
 	add_ata(macio->add("ata-3"), 0);
 	add_ata(macio->add("ata-3"), 1);
 
+	Node *sb = macio->add("sheepblaster");
+	sb->str("device_type", "sheepblaster");
+	sb->str("compatible", "sheepblaster");
+	sb->str("model", "SheepBlaster");
+	sb->hex("reg", "0001a00000001000");
+	sb->u32("AAPL,address", 0x8001a000u);
+
 	Node *pic = macio->add("interrupt-controller");
 	pic->str("device_type", "open-pic");
 	pic->str("compatible", "chrp,open-pic");

@@ -45,6 +45,7 @@
 #include "serial.h"
 #include "ether.h"
 #include "timer.h"
+#include "audio.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -559,7 +560,10 @@ void sheepshaver_cpu::execute_68k(uint32 entry, M68kRegisters *r)
 #endif
 
 #if SAFE_EXEC_68K
-	if (ReadMacInt32(XLM_RUN_MODE) != MODE_EMUL_OP)
+	if (ReadMacInt32(XLM_RUN_MODE) != MODE_EMUL_OP &&
+	    !(ROMType == ROMTYPE_NEWWORLD &&
+	      (ReadMacInt32(XLM_RUN_MODE) == MODE_NATIVE ||
+	       ReadMacInt32(XLM_RUN_MODE) == MODE_68K)))
 		printf("FATAL: Execute68k() not called from EMUL_OP mode\n");
 #endif
 
@@ -594,13 +598,20 @@ void sheepshaver_cpu::execute_68k(uint32 entry, M68kRegisters *r)
 	gpr(25) = ReadMacInt32(XLM_68K_R25);		// MSB of SR
 	if (ROMType == ROMTYPE_NEWWORLD) {
 		/*
-		 * NK v2 emulator (golden, 68k running): r29 = opcode table
-		 * (0x68080000, 512 KiB aligned) | opcode << 3, r30 = emulator code
-		 * base (0x68060000), r31 = Emulator Data (KDP+0x1000), r26/r28 the
-		 * emulator's own state. We are nested inside an EMUL_OP the
-		 * emulator is executing, so those registers are live: keep them
-		 * and only re-point r29 at the entry's opcode.
+		 * Nested in the emulator: r30/r31/r26/r28 are already the
+		 * emulator's. A native caller (the Sound panel waits in PPC)
+		 * does not have them. Load the NK v2 entry set then.
+		 * r29 is the opcode table at 0x68080000. r30 is emulator code.
+		 * r31 is Emulator Data.
 		 */
+		if (ReadMacInt32(XLM_RUN_MODE) != MODE_EMUL_OP &&
+		    ReadMacInt32(XLM_RUN_MODE) != MODE_68K) {
+			gpr(26) = 0;
+			gpr(28) = 0;
+			gpr(30) = 0x68060000;
+			gpr(31) = KernelDataAddr + 0x1000;
+			gpr(29) = 0x68080000;
+		}
 		gpr(29) &= 0xfff80000u;
 	} else {
 		gpr(26) = 0;
@@ -913,6 +924,10 @@ void nw_host_tick(void)
 		return;
 	next_present_us = now + 1000000 / 60;
 	VideoHostPresent();
+	/* The Sound panel waits in native code and does not take an
+	 * emulated interrupt, so HandleInterrupt never runs. This tick
+	 * does. That is what lets the alert completion return. */
+	AudioSheepBlasterComplete();
 }
 
 void init_emul_ppc(void)
@@ -1146,8 +1161,37 @@ void HandleInterrupt(powerpc_registers *r)
 	 * KDP now reachable at its real PA that corrupts the NK's page. Host
 	 * events reach the guest through the device models instead.
 	 */
-	if (ROMType == ROMTYPE_NEWWORLD)
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		/* The card hardware is in the device tree before the guest
+		 * runs. The Sound control panel lists a component, and the
+		 * Component Manager throws away registrations made before it
+		 * finishes loading extensions. CurApName becomes "Finder"
+		 * when that scan is done and the desktop exists. */
+		if (HasMacStarted()) {
+			static int audio_tick;
+			static int audio_reg;
+			audio_tick++;
+			if (!audio_reg && ReadMacInt8(0x910) == 6 &&
+			    ReadMacInt8(0x911) == 'F' && ReadMacInt8(0x912) == 'i' &&
+			    ReadMacInt8(0x913) == 'n' && ReadMacInt8(0x914) == 'd' &&
+			    ReadMacInt8(0x915) == 'e' && ReadMacInt8(0x916) == 'r') {
+				audio_reg = 1;
+				nw_audio_arm_register();
+			}
+			if (audio_tick == 15000)
+				nw_audio_arm_debug();
+		}
+		/* The SDL callback is blocked on the audio thread until
+		 * AudioInterrupt posts. Do that here. Do not fall through:
+		 * the rest of this function writes the nanokernel page. */
+		if ((InterruptFlags & INTFLAG_AUDIO) && int32(ReadMacInt32(XLM_IRQ_NEST)) <= 0) {
+			ClearInterruptFlag(INTFLAG_AUDIO);
+			AudioInterrupt();
+		}
+		if (int32(ReadMacInt32(XLM_IRQ_NEST)) <= 0)
+			AudioSheepBlasterComplete();
 		return;
+	}
 
 	// Do nothing if interrupts are disabled
 	if (int32(ReadMacInt32(XLM_IRQ_NEST)) > 0)

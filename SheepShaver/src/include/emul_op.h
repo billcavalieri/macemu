@@ -50,6 +50,7 @@ enum {	// Selectors for EMUL_OP opcodes
 	OP_CHECK_SYSV, OP_NTRB_17_PATCH, OP_NTRB_17_PATCH2, OP_NTRB_17_PATCH3, OP_NTRB_17_PATCH4, OP_CHECKLOAD,
 	OP_EXTFS_COMM, OP_EXTFS_HFS, OP_IDLE_TIME, OP_IDLE_TIME_2,
 	OP_COPYBITS_EXPAND,
+	OP_SHEEPBLASTER,
 	OP_MAX
 };
 const uint16 M68K_EMUL_RETURN = 0xfe40;	// Extended opcodes
@@ -111,5 +112,10 @@ const uint16 M68K_EMUL_OP_IDLE_TIME_2 = M68K_EMUL_BREAK + OP_IDLE_TIME_2;
 const uint16 M68K_EMUL_OP_COPYBITS_EXPAND = M68K_EMUL_BREAK + OP_COPYBITS_EXPAND;
 
 extern "C" void EmulOp(M68kRegisters *r, uint32 pc, int selector);
+/* Look for a loaded AWACS component. Host memory only; no 68k call. */
+extern void nw_audio_try(void);
+extern void nw_audio_arm_register(void);
+extern void nw_audio_arm_debug(void);
+extern int nw_audio_service_ok(void);
 
 #endif

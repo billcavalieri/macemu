@@ -19,12 +19,14 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 
 #include "sysdeps.h"
 #include "main.h"
 #include "version.h"
 #include "prefs.h"
 #include "cpu_emulation.h"
+#include "thunks.h"
 #include "xlowmem.h"
 #include "xpram.h"
 #include "timer.h"
@@ -35,12 +37,14 @@
 #include "scsi.h"
 #include "video.h"
 #include "audio.h"
+#include "audio_defs.h"
 #include "ether.h"
 #include "serial.h"
 #include "clip.h"
 #include "extfs.h"
 #include "macos_util.h"
 #include "rom_patches.h"
+#include "nw_io.h"
 #include "rsrc_patches.h"
 #include "name_registry.h"
 #include "user_strings.h"
@@ -62,8 +66,238 @@ static uint32 MakeExecutableTvec;
  *  Execute EMUL_OP opcode (called by 68k emulator)
  */
 
+/* Sound Manager sift -16569 entry. ResViewer:
+ * link; movem.l d0-d2/a3-a4; movea.l 12(a6),a3; move.w 2(a3),d7.
+ * The move.w is what makes this the dispatcher. Without it the same
+ * link/movem prologue matches unrelated calls. */
+static const uint8 nw_sift_prefix[16] = {
+	0x4e, 0x56, 0x00, 0x00, 0x48, 0xe7, 0x17, 0x18,
+	0x26, 0x6e, 0x00, 0x0c, 0x3e, 0x2b, 0x00, 0x02
+};
+
+static void nw_emit16(uint8 *b, int *n, uint16 v)
+{
+	b[(*n)++] = (uint8)(v >> 8);
+	b[(*n)++] = (uint8)v;
+}
+
+static void nw_emit32(uint8 *b, int *n, uint32 v)
+{
+	nw_emit16(b, n, (uint16)(v >> 16));
+	nw_emit16(b, n, (uint16)v);
+}
+
+/* The 9.2.1 ROM has no vCheckLoad pattern, so the AWACS sift is never
+ * rewritten on the way in. The scan only reports copies. It must not
+ * write them: a patched entry made Sound quit with error type 3.
+ * FindNext/Capture are not used. */
+static int nw_debug_arm;
+
+void nw_audio_arm_debug(void)
+{
+	nw_debug_arm = 1;
+}
+
+static void nw_audio_debug_scan(void)
+{
+	static int pass;
+	static const uint8 desc[8] = {
+		0x73, 0x64, 0x65, 0x76, 0x61, 0x77, 0x61, 0x63 /* sdevawac */
+	};
+	if (pass >= 3 || RAMBaseHost == 0 || RAMSize < sizeof nw_sift_prefix)
+		return;
+	pass++;
+	uint8 *base = RAMBaseHost;
+	uint8 *end = base + RAMSize;
+	uint8 *p = base;
+	int sift = 0;
+	while (p + sizeof nw_sift_prefix < end && sift < 12) {
+		uint8 *hit = (uint8 *)memmem(p, (size_t)(end - p), nw_sift_prefix, sizeof nw_sift_prefix);
+		if (!hit)
+			break;
+		sift++;
+		p = hit + sizeof nw_sift_prefix;
+		uint32 addr = RAMBase + (uint32)(hit - base);
+		/* Do not write these bytes. Replacing link with an emul op
+		 * made the Sound control panel execute an illegal instruction
+		 * (error type 3) once SheepBlaster was the saved output. */
+		const char *what = (addr & 1) ? "odd" : "code";
+		printf("NW-BOOT SheepBlaster debug sift pass=%d ptr=%08x %s\n",
+		       pass, (unsigned)addr, what);
+		fflush(stdout);
+	}
+	p = base;
+	int ndesc = 0;
+	while (p + sizeof desc < end && ndesc < 12) {
+		uint8 *hit = (uint8 *)memmem(p, (size_t)(end - p), desc, sizeof desc);
+		if (!hit)
+			break;
+		ndesc++;
+		p = hit + sizeof desc;
+		uint32 addr = RAMBase + (uint32)(hit - base);
+		printf("NW-BOOT SheepBlaster debug desc pass=%d ptr=%08x\n",
+		       pass, (unsigned)addr);
+		fflush(stdout);
+	}
+	printf("NW-BOOT SheepBlaster debug scan pass=%d sift=%d desc=%d\n",
+	       pass, sift, ndesc);
+	fflush(stdout);
+}
+
+void nw_audio_try(void)
+{
+	nw_audio_debug_scan();
+}
+
+
+static int nw_reg_arm;
+static int nw_audio_live;
+
+int nw_audio_service_ok(void)
+{
+	return nw_audio_live;
+}
+
+void nw_audio_arm_register(void)
+{
+	nw_reg_arm = 1;
+}
+
+/* Install a new sound-output component. Do not overwrite the AWACS
+ * entry; that removed the desktop icons. */
+static void nw_register_output(void)
+{
+	if (!nw_reg_arm)
+		return;
+	nw_reg_arm = 0;
+	static const uint8 entry_glue[] = {
+		0x4e, 0x56, 0x00, 0x00,
+		0x48, 0xe7, 0x80, 0x18,
+		0x26, 0x6e, 0x00, 0x0c,
+		0x28, 0x6e, 0x00, 0x08,
+		(uint8)(M68K_EMUL_OP_AUDIO_DISPATCH >> 8),
+		(uint8)(M68K_EMUL_OP_AUDIO_DISPATCH & 0xff),
+		0x2d, 0x40, 0x00, 0x10,
+		0x4c, 0xdf, 0x18, 0x01,
+		0x4e, 0x5e,
+		0x4e, 0x74, 0x00, 0x08
+	};
+	uint32 entry = SheepProc(entry_glue, sizeof entry_glue);
+	SheepVar cd(20);
+	WriteMacInt32(cd.addr() + 0, 0x73646576); /* sdev */
+	WriteMacInt32(cd.addr() + 4, 0x7368626c); /* shbl */
+	WriteMacInt32(cd.addr() + 8, 0x53685368); /* ShSh */
+	/* 8- and 16-bit, mono and stereo. No rate-convert bit:
+	 * the card resamples to 44100 itself. System sounds are
+	 * mostly 8-bit mono at 22050, and playing those at 44100
+	 * made them run about twice as fast. */
+	WriteMacInt32(cd.addr() + 12, 0x00000f0f);
+	WriteMacInt32(cd.addr() + 16, 0);
+	/* The Sound control panel lists GetComponentInfo's name. A nil
+	 * name is not shown. NewHandle is the Memory Manager, not the
+	 * component-list walk that left the window erased. */
+	M68kRegisters nr;
+	memset(&nr, 0, sizeof nr);
+	nr.d[0] = 16;
+	Execute68kTrap(0xa122, &nr);
+	uint32 name_h = nr.a[0];
+	if (name_h != 0) {
+		uint32 p = ReadMacInt32(name_h);
+		const char *s = "SheepBlaster";
+		WriteMacInt8(p, 12);
+		for (int i = 0; i < 12; i++)
+			WriteMacInt8(p + 1 + i, (uint8)s[i]);
+	}
+	printf("NW-BOOT G1: audio-reg name=%08x\n", (unsigned)name_h);
+	fflush(stdout);
+	/* RegisterComponent(cd, entry, global=1, name, nil, nil).
+	 * D0 is the selector ($7001). A parameter block with D0=0 is not
+	 * this call, and a 2-byte result slot smashes the guest stack. */
+	uint8 stub[48];
+	int n = 0;
+	nw_emit16(stub, &n, 0x598f);				/* subq.l #4,sp */
+	nw_emit16(stub, &n, 0x2f3c); nw_emit32(stub, &n, cd.addr());
+	nw_emit16(stub, &n, 0x2f3c); nw_emit32(stub, &n, entry);
+	nw_emit16(stub, &n, 0x3f3c); nw_emit16(stub, &n, 1);	/* global */
+	nw_emit16(stub, &n, 0x2f3c); nw_emit32(stub, &n, name_h);
+	nw_emit16(stub, &n, 0x2f3c); nw_emit32(stub, &n, 0);	/* info */
+	nw_emit16(stub, &n, 0x2f3c); nw_emit32(stub, &n, 0);	/* icon */
+	nw_emit16(stub, &n, 0x7001);				/* moveq #1,d0 */
+	nw_emit16(stub, &n, 0xa82a);
+	nw_emit16(stub, &n, 0x201f);				/* move.l (sp)+,d0 */
+	nw_emit16(stub, &n, 0x4e75);
+	uint32 stub_addr = SheepProc(stub, n);
+	M68kRegisters rr;
+	memset(&rr, 0, sizeof rr);
+	/* Open/Register during RegisterComponent must hit this card, not
+	 * the mixer path. That path calls 68k again and freezes the desktop. */
+	nw_sheepblaster_set_ready(1);
+	printf("NW-BOOT G1: audio-reg enter\n");
+	fflush(stdout);
+	Execute68k(stub_addr, &rr);
+	uint32 component = rr.d[0];
+	printf("NW-BOOT G1: audio-reg component=%08x\n", (unsigned)component);
+	fflush(stdout);
+	if (component == 0 || name_h == 0) {
+		static int tries;
+		nw_sheepblaster_set_ready(0);
+		if (++tries < 5)
+			nw_reg_arm = 1;
+		printf("NW-BOOT G1: audio-reg retry component=%08x name=%08x\n",
+		       (unsigned)component, (unsigned)name_h);
+		fflush(stdout);
+		return;
+	}
+	/* Do not call SetDefaultSoundOutput here. On the 1024 boot it
+	 * never returned: the main thread stayed in that 68k call and
+	 * the desktop never appeared. The Output list stays on Built-in
+	 * until the panel is opened. FindNext/Capture does not return
+	 * either. The stuck bytes are the component-list walk. */
+	nw_audio_live = 1;
+	nw_audio_try();
+}
+
+int32 nw_sheepblaster_delegate(uint32 params, uint32 target)
+{
+	static int busy;
+	static uint32 stub;
+	if (busy || params == 0 || target == 0)
+		return badComponentSelector;
+	if (stub == 0) {
+		uint8 b[16];
+		int n = 0;
+		nw_emit16(b, &n, 0x598f);
+		nw_emit16(b, &n, 0x2f09);			/* params */
+		nw_emit16(b, &n, 0x2f08);			/* target */
+		nw_emit16(b, &n, 0x7024);			/* DelegateComponentCall */
+		nw_emit16(b, &n, 0xa82a);
+		nw_emit16(b, &n, 0x201f);
+		nw_emit16(b, &n, 0x4e75);
+		stub = SheepProc(b, n);
+	}
+	busy = 1;
+	M68kRegisters rr;
+	memset(&rr, 0, sizeof rr);
+	rr.a[0] = target;
+	rr.a[1] = params;
+	Execute68k(stub, &rr);
+	busy = 0;
+	return (int32)rr.d[0];
+}
+
 void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 {
+	if (selector != OP_AUDIO_DISPATCH && selector != OP_SHEEPBLASTER)
+		nw_register_output();
+	if (nw_debug_arm && selector != OP_SHEEPBLASTER) {
+		nw_debug_arm = 0;
+		nw_audio_debug_scan();
+	}
+	/* Disk and toolbox traps are the other times the emulator is
+	 * live during a movie. One mixer pull per trap fills the ring
+	 * while native QuickTime is not in the 68k emulator. */
+	if (selector != OP_AUDIO_DISPATCH && selector != OP_SHEEPBLASTER)
+		AudioSheepBlasterComplete();
 	D(bug("EmulOp %04x at %08x\n", selector, pc));
 	switch (selector) {
 		case OP_BREAK:				// Breakpoint
@@ -195,6 +429,53 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 		case OP_AUDIO_DISPATCH:		// Audio component functions
 			r->d[0] = AudioDispatch(r->a[3], r->a[4]);
 			break;
+
+		case OP_SHEEPBLASTER: {		// AWACS `link a6,#0`, then the original body
+			uint32 sp = r->a[7];
+			if (sp >= 0x1000 && sp + 12 < RAMSize) {
+				uint32 params = ReadMacInt32(sp + 8);
+				if (params >= 0x1000 && params + 32 < RAMSize) {
+					int16 sel = (int16)ReadMacInt16(params + 2);
+					static int n_sniff;
+					if (n_sniff < 24) {
+						n_sniff++;
+						printf("NW-BOOT SheepBlaster debug sniff #%d pc=%08x sp=%08x sel=%d s0=%08x s4=%08x s8=%08x s12=%08x\n",
+						       n_sniff, (unsigned)pc, (unsigned)sp, (int)sel,
+						       (unsigned)ReadMacInt32(sp),
+						       (unsigned)ReadMacInt32(sp + 4),
+						       (unsigned)ReadMacInt32(sp + 8),
+						       (unsigned)ReadMacInt32(sp + 12));
+						fflush(stdout);
+					}
+					if (sel == kSoundComponentPlaySourceBufferSelect) {
+						uint32 pb = ReadMacInt32(params + 8);
+						if (pb == 0)
+							pb = ReadMacInt32(params + 4);
+						if (pb >= 0x1000 && pb + 32 < RAMSize) {
+							uint32 rec = ReadMacInt32(pb);
+							uint32 frames, buf;
+							if (rec >= 32 && rec < 512) {
+								frames = ReadMacInt32(pb + 4 + scd_sampleCount);
+								buf = ReadMacInt32(pb + 4 + scd_buffer);
+							} else {
+								frames = ReadMacInt32(pb + scd_sampleCount);
+								buf = ReadMacInt32(pb + scd_buffer);
+							}
+							if (buf >= 0x1000 && frames != 0 && frames <= 16384 &&
+							    buf + frames * 4 < RAMSize) {
+								nw_sheepblaster_enable(1);
+								nw_sheepblaster_submit(Mac2HostAddr(buf), frames);
+							}
+						}
+					}
+				}
+			}
+			sp -= 4;
+			WriteMacInt32(sp, r->a[6]);
+			r->a[6] = sp;
+			r->a[7] = sp;
+			break;
+		}
 
 		case OP_SOUNDIN_OPEN:		// Sound input driver functions
 			r->d[0] = SoundInOpen(r->a[0], r->a[1]);

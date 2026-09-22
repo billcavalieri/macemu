@@ -24,8 +24,10 @@
 #include <string.h>
 #include <time.h>
 #include <atomic>
+#include "sysdeps.h"
 #include "nw_io.h"
 #include "nw_devices.h"
+#include "cpu_emulation.h"
 
 
 static struct nw_devices_clock g_tb;
@@ -1595,6 +1597,270 @@ static void absent_io_write(void *, uint32_t, int, uint32_t)
 {
 }
 
+/* SheepBlaster playback ring: one second of S16BE stereo. */
+enum { SB_FRAMES = 44100 };
+static int16 sb_ring[SB_FRAMES * 2];
+static std::atomic<int> sb_wr{0};
+static std::atomic<int> sb_rd{0};
+static int sb_enabled;
+static int sb_ready;
+static int sb_trace;
+static uint32_t sb_target;
+static uint32_t sb_buf;
+static int sb_rate = 44100;
+static int sb_drops;
+static int sb_plays;
+static int sb_peak;
+
+void nw_sheepblaster_set_ready(int on)
+{
+	sb_ready = on;
+}
+
+void nw_sheepblaster_set_trace(int on)
+{
+	sb_trace = on;
+}
+
+int nw_sheepblaster_tracing(void)
+{
+	return sb_trace;
+}
+
+void nw_sheepblaster_set_target(uint32_t component)
+{
+	sb_target = component;
+}
+
+uint32_t nw_sheepblaster_target(void)
+{
+	return sb_target;
+}
+
+int nw_sheepblaster_ready(void)
+{
+	return sb_ready;
+}
+
+void nw_sheepblaster_enable(int on)
+{
+	sb_enabled = on;
+}
+
+static int sb_count(void)
+{
+	int w = sb_wr.load(std::memory_order_acquire);
+	int r = sb_rd.load(std::memory_order_acquire);
+	return (w - r + SB_FRAMES) % SB_FRAMES;
+}
+
+int nw_sheepblaster_pending(void)
+{
+	return sb_count();
+}
+
+static int16 sb_widen(uint8_t b, int twos)
+{
+	int v = twos ? (int)(int8_t)b : (int)b - 128;
+	return (int16)(v << 8);
+}
+
+static void sb_in_frame(const uint8_t *p, uint32_t format, int channels, int bits,
+	int16 *left, int16 *right)
+{
+	int twos = format != 0x72617720u; /* 'raw ' is offset-binary */
+	int le = format == 0x736f7774u;   /* 'sowt' */
+	int16 l, r;
+	if (bits <= 8) {
+		l = sb_widen(p[0], twos);
+		r = channels > 1 ? sb_widen(p[1], twos) : l;
+	} else if (le) {
+		l = (int16)(p[0] | (p[1] << 8));
+		r = channels > 1 ? (int16)(p[2] | (p[3] << 8)) : l;
+	} else {
+		l = (int16)((p[0] << 8) | p[1]);
+		r = channels > 1 ? (int16)((p[2] << 8) | p[3]) : l;
+	}
+	*left = l;
+	*right = r;
+}
+
+static void sb_write_frame(int *w, int16 l, int16 r, int *peak)
+{
+	int al = l < 0 ? -l : l;
+	int ar = r < 0 ? -r : r;
+	if (al > *peak)
+		*peak = al;
+	if (ar > *peak)
+		*peak = ar;
+	sb_ring[*w * 2] = l;
+	sb_ring[*w * 2 + 1] = r;
+	(*w)++;
+	if (*w >= SB_FRAMES)
+		*w = 0;
+}
+
+int nw_sheepblaster_play(const uint8_t *bytes, uint32_t frames,
+	uint32_t format, int channels, int bits, uint32_t rate_fixed)
+{
+	if (!sb_enabled || bytes == NULL || frames == 0)
+		return 0;
+	if (frames > 65536)
+		frames = 65536;
+	if (channels < 1)
+		channels = 1;
+	if (channels > 2)
+		channels = 2;
+	if (bits != 8 && bits != 16)
+		bits = 16;
+	if (format != 0x74776f73u && format != 0x72617720u && format != 0x736f7774u) {
+		static int n_fmt;
+		if (n_fmt < 4) {
+			n_fmt++;
+			printf("NW-BOOT G1: sheepblaster skip format=%08x\n", (unsigned)format);
+			fflush(stdout);
+		}
+		return 0;
+	}
+	/* rate 0 or nonsense: the host device is 44100. */
+	if (rate_fixed < (8000u << 16) || rate_fixed > (48000u << 16))
+		rate_fixed = 44100u << 16;
+	/* 16.16 input frames advanced per 44100 Hz output frame. */
+	uint32_t step = rate_fixed / 44100u;
+	if (step == 0)
+		step = 1;
+	int stride = (bits <= 8 ? 1 : 2) * channels;
+	int space = SB_FRAMES - 1 - sb_count();
+	int w = sb_wr.load(std::memory_order_relaxed);
+	int peak = sb_peak;
+	int out = 0;
+	uint32_t pos = 0;
+	while (space > 0) {
+		uint32_t i0 = pos >> 16;
+		if (i0 >= frames)
+			break;
+		uint32_t i1 = i0 + 1;
+		if (i1 >= frames)
+			i1 = frames - 1;
+		uint32_t frac = pos & 0xffffu;
+		int16 l0, r0, l1, r1;
+		sb_in_frame(bytes + i0 * stride, format, channels, bits, &l0, &r0);
+		sb_in_frame(bytes + i1 * stride, format, channels, bits, &l1, &r1);
+		int16 l = (int16)(l0 + (int)(l1 - l0) * (int)frac / 65536);
+		int16 r = (int16)(r0 + (int)(r1 - r0) * (int)frac / 65536);
+		sb_write_frame(&w, l, r, &peak);
+		space--;
+		out++;
+		pos += step;
+	}
+	sb_peak = peak;
+	sb_wr.store(w, std::memory_order_release);
+	sb_plays++;
+	if (sb_plays <= 8)
+		printf("NW-BOOT G1: sheepblaster play #%d in=%u rate=%u ch=%d bits=%d fmt=%08x out=%d\n",
+		       sb_plays, (unsigned)frames, (unsigned)(rate_fixed >> 16),
+		       channels, bits, (unsigned)format, out);
+	return out;
+}
+
+void nw_sheepblaster_submit(const uint8_t *be, uint32_t frames)
+{
+	nw_sheepblaster_play(be, frames, 0x74776f73u, 2, 16, 44100u << 16);
+}
+
+int nw_sheepblaster_pull(uint8_t *dst, int bytes)
+{
+	if (!sb_enabled || bytes < 4)
+		return 0;
+	int frames = bytes / 4;
+	int have = sb_count();
+	if (frames > have)
+		frames = have;
+	if (frames == 0)
+		return 0;
+	int r = sb_rd.load(std::memory_order_relaxed);
+	uint8_t *out = dst;
+	for (int i = 0; i < frames; i++) {
+		int16 l = sb_ring[r * 2];
+		int16 ri = sb_ring[r * 2 + 1];
+		out[0] = (uint8_t)(l >> 8);
+		out[1] = (uint8_t)l;
+		out[2] = (uint8_t)(ri >> 8);
+		out[3] = (uint8_t)ri;
+		out += 4;
+		r++;
+		if (r >= SB_FRAMES)
+			r = 0;
+	}
+	sb_rd.store(r, std::memory_order_release);
+	int n = frames * 4;
+	if (n < bytes)
+		memset(out, 0, (size_t)(bytes - n));
+	return n;
+}
+
+static uint32_t sb_read(void *, uint32_t off, int)
+{
+	switch (off) {
+		case 0: return sb_enabled ? 1u : 0u;
+		case 4: return (uint32_t)sb_rate;
+		case 8: return (uint32_t)(SB_FRAMES - 1 - sb_count());
+		default: return 0;
+	}
+}
+
+static void sb_write(void *, uint32_t off, int, uint32_t value)
+{
+	switch (off) {
+		case 0:
+			sb_enabled = (value & 1) != 0;
+			break;
+		case 4:
+			if (value >= 8000 && value <= 48000)
+				sb_rate = (int)value;
+			break;
+		case 0x0c:
+			sb_buf = value;
+			break;
+		case 0x10:
+			if (sb_buf != 0 && value != 0) {
+				uint8_t *p = Mac2HostAddr(sb_buf);
+				nw_sheepblaster_submit(p, value);
+			}
+			sb_buf = 0;
+			break;
+		default:
+			break;
+	}
+}
+
+static void sheepblaster_reset(void)
+{
+	sb_wr.store(0);
+	sb_rd.store(0);
+	sb_enabled = 0;
+	sb_buf = 0;
+	sb_drops = 0;
+	sb_plays = 0;
+	sb_peak = 0;
+}
+
+void nw_sheepblaster_init(void)
+{
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	printf("NW-BOOT SheepBlaster by Bill Cavalieri\n");
+	fflush(stdout);
+	sheepblaster_reset();
+	struct nw_io_device dev;
+	dev.name = "sheepblaster";
+	dev.base = NW_IO_SHEEPBLASTER_BASE;
+	dev.size = NW_IO_SHEEPBLASTER_SIZE;
+	dev.read = sb_read;
+	dev.write = sb_write;
+	dev.ctx = NULL;
+	nw_io_register(&dev);
+}
+
 void nw_devices_init(const struct nw_devices_clock *tb)
 {
 	g_tb = *tb;
@@ -1620,4 +1886,5 @@ void nw_devices_init(const struct nw_devices_clock *tb)
 	};
 	for (size_t i = 0; i < sizeof(devs) / sizeof(devs[0]); i++)
 		nw_io_register(&devs[i]);
+	nw_sheepblaster_init();
 }

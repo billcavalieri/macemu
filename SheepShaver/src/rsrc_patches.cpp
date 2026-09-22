@@ -121,6 +121,17 @@ void CheckLoad(uint32 type, int16 id, uint16 *p, uint32 size)
 	if ((uintptr)p >= (uintptr)ROMBaseHost && (uintptr)p <= (uintptr)(ROMBaseHost + ROM_SIZE))
 		return;
 
+	{
+		static int n_any;
+		if (n_any < 6) {
+			n_any++;
+			printf("NW-BOOT G1: checkload #%d %c%c%c%c id=%d\n", n_any,
+			       (int)(type >> 24), (int)((type >> 16) & 0xff),
+			       (int)((type >> 8) & 0xff), (int)(type & 0xff), (int)id);
+			fflush(stdout);
+		}
+	}
+
 	if (type == FOURCC('b','o','o','t') && id == 3) {
 		D(bug("boot 3 found\n"));
 		size >>= 1;
@@ -498,7 +509,19 @@ void CheckLoad(uint32 type, int16 id, uint16 *p, uint32 size)
 		uint32 thing = Host2MacAddr((uint8 *)p);
 		uint32 c_type = ReadMacInt32(thing);
 		uint32 sub_type = ReadMacInt32(thing + 4);
-		if (c_type == FOURCC('s','d','e','v') && sub_type == FOURCC('s','i','n','g')) {
+		/* sing is the Old World built-in. awac is the 68k AWACS output
+		 * on this Mac OS 9.2 volume; QuickTime opens that one. */
+		if (c_type == FOURCC('s','d','e','v') &&
+		    (sub_type == FOURCC('s','i','n','g') || sub_type == FOURCC('a','w','a','c'))) {
+			static int n_sing;
+			if (n_sing < 8) {
+				n_sing++;
+				printf("NW-BOOT G1: audio-thng #%d id=%d sub=%c%c%c%c ->awgc\n",
+				       n_sing, (int)id,
+				       (int)(sub_type >> 24), (int)((sub_type >> 16) & 0xff),
+				       (int)((sub_type >> 8) & 0xff), (int)(sub_type & 0xff));
+				fflush(stdout);
+			}
 			WriteMacInt32(thing + 4, FOURCC('a','w','g','c'));
 			D(bug("thng %d, type %c%c%c%c (%08x), sub type %c%c%c%c (%08x), data %p\n", id, c_type >> 24, (c_type >> 16) & 0xff, (c_type >> 8) & 0xff, c_type & 0xff, c_type, sub_type >> 24, (sub_type >> 16) & 0xff, (sub_type >> 8) & 0xff, sub_type & 0xff, sub_type, p));
 			AddSifter(ReadMacInt32(thing + componentResType), ReadMacInt16(thing + componentResID));
