@@ -79,6 +79,7 @@
 #include "nw_script.h"
 #include "nw_boot_contract.h"
 #include "nw_io.h"
+#include "nw_jit.h"
 #endif
 
 #define DEBUG 0
@@ -1067,25 +1068,31 @@ static int present_sdl_video()
 				if (SDL_BlitSurface(guest_surface, &r, host_surface, &d) != 0)
 					continue;
 			}
-			uint8_t *srcPixels = (uint8_t *)host_surface->pixels +
-				r.y * host_surface->pitch +
-				r.x * host_surface->format->BytesPerPixel;
-			uint8_t *dstPixels;
-			int dstPitch;
-			if (SDL_LockTexture(sdl_texture, &r, (void **)&dstPixels, &dstPitch) < 0)
-				continue;
-			const int rowbytes = r.w * (int)host_surface->format->BytesPerPixel;
-			for (int y = 0; y < r.h; y++) {
-				memcpy(dstPixels, srcPixels, (size_t)rowbytes);
-				srcPixels += host_surface->pitch;
-				dstPixels += dstPitch;
-			}
-			SDL_UnlockTexture(sdl_texture);
 			if (!have_uni) {
 				uni = r;
 				have_uni = true;
 			} else {
 				SDL_UnionRect(&uni, &r, &uni);
+			}
+		}
+		if (have_uni) {
+			/* One lock for the union. Metal still presents the whole
+			 * texture below; locking each tile was the cost. */
+			uint8_t *srcPixels = (uint8_t *)host_surface->pixels +
+				uni.y * host_surface->pitch +
+				uni.x * host_surface->format->BytesPerPixel;
+			uint8_t *dstPixels;
+			int dstPitch;
+			if (SDL_LockTexture(sdl_texture, &uni, (void **)&dstPixels, &dstPitch) == 0) {
+				const int rowbytes = uni.w * (int)host_surface->format->BytesPerPixel;
+				for (int y = 0; y < uni.h; y++) {
+					memcpy(dstPixels, srcPixels, (size_t)rowbytes);
+					srcPixels += host_surface->pitch;
+					dstPixels += dstPitch;
+				}
+				SDL_UnlockTexture(sdl_texture);
+			} else {
+				have_uni = false;
 			}
 		}
 		if (need_blit)
@@ -2118,8 +2125,28 @@ void VideoHostPresent(void)
 void VideoDriverVBL(void)
 {
 	nw_display_vbl_clear();
-	if (private_data != NULL && private_data->interruptsEnabled)
+	if (private_data != NULL && private_data->interruptsEnabled) {
+#ifdef SHEEPSHAVER
+		const uint64 t0 = GetTicks_usec();
+		const uint64 i0 = nw_jit_other_insns();
+#endif
 		VSLDoInterruptService(private_data->vslServiceID);
+#ifdef SHEEPSHAVER
+		static uint64 us_sum, insn_sum, ncall;
+		us_sum += GetTicks_usec() - t0;
+		insn_sum += nw_jit_other_insns() - i0;
+		ncall++;
+#if NW_BOOT_LOG
+		if ((ncall % 60ull) == 0) {
+			printf("NW-BOOT G1: vbl-svc n=%llu us=%llu insn=%llu\n",
+			       (unsigned long long)ncall,
+			       (unsigned long long)us_sum,
+			       (unsigned long long)insn_sum);
+			fflush(stdout);
+		}
+#endif
+#endif
+	}
 }
 #else
 void VideoInterrupt(void)
@@ -3061,13 +3088,10 @@ static void update_display_static_bbox(driver_base *drv)
 		if (n > 0) {
 			SDL_Rect *boxes = (SDL_Rect *)alloca(sizeof(SDL_Rect) * n);
 			uint32 nr_boxes = 0;
-			/* 32-bit NW: host_surface is CreateRGBSurfaceFrom(the_buffer),
-			 * so the guest FB is already what present uploads. Copying
-			 * dirty spans into the_buffer_copy is a bounce, not a present
-			 * source. Skip it. the_buffer_copy stays the memcmp shadow;
-			 * unmarked chrome is still caught by the fallthrough below.
-			 * Depths where host_surface does not wrap the_buffer still
-			 * copy, and 16-bit still Screen_blits. */
+			/* 32-bit NW: host_surface wraps the_buffer, so the upload
+			 * reads the guest FB directly. the_buffer_copy is only the
+			 * memcmp shadow. Update it for these rects or the next idle
+			 * scan treats the movie as dirty forever. */
 			const bool fb_is_host = host_surface && the_buffer &&
 				(uint8 *)host_surface->pixels == the_buffer;
 			if (!fb_is_host && SDL_MUSTLOCK(drv->s))
@@ -3075,15 +3099,16 @@ static void update_display_static_bbox(driver_base *drv)
 			for (int i = 0; i < n; i++) {
 				const int x = xs[i], y = ys[i], w = ws[i], h = hs[i];
 				const int span = w * (int)bytes_per_pixel;
-				if (!fb_is_host) {
+				if (the_buffer && the_buffer_copy && span > 0) {
 					for (int j = y; j < y + h; j++) {
 						const uint32 yb = (uint32)j * bytes_per_row;
-						const uint32 dst_yb = (uint32)j * dst_bytes_per_row;
 						const uint32 xb = (uint32)x * bytes_per_pixel;
 						memcpy(&the_buffer_copy[yb + xb], &the_buffer[yb + xb], (size_t)span);
-						if (blit)
+						if (!fb_is_host && blit) {
+							const uint32 dst_yb = (uint32)j * dst_bytes_per_row;
 							Screen_blit((uint8 *)drv->s->pixels + dst_yb + xb,
 								    the_buffer + yb + xb, span);
+						}
 					}
 				}
 				boxes[nr_boxes].x = x;
@@ -3097,8 +3122,11 @@ static void update_display_static_bbox(driver_base *drv)
 				SDL_UnlockSurface(drv->s);
 			if (nr_boxes)
 				update_sdl_video(drv->s, nr_boxes, boxes);
-			/* Fall through to memcmp so chrome not covered by the
-			 * CopyBits rect still matches the_buffer. */
+			/* A movie damages every frame, so unmarked chrome would
+			 * never reach the scan. About 4 Hz is enough to catch it. */
+			static unsigned damage_scans;
+			if ((++damage_scans % 15u) != 0)
+				return;
 		}
 	}
 #endif

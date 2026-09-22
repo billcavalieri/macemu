@@ -31,7 +31,7 @@
 #include <vector>
 #include <string>
 
-#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+#if 1
 
 namespace {
 

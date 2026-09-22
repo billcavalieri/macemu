@@ -223,6 +223,7 @@ static uint64_t g_dtlb_fl[NW_JIT_DTLB_FL_N];
 static int g_mode = -1;
 static nw_jit_host_lwz g_host_lwz;
 static nw_jit_host_stw g_host_stw;
+static nw_jit_host_msr g_host_msr;
 static nw_jit_host_lwz_pa g_host_lwz_pa;
 static nw_jit_host_stw_pa g_host_stw_pa;
 static nw_jit_host_mfspr g_host_mfspr;
@@ -257,6 +258,8 @@ enum { NW_JIT_DTLB_WAYS = 2 };
 static struct nw_jit_dtlb_ent g_dtlb[NW_JIT_DTLB_N][NW_JIT_DTLB_WAYS];
 static_assert(sizeof(struct nw_jit_dtlb_ent) == 32, "dtlb entry is 32 bytes");
 static uint64_t g_dtlb_hit, g_dtlb_miss;
+enum { DTLB_WHY_SR = 0, DTLB_WHY_BAT, DTLB_WHY_CONFLICT, DTLB_WHY_PR, DTLB_WHY_OTHER, DTLB_WHY_N };
+static uint64_t g_dtlb_why[DTLB_WHY_N];
 /* VSID|Ks|Kp|N: translation-relevant SR bits. T and reserved noise does not drop. */
 enum { NW_JIT_SR_XLATE = 0x70ffffffu };
 static uint32_t g_sr_gen[16];
@@ -1891,6 +1894,7 @@ void nw_jit_reset(void)
 	nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_RESET);
 	memset(g_dtlb_fl, 0, sizeof(g_dtlb_fl));
 	g_dtlb_hit = g_dtlb_miss = 0;
+	memset(g_dtlb_why, 0, sizeof(g_dtlb_why));
 	g_itlb_hit = g_itlb_miss = 0;
 }
 
@@ -2501,6 +2505,12 @@ void nw_jit_summary_print(const char *why)
 	       (unsigned long long)g_wraps,
 	       g_occ_max,
 	       (unsigned long long)g_chain_hops);
+	printf("NW-BOOT G1: dtlb-why sr=%llu bat=%llu conflict=%llu pr=%llu other=%llu\n",
+	       (unsigned long long)g_dtlb_why[DTLB_WHY_SR],
+	       (unsigned long long)g_dtlb_why[DTLB_WHY_BAT],
+	       (unsigned long long)g_dtlb_why[DTLB_WHY_CONFLICT],
+	       (unsigned long long)g_dtlb_why[DTLB_WHY_PR],
+	       (unsigned long long)g_dtlb_why[DTLB_WHY_OTHER]);
 	{
 		static const char *const cut_name[NW_JIT_CUT_N] = {
 			"ends_block", "page_cross", "peek_fail", "class_change",
@@ -2638,6 +2648,11 @@ void nw_jit_set_host_byte(nw_jit_host_lb lb, nw_jit_host_stb8 stb)
 {
 	g_host_lb = lb;
 	g_host_stb = stb;
+}
+
+void nw_jit_set_host_msr(nw_jit_host_msr fn)
+{
+	g_host_msr = fn;
 }
 
 void nw_jit_set_host_mem(nw_jit_host_lwz lwz, nw_jit_host_stw stw)
@@ -2966,6 +2981,85 @@ int nw_jit_dtlb_lookup_pr(uint32_t ea, int is_store, uint32_t *pa, int pr)
 int nw_jit_dtlb_lookup(uint32_t ea, int is_store, uint32_t *pa)
 {
 	return nw_jit_dtlb_lookup_pr(ea, is_store, pa, 0);
+}
+
+/* Classify a miss from the set as it stands, before the refill. */
+static int dtlb_why(uint32_t ea, int is_store, int pr)
+{
+	const unsigned i = (ea >> 12) & (NW_JIT_DTLB_N - 1u);
+	const uint32_t page = ea & ~0xfffu;
+	const uint32_t sr = g_sr_gen[(ea >> 28) & 0xfu];
+	int valid = 0;
+	for (int w = 0; w < NW_JIT_DTLB_WAYS; w++) {
+		const struct nw_jit_dtlb_ent *e = &g_dtlb[i][w];
+		if (!(e->flags & NW_JIT_DTLB_VALID))
+			continue;
+		valid++;
+		if (e->ea_page != page)
+			continue;
+		if (e->sr_gen != sr)
+			return DTLB_WHY_SR;
+		if ((e->flags & NW_JIT_DTLB_BAT) && e->bat_gen != g_bat_gen)
+			return DTLB_WHY_BAT;
+		if (((e->flags & NW_JIT_DTLB_PR) != 0) != (pr != 0) ||
+		    (is_store && !(e->flags & NW_JIT_DTLB_WRITE)))
+			return DTLB_WHY_PR;
+	}
+	if (valid >= NW_JIT_DTLB_WAYS)
+		return DTLB_WHY_CONFLICT;
+	return DTLB_WHY_OTHER;
+}
+
+static void dtlb_note_miss(uint32_t ea, int is_store, int pr)
+{
+	g_dtlb_miss++;
+	g_dtlb_why[dtlb_why(ea, is_store, pr)]++;
+}
+
+/* Copy the translator MSR into the JIT struct. A hop or tail does not
+ * pass through execute(), which is the only other writer of cpu->msr. */
+static void dtlb_sync_msr(struct nw_jit_cpu *cpu)
+{
+	if (!g_host_msr || !cpu->host)
+		return;
+	const uint32_t live = g_host_msr(cpu->host);
+	if (live == cpu->msr)
+		return;
+	static unsigned n;
+	if (n < 8u) {
+		n++;
+		printf("NW-BOOT G1: dtlb-msr #%u cpu=%08x live=%08x pc=%08x\n",
+		       n, (unsigned)cpu->msr, (unsigned)live, (unsigned)cpu->pc);
+		fflush(stdout);
+	}
+	cpu->msr = live;
+}
+
+/* Hit already in the table: use the host pointer. Do not translate or refill.
+ * Returns 0 when the helper must take the real miss. */
+static int dtlb_host_line(uint32_t ea, int is_store, int pr, uint64_t *host_out)
+{
+	const unsigned i = (ea >> 12) & (NW_JIT_DTLB_N - 1u);
+	const uint32_t page = ea & ~0xfffu;
+	const uint32_t sr = g_sr_gen[(ea >> 28) & 0xfu];
+	for (int w = 0; w < NW_JIT_DTLB_WAYS; w++) {
+		const struct nw_jit_dtlb_ent *e = &g_dtlb[i][w];
+		if (!(e->flags & NW_JIT_DTLB_VALID) || e->ea_page != page)
+			continue;
+		if (e->sr_gen != sr)
+			return 0;
+		if ((e->flags & NW_JIT_DTLB_BAT) && e->bat_gen != g_bat_gen)
+			return 0;
+		if (((e->flags & NW_JIT_DTLB_PR) != 0) != (pr != 0))
+			return 0;
+		if (is_store && !(e->flags & NW_JIT_DTLB_WRITE))
+			return 0;
+		if (!e->host)
+			return 0;
+		*host_out = e->host;
+		return 1;
+	}
+	return 0;
 }
 
 uint64_t nw_jit_dtlb_hits(void)
@@ -5636,20 +5730,33 @@ uint32_t nw_jit_helper_lwz(struct nw_jit_cpu *cpu, uint32_t ea)
 			cpu->fault_ea = ea;
 			return 0;
 		}
+		dtlb_note_miss(ea, 0, (int)((cpu->msr >> 14) & 1u));
 		nw_jit_dtlb_fill(ea, ea, 1,
 			(uint64_t)(uintptr_t)(cpu->mem + ((ea - cpu->mem_base) & ~0xfffu)),
 			(int)((cpu->msr >> 14) & 1u));
-		g_dtlb_miss++;
 		return mem_ld_be(cpu, ea);
 	}
+	dtlb_sync_msr(cpu);
+	{
+		uint64_t hostp = 0;
+		if (dtlb_host_line(ea, 0, (int)((cpu->msr >> 14) & 1u), &hostp)) {
+			const uint8_t *p = (const uint8_t *)(uintptr_t)hostp + (ea & 0xfffu);
+			g_dtlb_hit++;
+			return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+			       ((uint32_t)p[2] << 8) | p[3];
+		}
+	}
 	if (g_host_lwz && cpu->host) {
+		const int why = dtlb_why(ea, 0, (int)((cpu->msr >> 14) & 1u));
 		int f = 0;
 		uint32_t v = g_host_lwz(cpu->host, ea, cpu->pc, &f);
 		if (f) {
 			cpu->fault = f;
 			cpu->fault_ea = ea;
-		} else
+		} else {
 			g_dtlb_miss++;
+			g_dtlb_why[why]++;
+		}
 		return v;
 	}
 	cpu->fault = 1;
@@ -5833,10 +5940,10 @@ void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 			return;
 		}
 		mem_st_be(cpu, ea, val);
+		dtlb_note_miss(ea, 1, (int)((cpu->msr >> 14) & 1u));
 		nw_jit_dtlb_fill(ea, ea, 1,
 			(uint64_t)(uintptr_t)(cpu->mem + ((ea - cpu->mem_base) & ~0xfffu)),
 			(int)((cpu->msr >> 14) & 1u));
-		g_dtlb_miss++;
 		if ((ea & ~0xfffu) == (cpu->pc & ~0xfffu))
 			cpu->fault = NW_JIT_FAULT_SMC;
 		return;
@@ -5847,14 +5954,32 @@ void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 	if (nw_jit_mode() == NW_JIT_VERIFY)
 		return;
 	if (g_host_stw && cpu->host) {
+		dtlb_sync_msr(cpu);
+		{
+			uint64_t hostp = 0;
+			if (dtlb_host_line(ea, 1, (int)((cpu->msr >> 14) & 1u), &hostp)) {
+				uint8_t *p = (uint8_t *)(uintptr_t)hostp + (ea & 0xfffu);
+				p[0] = (uint8_t)(val >> 24);
+				p[1] = (uint8_t)(val >> 16);
+				p[2] = (uint8_t)(val >> 8);
+				p[3] = (uint8_t)val;
+				g_dtlb_hit++;
+				if ((ea & ~0xfffu) == (cpu->pc & ~0xfffu))
+					cpu->fault = NW_JIT_FAULT_SMC;
+				return;
+			}
+		}
+		const int why = dtlb_why(ea, 1, (int)((cpu->msr >> 14) & 1u));
 		int f = 0;
 		g_host_stw(cpu->host, ea, val, cpu->pc, &f);
 		if (f) {
 			cpu->fault = f;
 			cpu->fault_ea = ea;
 			cpu->fault_st = 1;
-		} else
+		} else {
 			g_dtlb_miss++;
+			g_dtlb_why[why]++;
+		}
 		return;
 	}
 	cpu->fault = 1;
@@ -7681,6 +7806,7 @@ static int emit_blr_x19(struct emit *e, uint32_t off)
 static int emit_dtlb_and_helpers(struct emit *e, int is_store)
 {
 	static_assert((offsetof(struct nw_jit_cpu, jit_dtlb) & 7) == 0, "jit_dtlb 8-aligned");
+
 	static_assert((offsetof(struct nw_jit_cpu, jit_dtlb_hit) & 7) == 0, "jit_dtlb_hit 8-aligned");
 	static_assert((offsetof(struct nw_jit_cpu, jit_lwz) & 7) == 0, "jit_lwz 8-aligned");
 	static_assert((offsetof(struct nw_jit_cpu, jit_stw) & 7) == 0, "jit_stw 8-aligned");

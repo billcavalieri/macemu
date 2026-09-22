@@ -287,6 +287,8 @@ void powerpc_cpu::initialize()
 	init_decode_cache();
 	execute_depth = 0;
 	srr0_ = srr1_ = dar_ = dsisr_ = 0;
+	fpu_retry_pc_ = 0;
+	fpu_retry_on_ = 0;
 	dec_ = 0xffffffffu;
 	tb_offset_ = 0;
 	dec_tb_base_ = tb_ticks();
@@ -357,6 +359,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 #ifdef SHEEPSHAVER
 	if (on) {
 		nw_jit_set_host_mem(powerpc_cpu::jit_host_lwz, powerpc_cpu::jit_host_stw);
+		nw_jit_set_host_msr(powerpc_cpu::jit_host_msr);
 		nw_jit_set_host_pa(powerpc_cpu::jit_host_lwz_pa, powerpc_cpu::jit_host_stw_pa);
 		nw_jit_set_host_mfspr(powerpc_cpu::jit_host_mfspr);
 		nw_jit_set_host_isync(powerpc_cpu::jit_host_isync);
@@ -391,9 +394,71 @@ void powerpc_cpu::enable_guest_mmu(bool on)
  *  panic region (ROM+0x325500..0x325fff). Observation only; names the call
  *  site of a silent spin that raises no exception.
  */
+static bool nw_jit_peek(uint32 ea, uint32 *opcode);
+static int g_glue_arm;
+static uint64 g_glue_n, g_glue_sum, g_glue_trips;
+
+static void nw_glue_add(int n)
+{
+	if (g_glue_arm && n > 0)
+		g_glue_n += (uint64)n;
+}
+
+static void nw_glue_site(powerpc_cpu &cpu, uint32 pc)
+{
+	static int dumped_de10, dumped_e128, dumped_e8c4;
+	static int nlog;
+	int *dumped = 0;
+	if (pc == 0x6806de10u) {
+		g_glue_arm = 1;
+		g_glue_n = 0;
+		dumped = &dumped_de10;
+	} else if (pc == 0x6806e128u) {
+		dumped = &dumped_e128;
+	} else if (pc == 0x6806e8c4u) {
+		if (g_glue_arm) {
+			g_glue_sum += g_glue_n;
+			g_glue_trips++;
+			g_glue_arm = 0;
+		}
+		dumped = &dumped_e8c4;
+	} else
+		return;
+	if (nlog < 12) {
+		nlog++;
+		const uint32 trap = (cpu.gpr(29) >> 3) & 0xffffu;
+		printf("NW-BOOT G1: glue pc=%08x lr=%08x cr=%08x r24=%08x trap=%04x ppc_rd=%llu insns=%llu\n",
+		       (unsigned)pc, (unsigned)cpu.debug_lr(), (unsigned)cpu.debug_cr(),
+		       (unsigned)cpu.gpr(24), (unsigned)trap,
+		       (unsigned long long)nw_mixedmode_ppc_rds(),
+		       (unsigned long long)g_glue_n);
+		fflush(stdout);
+	}
+	if (dumped && !*dumped) {
+		*dumped = 1;
+		for (int k = 0; k < 8; k++) {
+			uint32 w = 0;
+			const uint32 ea = pc + (uint32)k * 4u;
+			const int ok = nw_jit_peek(ea, &w);
+			printf("NW-BOOT G1: glue word %08x %+d %s %08x\n",
+			       (unsigned)pc, k, ok ? "ok" : "fail", (unsigned)w);
+		}
+		fflush(stdout);
+	}
+	if (g_glue_trips && (g_glue_trips % 10000ull) == 0 && pc == 0x6806e8c4u) {
+		printf("NW-BOOT G1: glue trips=%llu insns_to_twi=%llu avg=%llu\n",
+		       (unsigned long long)g_glue_trips,
+		       (unsigned long long)g_glue_sum,
+		       (unsigned long long)(g_glue_sum / g_glue_trips));
+		fflush(stdout);
+	}
+}
+
 static void nw_trace_pc(powerpc_cpu &cpu, uint32 pc)
 {
 	extern uint32 ROMBase;
+	if (pc == 0x6806de10u || pc == 0x6806e128u || pc == 0x6806e8c4u)
+		nw_glue_site(cpu, pc);
 	enum { RING = 256 };
 	static uint32 from[RING], to[RING];
 	static unsigned head, count;
@@ -1150,7 +1215,42 @@ bool powerpc_cpu::is_fp_insn(uint32 opcode)
 
 void powerpc_cpu::take_fpu()
 {
+	fpu_retry_pc_ = pc();
+	fpu_retry_on_ = 1;
+#if defined(SHEEPSHAVER) && NW_BOOT_LOG
+	{
+		static unsigned n;
+		if (n < 8u) {
+			n++;
+			printf("NW-BOOT G1: fpu #%u pc=%08x msr=%08x\n",
+			       n, (unsigned)pc(),
+			       (unsigned)ppc32_guest_mmu().msr());
+			fflush(stdout);
+		}
+	}
+#endif
 	take_exception(NW_VEC_FPU, pc(), 0);
+}
+
+void powerpc_cpu::finish_fpu_rfi()
+{
+	if (!fpu_retry_on_ || srr0_ != fpu_retry_pc_)
+		return;
+	fpu_retry_on_ = 0;
+	if (srr1_ & ppc32_mmu::MSR_FP)
+		return;
+	srr1_ |= ppc32_mmu::MSR_FP;
+#if defined(SHEEPSHAVER) && NW_BOOT_LOG
+	{
+		static unsigned n;
+		if (n < 8u) {
+			n++;
+			printf("NW-BOOT G1: fpu-enable #%u pc=%08x srr1=%08x\n",
+			       n, (unsigned)srr0_, (unsigned)srr1_);
+			fflush(stdout);
+		}
+	}
+#endif
 }
 
 void powerpc_cpu::tick_decrementer()
@@ -1180,9 +1280,7 @@ void powerpc_cpu::tick_decrementer()
 #ifdef SHEEPSHAVER
 	nw_devices_tick();
 	nw_host_tick();
-#if NW_BOOT_LOG
 	nw_script_tick();
-#endif
 	{
 		uint32 tm = 0;
 		if (RAMBaseHost)
@@ -1783,6 +1881,12 @@ static void jit_io_store(uint32 pa, int size, uint32 val, uint32 pc, int *fault)
 	nw_io_write(pa, size, val, pc);
 }
 
+uint32 powerpc_cpu::jit_host_msr(void *host)
+{
+	(void)host;
+	return ppc32_guest_mmu().msr();
+}
+
 uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
@@ -1802,10 +1906,12 @@ uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
 		return 0;
 	}
 	if (kind != NW_PA_FB && ppc32_guest_mmu_enabled() &&
-	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR)) {
+		const int pr = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0;
 		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM,
 			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
-			(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0, via_bat);
+			pr, via_bat);
+	}
 	return vm_read_memory_4(pa);
 }
 
@@ -2101,6 +2207,7 @@ void powerpc_cpu::jit_host_rfi(void *host, struct nw_jit_cpu *cpu)
 	if (!ppc || !cpu)
 		return;
 	if (ppc32_guest_mmu_enabled()) {
+		ppc->finish_fpu_rfi();
 		const uint32 old = ppc32_guest_mmu().msr();
 		ppc32_guest_mmu().set_msr(ppc->srr1_);
 		nw_log_msr_dr(ppc->srr1_);
@@ -2197,6 +2304,7 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 		cpu->vscr = ppc->vscr().get();
 	}
 	ppc->last_fetch_pa_ = npa;
+	cpu->msr = hmsr;
 	if (n2)
 		*n2 = nn;
 	if (uses_fpr)
@@ -3156,6 +3264,10 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			dsi_block_pc = jc.pc;
 			dsi_block_n = n2;
 			last_fetch_pa_ = npa;
+			/* The successor's inline DTLB reads jc.msr, not hmsr.
+			 * Leaving the entry MSR there rejected way 1 for the
+			 * rest of the hop (page 0x00280000 refill storm). */
+			jc.msr = hmsr;
 			next(&jc);
 			n_total += n2;
 			chain_pc = chain2;
@@ -3269,6 +3381,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			}
 		}
 #if NW_BOOT_LOG
+		nw_glue_add(n);
 		{
 			nw_event_insns((unsigned)n);
 			if (!hit) {
@@ -3605,6 +3718,7 @@ void powerpc_cpu::execute(uint32 entry)
 #endif
 		ii->execute(this, opcode);
 #if defined(SHEEPSHAVER) && NW_BOOT_LOG
+		nw_glue_add(1);
 		nw_event_insn();
 		nw_jit_pc_hot(insn_pc, opcode);
 #endif

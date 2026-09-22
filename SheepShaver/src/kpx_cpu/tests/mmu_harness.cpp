@@ -110,6 +110,13 @@ static void harness_rfi(void *host, struct nw_jit_cpu *cpu)
 	cpu->msr = h->srr1;
 }
 
+static uint32_t g_way1_live_msr;
+static uint32_t way1_rd_msr(void *)
+{
+	return g_way1_live_msr;
+}
+uint32_t nw_jit_helper_lwz(struct nw_jit_cpu *cpu, uint32_t ea);
+
 static int g_test_pmu_power_ev = -1;
 static void test_pmu_power_hook(int ev, void *ctx)
 {
@@ -2485,6 +2492,68 @@ int main()
 				CHECK(a.gpr[3] == 0x11223344u && a.gpr[4] == a.gpr[3]);
 				CHECK(nw_jit_dtlb_misses() > mm);
 				CHECK(nw_jit_dtlb_hits() > mh);
+			}
+		}
+
+		/* Way 1 must hit in the compiled load, not only in C lookup.
+		 * Live boot: set 640 way0 is 0x00a80000 (PR=1) and way1 is
+		 * 0x00280000 (PR=0). A supervisor lwz still entered the miss
+		 * helper, refilled that page, and never reached Control Strip. */
+		{
+			static uint8_t page_pr[4096];
+			static uint8_t page_sv[4096];
+			memset(page_pr, 0, sizeof(page_pr));
+			memset(page_sv, 0, sizeof(page_sv));
+			page_pr[0] = 0x11; page_pr[1] = 0x11; page_pr[2] = 0x11; page_pr[3] = 0x11;
+			page_sv[0] = 0x22; page_sv[1] = 0x22; page_sv[2] = 0x22; page_sv[3] = 0x22;
+			nw_jit_dtlb_flush();
+			nw_jit_dtlb_fill(0x00a80000u, 0x10a80000u, 1, (uint64_t)(uintptr_t)page_pr, 1);
+			nw_jit_dtlb_fill(0x00280000u, 0x10280000u, 1, (uint64_t)(uintptr_t)page_sv, 0);
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.msr = 0x10u; /* DR, PR clear: must hit way1 */
+			a.gpr[1] = 0x00280000u;
+			ops[0] = nw_ppc_lwz(3, 1, 0);
+			ops[1] = nw_ppc_blr();
+			fn = nw_jit_compile(ops, 2, 0x279d48u, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			{
+				const uint64_t mh = nw_jit_dtlb_hits(), mm = nw_jit_dtlb_misses();
+				fn(&a);
+				CHECK(a.fault == 0);
+				CHECK(a.gpr[3] == 0x22222222u);
+				CHECK(nw_jit_dtlb_hits() == mh + 1);
+				CHECK(nw_jit_dtlb_misses() == mm);
+			}
+			/* Same entries, user MSR: way1's PR tag must miss.
+			 * No host callback is installed yet, so the helper
+			 * faults without counting a translated miss. */
+			memset(&a, 0, sizeof(a));
+			a.lr = 0x2000u;
+			a.msr = 0x4010u; /* DR|PR */
+			a.gpr[1] = 0x00280000u;
+			a.gpr[3] = 0;
+			fn(&a);
+			CHECK(a.fault == 1);
+			CHECK(a.gpr[3] == 0);
+			/* Helper, not the inline path: the line is already valid. */
+			{
+				struct nw_jit_cpu h;
+				memset(&h, 0, sizeof(h));
+				h.msr = 0x4010u; /* stale user PR; translator is supervisor */
+				h.host = &h;
+				h.pc = 0x279d48u;
+				g_way1_live_msr = 0x10u;
+				nw_jit_set_host_msr(way1_rd_msr);
+				const uint64_t mh = nw_jit_dtlb_hits();
+				const uint64_t mm = nw_jit_dtlb_misses();
+				const uint32_t v = nw_jit_helper_lwz(&h, 0x00280000u);
+				nw_jit_set_host_msr(0);
+				CHECK(v == 0x22222222u);
+				CHECK(h.fault == 0);
+				CHECK(h.msr == 0x10u);
+				CHECK(nw_jit_dtlb_hits() == mh + 1);
+				CHECK(nw_jit_dtlb_misses() == mm);
 			}
 		}
 

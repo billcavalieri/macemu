@@ -257,6 +257,8 @@ private:
 	/* OEA exception/SPRG state for HotInts DataStorageInt. */
 	uint32 srr0_;
 	uint32 srr1_;
+	uint32 fpu_retry_pc_;
+	int fpu_retry_on_;
 	uint32 dar_;
 	uint32 dsisr_;
 	uint32 sprg_[4];
@@ -287,6 +289,7 @@ private:
 	void take_vpu();
 	static bool is_fp_insn(uint32 opcode);
 	void take_fpu();
+	void finish_fpu_rfi();
 
 	uint32 exception_vector(uint32 vec) const;
 	void take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra, uint32 event_pc = 0xffffffffu);
@@ -364,6 +367,7 @@ public:
 	void nw_mm_queue_ppc(uint32 proc) { mm_ppc_pending_ = proc; }
 	uint32 nw_mm_take_ppc() { uint32 p = mm_ppc_pending_; mm_ppc_pending_ = 0; return p; }
 	virtual void nw_invoke_mm_ppc(uint32 entry);
+	static uint32 jit_host_msr(void *host);
 	static uint32 jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault);
 	static void jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int *fault);
 	static uint32 jit_host_lwz_pa(void *host, uint32 pa, uint32 pc, int *fault);

@@ -145,6 +145,10 @@ typedef void (*nw_jit_host_sth16)(void *host, uint32_t ea, uint32_t val, uint32_
 typedef uint32_t (*nw_jit_host_lb)(void *host, uint32_t ea, uint32_t pc, int *fault);
 typedef void (*nw_jit_host_stb8)(void *host, uint32_t ea, uint32_t val, uint32_t pc, int *fault);
 void nw_jit_set_host_mem(nw_jit_host_lwz lwz, nw_jit_host_stw stw);
+/* Architectural MSR. The inline DTLB reads cpu->msr; a hop or tail that
+ * skipped execute() can leave that copy behind the translator. */
+typedef uint32_t (*nw_jit_host_msr)(void *host);
+void nw_jit_set_host_msr(nw_jit_host_msr fn);
 void nw_jit_set_host_half(nw_jit_host_lh lh, nw_jit_host_sth16 sth);
 void nw_jit_set_host_byte(nw_jit_host_lb lb, nw_jit_host_stb8 stb);
 

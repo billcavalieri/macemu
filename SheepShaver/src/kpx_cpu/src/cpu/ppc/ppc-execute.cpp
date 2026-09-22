@@ -1381,6 +1381,7 @@ void powerpc_cpu::execute_rfi(uint32 opcode)
 {
 	(void)opcode;
 	if (ppc32_guest_mmu_enabled()) {
+		finish_fpu_rfi();
 		const uint32 old = ppc32_guest_mmu().msr();
 		ppc32_guest_mmu().set_msr(srr1_);
 #ifdef SHEEPSHAVER
