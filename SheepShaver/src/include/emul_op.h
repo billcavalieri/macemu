@@ -51,6 +51,7 @@ enum {	// Selectors for EMUL_OP opcodes
 	OP_EXTFS_COMM, OP_EXTFS_HFS, OP_IDLE_TIME, OP_IDLE_TIME_2,
 	OP_COPYBITS_EXPAND,
 	OP_SHEEPBLASTER,
+	OP_SHEEPBLASTER_TICK,
 	OP_MAX
 };
 const uint16 M68K_EMUL_RETURN = 0xfe40;	// Extended opcodes
@@ -110,6 +111,7 @@ const uint16 M68K_EMUL_OP_EXTFS_HFS = M68K_EMUL_BREAK + OP_EXTFS_HFS;
 const uint16 M68K_EMUL_OP_IDLE_TIME = M68K_EMUL_BREAK + OP_IDLE_TIME;
 const uint16 M68K_EMUL_OP_IDLE_TIME_2 = M68K_EMUL_BREAK + OP_IDLE_TIME_2;
 const uint16 M68K_EMUL_OP_COPYBITS_EXPAND = M68K_EMUL_BREAK + OP_COPYBITS_EXPAND;
+const uint16 M68K_EMUL_OP_SHEEPBLASTER_TICK = M68K_EMUL_BREAK + OP_SHEEPBLASTER_TICK;
 
 extern "C" void EmulOp(M68kRegisters *r, uint32 pc, int selector);
 /* Look for a loaded AWACS component. Host memory only; no 68k call. */

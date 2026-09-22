@@ -34,6 +34,7 @@
 #include "audio_defs.h"
 #if defined(SHEEPSHAVER)
 #include "nw_io.h"
+#include "thunks.h"
 #endif
 #include "user_strings.h"
 #include "cdrom.h"
@@ -58,14 +59,12 @@ uint32 audio_component_flags;		// Component feature flags
 uint32 audio_data = 0;				// Mac address of global data area
 static int open_count = 0;			// Open/close nesting count
 #if defined(SHEEPSHAVER)
-static int sb_pull_on;				// A mixer source exists; pull GetSourceData
-static int sb_in_play;				// Inside PlaySourceBuffer
-static int sb_in_mixer;				// Inside a mixer Execute68k
-static int sb_in_completion;			// Inside the buffer-done callback
-static uint32 sb_done_glue;			// 68k stub that calls the buffer completion
-static uint32 sb_done_upp;			// Completion to call after playback
-static uint32 sb_done_pb;
-static int sb_done_wait;			// Frames still queued when the completion was armed
+static int sb_sources;				// AddSource minus RemoveSource
+static uint32 sb_tm;				// TMTask that pulls the mixer
+static uint32 sb_tm_proc;			// Its 68k routine
+static bool sb_tm_installed;
+static bool sb_tm_armed;			// PrimeTime is pending
+static bool sb_in_tick;				// Inside that task's pull
 #endif
 
 bool AudioAvailable = false;		// Flag: audio output available (from the software point of view)
@@ -209,13 +208,7 @@ static int32 AudioGetInfo(uint32 infoPtr, uint32 selector, uint32 sourceID)
 			r.d[0] = selector;
 			r.a[1] = sourceID;
 			r.a[2] = AudioStatus.mixer;
-#if defined(SHEEPSHAVER)
-			sb_in_mixer = 1;
-#endif
 			Execute68k(audio_data + adatGetInfo, &r);
-#if defined(SHEEPSHAVER)
-			sb_in_mixer = 0;
-#endif
 			D(bug("  delegated to Apple Mixer, returns %08lx\n", r.d[0]));
 			return r.d[0];
 	}
@@ -303,13 +296,7 @@ static int32 AudioSetInfo(uint32 infoPtr, uint32 selector, uint32 sourceID)
 			r.d[0] = selector;
 			r.a[1] = sourceID;
 			r.a[2] = AudioStatus.mixer;
-#if defined(SHEEPSHAVER)
-			sb_in_mixer = 1;
-#endif
 			Execute68k(audio_data + adatSetInfo, &r);
-#if defined(SHEEPSHAVER)
-			sb_in_mixer = 0;
-#endif
 			D(bug("  delegated to Apple Mixer, returns %08lx\n", r.d[0]));
 			return r.d[0];
 	}
@@ -318,87 +305,95 @@ static int32 AudioSetInfo(uint32 infoPtr, uint32 selector, uint32 sourceID)
 
 
 /*
- *  Pull one decoded buffer from the Apple mixer into the ring.
- *  QuickTime writes compressed audio into the mixer and waits for
- *  this. The equalizer moves only after the mixer is asked for frames.
- *  Call only while the 68k emulator registers are live.
+ *  SheepBlaster: the Apple mixer is pulled from a guest Time Manager
+ *  task. The mixer calls each buffer's completion from inside
+ *  GetSourceData, and the Sound Manager wrote that completion to run
+ *  at interrupt time. A host timer can land in the middle of any guest
+ *  instruction, and execute_68k() does not preserve r0-r12, so the
+ *  host never enters the guest on its own. See SHEEPBLASTER-SOUND.md.
  */
 
 #if defined(SHEEPSHAVER)
-static void sb_call_completion(void)
-{
-	/* The callback plays a 1-frame tail and arms itself again.
-	 * Entering it a second time is the illegal instruction
-	 * (error type 3). */
-	if (sb_in_completion)
-		return;
-	uint32 completion = sb_done_upp;
-	uint32 pb = sb_done_pb;
-	sb_done_upp = 0;
-	sb_done_pb = 0;
-	sb_done_wait = 0;
-	if (completion == 0 || pb == 0)
-		return;
-	/* Do not run this routine. Every call raised error type 3 and
-	 * never returned, so the OK button could not be clicked. The
-	 * alert audio is already in the ring. */
-	static int n_skip;
-	if (n_skip < 6) {
-		n_skip++;
-		uint16 op = ReadMacInt16(completion);
-		printf("NW-BOOT G1: sheepblaster skip #%d pb=%08x completion=%08x op=%04x\n",
-		       n_skip, (unsigned)pb, (unsigned)completion, (unsigned)op);
-		fflush(stdout);
-	}
-}
-#endif
+enum {	// TMTask struct
+	tmAddr = 6,
+	SIZEOF_TMTask = 22
+};
 
-void AudioSheepBlasterComplete(void)
+enum {
+	SB_TICK_MS = 10,		// Time Manager period
+	SB_LOW_WATER = 4096,	// Pull while fewer 44100 Hz frames than this are queued
+	SB_MAX_PULLS = 4		// Mixer blocks per tick
+};
+
+static bool sb_active(void)
 {
-#if defined(SHEEPSHAVER)
-	/* PlaySourceBuffer must have returned, and the frames must have
-	 * left the ring. Calling the completion from inside that call
-	 * made the Sound panel execute an illegal instruction (type 3). */
-	if (sb_in_completion || sb_done_upp == 0 || sb_in_play || sb_in_mixer)
-		return;
-	if (nw_sheepblaster_pending() > sb_done_wait)
-		return;
-	sb_call_completion();
-#endif
+	return nw_sheepblaster_ready() != 0;
 }
 
-void AudioSheepBlasterService(void)
+static void sb_tm_prime(void)
 {
-#if defined(SHEEPSHAVER)
-	static int in_service;
-	static int skip;
-	if (!nw_audio_service_ok())
+	if (!sb_tm_installed || sb_tm_armed || sb_in_tick)
 		return;
-	if (in_service || sb_in_play || sb_in_mixer || !sb_pull_on)
-		return;
-	if (audio_data == 0 || AudioStatus.mixer == 0 || !nw_sheepblaster_ready())
-		return;
-	if (skip > 0) {
-		skip--;
-		return;
-	}
-	/* Keep about a fifth of a second queued. More than that and a
-	 * pull would run ahead of the speakers. */
-	if (nw_sheepblaster_pending() > 8000)
-		return;
-	uint32 mode = ReadMacInt32(XLM_RUN_MODE);
-	if (mode != MODE_68K && mode != MODE_EMUL_OP)
-		return;
-	in_service = 1;
-	if (mode != MODE_EMUL_OP)
-		WriteMacInt32(XLM_RUN_MODE, MODE_EMUL_OP);
-	WriteMacInt32(audio_data + adatStreamInfo, 0);
 	M68kRegisters r;
 	memset(&r, 0, sizeof r);
-	r.a[0] = audio_data + adatStreamInfo;
+	r.a[0] = sb_tm;
+	r.d[0] = SB_TICK_MS;
+	Execute68kTrap(0xa05a, &r);	// PrimeTime()
+	sb_tm_armed = true;
+}
+
+static void sb_tm_install(void)
+{
+	if (sb_tm_installed)
+		return;
+	if (sb_tm == 0) {
+		static const uint8 proc[] = {
+			(uint8)(M68K_EMUL_OP_SHEEPBLASTER_TICK >> 8),	// A0 = task, D0 = ms or 0
+			(uint8)(M68K_EMUL_OP_SHEEPBLASTER_TICK & 0xff),
+			0x4a, 0x80,		// tst.l d0
+			0x67, 0x02,		// beq.s @1
+			0xa0, 0x5a,		// PrimeTime
+			0x4e, 0x75		// @1 rts
+		};
+		sb_tm_proc = SheepProc(proc, sizeof proc);
+		sb_tm = SheepMem::Reserve(SIZEOF_TMTask);
+	}
+	for (uint32 i = 0; i < SIZEOF_TMTask; i += 2)
+		WriteMacInt16(sb_tm + i, 0);
+	WriteMacInt32(sb_tm + tmAddr, sb_tm_proc);
+	M68kRegisters r;
+	memset(&r, 0, sizeof r);
+	r.a[0] = sb_tm;
+	Execute68kTrap(0xa458, &r);	// InsXTime()
+	sb_tm_installed = true;
+	sb_tm_armed = false;
+}
+
+static void sb_tm_remove(void)
+{
+	if (!sb_tm_installed)
+		return;
+	M68kRegisters r;
+	memset(&r, 0, sizeof r);
+	r.a[0] = sb_tm;
+	Execute68kTrap(0xa059, &r);	// RmvTime()
+	sb_tm_installed = false;
+	sb_tm_armed = false;
+}
+
+/* One GetSourceData into the ring. False when the mixer had nothing. */
+static bool sb_pull(void)
+{
+	uint32 ad = audio_data;
+	WriteMacInt32(ad + adatStreamInfo, 0);
+	M68kRegisters r;
+	memset(&r, 0, sizeof r);
+	r.a[0] = ad + adatStreamInfo;
 	r.a[1] = AudioStatus.mixer;
-	Execute68k(audio_data + adatGetSourceData, &r);
-	uint32 info = ReadMacInt32(audio_data + adatStreamInfo);
+	Execute68k(ad + adatGetSourceData, &r);
+	if (audio_data != ad)
+		return false;
+	uint32 info = ReadMacInt32(ad + adatStreamInfo);
 	uint32 frames = 0, format = 0, rate = 0, buf = 0;
 	int ch = 0, bits = 0;
 	if (info != 0) {
@@ -420,14 +415,43 @@ void AudioSheepBlasterService(void)
 	int pcm = format == FOURCC('t','w','o','s') ||
 		format == FOURCC('r','a','w',' ') ||
 		format == FOURCC('s','o','w','t') || format == 0;
-	if (buf >= 0x1000 && frames != 0 && frames <= 65536 && pcm) {
-		nw_sheepblaster_enable(1);
-		nw_sheepblaster_play(Mac2HostAddr(buf), frames,
-			format ? format : FOURCC('t','w','o','s'), ch, bits, rate);
-	} else
-		skip = 8;
-	WriteMacInt32(XLM_RUN_MODE, mode);
-	in_service = 0;
+	if (buf < 0x1000 || frames == 0 || frames > 65536 || !pcm)
+		return false;
+	nw_sheepblaster_enable(1);
+	nw_sheepblaster_play(Mac2HostAddr(buf), frames,
+		format ? format : FOURCC('t','w','o','s'), ch, bits, rate);
+	return true;
+}
+#endif
+
+/*
+ *  SheepBlaster Time Manager task body. Returns the delay before the
+ *  next run in milliseconds, or 0 to stop; *task is the TMTask.
+ */
+
+int32 AudioSheepBlasterTick(uint32 *task)
+{
+#if defined(SHEEPSHAVER)
+	*task = sb_tm;
+	sb_tm_armed = false;
+	if (!sb_tm_installed || sb_in_tick)
+		return 0;
+	if (audio_data == 0 || AudioStatus.mixer == 0 || sb_sources <= 0)
+		return 0;
+	sb_in_tick = true;
+	for (int i = 0; i < SB_MAX_PULLS && nw_sheepblaster_pending() < SB_LOW_WATER; i++)
+		if (!sb_pull())
+			break;
+	sb_in_tick = false;
+	/* A completion inside that pull can remove the source or close
+	 * the device. */
+	if (!sb_tm_installed || audio_data == 0 || AudioStatus.mixer == 0 || sb_sources <= 0)
+		return 0;
+	sb_tm_armed = true;
+	return SB_TICK_MS;
+#else
+	*task = 0;
+	return 0;
 #endif
 }
 
@@ -444,7 +468,15 @@ int32 AudioDispatch(uint32 params, uint32 globals)
 	int16 selector = (int16)ReadMacInt16(params + cp_what);
 	{
 		static int n_sel;
-		if (n_sel < 24) {
+		static int n_other;
+		bool probe = selector == kComponentOpenSelect ||
+			selector == kComponentCloseSelect ||
+			selector == kSoundComponentGetInfoSelect;
+		if (!probe && n_other < 20) {
+			n_other++;
+			printf("NW-BOOT G1: audio-sel other #%d sel=%d\n", n_other, (int)selector);
+			fflush(stdout);
+		} else if (n_sel < 8) {
 			n_sel++;
 			printf("NW-BOOT G1: audio-sel #%d sel=%d\n", n_sel, (int)selector);
 			fflush(stdout);
@@ -499,11 +531,14 @@ int32 AudioDispatch(uint32 params, uint32 globals)
 			}
 			if (audio_data == 0) {
 
-				// Allocate global data area
+				// Allocate global data area. System heap: the first
+				// Open can come from an application (the Sound control
+				// panel), and its heap is gone once it quits while this
+				// area and its 68k routines stay in use.
 				r.d[0] = SIZEOF_adat;
-				Execute68kTrap(0xa040, &r);	// ResrvMem()
+				Execute68kTrap(0xa440, &r);	// ResrvMemSys()
 				r.d[0] = SIZEOF_adat;
-				Execute68kTrap(0xa31e, &r);	// NewPtrClear()
+				Execute68kTrap(0xa71e, &r);	// NewPtrSysClear()
 				if (r.a[0] == 0)
 					return memFullErr;
 				audio_data = r.a[0];
@@ -620,20 +655,13 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 			if (open_count == 0) {
 				if (audio_data) {
 #if defined(SHEEPSHAVER)
-					sb_pull_on = 0;
-					sb_done_upp = 0;
-					sb_done_pb = 0;
+					sb_tm_remove();
+					sb_sources = 0;
 #endif
 					if (AudioStatus.mixer) {
 						// Close Apple Mixer
 						r.a[0] = AudioStatus.mixer;
-#if defined(SHEEPSHAVER)
-						sb_in_mixer = 1;
-#endif
 						Execute68k(audio_data + adatCloseMixer, &r);
-#if defined(SHEEPSHAVER)
-						sb_in_mixer = 0;
-#endif
 						D(bug(" CloseMixer() returns %08lx, mixer %08lx\n", r.d[0], AudioStatus.mixer));
 						AudioStatus.mixer = 0;
 					}
@@ -670,7 +698,7 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 			return noErr;
 
 		// Sound component functions (not delegated)
-		case kSoundComponentInitOutputDeviceSelect:
+		case kSoundComponentInitOutputDeviceSelect: {
 			D(bug(" InitOutputDevice\n"));
 			if (!audio_open)
 				return noHardwareErr;
@@ -688,44 +716,31 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 			WriteMacInt32(audio_data + adatData + scd_reserved, 0);
 			WriteMacInt32(audio_data + adatStreamInfo, 0);
 
-			// Open Apple Mixer
+			printf("NW-BOOT G1: audio-init enter\n");
+			fflush(stdout);
+			// Open Apple Mixer in the system heap; the calling
+			// application's heap can go away while the mixer is in use
+			uint32 zone = ReadMacInt32(0x118);	// TheZone
+			WriteMacInt32(0x118, ReadMacInt32(0x2a6));	// SysZone
 			r.a[0] = audio_data + adatMixer;
 			r.d[0] = 0;
 			r.a[1] = audio_data + adatData;
-#if defined(SHEEPSHAVER)
-			sb_in_mixer = 1;
-#endif
 			Execute68k(audio_data + adatOpenMixer, &r);
-#if defined(SHEEPSHAVER)
-			sb_in_mixer = 0;
-#endif
+			WriteMacInt32(0x118, zone);
 			AudioStatus.mixer = ReadMacInt32(audio_data + adatMixer);
 			printf("NW-BOOT G1: audio-mixer err=%08x mixer=%08x\n",
 			       (unsigned)r.d[0], (unsigned)AudioStatus.mixer);
 			fflush(stdout);
 #if defined(SHEEPSHAVER)
-			nw_sheepblaster_enable(1);
-			if (sb_done_glue == 0) {
-				/* Boolean completion(SoundParamBlockPtr *pb).
-				 * Pascal: 2-byte result, one pointer argument. */
-				M68kRegisters gr;
-				memset(&gr, 0, sizeof gr);
-				gr.d[0] = 32;
-				Execute68kTrap(0xa31e, &gr);	// NewPtrClear()
-				if (gr.a[0] != 0) {
-					sb_done_glue = gr.a[0];
-					uint32 gp = sb_done_glue;
-					WriteMacInt16(gp, 0x544f); gp += 2;	// subq.w #2,sp
-					WriteMacInt16(gp, 0x2f09); gp += 2;	// move.l a1,-(sp)
-					WriteMacInt16(gp, M68K_JSR_A0); gp += 2;
-					WriteMacInt16(gp, 0x301f); gp += 2;	// move.w (sp)+,d0
-					WriteMacInt16(gp, M68K_RTS);
-				}
+			if (sb_active() && AudioStatus.mixer) {
+				nw_sheepblaster_enable(1);
+				sb_tm_install();
 			}
 			if (r.d[0] != 0)
 				return noErr;
 #endif
 			return r.d[0];
+		}
 
 		case kSoundComponentGetSourceSelect:
 			D(bug(" GetSource source %08lx\n", ReadMacInt32(p)));
@@ -736,8 +751,9 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 		case kSoundComponentAddSourceSelect:
 			D(bug(" AddSource\n"));
 #if defined(SHEEPSHAVER)
-			sb_pull_on = 1;
-			if (!nw_sheepblaster_ready())
+			if (sb_active())
+				sb_sources++;
+			else
 #endif
 			AudioStatus.num_sources++;
 			{
@@ -753,14 +769,13 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 		case kSoundComponentRemoveSourceSelect:
 			D(bug(" RemoveSource\n"));
 #if defined(SHEEPSHAVER)
-			/* The alert channel is already gone. Calling its completion
-			 * after this enters a hardware poll that never returns and
-			 * leaves a half-drawn window on the desktop. */
-			sb_done_upp = 0;
-			sb_done_pb = 0;
-			if (!nw_sheepblaster_ready() && AudioStatus.num_sources > 0)
+			if (sb_active()) {
+				if (sb_sources > 0)
+					sb_sources--;
+			} else
 #endif
-			AudioStatus.num_sources--;
+			if (AudioStatus.num_sources > 0)
+				AudioStatus.num_sources--;
 			{
 				static int n_rm;
 				if (n_rm < 4) {
@@ -778,9 +793,6 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 			return AudioSetInfo(ReadMacInt32(p), ReadMacInt32(p + 4), ReadMacInt32(p + 8));
 
 		case kSoundComponentStartSourceSelect:
-#if defined(SHEEPSHAVER)
-			sb_pull_on = 1;
-#endif
 			if (audio_data == 0 || AudioStatus.mixer == 0)
 				return noErr;
 			D(bug(" StartSource count %d\n", ReadMacInt16(p + 4)));
@@ -788,15 +800,37 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 			r.d[0] = ReadMacInt16(p + 4);
 			r.a[0] = ReadMacInt32(p);
 			r.a[1] = AudioStatus.mixer;
-#if defined(SHEEPSHAVER)
-			sb_in_mixer = 1;
-#endif
 			Execute68k(audio_data + adatStartSource, &r);
-#if defined(SHEEPSHAVER)
-			sb_in_mixer = 0;
-#endif
 			D(bug(" returns %08lx\n", r.d[0]));
+#if defined(SHEEPSHAVER)
+			if (sb_active())
+				sb_tm_prime();
+#endif
 			return noErr;
+
+		case kSoundComponentPlaySourceBufferSelect:
+#if defined(SHEEPSHAVER)
+			if (sb_active()) {
+				static int n_psb;
+				if (n_psb < 8) {
+					n_psb++;
+					uint32 pb = ReadMacInt32(p + 4);
+					printf("NW-BOOT G1: sheepblaster psb #%d pb=%08x frames=%u completion=%08x sources=%d\n",
+					       n_psb, (unsigned)pb,
+					       pb ? (unsigned)ReadMacInt32(pb + 4 + scd_sampleCount) : 0u,
+					       pb ? (unsigned)ReadMacInt32(pb + 52) : 0u, sb_sources);
+					fflush(stdout);
+				}
+				if (audio_data == 0 || AudioStatus.mixer == 0)
+					return noErr;
+				r.a[0] = AudioStatus.mixer;
+				r.a[1] = params;
+				Execute68k(audio_data + adatDelegateCall, &r);
+				sb_tm_prime();
+				return r.d[0];
+			}
+#endif
+			goto delegate;
 
 		case kSoundComponentStopSourceSelect:
 			D(bug(" StopSource\n"));
@@ -810,76 +844,9 @@ delegate:	// Delegate call to Apple Mixer
 				return noErr;
 			r.a[0] = AudioStatus.mixer;
 			r.a[1] = params;
-#if defined(SHEEPSHAVER)
-			sb_in_mixer = 1;
-#endif
 			Execute68k(audio_data + adatDelegateCall, &r);
-#if defined(SHEEPSHAVER)
-			sb_in_mixer = 0;
-#endif
 			D(bug(" returns %08lx\n", r.d[0]));
 			return r.d[0];
-
-		case kSoundComponentPlaySourceBufferSelect:
-#if defined(SHEEPSHAVER)
-			/* A nested call is the completion routine asking for
-			 * another buffer. Returning here stops that recursion.
-			 * Do not hand the buffer to the mixer. The mixer waits
-			 * for a hardware interrupt that never comes, and that
-			 * wait froze SimpleSound and the menu clock. */
-			if (sb_in_play)
-				return noErr;
-			sb_in_play = 1;
-			if (nw_sheepblaster_ready()) {
-				uint32 pb = ReadMacInt32(p + 4);
-				if (pb == 0)
-					pb = ReadMacInt32(p);
-				if (pb != 0) {
-					uint32 rec = ReadMacInt32(pb);
-					int framed = rec >= 32 && rec < 512;
-					uint32 base = framed ? pb + 4 : pb;
-					uint32 frames = ReadMacInt32(base + scd_sampleCount);
-					uint32 buf = ReadMacInt32(base + scd_buffer);
-					uint32 format = ReadMacInt32(base + scd_format);
-					uint32 rate = ReadMacInt32(base + scd_sampleRate);
-					int ch = (int)ReadMacInt16(base + scd_numChannels);
-					int bits = (int)ReadMacInt16(base + scd_sampleSize);
-					int pcm = format == FOURCC('t','w','o','s') ||
-						format == FOURCC('r','a','w',' ') ||
-						format == FOURCC('s','o','w','t') || format == 0;
-					int queued = 0;
-					if (pcm && buf != 0 && frames != 0 && frames <= 65536) {
-						nw_sheepblaster_enable(1);
-						queued = nw_sheepblaster_play(Mac2HostAddr(buf), frames,
-							format ? format : FOURCC('t','w','o','s'),
-							ch, bits, rate);
-					}
-					/* completionRtn is at +52. Call it only after these
-					 * frames have left the ring, and not on this stack. */
-					if (!sb_in_completion && framed && rec >= 56 && sb_done_glue != 0 && sb_done_upp == 0) {
-						uint32 completion = ReadMacInt32(pb + 52);
-						if (completion >= 0x1000 && (completion & 1) == 0 &&
-						    completion + 2 < RAMSize) {
-							if (rec >= 62)
-								WriteMacInt16(pb + 60, 0);
-							sb_done_upp = completion;
-							sb_done_pb = pb;
-							/* Fire when the ring is empty, so the frames
-							 * just queued have been played. */
-							sb_done_wait = 0;
-							(void)queued;
-							printf("NW-BOOT G1: sheepblaster arm pb=%08x completion=%08x op=%04x queued=%d wait=%d\n",
-							       (unsigned)pb, (unsigned)completion,
-							       (unsigned)ReadMacInt16(completion),
-							       queued, sb_done_wait);
-							fflush(stdout);
-						}
-					}
-				}
-			}
-			sb_in_play = 0;
-#endif
-			return noErr;
 
 		default:
 			if (selector >= 0x100)

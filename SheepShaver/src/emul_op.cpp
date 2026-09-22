@@ -191,7 +191,9 @@ static void nw_register_output(void)
 	 * the card resamples to 44100 itself. System sounds are
 	 * mostly 8-bit mono at 22050, and playing those at 44100
 	 * made them run about twice as fast. */
-	WriteMacInt32(cd.addr() + 12, 0x00000f0f);
+	/* Output only. Input bits made the Sound panel treat this as a
+	 * sound input and lock when the device was selected. */
+	WriteMacInt32(cd.addr() + 12, 0x00000f00);
 	WriteMacInt32(cd.addr() + 16, 0);
 	/* The Sound control panel lists GetComponentInfo's name. A nil
 	 * name is not shown. NewHandle is the Memory Manager, not the
@@ -287,17 +289,16 @@ int32 nw_sheepblaster_delegate(uint32 params, uint32 target)
 
 void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 {
-	if (selector != OP_AUDIO_DISPATCH && selector != OP_SHEEPBLASTER)
+	/* Not from the Time Manager task: registration allocates memory,
+	 * which is not allowed at interrupt time. */
+	bool sb_op = selector == OP_AUDIO_DISPATCH || selector == OP_SHEEPBLASTER ||
+		selector == OP_SHEEPBLASTER_TICK;
+	if (!sb_op)
 		nw_register_output();
-	if (nw_debug_arm && selector != OP_SHEEPBLASTER) {
+	if (nw_debug_arm && !sb_op) {
 		nw_debug_arm = 0;
 		nw_audio_debug_scan();
 	}
-	/* Disk and toolbox traps are the other times the emulator is
-	 * live during a movie. One mixer pull per trap fills the ring
-	 * while native QuickTime is not in the 68k emulator. */
-	if (selector != OP_AUDIO_DISPATCH && selector != OP_SHEEPBLASTER)
-		AudioSheepBlasterComplete();
 	D(bug("EmulOp %04x at %08x\n", selector, pc));
 	switch (selector) {
 		case OP_BREAK:				// Breakpoint
@@ -428,6 +429,10 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 
 		case OP_AUDIO_DISPATCH:		// Audio component functions
 			r->d[0] = AudioDispatch(r->a[3], r->a[4]);
+			break;
+
+		case OP_SHEEPBLASTER_TICK:	// SheepBlaster Time Manager task
+			r->d[0] = AudioSheepBlasterTick(&r->a[0]);
 			break;
 
 		case OP_SHEEPBLASTER: {		// AWACS `link a6,#0`, then the original body

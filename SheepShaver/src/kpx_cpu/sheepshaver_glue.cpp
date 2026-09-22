@@ -924,10 +924,6 @@ void nw_host_tick(void)
 		return;
 	next_present_us = now + 1000000 / 60;
 	VideoHostPresent();
-	/* The Sound panel waits in native code and does not take an
-	 * emulated interrupt, so HandleInterrupt never runs. This tick
-	 * does. That is what lets the alert completion return. */
-	AudioSheepBlasterComplete();
 }
 
 void init_emul_ppc(void)
@@ -1178,8 +1174,8 @@ void HandleInterrupt(powerpc_registers *r)
 				audio_reg = 1;
 				nw_audio_arm_register();
 			}
-			if (audio_tick == 15000)
-				nw_audio_arm_debug();
+			/* Do not scan guest RAM from this tick. The scan stalls
+			 * the desktop while the Sound panel is in use. */
 		}
 		/* The SDL callback is blocked on the audio thread until
 		 * AudioInterrupt posts. Do that here. Do not fall through:
@@ -1188,8 +1184,6 @@ void HandleInterrupt(powerpc_registers *r)
 			ClearInterruptFlag(INTFLAG_AUDIO);
 			AudioInterrupt();
 		}
-		if (int32(ReadMacInt32(XLM_IRQ_NEST)) <= 0)
-			AudioSheepBlasterComplete();
 		return;
 	}
 

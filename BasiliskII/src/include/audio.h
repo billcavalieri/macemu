@@ -43,8 +43,7 @@ extern void AudioExit(void);
 extern void AudioReset(void);
 
 extern void AudioInterrupt(void);
-extern void AudioSheepBlasterService(void);
-extern void AudioSheepBlasterComplete(void);
+extern int32 AudioSheepBlasterTick(uint32 *task);
 
 extern void audio_enter_stream(void);
 extern void audio_exit_stream(void);
