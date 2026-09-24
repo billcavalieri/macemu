@@ -1025,6 +1025,93 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
     return guest_surface;
 }
 
+/* A fill-screen movie stores the new picture from top to bottom
+ * across several 60 Hz ticks. Uploading each short band is the sheet
+ * wipe. A band is held only when it starts at the top of the screen
+ * and then walks downward. A window or the Trash zoom starts lower,
+ * and hiding those bands froze the picture. Taller damage and narrow
+ * updates upload immediately. */
+static uint8_t *nw_sweep_snap;
+static int nw_sweep_bytes, nw_sweep_pitch, nw_sweep_bpp, nw_sweep_w, nw_sweep_h;
+static SDL_Rect nw_sweep_box;
+static int nw_sweep_on;
+
+static int nw_sweep_ensure(const SDL_Surface *s)
+{
+	const int need = s->pitch * s->h;
+	if (need <= 0)
+		return 0;
+	if (nw_sweep_snap && nw_sweep_bytes == need && nw_sweep_pitch == s->pitch &&
+	    nw_sweep_bpp == (int)s->format->BytesPerPixel &&
+	    nw_sweep_w == s->w && nw_sweep_h == s->h)
+		return 1;
+	free(nw_sweep_snap);
+	nw_sweep_snap = (uint8_t *)malloc((size_t)need);
+	nw_sweep_on = 0;
+	if (!nw_sweep_snap) {
+		nw_sweep_bytes = 0;
+		return 0;
+	}
+	nw_sweep_bytes = need;
+	nw_sweep_pitch = s->pitch;
+	nw_sweep_bpp = (int)s->format->BytesPerPixel;
+	nw_sweep_w = s->w;
+	nw_sweep_h = s->h;
+	return 1;
+}
+
+static void nw_sweep_store(const SDL_Surface *s, const SDL_Rect *r)
+{
+	const int bpp = (int)s->format->BytesPerPixel;
+	const int row = r->w * bpp;
+	if (row <= 0 || r->h <= 0)
+		return;
+	const uint8_t *src = (const uint8_t *)s->pixels + r->y * s->pitch + r->x * bpp;
+	uint8_t *dst = nw_sweep_snap + r->y * nw_sweep_pitch + r->x * bpp;
+	for (int y = 0; y < r->h; y++) {
+		memcpy(dst, src, (size_t)row);
+		src += s->pitch;
+		dst += nw_sweep_pitch;
+	}
+}
+
+static int nw_upload_base(uint8_t *base, int pitch, int bpp, const SDL_Rect *uni)
+{
+	uint8_t *srcPixels = base + uni->y * pitch + uni->x * bpp;
+	uint8_t *dstPixels;
+	int dstPitch;
+	if (SDL_LockTexture(sdl_texture, uni, (void **)&dstPixels, &dstPitch) != 0)
+		return 0;
+	const int rowbytes = uni->w * bpp;
+	for (int y = 0; y < uni->h; y++) {
+		memcpy(dstPixels, srcPixels, (size_t)rowbytes);
+		srcPixels += pitch;
+		dstPixels += dstPitch;
+	}
+	SDL_UnlockTexture(sdl_texture);
+	return 1;
+}
+
+static int nw_present_texture(const SDL_Rect *uni)
+{
+	const int tex_w = guest_surface->w;
+	const int tex_h = guest_surface->h;
+	const bool partial = tex_w > 0 && tex_h > 0 &&
+		(uni->x > 0 || uni->y > 0 || uni->w < tex_w || uni->h < tex_h);
+	if (nw_renderer_software && !nw_present_need_clear && partial) {
+		if (SDL_RenderCopy(sdl_renderer, sdl_texture, uni, uni) != 0)
+			return -1;
+	} else {
+		SDL_SetRenderDrawColor(sdl_renderer, 0, 0, 0, 0);
+		SDL_RenderClear(sdl_renderer);
+		if (SDL_RenderCopy(sdl_renderer, sdl_texture, NULL, NULL) != 0)
+			return -1;
+		nw_present_need_clear = false;
+	}
+	SDL_RenderPresent(sdl_renderer);
+	return 0;
+}
+
 static int present_sdl_video()
 {
 #ifdef SHEEPSHAVER
@@ -1039,8 +1126,17 @@ static int present_sdl_video()
 			memcpy(local, nw_present_rects, (size_t)n * sizeof(SDL_Rect));
 		nw_present_n = 0;
 		SDL_UnlockMutex(sdl_update_video_mutex);
-		if (n <= 0)
-			return 0;
+		if (n <= 0) {
+			if (!nw_sweep_on || !nw_sweep_snap)
+				return 0;
+			if (!nw_upload_base(nw_sweep_snap, nw_sweep_pitch, nw_sweep_bpp,
+					    &nw_sweep_box)) {
+				nw_sweep_on = 0;
+				return 0;
+			}
+			nw_sweep_on = 0;
+			return nw_present_texture(&nw_sweep_box);
+		}
 		SDL_Rect uni = {0, 0, 0, 0};
 		bool have_uni = false;
 		const int fb_w = guest_surface->w;
@@ -1074,6 +1170,43 @@ static int present_sdl_video()
 			} else {
 				SDL_UnionRect(&uni, &r, &uni);
 			}
+		}
+		/* A fill-screen movie starts at the top and walks down in
+		 * short bands. Hold only that walk. A band lower on the
+		 * screen is a window close or the zoom into the Trash, and
+		 * hiding it leaves the old picture up while the Finder has
+		 * already moved on. A tall union is uploaded below. */
+		const bool band = have_uni && !need_blit && host_surface &&
+			uni.w * 2 >= fb_w && uni.h >= 48 && uni.h <= 160;
+		const bool from_top = uni.y <= 16;
+		if (band && (nw_sweep_on || from_top) && nw_sweep_ensure(host_surface)) {
+			const int bottom = nw_sweep_box.y + nw_sweep_box.h;
+			const bool starts_over = nw_sweep_on &&
+				uni.y + 48 < bottom &&
+				uni.y <= nw_sweep_box.y + 16 &&
+				uni.y + uni.h < bottom - 64;
+			const bool extends = nw_sweep_on &&
+				uni.y + uni.h > bottom - 8 &&
+				uni.y >= bottom - 32;
+			if (nw_sweep_on && (starts_over || !extends)) {
+				if (nw_upload_base(nw_sweep_snap, nw_sweep_pitch, nw_sweep_bpp, &nw_sweep_box))
+					nw_present_texture(&nw_sweep_box);
+				nw_sweep_on = 0;
+			}
+			if (nw_sweep_on || from_top) {
+				if (!nw_sweep_on)
+					nw_sweep_box = uni;
+				else
+					SDL_UnionRect(&nw_sweep_box, &uni, &nw_sweep_box);
+				nw_sweep_store(host_surface, &nw_sweep_box);
+				nw_sweep_on = 1;
+				return 0;
+			}
+		}
+		if (nw_sweep_on && nw_sweep_snap) {
+			if (nw_upload_base(nw_sweep_snap, nw_sweep_pitch, nw_sweep_bpp, &nw_sweep_box))
+				nw_present_texture(&nw_sweep_box);
+			nw_sweep_on = 0;
 		}
 		if (have_uni) {
 			/* One lock for the union. Metal still presents the whole
@@ -2096,10 +2229,12 @@ void VideoHostPresent(void)
 #endif
 	present_sdl_video();
 #ifdef SHEEPSHAVER
+#if NW_BOOT_LOG
 	if (ROMType == ROMTYPE_NEWWORLD && the_buffer && guest_surface)
 		nw_fb_fps_proxy_sample(the_buffer, (uint32_t)guest_surface->pitch,
 				       (uint32_t)guest_surface->w,
 				       (uint32_t)guest_surface->h);
+#endif
 #endif
 #if NW_BOOT_LOG
 	nw_event_frame();
@@ -3099,18 +3234,30 @@ static void update_display_static_bbox(driver_base *drv)
 			for (int i = 0; i < n; i++) {
 				const int x = xs[i], y = ys[i], w = ws[i], h = hs[i];
 				const int span = w * (int)bytes_per_pixel;
+				bool dirty = true;
 				if (the_buffer && the_buffer_copy && span > 0) {
+					/* QuickTime redraws the same frame more than once.
+					 * Uploading an unchanged tile was a multi-megabyte
+					 * copy on the CPU thread while the picture sat still. */
+					dirty = false;
 					for (int j = y; j < y + h; j++) {
 						const uint32 yb = (uint32)j * bytes_per_row;
 						const uint32 xb = (uint32)x * bytes_per_pixel;
-						memcpy(&the_buffer_copy[yb + xb], &the_buffer[yb + xb], (size_t)span);
+						uint8 *shadow = &the_buffer_copy[yb + xb];
+						uint8 *src = &the_buffer[yb + xb];
+						if (memcmp(shadow, src, (size_t)span) == 0)
+							continue;
+						memcpy(shadow, src, (size_t)span);
+						dirty = true;
 						if (!fb_is_host && blit) {
 							const uint32 dst_yb = (uint32)j * dst_bytes_per_row;
 							Screen_blit((uint8 *)drv->s->pixels + dst_yb + xb,
-								    the_buffer + yb + xb, span);
+								    src, span);
 						}
 					}
 				}
+				if (!dirty)
+					continue;
 				boxes[nr_boxes].x = x;
 				boxes[nr_boxes].y = y;
 				boxes[nr_boxes].w = w;

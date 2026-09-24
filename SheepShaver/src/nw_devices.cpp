@@ -1794,8 +1794,23 @@ int nw_sheepblaster_pull(uint8_t *dst, int bytes)
 	}
 	sb_rd.store(r, std::memory_order_release);
 	int n = frames * 4;
-	if (n < bytes)
-		memset(out, 0, (size_t)(bytes - n));
+	/* A long repeat of the last sample is the robotic buzz. Hold it
+	 * for at most 1 ms, then silence. */
+	if (n < bytes) {
+		const uint8_t *last = out - 4;
+		int hold = bytes - n;
+		if (hold > 44 * 4)
+			hold = 44 * 4;
+		int left = hold;
+		while (left >= 4) {
+			memcpy(out, last, 4);
+			out += 4;
+			left -= 4;
+		}
+		if (n + hold < bytes)
+			memset(out, 0, (size_t)(bytes - (n + hold)));
+		n = bytes;
+	}
 	return n;
 }
 

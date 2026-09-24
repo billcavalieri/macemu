@@ -74,6 +74,7 @@ struct nw_jit_cpu {
 	/* Filled by nw_jit_cpu_bind; compiled code loads these via x19. */
 	void *jit_dtlb;
 	uint64_t *jit_dtlb_hit;
+	uint32_t *jit_sr_gen;	/* g_sr_gen; inline hit misses when the segment changed */
 	void *jit_lwz;
 	void *jit_stw;
 	void *jit_lwz_pa;
@@ -233,6 +234,13 @@ void nw_jit_note_cut(int reason);
 void nw_jit_note_hop_stop(int reason);
 uint64_t nw_jit_cut_count(int reason);
 uint64_t nw_jit_hop_stop_count(int reason);
+/* While on, compiled blocks, hop stops, and unsupported ops are
+ * counted apart from the boot totals. sb-cost prints them. */
+void nw_jit_pull_set(int on);
+void nw_jit_pull_log(void);
+/* kind: 0 compiled block, 1 one interpreted insn, 2 class_change cut, 3 fp_gate. */
+void nw_jit_itunes_note(uint32_t pc, int n, int kind, uint64_t host_us);
+void nw_jit_itunes_log(uint64_t frames);
 void nw_jit_invalidate_page(uint32_t phys_page);
 void nw_jit_invalidate_page_src(uint32_t phys_page, int src);
 void nw_jit_invalidate_range_src(uint32_t pa, uint32_t nbytes, int src);

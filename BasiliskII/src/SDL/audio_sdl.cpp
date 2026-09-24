@@ -98,7 +98,22 @@ static bool open_sdl_audio(void)
 	audio_spec.freq = audio_sample_rates[audio_sample_rate_index] >> 16;
 	audio_spec.format = (audio_sample_sizes[audio_sample_size_index] == 8) ? AUDIO_U8 : AUDIO_S16MSB;
 	audio_spec.channels = audio_channel_counts[audio_channel_count_index];
-	audio_spec.samples = 4096 >> PrefsFindInt32("sound_buffer");
+	int mixer_frames = 4096 >> PrefsFindInt32("sound_buffer");
+	if (mixer_frames < 64)
+		mixer_frames = 64;
+	audio_spec.samples = mixer_frames;
+#ifdef SHEEPSHAVER
+	/* One GetSourceData fills this many frames before it returns, and
+	 * the Apple mixer calls the completion once per guest buffer while
+	 * it does that. This clip's buffers shrink to 92 frames, so a 4096
+	 * frame chunk ran dozens of QuickTime completions inside one Time
+	 * Manager interrupt and the picture and the sound both stopped.
+	 * 512 frames is about 12 ms, one host callback. */
+	if (mixer_frames > 512)
+		mixer_frames = 512;
+	if (audio_spec.samples > 512)
+		audio_spec.samples = 512;
+#endif
 	audio_spec.callback = stream_func;
 	audio_spec.userdata = NULL;
 
@@ -131,8 +146,8 @@ static bool open_sdl_audio(void)
 	silence_byte = audio_spec.silence;
 	SDL_PauseAudio(0);
 
-	// Sound buffer size = 4096 frames
-	audio_frames_per_block = audio_spec.samples;
+	// Mixer chunk. SheepShaver's callback is smaller than this.
+	audio_frames_per_block = mixer_frames;
 	audio_mix_buf = (uint8*)malloc(audio_spec.size);
 	return true;
 }

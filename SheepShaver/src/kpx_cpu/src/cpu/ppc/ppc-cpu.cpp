@@ -1299,6 +1299,7 @@ void powerpc_cpu::tick_decrementer()
 			fflush(stdout);
 		}
 	}
+#if NW_BOOT_LOG
 	{
 		uint32 tm = 0;
 		if (RAMBaseHost)
@@ -1306,6 +1307,7 @@ void powerpc_cpu::tick_decrementer()
 		nw_event_tick(pc(), ppc32_guest_mmu().msr(),
 			      GetTicks_usec(), tb_ticks(), tm);
 	}
+#endif
 #if defined(NW_BOOT_LOG) && NW_BOOT_LOG
 	{
 		static uint64_t last500;
@@ -3070,6 +3072,8 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 					cut = (n >= NW_JIT_MAX_BLOCK) ? NW_JIT_CUT_MAX_BLOCK
 								      : NW_JIT_CUT_ENDS_BLOCK;
 				nw_jit_note_cut(cut);
+				if (cut == NW_JIT_CUT_CLASS_CHANGE)
+					nw_jit_itunes_note(guest_pc, 0, 2, 0);
 			}
 		}
 
@@ -3099,13 +3103,24 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	struct nw_jit_cpu &jc = *nw_jc_;
 	const int full = (mode == NW_JIT_VERIFY);
 	if (!hit) {
-		uses_fpr = is_fp_insn(first_opcode);
+		uses_fpr = 0;
+		for (int i = 0; i < n; i++) {
+			if (is_fp_insn(ops[i]))
+				uses_fpr = 1;
+		}
 		uses_vr = is_altivec_insn(first_opcode);
 		gpr_mask = 0;
 		for (int i = 0; i < n; i++)
 			gpr_mask |= nw_jit_op_gpr_mask(ops[i]);
 	}
 	(void)gpr_mask;
+	/* A mixed block can start with an integer op, so execute() did not
+	 * see an FP opcode. MSR[FP] still has to be on or the NK never
+	 * saves the FPRs across a switch. */
+	if (uses_fpr && !(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_FP)) {
+		take_fpu();
+		return 1;
+	}
 	jc.fault = 0;
 	jc.fault_ea = 0;
 	jc.fault_st = 0;
@@ -3168,8 +3183,45 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		}
 	};
 
+#if NW_BOOT_LOG
+	if (guest_pc >= 0x1de00000u && guest_pc < 0x1e000000u) {
+		static int dumped_a, dumped_b;
+		auto dump_loop = [&](uint32 ea, int *done) {
+			if (*done)
+				return;
+			*done = 1;
+			printf("NW-BOOT G1: itunes-loop %08x\n", (unsigned)ea);
+			for (int i = 0; i < 20; i++) {
+				const uint32 a = ea + (uint32)i * 4u;
+				const ppc32_xlate_result xr = ppc32_guest_mmu().translate(
+					a, PPC32_XLATE_DR, 4, false);
+				if (!xr.ok) {
+					printf("  %08x translate-fail\n", (unsigned)a);
+					continue;
+				}
+				printf("  %08x %08x\n", (unsigned)a,
+				       (unsigned)vm_read_memory_4(xr.pa));
+			}
+			fflush(stdout);
+		};
+		if (guest_pc >= 0x1dedfd00u && guest_pc < 0x1dedff00u)
+			dump_loop(0x1dedfd38u, &dumped_a);
+		if (guest_pc >= 0x1dfa2300u && guest_pc < 0x1dfa2500u)
+			dump_loop(0x1dfa2354u, &dumped_b);
+	}
+#endif
 	nw_jit_tail_begin();
+#if NW_BOOT_LOG
+	{
+		const int it = guest_pc >= 0x1de00000u && guest_pc < 0x1e000000u;
+		const uint64 t0 = it ? GetTicks_usec() : 0;
+		fn(&jc);
+		if (it)
+			nw_jit_itunes_note(guest_pc, n, 0, GetTicks_usec() - t0);
+	}
+#else
 	fn(&jc);
+#endif
 	int n_total = n;
 	uint32 dsi_block_pc = guest_pc;
 	int dsi_block_n = n;
@@ -3202,15 +3254,13 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	if (mode == NW_JIT_ON && !jc.fault) {
 		int hops = 0;
 		/* chain_disp is recorded for bc/bclr/bcctr. Hopping to the
-		 * taken target (jit-s9-hops3) smeared menu/title glyphs;
-		 * hopping to LR/CTR (jit-s9-hops, hops2) blacked the FB.
-		 * Equality on chain_pc stays; hops < 8. */
+		 * taken target smeared menu/title glyphs; hopping to LR/CTR
+		 * blacked the framebuffer. Equality on chain_pc stays. */
 		for (;;) {
 			if (hops >= 8) {
 				nw_jit_note_hop_stop(NW_JIT_HOP_CAP);
 				break;
 			}
-			(void)chain_disp;
 			if (!chain_pc) {
 				nw_jit_note_hop_stop(NW_JIT_HOP_NO_CHAIN_PC);
 				break;
@@ -3250,6 +3300,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			}
 			if (f2 && !(hmsr & ppc32_mmu::MSR_FP)) {
 				nw_jit_note_hop_stop(NW_JIT_HOP_FP_GATE);
+				nw_jit_itunes_note(jc.pc, 0, 3, 0);
 				break;
 			}
 			commit();
@@ -3286,7 +3337,18 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			 * Leaving the entry MSR there rejected way 1 for the
 			 * rest of the hop (page 0x00280000 refill storm). */
 			jc.msr = hmsr;
+#if NW_BOOT_LOG
+			{
+				const uint32 hop_pc = jc.pc;
+				const int it = hop_pc >= 0x1de00000u && hop_pc < 0x1e000000u;
+				const uint64 t0 = it ? GetTicks_usec() : 0;
+				next(&jc);
+				if (it)
+					nw_jit_itunes_note(hop_pc, n2, 0, GetTicks_usec() - t0);
+			}
+#else
 			next(&jc);
+#endif
 			n_total += n2;
 			chain_pc = chain2;
 			chain_disp = disp2;
@@ -3381,6 +3443,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		nw_jit_verify_uncompared(jc.fault);
 		if (jc.fault == 2)
 			nw_jit_note_skip_io(jc.fault_ea, jc.pc);
+		nw_jit_itunes_note(guest_pc, 1, 1, 0);
 		return 0;
 	}
 

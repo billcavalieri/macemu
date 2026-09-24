@@ -1319,6 +1319,10 @@ uint64_t nw_atrap_count(uint16_t trap, int window)
 
 void nw_atrap_hist_dump(const char *why)
 {
+#if !NW_BOOT_LOG
+	(void)why;
+	return;
+#endif
 	static const uint16_t hot[] = { 0xaafe, 0xa22e, 0xa148, 0xa96f, 0xa82a, 0xa88f };
 	printf("NW-BOOT G1: atrap %s boot", why ? why : "?");
 	for (size_t i = 0; i < sizeof(hot) / sizeof(hot[0]); i++)

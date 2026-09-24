@@ -418,6 +418,14 @@ static struct {
 } g_skip[NW_JIT_SKIPN];
 static uint64_t g_cut[NW_JIT_CUT_N];
 static uint64_t g_hop_stop[NW_JIT_HOP_N];
+static int g_pull_on;
+static uint64_t g_it_jit, g_it_interp, g_it_us, g_it_class, g_it_fp, g_it_skip;
+static uint64_t g_pull_jit, g_pull_vr, g_pull_skip, g_pull_vmx, g_pull_op6, g_pull_class;
+static uint64_t g_pull_hop[NW_JIT_HOP_N];
+struct nw_pull_pc { uint32_t pc; uint64_t n; int vr; };
+static nw_pull_pc g_pull_pc[4];
+struct nw_pull_sk { int prim; int xo; uint32_t pc; uint64_t n; };
+static nw_pull_sk g_pull_sk[4];
 static uint64_t g_codec_insns, g_other_insns;
 static uint64_t g_codec_insns_tick, g_other_insns_tick;
 static uint64_t g_kcall_fast;
@@ -1359,6 +1367,12 @@ void nw_jit_helper_fabs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb)
 	cpu->fpr[fd & 31u] = cpu->fpr[fb & 31u] & 0x7fffffffffffffffull;
 }
 
+/* Classify the single-precision value already stored in fpr[fd]. */
+void nw_jit_fprf_fd(struct nw_jit_cpu *cpu, uint32_t fd)
+{
+	nw_jit_fpscr_fprf(cpu, f32_from_fpr(cpu->fpr[fd & 31u]));
+}
+
 void nw_jit_helper_vsel(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc)
 {
 	vd &= 31u; va &= 31u; vb &= 31u; vc &= 31u;
@@ -2042,8 +2056,7 @@ int nw_jit_stats_wanted(void)
 #if NW_BOOT_LOG
 	return 1;
 #else
-	const char *e = getenv("NW_JIT_STATS");
-	return e && e[0] && strcmp(e, "0") != 0;
+	return 0;
 #endif
 }
 
@@ -2082,6 +2095,10 @@ static void nw_jit_summary_write_file(void);
 
 void nw_jit_stats_print(const char *why)
 {
+#if !NW_BOOT_LOG
+	(void)why;
+	return;
+#endif
 	if (!g_exec_blocks && nw_jit_mode() == NW_JIT_OFF)
 		return;
 	static const char *const src_name[NW_JIT_FL_N] = {
@@ -2898,6 +2915,7 @@ void nw_jit_cpu_bind(struct nw_jit_cpu *c)
 {
 	c->jit_dtlb = g_dtlb;
 	c->jit_dtlb_hit = &g_dtlb_hit;
+	c->jit_sr_gen = g_sr_gen;
 	c->jit_lwz = (void *)nw_jit_helper_lwz;
 	c->jit_stw = (void *)nw_jit_helper_stw;
 	c->jit_lwz_pa = (void *)nw_jit_helper_lwz_pa;
@@ -3186,6 +3204,34 @@ void nw_jit_note_exec_at(int n, uint32_t pc, int uses_vr)
 		g_codec_insns += (uint64_t)n;
 	else
 		g_other_insns += (uint64_t)n;
+	if (g_pull_on && pc) {
+		g_pull_jit += (uint64_t)n;
+		if (uses_vr)
+			g_pull_vr += (uint64_t)n;
+		int slot = -1;
+		int small = 0;
+		for (int i = 0; i < 4; i++) {
+			if (g_pull_pc[i].pc == pc) {
+				g_pull_pc[i].n += (uint64_t)n;
+				g_pull_pc[i].vr = uses_vr;
+				slot = -2;
+				break;
+			}
+			if (g_pull_pc[i].pc == 0) {
+				slot = i;
+				break;
+			}
+			if (g_pull_pc[i].n < g_pull_pc[small].n)
+				small = i;
+		}
+		if (slot == -1 && (uint64_t)n > g_pull_pc[small].n)
+			slot = small;
+		if (slot >= 0) {
+			g_pull_pc[slot].pc = pc;
+			g_pull_pc[slot].n = (uint64_t)n;
+			g_pull_pc[slot].vr = uses_vr;
+		}
+	}
 }
 
 void nw_jit_note_kcall_fast(void)
@@ -3616,6 +3662,41 @@ void nw_jit_note_skip_unsup(uint32_t op, unsigned packed, uint32_t pc)
 {
 	g_v_skip_unsup++;
 	const int prim = (int)(op >> 26);
+	if (g_pull_on) {
+		const uint64_t add = packed ? (uint64_t)packed : 1ull;
+		g_pull_skip += add;
+		if (prim == 4)
+			g_pull_vmx += add;
+		if (prim == 6)
+			g_pull_op6 += add;
+		if (pc >= 0x1de00000u && pc < 0x1e000000u)
+			g_it_skip += add;
+		const int xo = (prim == 4 || prim == 19 || prim == 31 || prim == 59 || prim == 63)
+				       ? (int)((op >> 1) & 0x3ff) : -1;
+		int slot = -1;
+		int small = 0;
+		for (int i = 0; i < 4; i++) {
+			if (g_pull_sk[i].n && g_pull_sk[i].prim == prim && g_pull_sk[i].xo == xo) {
+				g_pull_sk[i].n += add;
+				slot = -2;
+				break;
+			}
+			if (g_pull_sk[i].n == 0) {
+				slot = i;
+				break;
+			}
+			if (g_pull_sk[i].n < g_pull_sk[small].n)
+				small = i;
+		}
+		if (slot == -1 && add > g_pull_sk[small].n)
+			slot = small;
+		if (slot >= 0) {
+			g_pull_sk[slot].prim = prim;
+			g_pull_sk[slot].xo = xo;
+			g_pull_sk[slot].pc = pc;
+			g_pull_sk[slot].n = add;
+		}
+	}
 	const int xo = (prim == 4 || prim == 19 || prim == 31 || prim == 59 || prim == 63)
 			       ? (int)((op >> 1) & 0x3ff) : -1;
 	const uint64_t add = packed ? (uint64_t)packed : 1ull;
@@ -3783,12 +3864,17 @@ void nw_jit_note_cut(int reason)
 {
 	if (reason >= 0 && reason < NW_JIT_CUT_N)
 		g_cut[reason]++;
+	if (g_pull_on && reason == NW_JIT_CUT_CLASS_CHANGE)
+		g_pull_class++;
 }
 
 void nw_jit_note_hop_stop(int reason)
 {
-	if (reason >= 0 && reason < NW_JIT_HOP_N)
+	if (reason >= 0 && reason < NW_JIT_HOP_N) {
 		g_hop_stop[reason]++;
+		if (g_pull_on)
+			g_pull_hop[reason]++;
+	}
 }
 
 uint64_t nw_jit_cut_count(int reason)
@@ -3803,6 +3889,81 @@ uint64_t nw_jit_hop_stop_count(int reason)
 	if (reason < 0 || reason >= NW_JIT_HOP_N)
 		return 0;
 	return g_hop_stop[reason];
+}
+
+void nw_jit_pull_set(int on)
+{
+	g_pull_on = on ? 1 : 0;
+}
+
+static int itunes_pc(uint32_t pc)
+{
+	return pc >= 0x1de00000u && pc < 0x1e000000u;
+}
+
+void nw_jit_itunes_note(uint32_t pc, int n, int kind, uint64_t host_us)
+{
+	if (!itunes_pc(pc))
+		return;
+	if (kind == 0 && n > 0)
+		g_it_jit += (uint64_t)n;
+	else if (kind == 1)
+		g_it_interp++;
+	else if (kind == 2)
+		g_it_class++;
+	else if (kind == 3)
+		g_it_fp++;
+	g_it_us += host_us;
+}
+
+void nw_jit_itunes_log(uint64_t frames)
+{
+	const double audio_s = (double)frames / 44100.0;
+	const double host_s = (double)g_it_us / 1000000.0;
+	const double ratio = audio_s > 0.001 ? host_s / audio_s : 0.0;
+	printf("NW-BOOT G1: itunes-cost jit=%llu interp=%llu host_us=%llu frames=%llu host_per_audio=%.3f class_change=%llu fp_gate=%llu skip=%llu\n",
+	       (unsigned long long)g_it_jit, (unsigned long long)g_it_interp,
+	       (unsigned long long)g_it_us, (unsigned long long)frames, ratio,
+	       (unsigned long long)g_it_class, (unsigned long long)g_it_fp,
+	       (unsigned long long)g_it_skip);
+	g_it_jit = g_it_interp = g_it_us = g_it_class = g_it_fp = g_it_skip = 0;
+}
+
+void nw_jit_pull_log(void)
+{
+	static const char *const hop_name[NW_JIT_HOP_N] = {
+		"cap", "no_chain_pc", "pc_mismatch", "itlb_miss", "aline",
+		"cache_miss", "vec_gate", "fp_gate", "compile_null"
+	};
+	printf("NW-BOOT G1: sb-pull jit=%llu vr=%llu skip=%llu vmx=%llu op6=%llu class_change=%llu",
+	       (unsigned long long)g_pull_jit, (unsigned long long)g_pull_vr,
+	       (unsigned long long)g_pull_skip, (unsigned long long)g_pull_vmx,
+	       (unsigned long long)g_pull_op6, (unsigned long long)g_pull_class);
+	for (int i = 0; i < NW_JIT_HOP_N; i++) {
+		if (g_pull_hop[i])
+			printf(" %s=%llu", hop_name[i], (unsigned long long)g_pull_hop[i]);
+	}
+	printf("\n");
+	printf("NW-BOOT G1: sb-pull pc");
+	for (int i = 0; i < 4; i++) {
+		if (g_pull_pc[i].pc)
+			printf(" %08x:%llu%s", g_pull_pc[i].pc,
+			       (unsigned long long)g_pull_pc[i].n,
+			       g_pull_pc[i].vr ? ":vr" : "");
+	}
+	printf("\n");
+	printf("NW-BOOT G1: sb-pull skip");
+	for (int i = 0; i < 4; i++) {
+		if (g_pull_sk[i].n)
+			printf(" prim=%d xo=%d pc=%08x n=%llu",
+			       g_pull_sk[i].prim, g_pull_sk[i].xo, g_pull_sk[i].pc,
+			       (unsigned long long)g_pull_sk[i].n);
+	}
+	printf("\n");
+	g_pull_jit = g_pull_vr = g_pull_skip = g_pull_vmx = g_pull_op6 = g_pull_class = 0;
+	memset(g_pull_hop, 0, sizeof g_pull_hop);
+	memset(g_pull_pc, 0, sizeof g_pull_pc);
+	memset(g_pull_sk, 0, sizeof g_pull_sk);
 }
 
 void nw_jit_note_skip_io(uint32_t ea, uint32_t pc)
@@ -7808,6 +7969,7 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store)
 	static_assert((offsetof(struct nw_jit_cpu, jit_dtlb) & 7) == 0, "jit_dtlb 8-aligned");
 
 	static_assert((offsetof(struct nw_jit_cpu, jit_dtlb_hit) & 7) == 0, "jit_dtlb_hit 8-aligned");
+	static_assert((offsetof(struct nw_jit_cpu, jit_sr_gen) & 7) == 0, "jit_sr_gen 8-aligned");
 	static_assert((offsetof(struct nw_jit_cpu, jit_lwz) & 7) == 0, "jit_lwz 8-aligned");
 	static_assert((offsetof(struct nw_jit_cpu, jit_stw) & 7) == 0, "jit_stw 8-aligned");
 	static_assert((offsetof(struct nw_jit_cpu, jit_lwz_pa) & 7) == 0, "jit_lwz_pa 8-aligned");
@@ -7867,11 +8029,28 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store)
 	if (!emit_w(e, a64_b_cond(1, 0)))
 		return 0;
 	uint32_t *nw = NULL;
+	uint32_t *sr_ne = NULL;
 	if (is_store) {
 		nw = e->p;
 		if (!emit_w(e, a64_tbz(W12, 1, 0)))
 			return 0;
 	}
+	/* sr_gen at +12. Match stays on this path. A segment change misses
+	 * and the helper refills. */
+	if (!emit_w(e, a64_ldr_w(15, 11, 12)))
+		return 0;
+	if (!emit_w(e, a64_lsr(16, 8, 28)))
+		return 0;
+	if (!emit_w(e, a64_ldr_x(17, 19, (uint32_t)offsetof(struct nw_jit_cpu, jit_sr_gen))))
+		return 0;
+	/* LDR W16, [X17, W16, UXTW #2] */
+	if (!emit_w(e, 0xb8600800u | (16u << 16) | (2u << 13) | (1u << 12) | (17u << 5) | 16u))
+		return 0;
+	if (!emit_w(e, a64_cmp_w(15, 16)))
+		return 0;
+	sr_ne = e->p;
+	if (!emit_w(e, a64_b_cond(1, 0)))
+		return 0;
 	if (!emit_w(e, a64_ldr_w(W12, X11, 4)))
 		return 0;
 	if (!emit_w(e, a64_and_imm_off12(W1, W8)))
@@ -7942,6 +8121,8 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store)
 	*pr_ne = a64_b_cond(1, (int)(miss_p - pr_ne));
 	if (nw)
 		*nw = a64_tbz(W12, 1, (int)(miss_p - nw));
+	if (sr_ne)
+		*sr_ne = a64_b_cond(1, (int)(miss_p - sr_ne));
 	*to_inline = a64_b((int)(inline_p - to_inline));
 	*ident_to_pa = a64_b((int)(hit_p - ident_to_pa));
 	*to_join = a64_b((int)(join - to_join));
@@ -9019,6 +9200,236 @@ static int emit_call_fp_x_upd(struct emit *e, uint32_t pc, int fr, int ra, int r
 	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
 	return emit_upd_ra_on_ok(e, ra);
+}
+
+static uint32_t a64_ldr_d(int rt, int rn, uint32_t off)
+{
+	return 0xfd400000u | ((off >> 3) << 10) | ((uint32_t)rn << 5) | (uint32_t)rt;
+}
+
+static uint32_t a64_str_d(int rt, int rn, uint32_t off)
+{
+	return 0xfd000000u | ((off >> 3) << 10) | ((uint32_t)rn << 5) | (uint32_t)rt;
+}
+
+static uint32_t fpr_off(int r)
+{
+	return (uint32_t)offsetof(struct nw_jit_cpu, fpr) + (uint32_t)(r & 31) * 8u;
+}
+
+/* Single-precision ops as ARM instructions. If FPSCR exception enables
+ * are set, the existing helper runs instead. */
+static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int fc, uint32_t op)
+{
+	const int unary = (kind >= 101 && kind <= 103);
+	const int is_cmp = (kind == 104);
+	const int src0 = (is_cmp || !(unary || kind == 100)) ? ra : rb;
+	/* ARM inline of these ops, mixed integer/FP blocks, and the
+	 * taken-branch hop each shipped once and iTunes lost its text
+	 * and its audio. Every op stays on the helper. */
+	const int fast = 0;
+	(void)is_cmp;
+	uint32_t *slow = NULL;
+	if (fast && !unary) {
+		if (!emit_w(e, a64_ldr_w(W8, X19, (uint32_t)offsetof(struct nw_jit_cpu, fpscr))))
+			return 0;
+		if (!emit_w(e, a64_movz(W9, 0xf8u, 0)))
+			return 0;
+		if (!emit_w(e, 0x0a090108u))	/* and w8, w8, w9 */
+			return 0;
+		slow = e->p;
+		if (!emit_w(e, a64_cbnz(W8, 0)))
+			return 0;
+	}
+	if (fast && !emit_w(e, a64_ldr_d(0, X19, fpr_off(src0))))
+		return 0;
+	if (fast && kind == 103) {
+		if (!emit_w(e, a64_str_d(0, X19, fpr_off(rd))))
+			return 0;
+	} else if (fast && kind == 102) {
+		if (!emit_w(e, 0x1e614000u))	/* fneg d0, d0 */
+			return 0;
+		if (!emit_w(e, a64_str_d(0, X19, fpr_off(rd))))
+			return 0;
+	} else if (fast && kind == 101) {
+		if (!emit_w(e, 0x1e60c000u))	/* fabs d0, d0 */
+			return 0;
+		if (!emit_w(e, a64_str_d(0, X19, fpr_off(rd))))
+			return 0;
+	} else if (fast && is_cmp) {
+		if (!emit_w(e, a64_ldr_d(1, X19, fpr_off(rb))))
+			return 0;
+		if (!emit_w(e, 0x1e612000u))	/* fcmp d0, d1 */
+			return 0;
+		if (!emit_w(e, 0x52800028u))	/* mov w8, #1  unordered */
+			return 0;
+		uint32_t *vs = e->p;
+		if (!emit_w(e, a64_b_cond(6, 0)))	/* b.vs */
+			return 0;
+		if (!emit_w(e, 0x1a9fa7e8u))	/* cset w8, lt */
+			return 0;
+		if (!emit_w(e, a64_lsl(W8, W8, 3)))
+			return 0;
+		if (!emit_w(e, 0x1a9fd7e9u))	/* cset w9, gt */
+			return 0;
+		if (!emit_w(e, a64_lsl(W9, W9, 2)))
+			return 0;
+		if (!emit_w(e, 0x2a090108u))	/* orr w8, w8, w9 */
+			return 0;
+		if (!emit_w(e, 0x1a9f17e9u))	/* cset w9, eq */
+			return 0;
+		if (!emit_w(e, a64_lsl(W9, W9, 1)))
+			return 0;
+		if (!emit_w(e, 0x2a090108u))
+			return 0;
+		*vs = a64_b_cond(6, (int)(e->p - vs));
+		/* FPCC in FPSCR[15:12], then the CR field. */
+		if (!emit_w(e, a64_ldr_w(W9, X19, (uint32_t)offsetof(struct nw_jit_cpu, fpscr))))
+			return 0;
+		if (!emit_w(e, a64_movz(W10, 0xf000u, 0)))
+			return 0;
+		if (!emit_w(e, 0x0a2a0129u))	/* bic w9, w9, w10 */
+			return 0;
+		if (!emit_w(e, 0x2a083129u))	/* orr w9, w9, w8, lsl #12 */
+			return 0;
+		if (!emit_w(e, a64_str_w(W9, X19, (uint32_t)offsetof(struct nw_jit_cpu, fpscr))))
+			return 0;
+		const int sh = 28 - 4 * (int)((op >> 23) & 7u);
+		if (sh) {
+			if (!emit_w(e, a64_lsl(W8, W8, sh)))
+				return 0;
+		}
+		if (!emit_w(e, a64_ldr_w(W9, X19, (uint32_t)offsetof(struct nw_jit_cpu, cr))))
+			return 0;
+		if (!emit_w(e, a64_movz(W10, 0xfu, 0)))
+			return 0;
+		if (sh && !emit_w(e, a64_lsl(W10, W10, sh)))
+			return 0;
+		if (!emit_w(e, 0x0a2a0129u))	/* bic w9, w9, w10 */
+			return 0;
+		if (!emit_w(e, 0x2a080129u))	/* orr w9, w9, w8 */
+			return 0;
+		if (!emit_w(e, a64_str_w(W9, X19, (uint32_t)offsetof(struct nw_jit_cpu, cr))))
+			return 0;
+	} else if (fast) {
+		/* fmuls is fra*frc. fmadds is fra*frc+frb. The rest use fra, frb. */
+		const int two = (kind == 18 || kind == 20 || kind == 21 || kind == 25 || kind == 100);
+		const int breg = (kind == 25 || (kind >= 28 && kind <= 31)) ? fc : rb;
+		if (kind != 100) {
+			if (!emit_w(e, a64_ldr_d(1, X19, fpr_off(breg))))
+				return 0;
+		}
+		if (!two && kind != 100) {
+			if (!emit_w(e, a64_ldr_d(2, X19, fpr_off(rb))))
+				return 0;
+		}
+		if (!emit_w(e, 0x1e624000u))	/* fcvt s0, d0 */
+			return 0;
+		if (kind != 100 && !emit_w(e, 0x1e624021u))	/* fcvt s1, d1 */
+			return 0;
+		if (!two && kind != 100 && !emit_w(e, 0x1e624042u))	/* fcvt s2, d2 */
+			return 0;
+		uint32_t opc = 0;
+		if (kind == 21)
+			opc = 0x1e212800u;		/* fadd s0, s0, s1 */
+		else if (kind == 20)
+			opc = 0x1e213800u;		/* fsub */
+		else if (kind == 18)
+			opc = 0x1e211800u;		/* fdiv */
+		else if (kind == 25)
+			opc = 0x1e210800u;		/* fmul s0, s0, s1  fra*frc */
+		else if (kind == 29)
+			opc = 0x1f010800u;		/* fmadd s0, s0, s1, s2 */
+		else if (kind == 28)
+			opc = 0x1f218800u;		/* fnmsub: Sn*Sm - Sa */
+		else if (kind == 30)
+			opc = 0x1f018800u;		/* fmsub: Sa - Sn*Sm */
+		else if (kind == 31)
+			opc = 0x1f210800u;		/* fnmadd */
+		if (kind != 100 && !opc)
+			return 0;
+		if (opc && !emit_w(e, opc))
+			return 0;
+		if (!emit_w(e, 0x1e22c000u))	/* fcvt d0, s0 */
+			return 0;
+		if (!emit_w(e, a64_str_d(0, X19, fpr_off(rd))))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm32(e, W1, (uint32_t)rd))
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_fprf_fd))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+	}
+	uint32_t *over = NULL;
+	if (!fast || slow) {
+		if (slow) {
+			over = e->p;
+			if (!emit_w(e, a64_b(0)))
+				return 0;
+			*slow = a64_cbnz(W8, (int)(e->p - slow));
+		}
+		void *fn = NULL;
+		int narg = 2;
+		if (kind == 18) { fn = (void *)nw_jit_helper_fdivs; narg = 3; }
+		else if (kind == 20) { fn = (void *)nw_jit_helper_fsubs; narg = 3; }
+		else if (kind == 21) { fn = (void *)nw_jit_helper_fadds; narg = 3; }
+		else if (kind == 25) { fn = (void *)nw_jit_helper_fmuls; narg = 3; }
+		else if (kind == 28) { fn = (void *)nw_jit_helper_fmsubs; narg = 4; }
+		else if (kind == 29) { fn = (void *)nw_jit_helper_fmadds; narg = 4; }
+		else if (kind == 30) { fn = (void *)nw_jit_helper_fnmsubs; narg = 4; }
+		else if (kind == 31) { fn = (void *)nw_jit_helper_fnmadds; narg = 4; }
+		else if (kind == 100) { fn = (void *)nw_jit_helper_frsp; narg = 2; }
+		else if (kind == 101) { fn = (void *)nw_jit_helper_fabs; narg = 2; }
+		else if (kind == 102) { fn = (void *)nw_jit_helper_fneg; narg = 2; }
+		else if (kind == 103) { fn = (void *)nw_jit_helper_fmr; narg = 2; }
+		else if (kind == 104) { fn = (void *)nw_jit_helper_fcmpo; narg = 3; }
+		if (!fn)
+			return 0;
+		if (!emit_imm32(e, W1, is_cmp ? (uint32_t)((op >> 23) & 7u) : (uint32_t)rd))
+			return 0;
+		if (is_cmp) {
+			if (!emit_imm32(e, W2, (uint32_t)ra))
+				return 0;
+			if (!emit_imm32(e, W3, (uint32_t)rb))
+				return 0;
+		} else if (narg == 2) {
+			if (!emit_imm32(e, W2, (uint32_t)rb))
+				return 0;
+		} else if (kind == 25) {
+			if (!emit_imm32(e, W2, (uint32_t)ra))
+				return 0;
+			if (!emit_imm32(e, W3, (uint32_t)fc))
+				return 0;
+		} else if (narg == 3) {
+			if (!emit_imm32(e, W2, (uint32_t)ra))
+				return 0;
+			if (!emit_imm32(e, W3, (uint32_t)rb))
+				return 0;
+		} else {
+			if (!emit_imm32(e, W2, (uint32_t)ra))
+				return 0;
+			if (!emit_imm32(e, W3, (uint32_t)fc))
+				return 0;
+			if (!emit_imm32(e, W4, (uint32_t)rb))
+				return 0;
+		}
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)fn))
+			return 0;
+		if (!emit_w(e, 0xd63f0120u))
+			return 0;
+		if (!emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (over)
+			*over = a64_b((int)(e->p - over));
+	}
+	return emit_maybe_cr1(e, op);
 }
 
 static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
@@ -10547,6 +10958,9 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	if (prim == 59) {
 		const int axo = (int)((op >> 1) & 0x1f);
 		const int fc = (int)((op >> 6) & 0x1f);
+		if (axo == 18 || axo == 20 || axo == 21 || axo == 25 ||
+		    axo == 28 || axo == 29 || axo == 30 || axo == 31)
+			return emit_fp_inline(e, axo, rd, ra, rb, fc, op);
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
 		if (axo == 24) {
@@ -10600,23 +11014,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return emit_maybe_cr1(e, op);
 	}
-	if (prim == 63 && (xo == 32 || xo == 0)) {
-		if (!emit_imm32(e, W1, (op >> 23) & 7u))
-			return 0;
-		if (!emit_imm32(e, W2, (uint32_t)ra))
-			return 0;
-		if (!emit_imm32(e, W3, (uint32_t)rb))
-			return 0;
-		if (!emit_w(e, 0xaa1303e0u))
-			return 0;
-		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_fcmpo))
-			return 0;
-		if (!emit_w(e, 0xd63f0120u))
-			return 0;
-		if (!emit_w(e, 0xaa1303e0u))
-			return 0;
-		return emit_maybe_cr1(e, op);
-	}
+	if (prim == 63 && (xo == 32 || xo == 0))
+		return emit_fp_inline(e, 104, rd, ra, rb, 0, op);
 	if (prim == 63 && xo == 711) {
 		if (!emit_imm32(e, W1, (op >> 17) & 0xffu))
 			return 0;
@@ -10632,66 +11031,14 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return emit_maybe_cr1(e, op);
 	}
-	if (prim == 63 && xo == 264) {
-		if (!emit_imm32(e, W1, (uint32_t)rd))
-			return 0;
-		if (!emit_imm32(e, W2, (uint32_t)rb))
-			return 0;
-		if (!emit_w(e, 0xaa1303e0u))
-			return 0;
-		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_fabs))
-			return 0;
-		if (!emit_w(e, 0xd63f0120u))
-			return 0;
-		if (!emit_w(e, 0xaa1303e0u))
-			return 0;
-		return emit_maybe_cr1(e, op);
-	}
-	if (prim == 63 && xo == 40) {
-		if (!emit_imm32(e, W1, (uint32_t)rd))
-			return 0;
-		if (!emit_imm32(e, W2, (uint32_t)rb))
-			return 0;
-		if (!emit_w(e, 0xaa1303e0u))
-			return 0;
-		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_fneg))
-			return 0;
-		if (!emit_w(e, 0xd63f0120u))
-			return 0;
-		if (!emit_w(e, 0xaa1303e0u))
-			return 0;
-		return emit_maybe_cr1(e, op);
-	}
-	if (prim == 63 && xo == 72) {
-		if (!emit_imm32(e, W1, (uint32_t)rd))
-			return 0;
-		if (!emit_imm32(e, W2, (uint32_t)rb))
-			return 0;
-		if (!emit_w(e, 0xaa1303e0u))
-			return 0;
-		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_fmr))
-			return 0;
-		if (!emit_w(e, 0xd63f0120u))
-			return 0;
-		if (!emit_w(e, 0xaa1303e0u))
-			return 0;
-		return emit_maybe_cr1(e, op);
-	}
-	if (prim == 63 && xo == 12) {
-		if (!emit_imm32(e, W1, (uint32_t)rd))
-			return 0;
-		if (!emit_imm32(e, W2, (uint32_t)rb))
-			return 0;
-		if (!emit_w(e, 0xaa1303e0u))
-			return 0;
-		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_frsp))
-			return 0;
-		if (!emit_w(e, 0xd63f0120u))
-			return 0;
-		if (!emit_w(e, 0xaa1303e0u))
-			return 0;
-		return emit_maybe_cr1(e, op);
-	}
+	if (prim == 63 && xo == 264)
+		return emit_fp_inline(e, 101, rd, ra, rb, 0, op);
+	if (prim == 63 && xo == 40)
+		return emit_fp_inline(e, 102, rd, ra, rb, 0, op);
+	if (prim == 63 && xo == 72)
+		return emit_fp_inline(e, 103, rd, ra, rb, 0, op);
+	if (prim == 63 && xo == 12)
+		return emit_fp_inline(e, 100, rd, ra, rb, 0, op);
 	if (prim == 63 && xo == 583) {
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
@@ -11492,7 +11839,7 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 	if (!code_ready() || n <= 0)
 		return NULL;
 	{
-		const size_t need = 16384;
+		const size_t need = 65536;
 		if (g_code_used + need > NW_JIT_CODE_SIZE) {
 			wrap_note_occupancy();
 			invalidate_bank(0);
@@ -11546,6 +11893,19 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 		if (prim == 31 && (xo == 535 || xo == 567 || xo == 599 || xo == 631 ||
 				   xo == 663 || xo == 695 || xo == 727 || xo == 759 || xo == 983))
 			e.uses_fpr = 1;
+	}
+	if (!e.uses_fpr) {
+		for (int i = 1; i < n; i++) {
+			const uint32_t opi = ops[i];
+			const int p = (int)(opi >> 26);
+			const int x = (int)((opi >> 1) & 0x3ff);
+			if ((p >= 48 && p <= 55) || p == 59 || p == 63 ||
+			    (p == 31 && (x == 535 || x == 567 || x == 599 || x == 631 ||
+					 x == 663 || x == 695 || x == 727 || x == 759 || x == 983))) {
+				e.uses_fpr = 1;
+				break;
+			}
+		}
 	}
 	for (int i = 0; i < n; i++)
 		e.gpr_mask |= nw_jit_op_gpr_mask(ops[i]);
@@ -11642,6 +12002,19 @@ nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
 	if (prim == 31 && (xo == 535 || xo == 567 || xo == 599 || xo == 631 ||
 			   xo == 663 || xo == 695 || xo == 727 || xo == 759 || xo == 983))
 		uses_fpr = 1;
+	if (!uses_fpr) {
+		for (int i = 1; i < n; i++) {
+			const uint32_t opi = ops[i];
+			const int p = (int)(opi >> 26);
+			const int x = (int)((opi >> 1) & 0x3ff);
+			if ((p >= 48 && p <= 55) || p == 59 || p == 63 ||
+			    (p == 31 && (x == 535 || x == 567 || x == 599 || x == 631 ||
+					 x == 663 || x == 695 || x == 727 || x == 759 || x == 983))) {
+				uses_fpr = 1;
+				break;
+			}
+		}
+	}
 	uint32_t gpr_mask = 0;
 	for (int i = 0; i < n; i++)
 		gpr_mask |= nw_jit_op_gpr_mask(ops[i]);

@@ -89,16 +89,16 @@
 		A10F9210BC10000000000012 /* nw_boot_contract.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000011 /* nw_boot_contract.cpp */; };
 		A10F9210BC10000000000013 /* nw_boot_contract.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000011 /* nw_boot_contract.cpp */; };
 		A10F9210BC10000000000022 /* nw_io.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000021 /* nw_io.cpp */; };
+		A10F9210BC10000000000023 /* nw_io.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000021 /* nw_io.cpp */; };
 		A10F9210BC10000000000032 /* nw_bootinfo.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000031 /* nw_bootinfo.cpp */; };
 		A10F9210BC10000000000033 /* nw_bootinfo.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000031 /* nw_bootinfo.cpp */; };
-		A10F9210BC10000000000023 /* nw_io.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000021 /* nw_io.cpp */; };
 		A10F9210BC10000000000042 /* nw_devices.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000041 /* nw_devices.cpp */; };
 		A10F9210BC10000000000043 /* nw_devices.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000041 /* nw_devices.cpp */; };
+		A10F9210BC10000000000052 /* nw_script.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000051 /* nw_script.cpp */; };
 		A10F9210BC10000000000062 /* nw_nvram.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000061 /* nw_nvram.cpp */; };
 		A10F9210BC10000000000063 /* nw_nvram.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000061 /* nw_nvram.cpp */; };
 		A10F9210BC10000000000072 /* nw_jit.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000071 /* nw_jit.cpp */; };
 		A10F9210BC10000000000073 /* nw_jit.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000071 /* nw_jit.cpp */; };
-		A10F9210BC10000000000052 /* nw_script.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000051 /* nw_script.cpp */; };
 		A7B1921418C35D4700791D8D /* DiskType.m in Sources */ = {isa = PBXBuildFile; fileRef = A7B1921318C35D4700791D8D /* DiskType.m */; };
 		E413A40320CF7E6D00FBE967 /* video_sdl2.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */; };
 		E4150D1220D557820077C51A /* SDL2.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = E4150D1120D557820077C51A /* SDL2.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -148,14 +148,12 @@
 /* Begin PBXCopyFilesBuildPhase section */
 		E413A40820CF7EF800FBE967 /* Embed Frameworks */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
 			dstPath = "";
-			dstSubfolderSpec = 10;
+			dstSubfolder = Frameworks;
 			files = (
 				E4150D1220D557820077C51A /* SDL2.framework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
 
@@ -367,12 +365,12 @@
 		A10F9210BC10000000000031 /* nw_bootinfo.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_bootinfo.cpp; path = ../nw_bootinfo.cpp; sourceTree = SOURCE_ROOT; };
 		A10F9210BC10000000000040 /* nw_devices.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_devices.h; sourceTree = "<group>"; };
 		A10F9210BC10000000000041 /* nw_devices.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_devices.cpp; path = ../nw_devices.cpp; sourceTree = SOURCE_ROOT; };
+		A10F9210BC10000000000050 /* nw_script.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_script.h; sourceTree = "<group>"; };
+		A10F9210BC10000000000051 /* nw_script.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_script.cpp; path = ../nw_script.cpp; sourceTree = SOURCE_ROOT; };
 		A10F9210BC10000000000060 /* nw_nvram.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_nvram.h; sourceTree = "<group>"; };
 		A10F9210BC10000000000061 /* nw_nvram.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_nvram.cpp; path = ../nw_nvram.cpp; sourceTree = SOURCE_ROOT; };
 		A10F9210BC10000000000070 /* nw_jit.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_jit.h; sourceTree = "<group>"; };
 		A10F9210BC10000000000071 /* nw_jit.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_jit.cpp; path = ../nw_jit.cpp; sourceTree = SOURCE_ROOT; };
-		A10F9210BC10000000000050 /* nw_script.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_script.h; sourceTree = "<group>"; };
-		A10F9210BC10000000000051 /* nw_script.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_script.cpp; path = ../nw_script.cpp; sourceTree = SOURCE_ROOT; };
 		A7B1921218C35D4700791D8D /* DiskType.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DiskType.h; sourceTree = "<group>"; };
 		A7B1921318C35D4700791D8D /* DiskType.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = DiskType.m; sourceTree = "<group>"; };
 		E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = video_sdl2.cpp; path = ../../../BasiliskII/src/SDL/video_sdl2.cpp; sourceTree = "<group>"; };
@@ -438,14 +436,11 @@
 /* Begin PBXFrameworksBuildPhase section */
 		0846E49814B124DE00574779 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 		0856CCBF14A99E1C000B1711 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				E420910120D0C4FA0094654F /* SDL2.framework in Frameworks */,
 				E420260524125182000508DF /* Security.framework in Frameworks */,
@@ -454,14 +449,11 @@
 				E447067025D904D500EA2C14 /* Metal.framework in Frameworks */,
 				08CD42E814B7B8AA009CA2A2 /* Carbon.framework in Frameworks */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A10F9210BC1000000000000B /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
@@ -989,7 +981,6 @@
 /* Begin PBXHeadersBuildPhase section */
 		0846E49614B124DE00574779 /* Headers */ = {
 			isa = PBXHeadersBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				08003F8F1E0624D100A3ADAB /* ppc-dyngen-ops-x86_32.hpp in Headers */,
 				08003F8E1E0624D100A3ADAB /* basic-dyngen-ops.hpp in Headers */,
@@ -1001,7 +992,6 @@
 				08003F911E0624D100A3ADAB /* ppc-dyngen-ops.hpp in Headers */,
 				A10F9210BC10000000000006 /* ppc-mmu.hpp in Headers */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXHeadersBuildPhase section */
 
@@ -1015,8 +1005,6 @@
 				0846E49814B124DE00574779 /* Frameworks */,
 			);
 			buildRules = (
-			);
-			dependencies = (
 			);
 			name = kpx_cpu;
 			productName = kpx_cpu;
@@ -1053,8 +1041,6 @@
 			);
 			buildRules = (
 			);
-			dependencies = (
-			);
 			name = "SheepShaver-MMUTests";
 			productName = "SheepShaver-MMUTests";
 			productReference = A10F9210BC10000000000004 /* SheepShaver-MMUTests */;
@@ -1067,10 +1053,9 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastUpgradeCheck = 2660;
+				LastUpgradeCheck = 2700;
 			};
 			buildConfigurationList = 0856CCB114A99DE0000B1711 /* Build configuration list for PBXProject "SheepShaver" */;
-			compatibilityVersion = "Xcode 26.3";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -1098,7 +1083,6 @@
 /* Begin PBXResourcesBuildPhase section */
 		0856CCBD14A99E1C000B1711 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				E420260B24125442000508DF /* etherhelpertool in Resources */,
 				E44C460820D262B0000583AE /* VERSION_ in Resources */,
@@ -1108,48 +1092,61 @@
 				3D2C25B5221092BA00B635DE /* SheepVM.icns in Resources */,
 				0856D33514A9A704000B1711 /* VMSettingsWindow.nib in Resources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		08CD3F3214B665E1009CA2A2 /* Preprocess Info.plist */ = {
 			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-			);
 			name = "Preprocess Info.plist";
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "sed -i '' 's/@PACKAGE_VERSION@/2.5/g' \"${BUILT_PRODUCTS_DIR}/${INFOPLIST_PATH}\"\n";
+			shellScript = (
+				"sed -i '' 's/@PACKAGE_VERSION@/2.5/g' \"${BUILT_PRODUCTS_DIR}/${INFOPLIST_PATH}\"",
+				"",
+			);
 		};
 		E4202606241251C6000508DF /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
-			inputFileListPaths = (
-			);
 			inputPaths = (
+				"$(SRCROOT)/etherhelpertool.c",
 			);
-			outputFileListPaths = (
-			);
+			name = "Build etherhelpertool";
 			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/etherhelpertool",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# Build the helper for the same architectures as the app.\n# A bare \"cc\" follows the build machine, which makes the helper thin\n# even when the app is universal -- it then cannot exec on the other\n# architecture (\"bad CPU type in executable\").\n# $ARCHS_STANDARD rather than $ARCHS: inside a script phase $ARCHS is\n# not fixed to the target setting -- some Xcode versions narrow it to a\n# single architecture even with ONLY_ACTIVE_ARCH = NO.\nARCH_FLAGS=\"\"\nfor arch in $ARCHS_STANDARD; do\n\tARCH_FLAGS=\"$ARCH_FLAGS -arch $arch\"\ndone\ncc $ARCH_FLAGS etherhelpertool.c -framework Security -o \"$BUILT_PRODUCTS_DIR/etherhelpertool\"\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ] && [ \"$CODE_SIGNING_ALLOWED\" != NO ]; then\n\tcodesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --identifier com.billcavalieri.sheepshaver.etherhelpertool --options runtime \"$BUILT_PRODUCTS_DIR/etherhelpertool\"\nfi\n";
+			shellScript = (
+				"# Build the helper for the same architectures as the app.",
+				"# A bare \"cc\" follows the build machine, which makes the helper thin",
+				"# even when the app is universal -- it then cannot exec on the other",
+				"# architecture (\"bad CPU type in executable\").",
+				"# $ARCHS_STANDARD rather than $ARCHS: inside a script phase $ARCHS is",
+				"# not fixed to the target setting -- some Xcode versions narrow it to a",
+				"# single architecture even with ONLY_ACTIVE_ARCH = NO.",
+				"ARCH_FLAGS=\"\"",
+				"for arch in $ARCHS_STANDARD; do",
+				"\tARCH_FLAGS=\"$ARCH_FLAGS -arch $arch\"",
+				"done",
+				"OUT=\"$BUILT_PRODUCTS_DIR/etherhelpertool\"",
+				"TMP=\"${TARGET_TEMP_DIR:-/tmp}/etherhelpertool.build\"",
+				"rm -f \"$TMP\" \"$OUT\"",
+				"cc $ARCH_FLAGS etherhelpertool.c -framework Security -o \"$TMP\"",
+				"mv -f \"$TMP\" \"$OUT\"",
+				"if [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ] && [ \"$CODE_SIGNING_ALLOWED\" != NO ]; then",
+				"\tcodesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --identifier com.billcavalieri.sheepshaver.etherhelpertool --options runtime \"$OUT\"",
+				"fi",
+				"",
+			);
 		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		0846E49714B124DE00574779 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				0846E4B114B1264700574779 /* ieeefp.cpp in Sources */,
 				0846E4B314B1264F00574779 /* mathlib.cpp in Sources */,
@@ -1166,11 +1163,9 @@
 				08163340158C125800C449F9 /* ppc-dis.c in Sources */,
 				A10F9210BC10000000000005 /* ppc-mmu.cpp in Sources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 		0856CCBE14A99E1C000B1711 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				5DE93B46247C71F200B2C821 /* adb.cpp in Sources */,
 				E44C460B20D262B0000583AE /* debug.c in Sources */,
@@ -1254,11 +1249,9 @@
 				087B91BF1B780FFC00825F7F /* video_blit.cpp in Sources */,
 				087B91C01B780FFC00825F7F /* vm_alloc.cpp in Sources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A10F9210BC1000000000000A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				A10F9210BC10000000000007 /* ppc-mmu.cpp in Sources */,
 				A10F9210BC10000000000008 /* mmu_harness.cpp in Sources */,
@@ -1269,7 +1262,6 @@
 				A10F9210BC10000000000063 /* nw_nvram.cpp in Sources */,
 				A10F9210BC10000000000073 /* nw_jit.cpp in Sources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
@@ -1293,14 +1285,15 @@
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
-		0846E49B14B124DF00574779 /* Debug */ = {
+		0846E49B14B124DF00574779 /* Debug configuration for PBXNativeTarget "kpx_cpu" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = "$(ARCHS_STANDARD_64_BIT)";
 				CLANG_CXX_LIBRARY = "libc++";
 				CLANG_ENABLE_MODULE_DEBUGGING = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(SRCROOT)",
@@ -1331,7 +1324,7 @@
 					../Unix/dyngen_precompiled,
 				);
 				INSTALL_PATH = /usr/local/lib;
-				MACOSX_DEPLOYMENT_TARGET = 10.7;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
 				PRODUCT_NAME = kpx_cpu;
 				SKIP_INSTALL = YES;
@@ -1339,14 +1332,15 @@
 			};
 			name = Debug;
 		};
-		0846E49C14B124DF00574779 /* Release */ = {
+		0846E49C14B124DF00574779 /* Release configuration for PBXNativeTarget "kpx_cpu" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = "$(ARCHS_STANDARD_64_BIT)";
 				CLANG_CXX_LIBRARY = "libc++";
 				CLANG_ENABLE_MODULE_DEBUGGING = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(SRCROOT)",
@@ -1354,7 +1348,6 @@
 					/Library/Frameworks,
 				);
 				GCC_DYNAMIC_NO_PIC = YES;
-				GCC_ENABLE_FIX_AND_CONTINUE = NO;
 				GCC_OPTIMIZATION_LEVEL = 3;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"DATADIR=",
@@ -1377,7 +1370,7 @@
 					../Unix/dyngen_precompiled,
 				);
 				INSTALL_PATH = /usr/local/lib;
-				MACOSX_DEPLOYMENT_TARGET = 10.7;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
 				PRODUCT_NAME = kpx_cpu;
 				SKIP_INSTALL = YES;
@@ -1385,42 +1378,99 @@
 			};
 			name = Release;
 		};
-		0856CCAF14A99DE0000B1711 /* Debug */ = {
+		0856CCAF14A99DE0000B1711 /* Debug configuration for PBXProject "SheepShaver" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
 				GCC_WARN_CHECK_SWITCH_STATEMENTS = NO;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
 				GCC_WARN_UNINITIALIZED_AUTOS = YES;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_PARAMETER = NO;
 				GCC_WARN_UNUSED_VARIABLE = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 			};
 			name = Debug;
 		};
-		0856CCB014A99DE0000B1711 /* Release */ = {
+		0856CCB014A99DE0000B1711 /* Release configuration for PBXProject "SheepShaver" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
 				GCC_WARN_CHECK_SWITCH_STATEMENTS = NO;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
 				GCC_WARN_UNINITIALIZED_AUTOS = YES;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_PARAMETER = NO;
 				GCC_WARN_UNUSED_VARIABLE = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 			};
 			name = Release;
 		};
-		0856CCC514A99E1C000B1711 /* Debug */ = {
+		0856CCC514A99E1C000B1711 /* Debug configuration for PBXNativeTarget "SheepShaver" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = "$(ARCHS_STANDARD_64_BIT)";
 				ASSETCATALOG_COMPILER_APPICON_NAME = SheepShaver;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_ENTITLEMENTS = SheepShaver.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 3A6QJLRYR4;
 				ENABLE_HARDENED_RUNTIME = YES;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -1430,7 +1480,6 @@
 				);
 				GCC_CW_ASM_SYNTAX = NO;
 				GCC_DYNAMIC_NO_PIC = NO;
-				GCC_ENABLE_FIX_AND_CONTINUE = NO;
 				GCC_ENABLE_PASCAL_STRINGS = NO;
 				GCC_ENABLE_TRIGRAPHS = NO;
 				GCC_INLINES_ARE_PRIVATE_EXTERN = NO;
@@ -1471,7 +1520,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 10.13;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				OTHER_CFLAGS = "";
 				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
 				OTHER_LDFLAGS = "";
@@ -1491,19 +1540,19 @@
 			};
 			name = Debug;
 		};
-		0856CCC614A99E1C000B1711 /* Release */ = {
+		0856CCC614A99E1C000B1711 /* Release configuration for PBXNativeTarget "SheepShaver" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = "$(ARCHS_STANDARD_64_BIT)";
 				ASSETCATALOG_COMPILER_APPICON_NAME = SheepShaver;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_OBJC_WEAK = YES;
 				CODE_SIGN_ENTITLEMENTS = SheepShaver.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				DEAD_CODE_STRIPPING = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 3A6QJLRYR4;
 				ENABLE_HARDENED_RUNTIME = YES;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -1513,7 +1562,6 @@
 				);
 				GCC_CW_ASM_SYNTAX = NO;
 				GCC_DYNAMIC_NO_PIC = YES;
-				GCC_ENABLE_FIX_AND_CONTINUE = NO;
 				GCC_ENABLE_PASCAL_STRINGS = NO;
 				GCC_ENABLE_TRIGRAPHS = NO;
 				GCC_INLINES_ARE_PRIVATE_EXTERN = NO;
@@ -1553,7 +1601,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 10.13;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				OTHER_CFLAGS = "";
 				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
 				OTHER_LDFLAGS = "";
@@ -1572,14 +1620,17 @@
 			};
 			name = Release;
 		};
-		A10F9210BC1000000000000C /* Debug */ = {
+		A10F9210BC1000000000000C /* Debug configuration for PBXNativeTarget "SheepShaver-MMUTests" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = arm64;
 				CLANG_CXX_LANGUAGE_STANDARD = "c++11";
 				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_ENTITLEMENTS = SheepShaver.entitlements;
+				CODE_SIGN_IDENTITY = "-";
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_OPTIMIZATION_LEVEL = 0;
@@ -1591,8 +1642,6 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
-				CODE_SIGN_ENTITLEMENTS = SheepShaver.entitlements;
-				CODE_SIGN_IDENTITY = "-";
 				PRODUCT_NAME = "SheepShaver-MMUTests";
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -1600,14 +1649,17 @@
 			};
 			name = Debug;
 		};
-		A10F9210BC1000000000000D /* Release */ = {
+		A10F9210BC1000000000000D /* Release configuration for PBXNativeTarget "SheepShaver-MMUTests" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = arm64;
 				CLANG_CXX_LANGUAGE_STANDARD = "c++11";
 				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CODE_SIGN_ENTITLEMENTS = SheepShaver.entitlements;
+				CODE_SIGN_IDENTITY = "-";
 				COPY_PHASE_STRIP = YES;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				GCC_OPTIMIZATION_LEVEL = 3;
 				HEADER_SEARCH_PATHS = (
@@ -1618,8 +1670,6 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
-				CODE_SIGN_ENTITLEMENTS = SheepShaver.entitlements;
-				CODE_SIGN_IDENTITY = "-";
 				PRODUCT_NAME = "SheepShaver-MMUTests";
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -1633,37 +1683,33 @@
 		0846E4A114B1251400574779 /* Build configuration list for PBXNativeTarget "kpx_cpu" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				0846E49B14B124DF00574779 /* Debug */,
-				0846E49C14B124DF00574779 /* Release */,
+				0846E49B14B124DF00574779 /* Debug configuration for PBXNativeTarget "kpx_cpu" */,
+				0846E49C14B124DF00574779 /* Release configuration for PBXNativeTarget "kpx_cpu" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 		0856CCB114A99DE0000B1711 /* Build configuration list for PBXProject "SheepShaver" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				0856CCAF14A99DE0000B1711 /* Debug */,
-				0856CCB014A99DE0000B1711 /* Release */,
+				0856CCAF14A99DE0000B1711 /* Debug configuration for PBXProject "SheepShaver" */,
+				0856CCB014A99DE0000B1711 /* Release configuration for PBXProject "SheepShaver" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 		0856CCC714A99E1D000B1711 /* Build configuration list for PBXNativeTarget "SheepShaver" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				0856CCC514A99E1C000B1711 /* Debug */,
-				0856CCC614A99E1C000B1711 /* Release */,
+				0856CCC514A99E1C000B1711 /* Debug configuration for PBXNativeTarget "SheepShaver" */,
+				0856CCC614A99E1C000B1711 /* Release configuration for PBXNativeTarget "SheepShaver" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 		A10F9210BC1000000000000E /* Build configuration list for PBXNativeTarget "SheepShaver-MMUTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				A10F9210BC1000000000000C /* Debug */,
-				A10F9210BC1000000000000D /* Release */,
+				A10F9210BC1000000000000C /* Debug configuration for PBXNativeTarget "SheepShaver-MMUTests" */,
+				A10F9210BC1000000000000D /* Release configuration for PBXNativeTarget "SheepShaver-MMUTests" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
