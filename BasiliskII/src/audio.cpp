@@ -592,17 +592,13 @@ int32 AudioSheepBlasterTick(uint32 *task)
 		sb_tm_armed = true;
 		return SB_PULL_MS;
 	}
-	/* Song is over or the mixer has nothing. A few empty wakes let
-	 * the next buffer arrive. Then stop, so GetSourceData cannot sit
-	 * there after the audio has already ended. */
-	if (sb_got && ++sb_empty >= 3) {
-		sb_run = false;
-		sb_got = 0;
-		sb_empty = 0;
-		return 0;
-	}
+	/* A movie stalls while a frame is drawn, or while the host window
+	 * is in the background. Stopping here is what left QuickTime silent
+	 * after a click or a focus change. Stay armed and poll slower. */
+	if (sb_got)
+		sb_empty++;
 	sb_tm_armed = true;
-	return SB_PULL_MS;
+	return sb_empty >= 3 ? SB_IDLE_MAX_MS : SB_PULL_MS;
 #else
 	*task = 0;
 	return 0;

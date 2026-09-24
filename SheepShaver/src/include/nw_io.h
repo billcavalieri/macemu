@@ -154,10 +154,23 @@ void nw_fb_damage_clear(void);
 void nw_fb_damage_note_upload(uint64_t bytes);
 uint64_t nw_fb_damage_upload_bytes(void);
 uint64_t nw_fb_damage_marks(void);
+void nw_fb_arm(void);
+void nw_fb_note_host(const uint8_t *p);
+void nw_fb_bind_host(uint8_t *base, uint32_t bytes);
+uint32_t nw_fb_phys(uint32_t *bytes);
+void nw_fb_commit(void);
 void nw_fb_fps_proxy_sample(const uint8_t *fb, uint32_t pitch, uint32_t w, uint32_t h);
 void nw_fb_fps_proxy_tick(void);
 uint64_t nw_fb_fps_proxy_frames(void);
 unsigned nw_fb_fps_proxy_flat_max(void);
+
+/* A small pixmap stretched onto the screen. The host scales it. */
+int nw_movie_scale_put(const uint8_t *src, int src_stride, int sw, int sh,
+		       int dx, int dy, int dw, int dh);
+int nw_movie_scale_count(void);
+int nw_movie_scale_band(int i, int *dx, int *dy, int *dw, int *dh,
+			int *sw, int *sh, const uint8_t **px, int *stride);
+void nw_movie_scale_note_store(int x, int y, int w, int h);
 
 /* Mac 32-bit FB pixel is XRGB in memory (byte0 unused, 1=R, 2=G, 3=B),
  * the same layout take_shot dumps and an SDL ARGB8888 texture expects. */

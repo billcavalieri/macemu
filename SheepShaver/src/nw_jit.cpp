@@ -6125,6 +6125,7 @@ void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val)
 				p[2] = (uint8_t)(val >> 8);
 				p[3] = (uint8_t)val;
 				g_dtlb_hit++;
+				nw_fb_note_host(p);
 				if ((ea & ~0xfffu) == (cpu->pc & ~0xfffu))
 					cpu->fault = NW_JIT_FAULT_SMC;
 				return;

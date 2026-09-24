@@ -1956,9 +1956,15 @@ void powerpc_cpu::jit_host_stw(void *host, uint32 ea, uint32 val, uint32 pc, int
 		return;
 	}
 	vm_write_memory_4(pa, val);
-	if (kind == NW_PA_FB)
-		nw_fb_damage_store(pa, 4);
-	else if (ppc32_guest_mmu_enabled() &&
+	if (kind == NW_PA_FB) {
+		uint32_t nbytes = 0;
+		const uint32_t base = nw_fb_phys(&nbytes);
+		uint8 *host_base = base ? vm_do_get_real_address(base) : NULL;
+		if (host_base && nbytes)
+			nw_fb_bind_host(host_base, nbytes);
+		nw_fb_note_host(vm_do_get_real_address(pa));
+	}
+	if (ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR)) {
 		uint8 *hostp = vm_do_get_real_address(pa & ~0xfffu);
 		nw_jit_dtlb_fill(ea, pa, 1, (uint64_t)(uintptr_t)hostp,

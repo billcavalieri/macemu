@@ -338,9 +338,90 @@ bool NQD_fillrect_hook(uint32 p)
  *	Isomorphic rectangle blitting
  */
 
+static int nqd_scale_onto_screen(uint32 p, int *sw, int *sh, int *dw, int *dh,
+				 int *sx, int *sy, int *dx, int *dy, int *src_stride)
+{
+	if (ReadMacInt32(p + acclTransferMode) != 0 &&
+	    ReadMacInt32(p + acclTransferMode) != 64)
+		return 0;
+	if (ReadMacInt32(p + acclSrcPixelSize) != 32 || ReadMacInt32(p + acclDestPixelSize) != 32)
+		return 0;
+	*sw = (int)(int16)ReadMacInt16(p + acclSrcRect + 6) - (int)(int16)ReadMacInt16(p + acclSrcRect + 2);
+	*sh = (int)(int16)ReadMacInt16(p + acclSrcRect + 4) - (int)(int16)ReadMacInt16(p + acclSrcRect + 0);
+	*dw = (int)(int16)ReadMacInt16(p + acclDestRect + 6) - (int)(int16)ReadMacInt16(p + acclDestRect + 2);
+	*dh = (int)(int16)ReadMacInt16(p + acclDestRect + 4) - (int)(int16)ReadMacInt16(p + acclDestRect + 0);
+	if (*sw < 16 || *sh < 16 || *dw < *sw * 2 || *dh < *sh * 2)
+		return 0;
+	const uint32 dest = ReadMacInt32(p + acclDestBaseAddr);
+	if (!screen_base || !dest)
+		return 0;
+	uint8 *fb = Mac2HostAddr(screen_base);
+	uint8 *dp = Mac2HostAddr(dest);
+	if (!fb || !dp || dp < fb)
+		return 0;
+	const uint32 row = VModes[cur_mode].viRowBytes;
+	const uint32 fb_bytes = row * VModes[cur_mode].viYsize;
+	if ((uint32)(dp - fb) >= fb_bytes || row == 0)
+		return 0;
+	const int ox = (int)(((dp - fb) % row) / 4);
+	const int oy = (int)((dp - fb) / row);
+	*sx = (int)(int16)ReadMacInt16(p + acclSrcRect + 2) - (int)(int16)ReadMacInt16(p + acclSrcBoundsRect + 2);
+	*sy = (int)(int16)ReadMacInt16(p + acclSrcRect + 0) - (int)(int16)ReadMacInt16(p + acclSrcBoundsRect + 0);
+	*dx = ox + (int)(int16)ReadMacInt16(p + acclDestRect + 2) - (int)(int16)ReadMacInt16(p + acclDestBoundsRect + 2);
+	*dy = oy + (int)(int16)ReadMacInt16(p + acclDestRect + 0) - (int)(int16)ReadMacInt16(p + acclDestBoundsRect + 0);
+	*src_stride = (int32)ReadMacInt32(p + acclSrcRowBytes);
+	if (*src_stride < 0)
+		*src_stride = -*src_stride;
+	if (*src_stride < *sw * 4)
+		return 0;
+	return 1;
+}
+
+static int nqd_host_scale(uint32 p)
+{
+	int sw, sh, dw, dh, sx, sy, dx, dy, src_stride;
+	if (!nqd_scale_onto_screen(p, &sw, &sh, &dw, &dh, &sx, &sy, &dx, &dy, &src_stride))
+		return 0;
+	const int src_row_signed = (int32)ReadMacInt32(p + acclSrcRowBytes);
+	const int down = src_row_signed < 0;
+	uint8 *src = Mac2HostAddr(ReadMacInt32(p + acclSrcBaseAddr) +
+		(uint32)((down ? sy + sh - 1 : sy) * src_stride + sx * 4));
+	if (!src)
+		return 0;
+	if (!nw_movie_scale_put(src, down ? -src_stride : src_stride, sw, sh, dx, dy, dw, dh))
+		return 0;
+	const int dst_row_signed = (int32)ReadMacInt32(p + acclDestRowBytes);
+	const int dst_stride = dst_row_signed < 0 ? -dst_row_signed : dst_row_signed;
+	uint8 *dst = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr));
+	if (dst && dst_stride >= dw * 4) {
+		const int dest_x = (int)(int16)ReadMacInt16(p + acclDestRect + 2) - (int)(int16)ReadMacInt16(p + acclDestBoundsRect + 2);
+		const int dest_y = (int)(int16)ReadMacInt16(p + acclDestRect + 0) - (int)(int16)ReadMacInt16(p + acclDestBoundsRect + 0);
+		uint8 *dp = dst + (dest_y * dst_stride) + dest_x * 4;
+		for (int y = 0; y < dh; y++) {
+			const int sy = (int)((y * sh) / dh);
+			const uint8 *srow = src + (down ? (sh - 1 - sy) : sy) * src_stride;
+			uint8 *drow = dp + y * dst_stride;
+			for (int x = 0; x < dw; x++) {
+				const int sx = (int)((x * sw) / dw);
+				const uint8 *sp = srow + sx * 4;
+				drow[x * 4] = sp[0];
+				drow[x * 4 + 1] = sp[1];
+				drow[x * 4 + 2] = sp[2];
+				drow[x * 4 + 3] = sp[3];
+			}
+		}
+	}
+	nw_fb_damage_rect(dx, dy, dw, dh);
+	if (ReadMacInt32(p + acclDestBaseAddr) == screen_base || screen_base)
+		video_set_dirty_area(dx, dy, dw, dh);
+	return 1;
+}
+
 void NQD_bitblt(uint32 p)
 {
 	D(bug("accl_bitblt %08x\n", p));
+	if (nqd_host_scale(p))
+		return;
 
 	// Get blitting parameters
 	int16 src_X  = (int16)ReadMacInt16(p + acclSrcRect + 2) - (int16)ReadMacInt16(p + acclSrcBoundsRect + 2);
@@ -465,6 +546,14 @@ bool NQD_bitblt_hook(uint32 p)
 	D(bug("accl_draw_hook %08x\n", p));
 	NQD_set_dirty_area(p);
 
+	{
+		int sw, sh, dw, dh, sx, sy, dx, dy, src_stride;
+		if (nqd_scale_onto_screen(p, &sw, &sh, &dw, &dh, &sx, &sy, &dx, &dy, &src_stride)) {
+			WriteMacInt32(p + acclDrawProc, NativeTVECT(NATIVE_NQD_BITBLT));
+			return true;
+		}
+	}
+
 	const uint32 src_ps = ReadMacInt32(p + acclSrcPixelSize);
 	const uint32 dst_ps = ReadMacInt32(p + acclDestPixelSize);
 	/* 8/16-bit Appearance chrome into a 32-bit FB. Same-depth 32-bit
@@ -494,6 +583,13 @@ bool NQD_bitblt_hook(uint32 p)
 bool NQD_unknown_hook(uint32 arg)
 {
 	D(bug("accl_unknown_hook %08x\n", arg));
+	{
+		int sw, sh, dw, dh, sx, sy, dx, dy, src_stride;
+		if (nqd_scale_onto_screen(arg, &sw, &sh, &dw, &dh, &sx, &sy, &dx, &dy, &src_stride)) {
+			WriteMacInt32(arg + acclDrawProc, NativeTVECT(NATIVE_NQD_BITBLT));
+			return true;
+		}
+	}
 	NQD_set_dirty_area(arg);
 
 	return false;

@@ -20,6 +20,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "nw_io.h"
 #include "nw_jit.h"
@@ -372,6 +373,7 @@ void nw_fb_damage_store(uint32_t pa, unsigned nbytes)
 	const int x0 = (int)((off % g_fb_rowbytes) / g_fb_bpp);
 	const int y1 = (int)(last / g_fb_rowbytes);
 	const int x1 = (int)((last % g_fb_rowbytes) / g_fb_bpp);
+	nw_movie_scale_note_store(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
 	const int w = x1 - x0 + 1;
 	/* Same-row: one rect. Cross-row stores have x1 < x0 so w <= 0
 	 * and a single rect marks nothing; cover each row's span. */
@@ -483,6 +485,67 @@ uint64_t nw_fb_damage_marks(void)
 	return g_fb_marks;
 }
 
+static int g_fb_arm;
+static uint8_t *g_fb_host;
+static uint32_t g_fb_host_bytes;
+static uint32_t g_fb_pages[32];
+
+void nw_fb_bind_host(uint8_t *base, uint32_t bytes)
+{
+	if (!base || bytes < 4)
+		return;
+	g_fb_host = base;
+	g_fb_host_bytes = bytes;
+}
+
+uint32_t nw_fb_phys(uint32_t *bytes)
+{
+	if (bytes)
+		*bytes = g_fb_rowbytes * g_fb_h;
+	return g_fb_base;
+}
+
+void nw_fb_arm(void)
+{
+	g_fb_arm = 1;
+}
+
+void nw_fb_note_host(const uint8_t *p)
+{
+	if (!g_fb_host || p < g_fb_host)
+		return;
+	const uint32_t off = (uint32_t)(p - g_fb_host);
+	if (off >= g_fb_host_bytes)
+		return;
+	const unsigned page = off >> 12;
+	if (page < 1024u)
+		g_fb_pages[page >> 5] |= 1u << (page & 31u);
+	g_fb_arm = 1;
+}
+
+void nw_fb_commit(void)
+{
+	if (!g_fb_arm || !g_fb_w || !g_fb_rowbytes || !g_fb_bpp)
+		return;
+	g_fb_arm = 0;
+	const int row_pages = (int)((g_fb_rowbytes + 4095u) >> 12);
+	for (unsigned page = 0; page < 1024u; page++) {
+		if ((g_fb_pages[page >> 5] & (1u << (page & 31u))) == 0)
+			continue;
+		g_fb_pages[page >> 5] &= ~(1u << (page & 31u));
+		const uint32_t off = page << 12;
+		const int y = (int)(off / g_fb_rowbytes);
+		if (y >= (int)g_fb_h)
+			continue;
+		int h = row_pages > 0 ? (int)(4096u / g_fb_rowbytes) : 1;
+		if (h < 1)
+			h = 1;
+		if (y + h > (int)g_fb_h)
+			h = (int)g_fb_h - y;
+		nw_fb_damage_rect(0, y, (int)g_fb_w, h);
+	}
+}
+
 void nw_fb_fps_proxy_sample(const uint8_t *fb, uint32_t pitch, uint32_t w, uint32_t h)
 {
 	if (!fb || w < 32 || h < 32 || pitch == 0)
@@ -553,6 +616,96 @@ void nw_fb_mac32_rgb(const uint8_t *px, uint8_t *r, uint8_t *g, uint8_t *b)
 		*g = px[2];
 	if (b)
 		*b = px[3];
+}
+
+enum { NW_MOVIE_BANDS = 64, NW_MOVIE_BYTES = 2 * 1024 * 1024 };
+
+struct nw_movie_band {
+	int dx, dy, dw, dh, sw, sh, stride, off;
+};
+
+static uint8_t *g_movie;
+static int g_movie_used, g_movie_n;
+static struct nw_movie_band g_movie_b[NW_MOVIE_BANDS];
+
+int nw_movie_scale_put(const uint8_t *src, int src_stride, int sw, int sh,
+		       int dx, int dy, int dw, int dh)
+{
+	if (!src || sw < 1 || sh < 1 || dw < 1 || dh < 1 || sw > 2048 || sh > 2048)
+		return 0;
+	const int row = sw * 4;
+	const int nbytes = row * sh;
+	/* A band that starts above the previous one is the next frame. */
+	if (g_movie_n > 0 && dy + 8 < g_movie_b[g_movie_n - 1].dy) {
+		g_movie_n = 0;
+		g_movie_used = 0;
+	}
+	if (g_movie_n >= NW_MOVIE_BANDS || g_movie_used > NW_MOVIE_BYTES - nbytes) {
+		g_movie_n = 0;
+		g_movie_used = 0;
+	}
+	if (!g_movie) {
+		g_movie = (uint8_t *)malloc(NW_MOVIE_BYTES);
+		if (!g_movie)
+			return 0;
+	}
+	uint8_t *dst = g_movie + g_movie_used;
+	const int step = src_stride < 0 ? -src_stride : src_stride;
+	if (src_stride < 0)
+		src += (size_t)(sh - 1) * (size_t)step;
+	for (int y = 0; y < sh; y++) {
+		memcpy(dst + (size_t)y * (size_t)row, src, (size_t)row);
+		src += step;
+	}
+	g_movie_b[g_movie_n].dx = dx;
+	g_movie_b[g_movie_n].dy = dy;
+	g_movie_b[g_movie_n].dw = dw;
+	g_movie_b[g_movie_n].dh = dh;
+	g_movie_b[g_movie_n].sw = sw;
+	g_movie_b[g_movie_n].sh = sh;
+	g_movie_b[g_movie_n].stride = row;
+	g_movie_b[g_movie_n].off = g_movie_used;
+	g_movie_n++;
+	g_movie_used += nbytes;
+	return 1;
+}
+
+int nw_movie_scale_count(void)
+{
+	return g_movie_n;
+}
+
+int nw_movie_scale_band(int i, int *dx, int *dy, int *dw, int *dh,
+			int *sw, int *sh, const uint8_t **px, int *stride)
+{
+	if (i < 0 || i >= g_movie_n || !g_movie)
+		return 0;
+	const struct nw_movie_band *b = &g_movie_b[i];
+	*dx = b->dx;
+	*dy = b->dy;
+	*dw = b->dw;
+	*dh = b->dh;
+	*sw = b->sw;
+	*sh = b->sh;
+	*px = g_movie + b->off;
+	*stride = b->stride;
+	return 1;
+}
+
+void nw_movie_scale_note_store(int x, int y, int w, int h)
+{
+	if (g_movie_n <= 0 || w <= 0 || h <= 0)
+		return;
+	const int x1 = x + w;
+	const int y1 = y + h;
+	for (int i = 0; i < g_movie_n; i++) {
+		const struct nw_movie_band *b = &g_movie_b[i];
+		if (x < b->dx + b->dw && x1 > b->dx && y < b->dy + b->dh && y1 > b->dy) {
+			g_movie_n = 0;
+			g_movie_used = 0;
+			return;
+		}
+	}
 }
 
 void nw_fb_pack_mac32(uint8_t *px, uint8_t r, uint8_t g, uint8_t b)

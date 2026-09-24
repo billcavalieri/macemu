@@ -1025,12 +1025,12 @@ static SDL_Surface *init_sdl_video(int width, int height, int depth, Uint32 flag
     return guest_surface;
 }
 
-/* A fill-screen movie stores the new picture from top to bottom
- * across several 60 Hz ticks. Uploading each short band is the sheet
- * wipe. A band is held only when it starts at the top of the screen
- * and then walks downward. A window or the Trash zoom starts lower,
- * and hiding those bands froze the picture. Taller damage and narrow
- * updates upload immediately. */
+/* A movie stores the new picture from top to bottom across several
+ * 60 Hz ticks. Uploading each band is the sheet wipe. Hold a wide
+ * band wherever it starts, including inside a window, and upload the
+ * snapshot when the walk starts over or the next update does not
+ * continue it. A one-shot window close still appears on the next tick.
+ * Narrow updates and a union that already covers the screen upload now. */
 static uint8_t *nw_sweep_snap;
 static int nw_sweep_bytes, nw_sweep_pitch, nw_sweep_bpp, nw_sweep_w, nw_sweep_h;
 static SDL_Rect nw_sweep_box;
@@ -1092,6 +1092,40 @@ static int nw_upload_base(uint8_t *base, int pitch, int bpp, const SDL_Rect *uni
 	return 1;
 }
 
+static SDL_Texture *nw_movie_tex;
+static int nw_movie_tw, nw_movie_th;
+
+static void nw_present_movie(void)
+{
+	const int n = nw_movie_scale_count();
+	if (n <= 0 || !sdl_renderer || !sdl_texture)
+		return;
+	Uint32 fmt = SDL_PIXELFORMAT_ARGB8888;
+	SDL_QueryTexture(sdl_texture, &fmt, NULL, NULL, NULL);
+	for (int i = 0; i < n; i++) {
+		int dx, dy, dw, dh, sw, sh, stride;
+		const uint8_t *px = NULL;
+		if (!nw_movie_scale_band(i, &dx, &dy, &dw, &dh, &sw, &sh, &px, &stride) || !px)
+			continue;
+		if (!nw_movie_tex || nw_movie_tw < sw || nw_movie_th < sh) {
+			if (nw_movie_tex)
+				SDL_DestroyTexture(nw_movie_tex);
+			const int tw = sw > nw_movie_tw ? sw : (nw_movie_tw > 0 ? nw_movie_tw : sw);
+			const int th = sh > nw_movie_th ? sh : (nw_movie_th > 0 ? nw_movie_th : sh);
+			nw_movie_tex = SDL_CreateTexture(sdl_renderer, fmt, SDL_TEXTUREACCESS_STREAMING, tw, th);
+			nw_movie_tw = nw_movie_tex ? tw : 0;
+			nw_movie_th = nw_movie_tex ? th : 0;
+		}
+		if (!nw_movie_tex)
+			continue;
+		SDL_Rect src = {0, 0, sw, sh};
+		if (SDL_UpdateTexture(nw_movie_tex, &src, px, stride) != 0)
+			continue;
+		SDL_Rect dst = {dx, dy, dw, dh};
+		SDL_RenderCopy(sdl_renderer, nw_movie_tex, &src, &dst);
+	}
+}
+
 static int nw_present_texture(const SDL_Rect *uni)
 {
 	const int tex_w = guest_surface->w;
@@ -1108,6 +1142,7 @@ static int nw_present_texture(const SDL_Rect *uni)
 			return -1;
 		nw_present_need_clear = false;
 	}
+	nw_present_movie();
 	SDL_RenderPresent(sdl_renderer);
 	return 0;
 }
@@ -1171,15 +1206,15 @@ static int present_sdl_video()
 				SDL_UnionRect(&uni, &r, &uni);
 			}
 		}
-		/* A fill-screen movie starts at the top and walks down in
-		 * short bands. Hold only that walk. A band lower on the
-		 * screen is a window close or the zoom into the Trash, and
-		 * hiding it leaves the old picture up while the Finder has
-		 * already moved on. A tall union is uploaded below. */
+		/* Hold a wide partial band and show it as one rectangle.
+		 * The movie window starts below the menu bar, so the walk
+		 * does not have to begin at y 0. */
+		/* Fullscreen frames are taller than half the screen. They were
+		 * uploaded on every strip, and each upload waited out a vsync,
+		 * which is the 4 fps picture. Hold those too. */
 		const bool band = have_uni && !need_blit && host_surface &&
-			uni.w * 2 >= fb_w && uni.h >= 48 && uni.h <= 160;
-		const bool from_top = uni.y <= 16;
-		if (band && (nw_sweep_on || from_top) && nw_sweep_ensure(host_surface)) {
+			fb_h > 0 && uni.w * 2 >= fb_w && uni.h >= 32 && uni.h <= fb_h;
+		if (band && nw_sweep_ensure(host_surface)) {
 			const int bottom = nw_sweep_box.y + nw_sweep_box.h;
 			const bool starts_over = nw_sweep_on &&
 				uni.y + 48 < bottom &&
@@ -1193,15 +1228,15 @@ static int present_sdl_video()
 					nw_present_texture(&nw_sweep_box);
 				nw_sweep_on = 0;
 			}
-			if (nw_sweep_on || from_top) {
-				if (!nw_sweep_on)
-					nw_sweep_box = uni;
-				else
-					SDL_UnionRect(&nw_sweep_box, &uni, &nw_sweep_box);
-				nw_sweep_store(host_surface, &nw_sweep_box);
-				nw_sweep_on = 1;
-				return 0;
-			}
+			if (!nw_sweep_on)
+				nw_sweep_box = uni;
+			else
+				SDL_UnionRect(&nw_sweep_box, &uni, &nw_sweep_box);
+			/* Only the new strip. Copying the whole box each tick
+			 * stole the guest time fullscreen needs to finish a frame. */
+			nw_sweep_store(host_surface, &uni);
+			nw_sweep_on = 1;
+			return 0;
 		}
 		if (nw_sweep_on && nw_sweep_snap) {
 			if (nw_upload_base(nw_sweep_snap, nw_sweep_pitch, nw_sweep_bpp, &nw_sweep_box))
@@ -1258,6 +1293,7 @@ static int present_sdl_video()
 				return -1;
 			nw_present_need_clear = false;
 		}
+		nw_present_movie();
 		SDL_RenderPresent(sdl_renderer);
 		return 0;
 	}
@@ -2220,6 +2256,8 @@ void VideoHostPresent(void)
 	SDL_PumpEvents();
 	handle_events();
 #ifdef SHEEPSHAVER
+	if (ROMType == ROMTYPE_NEWWORLD)
+		nw_fb_commit();
 	/* Redraw thread does not refresh New World (events are CPU-thread
 	 * only). Scan/copy dirty tiles here, then present. */
 	if (ROMType == ROMTYPE_NEWWORLD && video_refresh)
@@ -2840,6 +2878,9 @@ static int SDLCALL on_sdl_event_generated(void *userdata, SDL_Event * event)
 							nw_swallow_capture_up = true;
 						}
 					}
+					/* macOS stops the callback while the app is away.
+					 * Unpausing starts it again; the guest task stays armed. */
+					SDL_PauseAudio(0);
 					break;
 				case SDL_WINDOWEVENT_FOCUS_LOST:
 					/* SetRelativeMouseMode often synthesizes a focus-lost
