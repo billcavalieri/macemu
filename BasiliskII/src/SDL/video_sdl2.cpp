@@ -67,6 +67,9 @@
 #include "adb.h"
 #include "macos_util.h"
 #include "prefs.h"
+#ifdef SHEEPSHAVER
+#include "sheepforce.h"
+#endif
 #include "user_strings.h"
 #include "video.h"
 #include "video_defs.h"
@@ -1150,6 +1153,13 @@ static int nw_present_texture(const SDL_Rect *uni)
 static int present_sdl_video()
 {
 #ifdef SHEEPSHAVER
+	if (ROMType == ROMTYPE_NEWWORLD && SheepForceEnabled()) {
+		SDL_LockMutex(sdl_update_video_mutex);
+		nw_present_n = 0;
+		SDL_UnlockMutex(sdl_update_video_mutex);
+		if (SheepForcePresent(0, 0, SheepForceWidth(), SheepForceHeight()))
+			return 0;
+	}
 	if (ROMType == ROMTYPE_NEWWORLD) {
 		if (!sdl_renderer || !sdl_texture || !guest_surface)
 			return -1;
@@ -1451,11 +1461,16 @@ void driver_base::init()
 	}
 		
 	int aligned_height = (VIDEO_MODE_Y + 15) & ~15;
+#ifdef SHEEPSHAVER
+	const int sf_pages = SheepForceEnabled() ? 2 : 1;
+#else
+	const int sf_pages = 1;
+#endif
 
 #ifdef ENABLE_VOSF
 	use_vosf = true;
 	// Allocate memory for frame buffer (SIZE is extended to page-boundary)
-	the_buffer_size = page_extend((aligned_height + 2) * pitch);
+	the_buffer_size = page_extend((aligned_height + 2) * pitch) * (uint32)sf_pages;
 	the_buffer = (uint8 *)vm_acquire_framebuffer(the_buffer_size);
 	the_buffer_copy = (uint8 *)malloc(the_buffer_size);
 	D(bug("the_buffer = %p, the_buffer_copy = %p, the_host_buffer = %p\n", the_buffer, the_buffer_copy, the_host_buffer));
@@ -1478,7 +1493,7 @@ void driver_base::init()
 #endif
 	if (!use_vosf) {
 		// Allocate memory for frame buffer
-		the_buffer_size = (aligned_height + 2) * pitch;
+		the_buffer_size = (aligned_height + 2) * pitch * (uint32)sf_pages;
 		the_buffer_copy = (uint8 *)calloc(1, the_buffer_size);
 		the_buffer = (uint8 *)vm_acquire_framebuffer(the_buffer_size);
 		memset(the_buffer, 0, the_buffer_size);
@@ -1489,6 +1504,18 @@ void driver_base::init()
 
 	// Set frame buffer base
 	set_mac_frame_buffer(monitor, VIDEO_MODE_DEPTH, true);
+#ifdef SHEEPSHAVER
+	{
+		int depth_bits = 8;
+		if (VIDEO_MODE_DEPTH == VIDEO_DEPTH_16BIT)
+			depth_bits = 16;
+		else if (VIDEO_MODE_DEPTH == VIDEO_DEPTH_32BIT)
+			depth_bits = 32;
+		SheepForceSetGeometry(the_buffer, screen_base, the_buffer_size / (uint32)sf_pages,
+				      VIDEO_MODE_X, VIDEO_MODE_Y, pitch, depth_bits);
+		SheepForceStartup(sdl_window);
+	}
+#endif
 
 	adapt_to_video_mode();
 	
@@ -2475,6 +2502,19 @@ void SDL_monitor_desc::set_gamma(uint8 *gamma, int num_in)
 #ifdef SHEEPSHAVER
 int16 video_mode_change(VidLocals *csSave, uint32 ParamPtr)
 {
+	/* Page flip with the same mode: DrawSprocket switches the visible page. */
+	if (SheepForceEnabled() &&
+	    (csSave->saveData == ReadMacInt32(ParamPtr + csData)) &&
+	    (csSave->saveMode == ReadMacInt16(ParamPtr + csMode))) {
+		int page = (int)ReadMacInt16(ParamPtr + csPage);
+		csSave->savePage = (uint16)page;
+		SheepForceSetVisiblePage(page);
+		SheepForceSync();
+		WriteMacInt32(ParamPtr + csBaseAddr, SheepForcePageMac(page));
+		csSave->saveBaseAddr = SheepForcePageMac(page);
+		return noErr;
+	}
+
 	/* return if no mode change */
 	if ((csSave->saveData == ReadMacInt32(ParamPtr + csData)) &&
 	    (csSave->saveMode == ReadMacInt16(ParamPtr + csMode))) return noErr;

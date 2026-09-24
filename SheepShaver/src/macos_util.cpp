@@ -309,8 +309,11 @@ uint32 FindLibSymbol(const char *lib_str, const char *sym_str)
 		int16 res;
 		res = GetSharedLibrary(lib.addr(), FOURCC('p','w','p','c'), 1, conn_id.addr(), main_addr.addr(), err.addr());
 		D(bug(" GetSharedLibrary: ret %d, connection ID %ld, main %p\n", res, conn_id.value(), main_addr.value()));
-		if (res)
+		if (res) {
+			if (ROMType == ROMTYPE_NEWWORLD)
+				printf("NW-BOOT G1: GetSharedLibrary %s -> %d\n", lib.value() + 1, (int)res);
 			return 0;
+		}
 		res = FindSymbol(conn_id.value(), sym.addr(), sym_addr.addr(), sym_class.addr());
 		D(bug(" FindSymbol: ret %d, sym_addr %p, sym_class %ld\n", res, sym_addr.value(), sym_class.value()));
 //!!??		CloseConnection(&conn_id);

@@ -38,6 +38,7 @@
 #include "rom_patches.h"
 #include "nw_devices.h"
 #include "nw_io.h"
+#include "sheepforce.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -103,6 +104,8 @@ typedef void (*nqdmisc_ptr)(uint32, void *);
 static uint32 nqdmisc_tvect = 0;
 void NQDMisc(uint32 arg1, uintptr arg2)
 {
+	if (nqdmisc_tvect == 0)
+		return;
 	CallMacOS2(nqdmisc_ptr, nqdmisc_tvect, arg1, (void *)arg2);
 }
 
@@ -124,6 +127,7 @@ typedef int32 (*gif_ptr)(uint32, int32, void *, void *, void *, void *);
 static uint32 gif_tvect = 0;
 typedef void (*ien_ptr)(uint32, int32, void *);	/* InterruptSetMember by value: r3 setID, r4 member */
 static bool nw_vbl_installed = false;
+static uint32 nw_vbl_code = 0;
 
 static void nw_install_vbl_handler(VidLocals *csSave)
 {
@@ -148,25 +152,6 @@ static void nw_install_vbl_handler(VidLocals *csSave)
 	                        (void *)handler.addr(), (void *)enabler.addr(), (void *)disabler.addr());
 	if (err != 0 || enabler.value() == 0) {
 		printf("NW-BOOT G1: video ndrv: GetInterruptFunctions -> %d enabler %08x; no VBL\n", (int)err, (unsigned)enabler.value());
-		return;
-	}
-	/* The handler's TVector and code live in the system heap, Mac memory
-	 * the Interrupt Manager and Mixed Mode see, rather than in SheepShaver's
-	 * thunk area. The code is the NativeOp for NATIVE_VIDEO_VBL followed by
-	 * blr, like the driver stub's. */
-	const uint32 blk = Mac_sysalloc(16);
-	if (blk == 0) {
-		printf("NW-BOOT G1: video ndrv: no memory for the VBL handler; no VBL\n");
-		return;
-	}
-	WriteMacInt32(blk + 0, NativeOpcode(NATIVE_VIDEO_VBL));
-	WriteMacInt32(blk + 4, 0x4e800020);		/* blr */
-	WriteMacInt32(blk + 8, blk);			/* TVector: code, TOC */
-	WriteMacInt32(blk + 12, 0);
-	err = (int32)CallMacOS6(iif_ptr, iif_tvect, set_id, member, (void *)0,
-	                        (void *)(blk + 8), (void *)0, (void *)0);
-	if (err != 0) {
-		printf("NW-BOOT G1: video ndrv: InstallInterruptFunctions -> %d; no VBL\n", (int)err);
 		return;
 	}
 	CallMacOS3(ien_ptr, enabler.value(), set_id, member, (void *)0);
@@ -262,12 +247,20 @@ static int16 VideoOpen(uint32 pb, VidLocals *csSave)
 
 	// Install and activate interrupt service
 	SheepVar32 theServiceID = 0;
-	VSLNewInterruptService(csSave->regEntryID, FOURCC('v','b','l',' '), theServiceID.addr());
-	csSave->vslServiceID = theServiceID.value();
-	D(bug(" Interrupt ServiceID %08lx\n", csSave->vslServiceID));
-	csSave->interruptsEnabled = true;
-	if (ROMType == ROMTYPE_NEWWORLD)
+	if (vslnewis_tvect != 0) {
+		VSLNewInterruptService(csSave->regEntryID, FOURCC('v','b','l',' '), theServiceID.addr());
+		csSave->vslServiceID = theServiceID.value();
+		csSave->interruptsEnabled = true;
+		if (ROMType == ROMTYPE_NEWWORLD)
+			nw_install_vbl_handler(csSave);
+	} else if (ROMType == ROMTYPE_NEWWORLD) {
+		csSave->vslServiceID = 0;
 		nw_install_vbl_handler(csSave);
+		csSave->interruptsEnabled = nw_vbl_installed;
+	} else {
+		csSave->vslServiceID = 0;
+		csSave->interruptsEnabled = false;
+	}
 
 	return noErr;
 }
@@ -807,12 +800,18 @@ static int16 VideoStatus(uint32 pb, VidLocals *csSave)
 
 		case cscGetPageCnt:						// GetPage
 			D(bug("GetPage\n"));
-			WriteMacInt16(param + csPage, 1);
+			WriteMacInt16(param + csPage, SheepForcePageCount());
 			return noErr;
 
 		case cscGetPageBase:						// GetPageBase
 			D(bug("GetPageBase\n"));
-			WriteMacInt32(param + csBaseAddr, csSave->saveBaseAddr);
+			{
+				int page = (int)(int16)ReadMacInt16(param + csPage);
+				uint32 base = SheepForceEnabled() ? SheepForcePageMac(page) : csSave->saveBaseAddr;
+				if (!base)
+					base = csSave->saveBaseAddr;
+				WriteMacInt32(param + csBaseAddr, base);
+			}
 			return noErr;
 
 		case cscGetGray:							// GetGray
@@ -1016,7 +1015,7 @@ static int16 VideoStatus(uint32 pb, VidLocals *csSave)
 							WriteMacInt32(param + csDeviceType, 2); // DIRECT
 							break;
 					}
-					WriteMacInt32(param + csPageCount, 1);
+					WriteMacInt32(param + csPageCount, SheepForcePageCount());
 					return noErr;
 				}
 			}
@@ -1105,7 +1104,8 @@ static int16 VideoClose(uint32 pb, VidLocals *csSave)
 
 	// Delete interrupt service
 	csSave->interruptsEnabled = false;
-	VSLDisposeInterruptService(csSave->vslServiceID);
+	if (vsldisposeis_tvect != 0)
+		VSLDisposeInterruptService(csSave->vslServiceID);
 
 	return noErr;
 }
@@ -1140,26 +1140,27 @@ int16 VideoDoDriverIO(uint32 spaceID, uint32 commandID, uint32 commandContents, 
 			}
 			vslnewis_tvect = FindLibSymbol("\020VideoServicesLib", "\026VSLNewInterruptService");
 			D(bug("VSLNewInterruptService TVECT at %08lx\n", vslnewis_tvect));
-			if (vslnewis_tvect == 0) {
+			if (vslnewis_tvect == 0 && ROMType != ROMTYPE_NEWWORLD) {
 				printf("FATAL: VideoDoDriverIO(): Can't find VSLNewInterruptService()\n");
 				err = -1;
 				break;
 			}
 			vsldisposeis_tvect = FindLibSymbol("\020VideoServicesLib", "\032VSLDisposeInterruptService");
 			D(bug("VSLDisposeInterruptService TVECT at %08lx\n", vsldisposeis_tvect));
-			if (vsldisposeis_tvect == 0) {
+			if (vsldisposeis_tvect == 0 && ROMType != ROMTYPE_NEWWORLD) {
 				printf("FATAL: VideoDoDriverIO(): Can't find VSLDisposeInterruptService()\n");
 				err = -1;
 				break;
 			}
 			vsldois_tvect = FindLibSymbol("\020VideoServicesLib", "\025VSLDoInterruptService");
 			D(bug("VSLDoInterruptService TVECT at %08lx\n", vsldois_tvect));
-			if (vsldois_tvect == 0) {
+			if (vsldois_tvect == 0 && ROMType != ROMTYPE_NEWWORLD) {
 				printf("FATAL: VideoDoDriverIO(): Can't find VSLDoInterruptService()\n");
 				err = -1;
 				break;
 			}
-			nqdmisc_tvect = FindLibSymbol("\014InterfaceLib", "\007NQDMisc");
+			if (ROMType == ROMTYPE_NEWWORLD && vslnewis_tvect == 0)
+				printf("NW-BOOT G1: video ndrv: no VideoServicesLib; display opens without VBL\n");			nqdmisc_tvect = FindLibSymbol("\014InterfaceLib", "\007NQDMisc");
 			D(bug("NQDMisc TVECT at %08lx\n", nqdmisc_tvect));
 			if (nqdmisc_tvect == 0) {
 				printf("FATAL: VideoDoDriverIO(): Can't find NQDMisc()\n");
@@ -1177,6 +1178,8 @@ int16 VideoDoDriverIO(uint32 spaceID, uint32 commandID, uint32 commandContents, 
 
 			private_data = new VidLocals;
 			private_data->gammaTable = 0;
+			if (ROMType == ROMTYPE_NEWWORLD && nw_vbl_code == 0)
+				nw_vbl_code = Mac_sysalloc(16);
 			private_data->regEntryID = Mac_sysalloc(sizeof(RegEntryID));
 			if (private_data->regEntryID == 0) {
 				printf("FATAL: VideoDoDriverIO(): Can't allocate service owner\n");

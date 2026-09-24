@@ -49,6 +49,8 @@ prefs_desc common_prefs_items[] = {
 	{"ramsize", TYPE_INT32, false,      "size of Mac RAM in bytes"},
 	{"frameskip", TYPE_INT32, false,    "number of frames to skip in refreshed video modes"},
 	{"gfxaccel", TYPE_BOOLEAN, false,   "turn on QuickDraw acceleration"},
+	{"sheepforce", TYPE_BOOLEAN, false, "SheepForce Metal display"},
+	{"qtcodec", TYPE_BOOLEAN, false,  "host Cinepak and Sorenson Video decode"},
 	{"nocdrom", TYPE_BOOLEAN, false,    "don't install CD-ROM driver"},
 	{"nonet", TYPE_BOOLEAN, false,      "don't use Ethernet"},
 	{"nosound", TYPE_BOOLEAN, false,    "don't enable sound output"},
@@ -92,6 +94,8 @@ void AddPrefsDefaults(void)
 	PrefsAddInt32("ramsize", 16 * 1024 * 1024);
 	PrefsAddInt32("frameskip", 8);
 	PrefsAddBool("gfxaccel", true);
+	PrefsAddBool("sheepforce", false);
+	PrefsAddBool("qtcodec", false);
 	PrefsAddBool("nocdrom", false);
 	PrefsAddBool("nonet", false);
 	PrefsAddBool("nosound", false);

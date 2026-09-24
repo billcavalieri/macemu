@@ -1173,6 +1173,7 @@ void HandleInterrupt(powerpc_registers *r)
 			    ReadMacInt8(0x915) == 'e' && ReadMacInt8(0x916) == 'r') {
 				audio_reg = 1;
 				nw_audio_arm_register();
+				SheepForceComponentsArm();
 			}
 			/* Do not scan guest RAM from this tick. The scan stalls
 			 * the desktop while the Sound panel is in use. */

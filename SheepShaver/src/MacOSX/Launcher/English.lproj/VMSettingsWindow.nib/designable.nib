@@ -37,6 +37,8 @@
                 <outlet property="refreshRate" destination="156" id="345"/>
                 <outlet property="romFile" destination="237" id="326"/>
                 <outlet property="scrollLines" destination="200" id="346"/>
+                <outlet property="sheepForce" destination="501" id="503"/>
+                <outlet property="qtCodec" destination="502" id="504"/>
                 <outlet property="scrollLinesStepper" destination="202" id="347"/>
                 <outlet property="unixRoot" destination="239" id="325"/>
                 <outlet property="useRawKeyCodes" destination="196" id="333"/>
@@ -333,8 +335,24 @@
                                                 <rect key="frame" x="3" y="3" width="516" height="176"/>
                                                 <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                                                 <subviews>
-                                                    <button imageHugsTitle="YES" id="153">
+                                                    <button imageHugsTitle="YES" id="502">
+                                                        <rect key="frame" x="125" y="1" width="280" height="18"/>
+                                                        <autoresizingMask key="autoresizingMask" widthSizable="YES" flexibleMaxX="YES" flexibleMinY="YES"/>
+                                                        <buttonCell key="cell" type="check" title="QuickTime Cinepak and Sorenson" bezelStyle="regularSquare" imagePosition="leading" alignment="left" inset="2" id="506">
+                                                            <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
+                                                            <font key="font" metaFont="system"/>
+                                                        </buttonCell>
+                                                    </button>
+                                                    <button imageHugsTitle="YES" id="501">
                                                         <rect key="frame" x="125" y="19" width="216" height="18"/>
+                                                        <autoresizingMask key="autoresizingMask" widthSizable="YES" flexibleMaxX="YES" flexibleMinY="YES"/>
+                                                        <buttonCell key="cell" type="check" title="SheepForce" bezelStyle="regularSquare" imagePosition="leading" alignment="left" inset="2" id="505">
+                                                            <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
+                                                            <font key="font" metaFont="system"/>
+                                                        </buttonCell>
+                                                    </button>
+                                                    <button imageHugsTitle="YES" id="153">
+                                                        <rect key="frame" x="125" y="37" width="216" height="18"/>
                                                         <autoresizingMask key="autoresizingMask" widthSizable="YES" flexibleMaxX="YES" flexibleMinY="YES"/>
                                                         <buttonCell key="cell" type="check" title="Enable QuickDraw Acceleration" bezelStyle="regularSquare" imagePosition="leading" alignment="left" state="on" inset="2" id="182">
                                                             <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>

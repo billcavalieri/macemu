@@ -135,7 +135,11 @@
 #endif
 #endif
 
-#ifndef USE_SDL_VIDEO
+#if defined(__MACOSX__) && !defined(SDL_PLATFORM_MACOS)
+#define SDL_PLATFORM_MACOS 1
+#endif
+
+#if !defined(USE_SDL_VIDEO) && !defined(USE_MACOS_VIDEO)
 #include <X11/Xlib.h>
 #endif
 
@@ -220,7 +224,7 @@ uint8 gZeroPage[0x3000], gKernelData[0x2000];
 #endif
 
 // Global variables
-#ifndef USE_SDL_VIDEO
+#if !defined(USE_SDL_VIDEO) && !defined(USE_MACOS_VIDEO)
 char *x_display_name = NULL;				// X11 display name
 Display *x_display = NULL;					// X11 display handle
 #ifdef X11_LOCK_TYPE
@@ -918,7 +922,7 @@ int main(int argc, char **argv)
 			argv[i] = NULL;
 		} else if (strcmp(argv[i], "--help") == 0) {
 			usage(argv[0]);
-#ifndef USE_SDL_VIDEO
+#if !defined(USE_SDL_VIDEO) && !defined(USE_MACOS_VIDEO)
 		} else if (strcmp(argv[i], "--display") == 0) {
 			i++;
 			if (i < argc)
@@ -1016,7 +1020,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-#ifndef USE_SDL_VIDEO
+#if !defined(USE_SDL_VIDEO) && !defined(USE_MACOS_VIDEO)
 	// Open display
 	x_display = XOpenDisplay(x_display_name);
 	if (x_display == NULL) {
@@ -1408,7 +1412,7 @@ static void Quit(void)
 #endif
 
 	// Close X11 server connection
-#ifndef USE_SDL_VIDEO
+#if !defined(USE_SDL_VIDEO) && !defined(USE_MACOS_VIDEO)
 	if (x_display)
 		XCloseDisplay(x_display);
 #endif
@@ -2528,7 +2532,7 @@ void ErrorAlert(const char *text)
 			return;
 	}
 #ifdef ENABLE_GTK
-#ifndef USE_SDL_VIDEO
+#if !defined(USE_SDL_VIDEO) && !defined(USE_MACOS_VIDEO)
 	if (x_display == NULL) {
 		printf(GetString(STR_SHELL_ERROR_PREFIX), text);
 		return;
@@ -2554,7 +2558,7 @@ void WarningAlert(const char *text)
 			return;
 	}
 #ifdef ENABLE_GTK
-#ifndef USE_SDL_VIDEO
+#if !defined(USE_SDL_VIDEO) && !defined(USE_MACOS_VIDEO)
 	if (x_display == NULL) {
 		printf(GetString(STR_SHELL_WARNING_PREFIX), text);
 		return;

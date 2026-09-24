@@ -38,6 +38,11 @@
 #include "video.h"
 #include "audio.h"
 #include "audio_defs.h"
+
+extern int32 QtCodecDispatch(uint32 selector_word, uint32 params);
+extern void QtCodecRegister(void);
+extern int32 SheepForceRaveGuest(uint32 selector_word, uint32 params);
+extern void SheepForceRaveRegister(void);
 #include "ether.h"
 #include "serial.h"
 #include "clip.h"
@@ -293,8 +298,11 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 	 * which is not allowed at interrupt time. */
 	bool sb_op = selector == OP_AUDIO_DISPATCH || selector == OP_SHEEPBLASTER ||
 		selector == OP_SHEEPBLASTER_TICK;
-	if (!sb_op)
+	if (!sb_op) {
 		nw_register_output();
+		QtCodecRegister();
+		SheepForceRaveRegister();
+	}
 	if (nw_debug_arm && !sb_op) {
 		nw_debug_arm = 0;
 		nw_audio_debug_scan();
@@ -433,6 +441,14 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 
 		case OP_SHEEPBLASTER_TICK:	// SheepBlaster Time Manager task
 			r->d[0] = AudioSheepBlasterTick(&r->a[0]);
+			break;
+
+		case OP_QTCODEC:
+			r->d[0] = QtCodecDispatch(r->a[3], r->a[4]);
+			break;
+
+		case OP_RAVE:
+			r->d[0] = SheepForceRaveGuest(r->a[3], r->a[4]);
 			break;
 
 		case OP_SHEEPBLASTER: {		// AWACS `link a6,#0`, then the original body

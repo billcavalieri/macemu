@@ -466,14 +466,8 @@
 /* Define if BSD-style non-blocking I/O is to be used */
 /* #undef USE_FIONBIO */
 
-/* Define to enable SDL support. */
-#define USE_SDL 1
-
-/* Define to enable SDL audio support */
-#define USE_SDL_AUDIO 1
-
-/* Define to enable SDL video graphics support. */
-#define USE_SDL_VIDEO 1
+/* Mac window and audio are AppKit and CoreAudio. SDL is not used. */
+#define USE_MACOS_VIDEO 1
 
 /* Define to 1 if your processor stores words with the most significant byte
    first (like Motorola and SPARC, unlike Intel and VAX). */

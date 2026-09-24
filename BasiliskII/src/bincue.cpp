@@ -42,6 +42,7 @@
 #include <errno.h>
 
 #include <list>
+#include <pthread.h>
 
 #ifdef OSX_CORE_AUDIO
 #include "../MacOSX/MacOSX_sound_if.h"
@@ -168,20 +169,14 @@ static uint8 silence_byte;
 static std::list<CDPlayer*> players;
 CDPlayer* currently_playing = NULL;
 
-#if SDL_VERSION_ATLEAST(3, 0, 0)
-static SDL_Mutex *player_lock;
-#else
-static SDL_mutex *player_lock;
-#endif
-#define LOCK_PLAYER		SDL_LockMutex(player_lock)
-#define UNLOCK_PLAYER	SDL_UnlockMutex(player_lock)
+static pthread_mutex_t player_lock = PTHREAD_MUTEX_INITIALIZER;
+#define LOCK_PLAYER		pthread_mutex_lock(&player_lock)
+#define UNLOCK_PLAYER	pthread_mutex_unlock(&player_lock)
 
 void InitBinCue() {
-	player_lock = SDL_CreateMutex();
 }
 
 void ExitBinCue() {
-	SDL_DestroyMutex(player_lock);
 }
 
 CDPlayer* CSToPlayer(CueSheet* cs)

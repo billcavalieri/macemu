@@ -52,6 +52,8 @@ enum {	// Selectors for EMUL_OP opcodes
 	OP_COPYBITS_EXPAND,
 	OP_SHEEPBLASTER,
 	OP_SHEEPBLASTER_TICK,
+	OP_QTCODEC,
+	OP_RAVE,
 	OP_MAX
 };
 const uint16 M68K_EMUL_RETURN = 0xfe40;	// Extended opcodes
@@ -112,11 +114,16 @@ const uint16 M68K_EMUL_OP_IDLE_TIME = M68K_EMUL_BREAK + OP_IDLE_TIME;
 const uint16 M68K_EMUL_OP_IDLE_TIME_2 = M68K_EMUL_BREAK + OP_IDLE_TIME_2;
 const uint16 M68K_EMUL_OP_COPYBITS_EXPAND = M68K_EMUL_BREAK + OP_COPYBITS_EXPAND;
 const uint16 M68K_EMUL_OP_SHEEPBLASTER_TICK = M68K_EMUL_BREAK + OP_SHEEPBLASTER_TICK;
+const uint16 M68K_EMUL_OP_QTCODEC = M68K_EMUL_BREAK + OP_QTCODEC;
+const uint16 M68K_EMUL_OP_RAVE = M68K_EMUL_BREAK + OP_RAVE;
 
 extern "C" void EmulOp(M68kRegisters *r, uint32 pc, int selector);
 /* Look for a loaded AWACS component. Host memory only; no 68k call. */
 extern void nw_audio_try(void);
 extern void nw_audio_arm_register(void);
+/* QuickTime codec and RAVE registration wait for the same point as audio:
+ * the Component Manager drops components registered before Finder runs. */
+extern void SheepForceComponentsArm(void);
 extern void nw_audio_arm_debug(void);
 extern int nw_audio_service_ok(void);
 

@@ -21,16 +21,9 @@
 #include <Cocoa/Cocoa.h>
 #include <ApplicationServices/ApplicationServices.h>
 #include "sysdeps.h"
-#include <SDL.h>
 #include "utils_macosx.h"
 
-#if SDL_VERSION_ATLEAST(2, 0, 0) && !SDL_VERSION_ATLEAST(3, 0, 0)
-#include <SDL_syswm.h>
-#endif
-
 #include <sys/sysctl.h>
-
-#if SDL_VERSION_ATLEAST(2, 0, 0)
 #include <Metal/Metal.h>
 
 bool MetalIsAvailable() {
@@ -73,90 +66,6 @@ void disable_SDL2_macosx_menu_bar_keyboard_shortcuts() {
 		}
 	}
 }
-
-static NSWindow *get_nswindow(SDL_Window *window) {
-#if SDL_VERSION_ATLEAST(3, 0, 0)
-	SDL_PropertiesID props = SDL_GetWindowProperties(window);
-	return (NSWindow *)SDL_GetPointerProperty(props, "SDL.window.cocoa.window", NULL);
-#else
-	SDL_SysWMinfo wmInfo;
-	SDL_VERSION(&wmInfo.version);
-	return SDL_GetWindowWMInfo(window, &wmInfo) ? wmInfo.info.cocoa.window : nil;
-#endif
-}
-
-bool is_fullscreen_osx(SDL_Window * window)
-{
-	if (!window) {
-		return false;
-	}
-	
-	const NSWindowStyleMask styleMask = [get_nswindow(window) styleMask];
-	return (styleMask & NSWindowStyleMaskFullScreen) != 0;
-}
-
-void macosx_set_window_title(SDL_Window *window, const char *title)
-{
-	if (!window || !title)
-		return;
-	NSWindow *nsw = get_nswindow(window);
-	if (!nsw) {
-		SDL_SetWindowTitle(window, title);
-		return;
-	}
-	NSString *t = [[NSString alloc] initWithUTF8String:title];
-	if ([NSThread isMainThread]) {
-		[nsw setTitle:t];
-		[t release];
-		return;
-	}
-	dispatch_async(dispatch_get_main_queue(), ^{
-		[nsw setTitle:t];
-		[t release];
-	});
-}
-
-#endif // SDL_VERSION_ATLEAST(2, 0, 0)
-
-#if SDL_VERSION_ATLEAST(3, 0, 0) && defined(VIDEO_CHROMAKEY)
-
-// from https://github.com/zydeco/macemu/tree/rootless/
-
-void make_window_transparent(SDL_Window *window)
-{
-	if (!window) {
-		return;
-	}
-	NSWindow *cocoaWindow = get_nswindow(window);
-	static bool observing;
-    if (!observing) {
-		cocoaWindow.level = NSMainMenuWindowLevel + 1;
-        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:cocoaWindow queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {
-            NSWindow *window = (NSWindow *)note.object;
-            window.level = NSMainMenuWindowLevel + 1;
-        }];
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:cocoaWindow queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {
-            NSWindow *window = (NSWindow *)note.object;
-            // hack for window to be sent behind new key window
-            [window setIsVisible:NO];
-            [window setLevel:NSNormalWindowLevel];
-            [window setIsVisible:YES];
-        }];
-        observing = true;
-    }
-}
-
-void set_mouse_ignore(SDL_Window *window, int flag) {
-	if (!window) {
-		return;
-	}
-	dispatch_async(dispatch_get_main_queue(), ^{
-		get_nswindow(window).ignoresMouseEvents = flag;
-	});
-}
-
-#endif // SDL_VERSION_ATLEAST(3, 0, 0) && defined(VIDEO_CHROMAKEY)
 
 void set_menu_bar_visible_osx(bool visible)
 {

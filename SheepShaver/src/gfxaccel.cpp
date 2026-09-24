@@ -28,6 +28,8 @@
 #include "cpu_emulation.h"
 #include "emul_op.h"
 #include "macos_util.h"
+#include "sheepforce.h"
+#include "thunks.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -173,6 +175,10 @@ void NQD_invrect(uint32 p)
 	const int dest_row_bytes = (int32)ReadMacInt32(p + acclDestRowBytes);
 	uint8 *dest = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) + (dest_Y * dest_row_bytes) + (dest_X * bpp));
 	nqd_mark_written(dest, width, height, bpp);
+	if (SheepForceEnabled() && SheepForceOwns(ReadMacInt32(p + acclDestBaseAddr)) &&
+	    bpp >= 1 &&
+	    SheepForceTryInvert(dest, bpp, dest_row_bytes, width * bpp, height))
+		return;
 	width *= bpp;
 	switch (bpp) {
 	case 1:
@@ -288,6 +294,10 @@ void NQD_fillrect(uint32 p)
 	const int dest_row_bytes = (int32)ReadMacInt32(p + acclDestRowBytes);
 	uint8 *dest = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) + (dest_Y * dest_row_bytes) + (dest_X * bpp));
 	nqd_mark_written(dest, width, height, bpp);
+	if (SheepForceEnabled() && SheepForceOwns(ReadMacInt32(p + acclDestBaseAddr)) &&
+	    bpp >= 1 &&
+	    SheepForceTryFill(dest, bpp, dest_row_bytes, width * bpp, height, color))
+		return;
 	width *= bpp;
 	switch (bpp) {
 	case 1:
@@ -452,6 +462,11 @@ void NQD_bitblt(uint32 p)
 	uint8 *dst0 = Mac2HostAddr(ReadMacInt32(p + acclDestBaseAddr) +
 		(dest_Y * dst_row_bytes) + (dest_X * dst_bpp));
 	nqd_mark_written(dst0, width, height, dst_bpp);
+	if (!down && src_bpp == dst_bpp && SheepForceEnabled() &&
+	    SheepForceOwns(ReadMacInt32(p + acclDestBaseAddr)) &&
+	    SheepForceOwns(ReadMacInt32(p + acclSrcBaseAddr)) &&
+	    SheepForceTryBlit(dst, src, src_bpp, dst_row_bytes, src_row_bytes, width * src_bpp, height))
+		return;
 	const int sstep = down ? -src_row_bytes : src_row_bytes;
 	const int dstep = down ? -dst_row_bytes : dst_row_bytes;
 	if (src_bpp == dst_bpp) {
@@ -599,6 +614,8 @@ bool NQD_unknown_hook(uint32 arg)
 bool NQD_sync_hook(uint32 arg)
 {
 	D(bug("accl_sync_hook %08x\n", arg));
+	if (SheepForceEnabled())
+		SheepForceSync();
 	return true;
 }
 
@@ -711,15 +728,22 @@ int NQD_copybits_expand(uint32 srcBits, uint32 dstBits, uint32 srcRect,
 
 void VideoInstallAccel(void)
 {
+	if (!PrefsFindBool("gfxaccel") && !PrefsFindBool("sheepforce"))
+		return;
 	/*
-	 * Do not Execute68kTrap from here. PatchAfterStartup runs from
-	 * 68k accRun → EMUL_OP → ExecuteNative (another nested 68k mixed
-	 * mode). GetTrapAddress/SetToolTrap on that stack wedges the
-	 * New World 68k emulator; Finder then never launches apps.
-	 * QT controller chrome is JIT fadds/fsubs, not this trap.
+	 * Plant the Native QuickDraw draw procs. Do not Execute68kTrap from
+	 * here: PatchAfterStartup is already inside a 68k accRun.
 	 */
-#if NW_BOOT_LOG
-	printf("NW-BOOT G1: VideoInstallAccel (no 68k CopyBits trap)\n");
-	fflush(stdout);
-#endif
+	uint32 info = Mac_sysalloc(16);
+	if (info == 0)
+		return;
+	WriteMacInt32(info + 0, NativeTVECT(NATIVE_NQD_BITBLT_HOOK));
+	WriteMacInt32(info + 4, NativeTVECT(NATIVE_NQD_SYNC_HOOK));
+	WriteMacInt32(info + 8, ACCL_BITBLT);
+	NQDMisc(6, info);
+	WriteMacInt32(info + 0, NativeTVECT(NATIVE_NQD_FILLRECT_HOOK));
+	WriteMacInt32(info + 4, NativeTVECT(NATIVE_NQD_SYNC_HOOK));
+	WriteMacInt32(info + 8, ACCL_FILLRECT);
+	NQDMisc(6, info);
+	printf("SheepForce: Native QuickDraw hooks installed\n");
 }

@@ -183,6 +183,8 @@ static NSString *getStringFromPrefs(const char *key)
     [refreshRate selectItemAtIndex: item ];
 
   [qdAccel setIntValue: PrefsFindBool("gfxaccel") ];
+  [sheepForce setIntValue: PrefsFindBool("sheepforce") ];
+  [qtCodec setIntValue: PrefsFindBool("qtcodec") ];
 
   [disableSound setIntValue: PrefsFindBool("nosound") ];
   [outDevice setStringValue: getStringFromPrefs("dsp") ];
@@ -454,6 +456,8 @@ static NSString *makeRelativeIfNecessary(NSString *path)
   }
   PrefsReplaceInt32("frameskip", rate);
   PrefsReplaceBool("gfxaccel", [qdAccel intValue]);
+  PrefsReplaceBool("sheepforce", [sheepForce intValue]);
+  PrefsReplaceBool("qtcodec", [qtCodec intValue]);
 
   PrefsReplaceBool("nosound", [disableSound intValue]);
   PrefsReplaceString("dsp", [[outDevice stringValue] UTF8String]);

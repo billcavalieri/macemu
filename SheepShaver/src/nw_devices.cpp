@@ -212,7 +212,7 @@ static uint32_t pic_iack(void)
 	if (r >= 0 && prio(pic.src[r].ivpr) > (int)pic.ctpr) {
 		struct pic_src *s = &pic.src[r];
 		s->servicing = 1;
-		if (!is_level(r))
+		if (!is_level(r) || r == NW_VBL_IRQ)
 			s->pending = 0;
 		pic_update();
 		nw_io_ext_irq = 0;		/* stays low until EOI or a CTPR change */

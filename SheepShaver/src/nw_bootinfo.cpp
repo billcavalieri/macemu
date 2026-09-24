@@ -40,6 +40,8 @@
 
 #include "nw_bootinfo.h"
 #include "nw_boot_contract.h"
+#include "sysdeps.h"
+#include "prefs.h"
 
 namespace {
 
@@ -494,8 +496,11 @@ Node *build_machine(const nw_bootinfo_params *p)
 	add_pci_ids(disp, 0x106b, 0x0010, 0, 0x00030000);
 	disp->u32("cache-line-size", 0);
 	disp->str("device_type", "display");
-	disp->str("model", "SheepShaver Video");
+	const bool sheepforce = PrefsFindBool("sheepforce");
+	disp->str("model", sheepforce ? "SheepForce" : "SheepShaver Video");
 	disp->str("compatible", "cofb");
+	if (sheepforce)
+		disp->empty("sheepforce");
 	if (p->display_driver && p->display_driver_size) {
 		disp->set("driver,AAPL,MacOS,PowerPC", p->display_driver, p->display_driver_size);
 		/* vertical blank, OpenPIC 0x1d level, Trampoline list position 7
@@ -504,7 +509,8 @@ Node *build_machine(const nw_bootinfo_params *p)
 		disp->u32("interrupt-parent", NW_PHANDLE_PIC);
 	}
 	{
-		uint32_t fb_size = (p->fb_linebytes * p->fb_height + 0xfffu) & ~0xfffu;
+		uint32_t pages = sheepforce ? 2u : 1u;
+		uint32_t fb_size = (p->fb_linebytes * p->fb_height * pages + 0xfffu) & ~0xfffu;
 		uint8_t aa[20] = { 0x82, 0x00, 0x70, 0x10, 0, 0, 0, 0 };
 		be32(aa + 8, p->fb_la);
 		be32(aa + 12, 0);
