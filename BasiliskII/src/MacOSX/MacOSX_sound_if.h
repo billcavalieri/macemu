@@ -39,7 +39,7 @@ class OSXsoundOutput {
   int putBuffer(void *buffer, int numSamples);
   void setCallback(audioCallback fn);
   unsigned int bufferSizeFrames();
-  int sendAudioBuffer(void *buffer, int numFrames);
+  int sendAudioBuffer(void *buffer, int numFrames, int big_endian = 0);
 };
 
 #endif

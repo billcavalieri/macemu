@@ -23,6 +23,7 @@
 #include "sysdeps.h"
 #define _UINT64
 #import <Cocoa/Cocoa.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <ApplicationServices/ApplicationServices.h>
 
 #include "clip.h"
@@ -78,50 +79,46 @@ enum {
 #define smMacSysScript		18
 #define smMacRegionCode		40
 
+/* com.apple.pict. UTTypePICT is gone from UniformTypeIdentifiers. */
+static NSString *const kPictUTI = @"com.apple.pict";
+
 static NSString *UTIForFlavor(uint32_t type)
 {
 	switch (type) {
 		case TYPE_MOOV:
-			return (NSString *)kUTTypeQuickTimeMovie;
+			return UTTypeQuickTimeMovie.identifier;
 		case TYPE_SND:
-			return (NSString *)kUTTypeAudio;
+			return UTTypeAudio.identifier;
 		case TYPE_ICNS:
-			return (NSString *)kUTTypeAppleICNS;
-		default: {
-			CFStringRef typeString = UTCreateStringForOSType(type);
-			NSString *uti = (NSString *)UTTypeCreatePreferredIdentifierForTag(kUTTagClassOSType, typeString, NULL);
-
-			CFRelease(typeString);
-
-			if (uti == nil || [uti hasPrefix:@"dyn."]) {
-				// The docs threaten that this may stop working at some unspecified point in the future.
-				// However, it seems to work on Lion and Mountain Lion, and there's no other way to do this
-				// that I can see. Most likely, whichever release eventually breaks this will probably also
-				// drop support for the 32-bit applications which typically use these 32-bit scrap types anyway,
-				// making it irrelevant. When this happens, we should include a version check for the version of
-				// OS X that dropped this support, and leave uti alone in that case.
-
-				[uti release];
-				uti = [[NSString alloc] initWithFormat:@"CorePasteboardFlavorType 0x%08x", type];
-			}
-
-			return [uti autorelease];
-		}
+			return UTTypeICNS.identifier;
+		case TYPE_PICT:
+			return kPictUTI;
+		default:
+			/* OSType tag class was removed. Classic flavors use this pasteboard name. */
+			return [NSString stringWithFormat:@"CorePasteboardFlavorType 0x%08x", type];
 	}
 }
 
 static uint32_t FlavorForUTI(NSString *uti)
 {
-	CFStringRef typeTag = UTTypeCopyPreferredTagWithClass((CFStringRef)uti, kUTTagClassOSType);
-
-	if (!typeTag)
+	if (uti == nil)
 		return 0;
-
-	uint32_t type = UTGetOSTypeFromString(typeTag);
-
-	CFRelease(typeTag);
-
-	return type;
+	if ([uti isEqualToString:UTTypeQuickTimeMovie.identifier])
+		return TYPE_MOOV;
+	if ([uti isEqualToString:UTTypeAudio.identifier])
+		return TYPE_SND;
+	if ([uti isEqualToString:UTTypeICNS.identifier])
+		return TYPE_ICNS;
+	if ([uti isEqualToString:kPictUTI])
+		return TYPE_PICT;
+	if ([uti hasPrefix:@"CorePasteboardFlavorType "]) {
+		NSScanner *scanner = [NSScanner scannerWithString:uti];
+		unsigned int value = 0;
+		[scanner scanString:@"CorePasteboardFlavorType " intoString:nil];
+		if ([scanner scanHexInt:&value])
+			return value;
+	}
+	return 0;
 }
 
 /*
@@ -605,7 +602,7 @@ static NSAttributedString *AttributedStringFromMacTEXTAndStyl(NSData *textData, 
 		int32_t nextChar;
 
 		if (i + 1 == elements)
-			nextChar = [textData length];
+			nextChar = (int32_t)[textData length];
 		else
 			nextChar = CFSwapInt32BigToHost(*(int32_t *)(bytes + cursor));
 
@@ -707,7 +704,7 @@ static void AppendStylRunData(NSMutableData *stylData, NSDictionary *attrs, Scri
 	NSLayoutManager *layoutManager = [[NSLayoutManager alloc] init];
 
 	NSFont *font = [attrs objectForKey:NSFontAttributeName];
-	NSColor *color = [[attrs objectForKey:NSForegroundColorAttributeName] colorUsingColorSpaceName:NSDeviceRGBColorSpace device:nil];
+	NSColor *color = [[attrs objectForKey:NSForegroundColorAttributeName] colorUsingColorSpace:[NSColorSpace deviceRGBColorSpace]];
 	NSFontTraitMask traits = [fontManager traitsOfFont:font];
 	NSNumber *underlineStyle = [attrs objectForKey:NSUnderlineStyleAttributeName];
 	NSNumber *strokeWidth = [attrs objectForKey:NSStrokeWidthAttributeName];
@@ -989,7 +986,7 @@ static NSData *ConvertImageToPICT(NSImage *image) {
 static NSData *MacPICTDataFromPasteboard(NSPasteboard *pboard)
 {
 	// check if there's any PICT data on the pasteboard
-	NSData *pictData = DataFromPasteboard(pboard, (NSString *)kUTTypePICT);
+	NSData *pictData = DataFromPasteboard(pboard, kPictUTI);
 
 	if (pictData)
 		return pictData;
@@ -1063,7 +1060,7 @@ static void WriteDataToMacClipboard(NSData *pbData, uint32_t type)
 
 	// Allocate space for new scrap in MacOS side
 	M68kRegisters r;
-	r.d[0] = [pbData length];
+	r.d[0] = (uint32)[pbData length];
 	Execute68kTrap(0xa71e, &r);				// NewPtrSysClear()
 	uint32_t scrap_area = r.a[0];
 
@@ -1089,7 +1086,7 @@ static void WriteDataToMacClipboard(NSData *pbData, uint32_t type)
 
 		if (proc_area) {
 			Host2Mac_memcpy(proc_area, proc, sizeof(proc));
-			WriteMacInt32(proc_area + 4, [pbData length]);
+			WriteMacInt32(proc_area + 4, (uint32)[pbData length]);
 			WriteMacInt32(proc_area + 10, type);
 			WriteMacInt32(proc_area + 16, scrap_area);
 			we_put_this_data = true;
@@ -1132,12 +1129,13 @@ static void ConvertHostPasteboardToMacScrap()
 		WriteDataToMacClipboard(pictData, TYPE_PICT);
 
 	for (NSString *eachType in [g_pboard types]) {
-		if (UTTypeConformsTo((CFStringRef)eachType, kUTTypeText)) {
+		UTType *eachUT = [UTType typeWithIdentifier:eachType];
+		if (eachUT != nil && [eachUT conformsToType:UTTypeText]) {
 			// text types are already handled
 			continue;
 		}
 
-		if (UTTypeConformsTo((CFStringRef)eachType, kUTTypeImage)) {
+		if (eachUT != nil && [eachUT conformsToType:UTTypeImage]) {
 			// image types are already handled
 			continue;
 		}
@@ -1165,7 +1163,7 @@ static void ConvertMacScrapToHostPasteboard()
 	[g_pboard clearContents];
 
 	for (NSNumber *eachTypeNum in g_macScrap) AUTORELEASE_POOL {
-		uint32_t eachType = [eachTypeNum integerValue];
+		uint32_t eachType = (uint32_t)[eachTypeNum integerValue];
 
 		if (eachType == TYPE_TEXT || eachType == TYPE_STYL || eachType == TYPE_UTXT || eachType == TYPE_UT16 || eachType == TYPE_USTL) {
 			if (wroteText)

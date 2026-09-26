@@ -179,7 +179,7 @@ static void print_options(const prefs_desc *list)
 					break;
 				case TYPE_INT32:
 					typestr = "NUMBER";
-					sprintf(numstr, "%d", PrefsFindInt32(list->name));
+					snprintf(numstr, sizeof(numstr), "%d", PrefsFindInt32(list->name));
 					defstr = numstr;
 					break;
 				default:
@@ -252,7 +252,7 @@ static void add_data(const char *name, prefs_type type, void *data, int size)
 
 void PrefsAddString(const char *name, const char *s)
 {
-	add_data(name, TYPE_STRING, (void *)s, strlen(s) + 1);
+	add_data(name, TYPE_STRING, (void *)s, (int)(strlen(s) + 1));
 }
 
 void PrefsAddBool(const char *name, bool b)
@@ -293,7 +293,7 @@ void PrefsReplaceString(const char *name, const char *s, int index)
 		free(p->data);
 		p->data = strdup(s);
 	} else
-		add_data(name, TYPE_STRING, (void *)s, strlen(s) + 1);
+		add_data(name, TYPE_STRING, (void *)s, (int)(strlen(s) + 1));
 }
 
 void PrefsReplaceBool(const char *name, bool b)
@@ -389,7 +389,7 @@ void LoadPrefsFromStream(FILE *f)
 	char line[256];
 	while(fgets(line, sizeof(line), f)) {
 		// Remove newline, if present
-		int len = strlen(line);
+		int len = (int)strlen(line);
 		if (len > 0 && line[len-1] == '\n') {
 			line[len-1] = '\0';
 			len--;
@@ -411,7 +411,7 @@ void LoadPrefsFromStream(FILE *f)
 		while (*p && isspace(*p)) p++;
 		char *keyword = line;
 		char *value = p;
-		int32 i = atol(value);
+		int32 i = (int32)atol(value);
 
 		// Look for keyword first in prefs item list
 		const prefs_desc *desc = find_prefs_desc(keyword);

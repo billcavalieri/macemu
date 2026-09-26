@@ -503,7 +503,7 @@ void sheepshaver_cpu::interrupt(uint32 entry)
 	uint32 saved_sp = gpr(1);
 
 	// Initialize stack pointer to SheepShaver alternate stack base
-	gpr(1) = SignalStackBase() - 64;
+	gpr(1) = (uint32)(SignalStackBase() - 64);
 
 	// Build trampoline to return from interrupt
 	SheepVar32 trampoline = POWERPC_EXEC_RETURN;
@@ -797,7 +797,7 @@ static void dump_log(void)
 
 static int read_mem(bfd_vma memaddr, bfd_byte *myaddr, int length, struct disassemble_info *info)
 {
-	Mac2Host_memcpy(myaddr, memaddr, length);
+	Mac2Host_memcpy(myaddr, (uint32)memaddr, length);
 	return 0;
 }
 
@@ -1316,22 +1316,22 @@ void sheepshaver_cpu::execute_native_op(uint32 selector)
 		EtherIRQ();
 		break;
 	case NATIVE_ETHER_INIT:
-		gpr(3) = InitStreamModule((void *)gpr(3));
+		gpr(3) = InitStreamModule((void *)(uintptr)gpr(3));
 		break;
 	case NATIVE_ETHER_TERM:
 		TerminateStreamModule();
 		break;
 	case NATIVE_ETHER_OPEN:
-		gpr(3) = ether_open((queue_t *)gpr(3), (void *)gpr(4), gpr(5), gpr(6), (void*)gpr(7));
+		gpr(3) = ether_open((queue_t *)Mac2HostAddr(gpr(3)), (void *)(uintptr)gpr(4), gpr(5), gpr(6), (void *)(uintptr)gpr(7));
 		break;
 	case NATIVE_ETHER_CLOSE:
-		gpr(3) = ether_close((queue_t *)gpr(3), gpr(4), (void *)gpr(5));
+		gpr(3) = ether_close((queue_t *)Mac2HostAddr(gpr(3)), gpr(4), (void *)(uintptr)gpr(5));
 		break;
 	case NATIVE_ETHER_WPUT:
-		gpr(3) = ether_wput((queue_t *)gpr(3), (mblk_t *)gpr(4));
+		gpr(3) = ether_wput((queue_t *)Mac2HostAddr(gpr(3)), (mblk_t *)Mac2HostAddr(gpr(4)));
 		break;
 	case NATIVE_ETHER_RSRV:
-		gpr(3) = ether_rsrv((queue_t *)gpr(3));
+		gpr(3) = ether_rsrv((queue_t *)Mac2HostAddr(gpr(3)));
 		break;
 	case NATIVE_NQD_SYNC_HOOK:
 		gpr(3) = NQD_sync_hook(gpr(3));

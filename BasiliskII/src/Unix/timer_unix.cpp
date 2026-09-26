@@ -33,19 +33,12 @@
 #endif
 
 #if defined(__MACH__)
-#include <mach/mach.h>
-#include <mach/clock.h>
-
-static clock_serv_t host_clock;
-static bool host_clock_inited = false;
+#include <time.h>
 
 static inline void mach_current_time(tm_time_t &t) {
-	if(!host_clock_inited) {
-		host_get_clock_service(mach_host_self(), SYSTEM_CLOCK, &host_clock);
-		host_clock_inited = true;
-	}
-	
-	clock_get_time(host_clock, (mach_timespec_t *)&t);
+	uint64_t ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+	t.tv_sec = (unsigned int)(ns / 1000000000ull);
+	t.tv_nsec = (clock_res_t)(ns % 1000000000ull);
 }
 #else
 tm_time_t host_clock;
@@ -84,7 +77,7 @@ void Microseconds(uint32 &hi, uint32 &lo)
 	#endif
 #endif
 	hi = tl >> 32;
-	lo = tl;
+	lo = (uint32)tl;
 }
 
 
@@ -229,7 +222,7 @@ int32 timer_host2mac_time(tm_time_t hosttime)
 		uint64 t = (uint64)hosttime.tv_sec * 1000000 + hosttime.tv_usec;
 #endif
 		if (t > 0x7fffffff)
-			return t / 1000;	// Time in milliseconds
+			return (int32)(t / 1000);	// Time in milliseconds
 		else
 			return -t;			// Time in negative microseconds
 	}

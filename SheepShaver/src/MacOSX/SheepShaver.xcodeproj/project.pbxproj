@@ -16,17 +16,17 @@
 		082AC22D14AA52E900071F5E /* prefs_editor_dummy.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 082AC22C14AA52E900071F5E /* prefs_editor_dummy.cpp */; };
 		083E370C16EFE85000CCCA59 /* disk_sparsebundle.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 083E370A16EFE85000CCCA59 /* disk_sparsebundle.cpp */; };
 		083E372216EFE87200CCCA59 /* tinyxml2.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 083E372016EFE87200CCCA59 /* tinyxml2.cpp */; };
-		0846E4B114B1264700574779 /* ieeefp.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDF714A99EEF000B1711 /* ieeefp.cpp */; };
+		0846E4B114B1264700574779 /* ieeefp.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDF714A99EEF000B1711 /* ieeefp.cpp */; settings = {EXCLUDED_ARCHS = arm64; }; };
 		0846E4B314B1264F00574779 /* mathlib.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDFD14A99EEF000B1711 /* mathlib.cpp */; };
 		0846E4B514B1265500574779 /* utils-cpuinfo.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CE0214A99EEF000B1711 /* utils-cpuinfo.cpp */; };
-		0846E4B614B1265A00574779 /* ppc-translate.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDF014A99EEF000B1711 /* ppc-translate.cpp */; };
-		0846E4B814B1266000574779 /* ppc-jit.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDEB14A99EEF000B1711 /* ppc-jit.cpp */; };
+		0846E4B614B1265A00574779 /* ppc-translate.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDF014A99EEF000B1711 /* ppc-translate.cpp */; settings = {EXCLUDED_ARCHS = arm64; }; };
+		0846E4B814B1266000574779 /* ppc-jit.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDEB14A99EEF000B1711 /* ppc-jit.cpp */; settings = {EXCLUDED_ARCHS = arm64; }; };
 		0846E4B914B1266600574779 /* ppc-execute.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDE814A99EEF000B1711 /* ppc-execute.cpp */; };
-		0846E4BC14B1267200574779 /* ppc-dyngen.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDE614A99EEF000B1711 /* ppc-dyngen.cpp */; };
+		0846E4BC14B1267200574779 /* ppc-dyngen.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDE614A99EEF000B1711 /* ppc-dyngen.cpp */; settings = {EXCLUDED_ARCHS = arm64; }; };
 		0846E4BE14B1267A00574779 /* ppc-decode.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDE414A99EEF000B1711 /* ppc-decode.cpp */; };
 		0846E4C014B1267F00574779 /* ppc-cpu.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDE214A99EEF000B1711 /* ppc-cpu.cpp */; };
-		0846E4C114B1268B00574779 /* jit-cache.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDCD14A99EEF000B1711 /* jit-cache.cpp */; };
-		0846E4C214B1269600574779 /* basic-dyngen.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDC514A99EEF000B1711 /* basic-dyngen.cpp */; };
+		0846E4C114B1268B00574779 /* jit-cache.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDCD14A99EEF000B1711 /* jit-cache.cpp */; settings = {EXCLUDED_ARCHS = arm64; }; };
+		0846E4C214B1269600574779 /* basic-dyngen.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDC514A99EEF000B1711 /* basic-dyngen.cpp */; settings = {EXCLUDED_ARCHS = arm64; }; };
 		0846E51314B128ED00574779 /* sheepshaver_glue.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CDBB14A99EEF000B1711 /* sheepshaver_glue.cpp */; };
 		0856CFE614A99EF0000B1711 /* disk.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CD7D14A99EEF000B1711 /* disk.cpp */; };
 		0856CFEC14A99EF0000B1711 /* scsi_dummy.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CD8414A99EEF000B1711 /* scsi_dummy.cpp */; };
@@ -71,7 +71,6 @@
 		087B91BF1B780FFC00825F7F /* video_blit.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 087B91B91B780FFC00825F7F /* video_blit.cpp */; };
 		087B91C01B780FFC00825F7F /* vm_alloc.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 087B91BC1B780FFC00825F7F /* vm_alloc.cpp */; };
 		08CD42DC14B7B85B009CA2A2 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 08CD42DB14B7B85B009CA2A2 /* Cocoa.framework */; };
-		08CD42E814B7B8AA009CA2A2 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 08CD42E714B7B8AA009CA2A2 /* Carbon.framework */; };
 		3D2C25B5221092BA00B635DE /* SheepVM.icns in Resources */ = {isa = PBXBuildFile; fileRef = 3D2C25B4221092BA00B635DE /* SheepVM.icns */; };
 		520A161330056291005DCC43 /* SheepShaver.icon in Resources */ = {isa = PBXBuildFile; fileRef = 520A161230056291005DCC43 /* SheepShaver.icon */; };
 		5D2143D524B2DD90008BB372 /* bincue.h in Headers */ = {isa = PBXBuildFile; fileRef = 5D2143D424B2DD90008BB372 /* bincue.h */; };
@@ -103,16 +102,22 @@
 		A1B2C3D4E5F60718293A4B02 /* sheepforce.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B01 /* sheepforce.cpp */; };
 		A1B2C3D4E5F60718293A4B04 /* qt_codec.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */; };
 		A1B2C3D4E5F60718293A4B06 /* sheepforce_metal.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B05 /* sheepforce_metal.mm */; };
+		A1B2C3D4E5F60718293A4B08 /* SheepForce.metal in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B07 /* SheepForce.metal */; };
 		A1B2C3D4E5F60718293A4B0A /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B09 /* QuartzCore.framework */; };
 		A1BEEF0120CF7E6D00FBE901 /* video_macos.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1BEEF0020CF7E6D00FBE901 /* video_macos.mm */; };
 		A1BEEF1020CF7E6D00FBE902 /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1BEEF2020CF7E6D00FBE902 /* AudioToolbox.framework */; };
 		A1BEEF1120CF7E6D00FBE902 /* CoreAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1BEEF2120CF7E6D00FBE902 /* CoreAudio.framework */; };
 		A1BEEF3020CF7E6D00FBE903 /* VMLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BEEF4020CF7E6D00FBE903 /* VMLibraryView.swift */; };
 		A1BEEF3120CF7E6D00FBE903 /* VMSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BEEF4120CF7E6D00FBE903 /* VMSettingsView.swift */; };
-		A1BEEF3220CF7E6D00FBE903 /* DisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BEEF4220CF7E6D00FBE903 /* DisplayView.swift */; };
 		A1BEEF3320CF7E6D00FBE903 /* SheepHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BEEF4320CF7E6D00FBE903 /* SheepHost.swift */; };
+		A1BEEF3420CF7E6D00FBE904 /* GuestDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BEEF4420CF7E6D00FBE904 /* GuestDisplayView.swift */; };
+		A1BEEF3520CF7E6D00FBE904 /* SheepWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BEEF4520CF7E6D00FBE904 /* SheepWindowController.swift */; };
+		A1BEEF3620CF7E6D00FBE904 /* PrefsBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BEEF4620CF7E6D00FBE904 /* PrefsBridge.swift */; };
+		A1BEEF3720CF7E6D00FBE904 /* VirtualMachineDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BEEF4720CF7E6D00FBE904 /* VirtualMachineDocument.swift */; };
+		A1BEEF3820CF7E6D00FBE904 /* ClassicMacOS.svg in Resources */ = {isa = PBXBuildFile; fileRef = A1BEEF4820CF7E6D00FBE904 /* ClassicMacOS.svg */; };
+		A1BEEF4A20CF7E6D00FBE905 /* sheep_baa_chime.wav in Resources */ = {isa = PBXBuildFile; fileRef = A1BEEF4920CF7E6D00FBE905 /* sheep_baa_chime.wav */; };
 		A7B1921418C35D4700791D8D /* DiskType.m in Sources */ = {isa = PBXBuildFile; fileRef = A7B1921318C35D4700791D8D /* DiskType.m */; };
-		E4202603241250EE000508DF /* runtool.c in Sources */ = {isa = PBXBuildFile; fileRef = E4202602241250EE000508DF /* runtool.c */; };
+		E4202603241250EE000508DF /* runtool.c in Sources */ = {isa = PBXBuildFile; fileRef = E4202602241250EE000508DF /* runtool.c */; settings = {COMPILER_FLAGS = "-x objective-c"; }; };
 		E420260524125182000508DF /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E420260424125182000508DF /* Security.framework */; };
 		E420260B24125442000508DF /* etherhelpertool in Resources */ = {isa = PBXBuildFile; fileRef = E420260A2412540D000508DF /* etherhelpertool */; };
 		E444DC1520C8F06700DD29C9 /* pict.c in Sources */ = {isa = PBXBuildFile; fileRef = E444DC1420C8F06700DD29C9 /* pict.c */; };
@@ -343,7 +348,6 @@
 		087B91BC1B780FFC00825F7F /* vm_alloc.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = vm_alloc.cpp; path = ../CrossPlatform/vm_alloc.cpp; sourceTree = SOURCE_ROOT; };
 		087B91BD1B780FFC00825F7F /* vm_alloc.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = vm_alloc.h; path = ../CrossPlatform/vm_alloc.h; sourceTree = SOURCE_ROOT; };
 		08CD42DB14B7B85B009CA2A2 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = /System/Library/Frameworks/Cocoa.framework; sourceTree = "<absolute>"; };
-		08CD42E714B7B8AA009CA2A2 /* Carbon.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Carbon.framework; path = /System/Library/Frameworks/Carbon.framework; sourceTree = "<absolute>"; };
 		3D2C25B4221092BA00B635DE /* SheepVM.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = SheepVM.icns; sourceTree = "<group>"; };
 		520A161230056291005DCC43 /* SheepShaver.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = SheepShaver.icon; sourceTree = "<group>"; };
 		5D2143D424B2DD90008BB372 /* bincue.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = bincue.h; sourceTree = "<group>"; };
@@ -387,19 +391,21 @@
 		A1BEEF2120CF7E6D00FBE902 /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = /System/Library/Frameworks/CoreAudio.framework; sourceTree = "<absolute>"; };
 		A1BEEF4020CF7E6D00FBE903 /* VMLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VMLibraryView.swift; path = SheepApp/VMLibraryView.swift; sourceTree = "<group>"; };
 		A1BEEF4120CF7E6D00FBE903 /* VMSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VMSettingsView.swift; path = SheepApp/VMSettingsView.swift; sourceTree = "<group>"; };
-		A1BEEF4220CF7E6D00FBE903 /* DisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DisplayView.swift; path = SheepApp/DisplayView.swift; sourceTree = "<group>"; };
 		A1BEEF4320CF7E6D00FBE903 /* SheepHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SheepHost.swift; path = SheepApp/SheepHost.swift; sourceTree = "<group>"; };
+		A1BEEF4420CF7E6D00FBE904 /* GuestDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = GuestDisplayView.swift; path = SheepApp/GuestDisplayView.swift; sourceTree = "<group>"; };
+		A1BEEF4520CF7E6D00FBE904 /* SheepWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SheepWindowController.swift; path = SheepApp/SheepWindowController.swift; sourceTree = "<group>"; };
+		A1BEEF4620CF7E6D00FBE904 /* PrefsBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PrefsBridge.swift; path = SheepApp/PrefsBridge.swift; sourceTree = "<group>"; };
+		A1BEEF4720CF7E6D00FBE904 /* VirtualMachineDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VirtualMachineDocument.swift; path = SheepApp/VirtualMachineDocument.swift; sourceTree = "<group>"; };
+		A1BEEF4820CF7E6D00FBE904 /* ClassicMacOS.svg */ = {isa = PBXFileReference; lastKnownFileType = image.svg; name = ClassicMacOS.svg; path = SheepApp/ClassicMacOS.svg; sourceTree = "<group>"; };
+		A1BEEF4920CF7E6D00FBE905 /* sheep_baa_chime.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; name = sheep_baa_chime.wav; path = SheepApp/sheep_baa_chime.wav; sourceTree = "<group>"; };
 		A7B1921218C35D4700791D8D /* DiskType.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DiskType.h; sourceTree = "<group>"; };
 		A7B1921318C35D4700791D8D /* DiskType.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = DiskType.m; sourceTree = "<group>"; };
-		E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = video_sdl2.cpp; path = ../../../BasiliskII/src/SDL/video_sdl2.cpp; sourceTree = "<group>"; };
-		E4150D1120D557820077C51A /* SDL2.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SDL2.framework; sourceTree = "<group>"; };
 		E41936C220CFE64D003A7654 /* SDLMain.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = SDLMain.h; path = ../../../BasiliskII/src/SDL/SDLMain.h; sourceTree = "<group>"; };
 		E41936C320CFE64D003A7654 /* SDLMain.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = SDLMain.m; path = ../../../BasiliskII/src/SDL/SDLMain.m; sourceTree = "<group>"; };
 		E4202600241250E2000508DF /* etherhelpertool.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = etherhelpertool.c; sourceTree = "<group>"; };
 		E4202602241250EE000508DF /* runtool.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = runtool.c; sourceTree = "<group>"; };
 		E420260424125182000508DF /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		E420260A2412540D000508DF /* etherhelpertool */ = {isa = PBXFileReference; lastKnownFileType = text; path = etherhelpertool; sourceTree = BUILT_PRODUCTS_DIR; };
-		E420910020D0C4FA0094654F /* SDL2.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SDL2.framework; sourceTree = "<group>"; };
 		E4302EE21FBFE7FA00A5B500 /* lowmem.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = lowmem.c; path = Darwin/lowmem.c; sourceTree = "<group>"; };
 		E444DC1420C8F06700DD29C9 /* pict.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = pict.c; path = ../pict.c; sourceTree = "<group>"; };
 		E447066F25D904D500EA2C14 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
@@ -467,7 +473,6 @@
 				A1BEEF1120CF7E6D00FBE902 /* CoreAudio.framework in Frameworks */,
 				E447067025D904D500EA2C14 /* Metal.framework in Frameworks */,
 				A1B2C3D4E5F60718293A4B0A /* QuartzCore.framework in Frameworks */,
-				08CD42E814B7B8AA009CA2A2 /* Carbon.framework in Frameworks */,
 			);
 		};
 		A10F9210BC1000000000000B /* Frameworks */ = {
@@ -504,7 +509,6 @@
 			isa = PBXGroup;
 			children = (
 				520A161230056291005DCC43 /* SheepShaver.icon */,
-				E4150D1120D557820077C51A /* SDL2.framework */,
 				0856CCC814A99E30000B1711 /* Sources */,
 				08CD42DF14B7B865009CA2A2 /* Frameworks */,
 				0856CCC214A99E1C000B1711 /* Products */,
@@ -831,12 +835,16 @@
 				A1BEEF0020CF7E6D00FBE901 /* video_macos.mm */,
 				A1BEEF4020CF7E6D00FBE903 /* VMLibraryView.swift */,
 				A1BEEF4120CF7E6D00FBE903 /* VMSettingsView.swift */,
-				A1BEEF4220CF7E6D00FBE903 /* DisplayView.swift */,
 				A1BEEF4320CF7E6D00FBE903 /* SheepHost.swift */,
+				A1BEEF4420CF7E6D00FBE904 /* GuestDisplayView.swift */,
+				A1BEEF4520CF7E6D00FBE904 /* SheepWindowController.swift */,
+				A1BEEF4620CF7E6D00FBE904 /* PrefsBridge.swift */,
+				A1BEEF4720CF7E6D00FBE904 /* VirtualMachineDocument.swift */,
+				A1BEEF4820CF7E6D00FBE904 /* ClassicMacOS.svg */,
+				A1BEEF4920CF7E6D00FBE905 /* sheep_baa_chime.wav */,
 				A1B2C3D4E5F60718293A4B07 /* SheepForce.metal */,
 				5DDE94F82255C70C004D0E79 /* MacOSX_sound_if.h */,
 				5DDE94FA2255C712004D0E79 /* MacOSX_sound_if.cpp */,
-				E413A40220CF7E6D00FBE967 /* video_sdl2.cpp */,
 			);
 			name = MacOSX;
 			sourceTree = "<group>";
@@ -982,8 +990,6 @@
 				E447066F25D904D500EA2C14 /* Metal.framework */,
 				A1B2C3D4E5F60718293A4B09 /* QuartzCore.framework */,
 				E420260424125182000508DF /* Security.framework */,
-				E420910020D0C4FA0094654F /* SDL2.framework */,
-				08CD42E714B7B8AA009CA2A2 /* Carbon.framework */,
 				08CD42DB14B7B85B009CA2A2 /* Cocoa.framework */,
 				A1BEEF2020CF7E6D00FBE902 /* AudioToolbox.framework */,
 				A1BEEF2120CF7E6D00FBE902 /* CoreAudio.framework */,
@@ -1052,7 +1058,6 @@
 				0856CCBE14A99E1C000B1711 /* Sources */,
 				0856CCBF14A99E1C000B1711 /* Frameworks */,
 				E413A40820CF7EF800FBE967 /* Embed Frameworks */,
-				08CD3F3214B665E1009CA2A2 /* Preprocess Info.plist */,
 			);
 			buildRules = (
 			);
@@ -1122,20 +1127,13 @@
 				0856D05914A99EF1000B1711 /* SheepShaver.icns in Resources */,
 				E44C460F20D262B0000583AE /* COPYRIGHT in Resources */,
 				3D2C25B5221092BA00B635DE /* SheepVM.icns in Resources */,
+				A1BEEF3820CF7E6D00FBE904 /* ClassicMacOS.svg in Resources */,
+				A1BEEF4A20CF7E6D00FBE905 /* sheep_baa_chime.wav in Resources */,
 			);
 		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		08CD3F3214B665E1009CA2A2 /* Preprocess Info.plist */ = {
-			isa = PBXShellScriptBuildPhase;
-			name = "Preprocess Info.plist";
-			shellPath = /bin/sh;
-			shellScript = (
-				"sed -i '' 's/@PACKAGE_VERSION@/2.5/g' \"${BUILT_PRODUCTS_DIR}/${INFOPLIST_PATH}\"",
-				"",
-			);
-		};
 		E4202606241251C6000508DF /* Build etherhelpertool */ = {
 			isa = PBXShellScriptBuildPhase;
 			inputPaths = (
@@ -1161,10 +1159,18 @@
 				"OUT=\"$BUILT_PRODUCTS_DIR/etherhelpertool\"",
 				"TMP=\"${TARGET_TEMP_DIR:-/tmp}/etherhelpertool.build\"",
 				"rm -f \"$TMP\" \"$OUT\"",
-				"cc $ARCH_FLAGS etherhelpertool.c -framework Security -o \"$TMP\"",
+				"cc $ARCH_FLAGS -sectcreate __TEXT __info_plist \"$SRCROOT/etherhelper-Info.plist\" etherhelpertool.c -o \"$TMP\"",
 				"mv -f \"$TMP\" \"$OUT\"",
+				"HELPER_ID=com.sheepshaver.etherhelper",
 				"if [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ] && [ \"$CODE_SIGNING_ALLOWED\" != NO ]; then",
-				"\tcodesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --identifier com.billcavalieri.sheepshaver.etherhelpertool --options runtime \"$OUT\"",
+				"\tcodesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --identifier \"$HELPER_ID\" --options runtime \"$OUT\"",
+				"fi",
+				"APP=\"$BUILT_PRODUCTS_DIR/$WRAPPER_NAME\"",
+				"mkdir -p \"$APP/Contents/Library/LaunchServices\" \"$APP/Contents/Library/LaunchDaemons\"",
+				"cp -f \"$OUT\" \"$APP/Contents/Library/LaunchServices/$HELPER_ID\"",
+				"cp -f \"$SRCROOT/com.sheepshaver.etherhelper.plist\" \"$APP/Contents/Library/LaunchDaemons/$HELPER_ID.plist\"",
+				"if [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ] && [ \"$CODE_SIGNING_ALLOWED\" != NO ]; then",
+				"\tcodesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --identifier \"$HELPER_ID\" --options runtime \"$APP/Contents/Library/LaunchServices/$HELPER_ID\"",
 				"fi",
 				"",
 			);
@@ -1210,6 +1216,7 @@
 				A1B2C3D4E5F60718293A4B02 /* sheepforce.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B04 /* qt_codec.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B06 /* sheepforce_metal.mm in Sources */,
+				A1B2C3D4E5F60718293A4B08 /* SheepForce.metal in Sources */,
 				0856D00914A99EF0000B1711 /* macos_util.cpp in Sources */,
 				A10F9210BC10000000000012 /* nw_boot_contract.cpp in Sources */,
 				A10F9210BC10000000000022 /* nw_io.cpp in Sources */,
@@ -1252,8 +1259,11 @@
 				A1BEEF0120CF7E6D00FBE901 /* video_macos.mm in Sources */,
 				A1BEEF3020CF7E6D00FBE903 /* VMLibraryView.swift in Sources */,
 				A1BEEF3120CF7E6D00FBE903 /* VMSettingsView.swift in Sources */,
-				A1BEEF3220CF7E6D00FBE903 /* DisplayView.swift in Sources */,
 				A1BEEF3320CF7E6D00FBE903 /* SheepHost.swift in Sources */,
+				A1BEEF3420CF7E6D00FBE904 /* GuestDisplayView.swift in Sources */,
+				A1BEEF3520CF7E6D00FBE904 /* SheepWindowController.swift in Sources */,
+				A1BEEF3620CF7E6D00FBE904 /* PrefsBridge.swift in Sources */,
+				A1BEEF3720CF7E6D00FBE904 /* VirtualMachineDocument.swift in Sources */,
 				0856D09814A99EF1000B1711 /* ether_unix.cpp in Sources */,
 				0856D0AA14A99EF1000B1711 /* main_unix.cpp in Sources */,
 				0856D10614A99EF1000B1711 /* prefs_unix.cpp in Sources */,
@@ -1354,6 +1364,7 @@
 					../include,
 					../Unix/dyngen_precompiled,
 				);
+				"EXCLUDED_SOURCE_FILE_NAMES[arch=arm64]" = "ieeefp.cpp ppc-translate.cpp ppc-jit.cpp ppc-dyngen.cpp jit-cache.cpp basic-dyngen.cpp";
 				INSTALL_PATH = /usr/local/lib;
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
@@ -1397,6 +1408,7 @@
 					../include,
 					../Unix/dyngen_precompiled,
 				);
+				"EXCLUDED_SOURCE_FILE_NAMES[arch=arm64]" = "ieeefp.cpp ppc-translate.cpp ppc-jit.cpp ppc-dyngen.cpp jit-cache.cpp basic-dyngen.cpp";
 				INSTALL_PATH = /usr/local/lib;
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
@@ -1482,6 +1494,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_PARAMETER = NO;
 				GCC_WARN_UNUSED_VARIABLE = YES;
+				ONLY_ACTIVE_ARCH = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 			};
 			name = Release;
@@ -1547,18 +1560,34 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.6;
 				OTHER_CFLAGS = "";
 				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
-				OTHER_LDFLAGS = "";
-				"OTHER_LDFLAGS[arch=arm64]" = "-lkpx_cpu";
+				OTHER_LDFLAGS = (
+					"-framework",
+					ServiceManagement,
+					"-framework",
+					UniformTypeIdentifiers,
+				);
+				"OTHER_LDFLAGS[arch=arm64]" = (
+					"-lkpx_cpu",
+					"-framework",
+					ServiceManagement,
+					"-framework",
+					UniformTypeIdentifiers,
+				);
 				"OTHER_LDFLAGS[arch=x86_64]" = (
 					"-lkpx_cpu",
 					"-pagezero_size",
 					0x3000,
+					"-framework",
+					ServiceManagement,
+					"-framework",
+					UniformTypeIdentifiers,
 				);
 				PRECOMPS_INCLUDE_HEADERS_FROM_BUILT_PRODUCTS_DIR = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = com.billcavalieri.sheepshaver;
 				PRODUCT_NAME = SheepShaver;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SKIP_INSTALL = NO;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
 				VALID_ARCHS = "x86_64 arm64";
 				WARNING_LDFLAGS = "";
@@ -1625,18 +1654,34 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.6;
 				OTHER_CFLAGS = "";
 				OTHER_CPLUSPLUSFLAGS = "$(OTHER_CFLAGS)";
-				OTHER_LDFLAGS = "";
-				"OTHER_LDFLAGS[arch=arm64]" = "-lkpx_cpu";
+				OTHER_LDFLAGS = (
+					"-framework",
+					ServiceManagement,
+					"-framework",
+					UniformTypeIdentifiers,
+				);
+				"OTHER_LDFLAGS[arch=arm64]" = (
+					"-lkpx_cpu",
+					"-framework",
+					ServiceManagement,
+					"-framework",
+					UniformTypeIdentifiers,
+				);
 				"OTHER_LDFLAGS[arch=x86_64]" = (
 					"-lkpx_cpu",
 					"-pagezero_size",
 					0x3000,
+					"-framework",
+					ServiceManagement,
+					"-framework",
+					UniformTypeIdentifiers,
 				);
 				PRECOMPS_INCLUDE_HEADERS_FROM_BUILT_PRODUCTS_DIR = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = com.billcavalieri.sheepshaver;
 				PRODUCT_NAME = SheepShaver;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SKIP_INSTALL = NO;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
 				VALID_ARCHS = "x86_64 arm64";
 			};

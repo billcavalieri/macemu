@@ -37,4 +37,12 @@ extern void ADBInterrupt(void);
 
 extern void ADBSetRelMouseMode(bool relative);
 
+#ifdef POWERPC_ROM
+extern void ADBSetAbsMouse(int x, int y);
+extern void ADBInstallAbsCursor(void);
+extern void ADBRemoveAbsCursor(void);
+extern void ADBAbsMousePulse(void);
+extern int32 ADBAbsMouseTick(uint32 *task);
+#endif
+
 #endif

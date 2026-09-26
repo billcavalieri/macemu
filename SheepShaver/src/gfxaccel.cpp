@@ -179,6 +179,8 @@ void NQD_invrect(uint32 p)
 	    bpp >= 1 &&
 	    SheepForceTryInvert(dest, bpp, dest_row_bytes, width * bpp, height))
 		return;
+	if (SheepForceEnabled())
+		SheepForceFlushCPU(dest, dest_row_bytes, width * bpp, height);
 	width *= bpp;
 	switch (bpp) {
 	case 1:
@@ -298,6 +300,8 @@ void NQD_fillrect(uint32 p)
 	    bpp >= 1 &&
 	    SheepForceTryFill(dest, bpp, dest_row_bytes, width * bpp, height, color))
 		return;
+	if (SheepForceEnabled())
+		SheepForceFlushCPU(dest, dest_row_bytes, width * bpp, height);
 	width *= bpp;
 	switch (bpp) {
 	case 1:
@@ -464,9 +468,10 @@ void NQD_bitblt(uint32 p)
 	nqd_mark_written(dst0, width, height, dst_bpp);
 	if (!down && src_bpp == dst_bpp && SheepForceEnabled() &&
 	    SheepForceOwns(ReadMacInt32(p + acclDestBaseAddr)) &&
-	    SheepForceOwns(ReadMacInt32(p + acclSrcBaseAddr)) &&
 	    SheepForceTryBlit(dst, src, src_bpp, dst_row_bytes, src_row_bytes, width * src_bpp, height))
 		return;
+	if (SheepForceEnabled())
+		SheepForceFlushCPU(dst0, dst_row_bytes, width * dst_bpp, height);
 	const int sstep = down ? -src_row_bytes : src_row_bytes;
 	const int dstep = down ? -dst_row_bytes : dst_row_bytes;
 	if (src_bpp == dst_bpp) {
@@ -571,12 +576,27 @@ bool NQD_bitblt_hook(uint32 p)
 
 	const uint32 src_ps = ReadMacInt32(p + acclSrcPixelSize);
 	const uint32 dst_ps = ReadMacInt32(p + acclDestPixelSize);
-	/* 8/16-bit Appearance chrome into a 32-bit FB. Same-depth 32-bit
-	 * srcCopy stays in ROM so ShieldCursor still wraps window blits. */
+	/* 8/16-bit Appearance chrome into a 32-bit FB, and same-depth
+	 * 32-bit srcCopy when the blit misses CrsrRect (0x83C). A hit
+	 * stays in the ROM so ShieldCursor still wraps it. */
 	const int expand32 = dst_ps == 32 && (src_ps == 8 || src_ps == 15 || src_ps == 16);
+	int hits_cursor = 0;
+	if (dst_ps == 32 && src_ps == 32) {
+		int bt = (int)(int16)ReadMacInt16(p + acclDestRect + 0);
+		int bl = (int)(int16)ReadMacInt16(p + acclDestRect + 2);
+		int bb = (int)(int16)ReadMacInt16(p + acclDestRect + 4);
+		int br = (int)(int16)ReadMacInt16(p + acclDestRect + 6);
+		int ct = (int)(int16)ReadMacInt16(0x83c);
+		int cl = (int)(int16)ReadMacInt16(0x83e);
+		int cb = (int)(int16)ReadMacInt16(0x840);
+		int cr = (int)(int16)ReadMacInt16(0x842);
+		if (cb > ct && cr > cl && bl < cr && cl < br && bt < cb && ct < bb)
+			hits_cursor = 1;
+	}
+	const int same32 = dst_ps == 32 && src_ps == 32 && !hits_cursor;
 	if (ReadMacInt32(p + 0x018) + ReadMacInt32(p + 0x128) == 0 &&
 		ReadMacInt32(p + 0x130) == 0 &&
-		expand32 &&
+		(expand32 || same32) &&
 		(int32)(ReadMacInt32(p + acclSrcRowBytes) ^ ReadMacInt32(p + acclDestRowBytes)) >= 0 &&
 		ReadMacInt32(p + acclTransferMode) == 0 &&
 		(int32)ReadMacInt32(p + 0x15c) > 0) {
@@ -692,6 +712,8 @@ int NQD_copybits_expand(uint32 srcBits, uint32 dstBits, uint32 srcRect,
 				  (uint32)(dest_Y * dst_row + dest_X * dst_bpp));
 	if (!src || !dst)
 		return 0;
+	if (SheepForceEnabled())
+		SheepForceFlushCPU(dst, dst_row, width * dst_bpp, height);
 	nqd_mark_written(dst, width, height, dst_bpp);
 	for (int y = 0; y < height; y++) {
 		if (src_bpp == 1) {

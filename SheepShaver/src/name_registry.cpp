@@ -55,7 +55,7 @@ static inline int16 RegistryPropertyCreate(uintptr arg1, const char *arg2, uintp
 static inline int16 RegistryPropertyCreateStr(uintptr arg1, const char *arg2, const char *arg3)
 {
 	SheepString arg3str(arg3);
-	return RegistryPropertyCreate(arg1, arg2, arg3str.addr(), strlen(arg3) + 1);
+	return RegistryPropertyCreate(arg1, arg2, arg3str.addr(), (uint32)(strlen(arg3) + 1));
 }
 
 // Video driver stub
@@ -108,11 +108,11 @@ static const char *cpu_node_name_for_pvr(void)
 static void FillCPUProperties(uint32 cpu_entry)
 {
 	SheepVar32 u32;
-	u32.set_value(CPUClockSpeed);
+	u32.set_value((uint32)CPUClockSpeed);
 	RegistryPropertyCreate(cpu_entry, "clock-frequency", u32.addr(), 4);
-	u32.set_value(BusClockSpeed);
+	u32.set_value((uint32)BusClockSpeed);
 	RegistryPropertyCreate(cpu_entry, "bus-frequency", u32.addr(), 4);
-	u32.set_value(TimebaseSpeed);
+	u32.set_value((uint32)TimebaseSpeed);
 	RegistryPropertyCreate(cpu_entry, "timebase-frequency", u32.addr(), 4);
 	u32.set_value(PVR);
 	RegistryPropertyCreate(cpu_entry, "cpu-version", u32.addr(), 4);
@@ -289,7 +289,7 @@ static void PatchNewWorldNameRegistry(uint32 device_tree)
 	RegistryPropertyCreate(device_tree, "#address-cells", u32.addr(), 4);
 	u32.set_value(1);
 	RegistryPropertyCreate(device_tree, "#size-cells", u32.addr(), 4);
-	u32.set_value(BusClockSpeed);
+	u32.set_value((uint32)BusClockSpeed);
 	RegistryPropertyCreate(device_tree, "clock-frequency", u32.addr(), 4);
 	RegistryPropertyCreateStr(device_tree, "model", nw_root_model());
 	RegistryPropertyCreateStr(device_tree, "compatible", nw_root_compatible());
@@ -387,7 +387,7 @@ void DoPatchNameRegistry(void)
 			return;
 		}
 
-		u32.set_value(BusClockSpeed);
+		u32.set_value((uint32)BusClockSpeed);
 		RegistryPropertyCreate(device_tree.addr(), "clock-frequency", u32.addr(), 4);
 		RegistryPropertyCreateStr(device_tree.addr(), "model", "Power Macintosh");
 

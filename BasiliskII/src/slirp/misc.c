@@ -18,9 +18,7 @@ int x_display = 0;
 int x_screen = 0;
 
 int
-show_x(buff, inso)
-	char *buff;
-	struct socket *inso;
+show_x(char * buff, struct socket * inso)
 {
 	if (x_port < 0) {
 		lprint("X Redir: X not being redirected.\r\n");
@@ -41,11 +39,7 @@ show_x(buff, inso)
  * XXX Allow more than one X redirection?
  */
 void
-redir_x(inaddr, start_port, display, screen)
-	u_int32_t inaddr;
-	int start_port;
-	int display;
-	int screen;
+redir_x(u_int32_t inaddr, int start_port, int display, int screen)
 {
 	int i;
 	
@@ -70,9 +64,7 @@ redir_x(inaddr, start_port, display, screen)
 
 #ifndef HAVE_INET_ATON
 int
-inet_aton(cp, ia)
-	const char *cp;
-	struct in_addr *ia;
+inet_aton(const char * cp, struct in_addr * ia)
 {
 	u_int32_t addr = inet_addr(cp);
 	if (addr == 0xffffffff)
@@ -86,7 +78,7 @@ inet_aton(cp, ia)
  * Get our IP address and put it in our_addr
  */
 void
-getouraddr()
+getouraddr(void)
 {
 	char buff[256];
 	struct hostent *he = NULL;
@@ -105,8 +97,7 @@ struct quehead {
 };
 
 void
-insque(a, b)
-	void *a, *b;
+insque(void * a, void * b)
 {
 	register struct quehead *element = (struct quehead *) a;
 	register struct quehead *head = (struct quehead *) b;
@@ -118,8 +109,7 @@ insque(a, b)
 }
 
 void
-remque(a)
-     void *a;
+remque(void * a)
 {
   register struct quehead *element = (struct quehead *) a;
   ((struct quehead *)(element->qh_link))->qh_rlink = element->qh_rlink;
@@ -132,12 +122,7 @@ remque(a)
 
 
 int
-add_exec(ex_ptr, do_pty, exec, addr, port)
-	struct ex_list **ex_ptr;
-	int do_pty;
-	char *exec;
-	int addr;
-	int port;
+add_exec(struct ex_list ** ex_ptr, int do_pty, char * exec, int addr, int port)
 {
 	struct ex_list *tmp_ptr;
 	
@@ -167,8 +152,7 @@ extern int sys_nerr;
 extern char *sys_errlist[];
 
 char *
-strerror(error)
-	int error;
+strerror(int error)
 {
 	if (error < sys_nerr)
 	   return sys_errlist[error];
@@ -182,10 +166,7 @@ strerror(error)
 #ifdef _WIN32
 
 int
-fork_exec(so, ex, do_pty)
-	struct socket *so;
-	char *ex;
-	int do_pty;
+fork_exec(struct socket * so, char * ex, int do_pty)
 {
     /* not implemented */
     return 0;
@@ -194,8 +175,7 @@ fork_exec(so, ex, do_pty)
 #else
 
 int
-slirp_openpty(amaster, aslave)
-     int *amaster, *aslave;
+slirp_openpty(int * amaster, int * aslave)
 {
 	register int master, slave;
 
@@ -270,10 +250,7 @@ slirp_openpty(amaster, aslave)
  * do_ptr = 2   Fork/exec using pty
  */
 int
-fork_exec(so, ex, do_pty)
-	struct socket *so;
-	char *ex;
-	int do_pty;
+fork_exec(struct socket * so, char * ex, int do_pty)
 {
 	int s;
 	struct sockaddr_in addr;
@@ -430,8 +407,7 @@ fork_exec(so, ex, do_pty)
 
 #ifndef HAVE_STRDUP
 char *
-strdup(str)
-	const char *str;
+strdup(const char * str)
 {
 	char *bptr;
 	
@@ -444,8 +420,7 @@ strdup(str)
 
 #if 0
 void
-snooze_hup(num)
-	int num;
+snooze_hup(int num)
 {
 	int s, ret;
 #ifndef NO_UNIX_SOCKETS
@@ -486,7 +461,7 @@ snooze_hup(num)
 	
 	
 void
-snooze()
+snooze(void)
 {
 	sigset_t s;
 	int i;
@@ -511,8 +486,7 @@ snooze()
 }
 
 void
-relay(s)
-	int s;
+relay(int s)
 {
 	char buf[8192];
 	int n;
@@ -622,7 +596,7 @@ lprint(va_alist) va_dcl
 		 * Remove \r's
 		 * otherwise you'll get ^M all over the file
 		 */
-		int len = strlen(format);
+		int len = (int)strlen(format);
 		char *bptr1, *bptr2;
 		
 		bptr1 = bptr2 = strdup(format);
@@ -640,8 +614,7 @@ lprint(va_alist) va_dcl
 }
 
 void
-add_emu(buff)
-	char *buff;
+add_emu(char * buff)
 {
 	u_int lport, fport;
 	u_int8_t tos = 0, emu = 0;
@@ -650,7 +623,7 @@ add_emu(buff)
 	struct emu_t *emup;
 	struct socket *so;
 	
-	if (sscanf(buff, "%256s %256s", buff2, buff1) != 2) {
+	if (sscanf(buff, "%255s %255s", buff2, buff1) != 2) {
 		lprint("Error: Bad arguments\r\n");
 		return;
 	}
@@ -663,9 +636,9 @@ add_emu(buff)
 		}
 	}
 	
-	if (sscanf(buff2, "%128[^:]:%128s", buff1, buff3) != 2) {
+	if (sscanf(buff2, "%128[^:]:%127s", buff1, buff3) != 2) {
 		buff3 = 0;
-		if (sscanf(buff2, "%256s", buff1) != 1) {
+		if (sscanf(buff2, "%255s", buff1) != 1) {
 			lprint("Error: Bad second argument\r\n");
 			return;
 		}
@@ -734,10 +707,7 @@ add_emu(buff)
  */
 
 int
-vsprintf_len(string, format, args)
-	char *string;
-	const char *format;
-	va_list args;
+vsprintf_len(char * string, const char * format, va_list args)
 {
 	vsprintf(string, format, args);
 	return strlen(string);
@@ -767,8 +737,7 @@ sprintf_len(va_alist) va_dcl
 #endif
 
 void
-u_sleep(usec)
-	int usec;
+u_sleep(int usec)
 {
 	struct timeval t;
 	fd_set fdset;
@@ -786,8 +755,7 @@ u_sleep(usec)
  */
 
 void
-fd_nonblock(fd)
-	int fd;
+fd_nonblock(int fd)
 {
 #if defined USE_FIONBIO && defined FIONBIO
 	ioctlsockopt_t opt = 1;
@@ -803,8 +771,7 @@ fd_nonblock(fd)
 }
 
 void
-fd_block(fd)
-	int fd;
+fd_block(int fd)
 {
 #if defined USE_FIONBIO && defined FIONBIO
 	ioctlsockopt_t opt = 0;
@@ -825,12 +792,7 @@ fd_block(fd)
  * invoke RSH
  */
 int
-rsh_exec(so,ns, user, host, args)
-	struct socket *so;
-	struct socket *ns;
-	char *user;
-	char *host;
-	char *args;
+rsh_exec(struct socket * so, struct socket * ns, char * user, char * host, char * args)
 {
 	int fd[2];
 	int fd0[2];

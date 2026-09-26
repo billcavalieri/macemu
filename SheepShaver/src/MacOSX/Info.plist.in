@@ -32,11 +32,11 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>@PACKAGE_VERSION@</string>
+	<string>2.5</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>@PACKAGE_VERSION@</string>
+	<string>2.5</string>
 	<key>CSResourcesFileMapped</key>
 	<true/>
 	<key>LSApplicationCategoryType</key>
@@ -45,5 +45,10 @@
 	<string>26.6</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>SMPrivilegedExecutables</key>
+	<dict>
+		<key>com.sheepshaver.etherhelper</key>
+		<string>identifier "com.sheepshaver.etherhelper"</string>
+	</dict>
 </dict>
 </plist>

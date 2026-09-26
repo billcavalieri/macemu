@@ -338,6 +338,12 @@ static void stream_func(void *arg, uint8 *stream, int stream_len)
 void AudioInterrupt(void)
 {
 	D(bug("AudioInterrupt\n"));
+#if defined(SHEEPSHAVER)
+	if (nw_sheepblaster_ready()) {
+		SDL_SemPost(audio_irq_done_sem);
+		return;
+	}
+#endif
 	{
 		static int n_run;
 		if (n_run < 4) {

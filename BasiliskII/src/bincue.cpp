@@ -148,6 +148,7 @@ typedef struct {
 static unsigned int totalPregap;
 static unsigned int prestart;
 
+#if defined(USE_SDL_AUDIO)
 // Current audio output settings
 
 struct OutputSettings {
@@ -159,10 +160,13 @@ struct OutputSettings {
 
 static bool have_current_output_settings = false;
 static OutputSettings current_output_settings;
+#endif
 
 // Audio System Variables
 
+#if defined(USE_SDL_AUDIO) || defined(OSX_CORE_AUDIO)
 static uint8 silence_byte;
+#endif
 
 // CD Player state; multiple players supported through list
 
@@ -325,8 +329,9 @@ static bool ParseCueSheet(FILE *fh, CueSheet *cs, const char *cuefile)
 						cs->big_endian_audio = true;
 					char *tmp = strdup(cuefile);
 					char *b = dirname(tmp);
-					cs->binfile = (char *) malloc(strlen(b) + strlen(filename) + 2);
-					sprintf(cs->binfile, "%s/%s", b, filename);
+					size_t binfile_len = strlen(b) + strlen(filename) + 2;
+					cs->binfile = (char *) malloc(binfile_len);
+					snprintf(cs->binfile, binfile_len, "%s/%s", b, filename);
 					free(tmp);
 				}
 			} else if (!strcmp("TRACK", keyword)) {
@@ -477,8 +482,8 @@ static bool LoadCueSheet(const char *cuefile, CueSheet *cs)
 
 
 		tlast = &cs->tracks[cs->tcnt - 1];
-		tlast->length = buf.st_size/cs->raw_sector_size
-						- tlast->start + totalPregap;
+		tlast->length = (unsigned)(buf.st_size/cs->raw_sector_size
+						- tlast->start + totalPregap);
 
 		if (tlast->length < 0) {
 			D(bug("Binary file too short \n"));
@@ -487,7 +492,7 @@ static bool LoadCueSheet(const char *cuefile, CueSheet *cs)
 
 		// save bin file length and pointer
 
-		cs->length = buf.st_size/cs->raw_sector_size;
+		cs->length = (unsigned)(buf.st_size/cs->raw_sector_size);
 		cs->binfh = binfh;
 
 		fclose(fh);
@@ -677,7 +682,7 @@ bool readtoc_bincue(void *fh, unsigned char *toc)
 		*p++ = msf.s;
 		*p++ = msf.f;
 
-		int toc_size = p - toc;
+		int toc_size = (int)(p - toc);
 		*toc++ = toc_size >> 8;
 		*toc++ = toc_size & 0xff;
 		return true;
@@ -834,18 +839,19 @@ bool CDPlay_bincue(void *fh, uint8 start_m, uint8 start_s, uint8 start_f,
 
 		player->audiostatus = CDROM_AUDIO_NO_STATUS;
 
-		int cur_position_frames = (player->audioposition / cs->raw_sector_size) + player->audiostart;
-
 		player->audiostart = MSFToFrames((MSF){start_m, start_s, start_f});
 		player->audioend   = MSFToFrames((MSF){end_m, end_s, end_f});
 
 		track = PositionToTrack(player->cs, player->audiostart);
 
+#if DEBUG
+		int cur_position_frames = (player->audioposition / cs->raw_sector_size) + player->audiostart;
 		int cur_track = PositionToTrack(player->cs, cur_position_frames);
 		MSF cur_msf;
 		FramesToMSF(cur_position_frames, &cur_msf);
 		D(bug("Track position check: requested play start %d m %d s %d f == track %d, current pos %d m %d s %d f == track %d\n",
 			start_m, start_s, start_f, track, cur_msf.m, cur_msf.s, cur_msf.f, cur_track));
+#endif
 
 		if (track < player->cs->tcnt) {
 			player->audioposition = 0;
@@ -953,6 +959,7 @@ void CDGetVol_bincue(void* fh, uint8* left, uint8* right) {
 	}
 }
 
+#if defined(USE_SDL_AUDIO) || defined(OSX_CORE_AUDIO)
 static uint8 *fill_buffer(int stream_len, CDPlayer* player)
 {
 	static uint8 *buf = 0;
@@ -1084,6 +1091,7 @@ static uint8 *fill_buffer(int stream_len, CDPlayer* player)
 	}
 	return buf;
 }
+#endif
 
 
 #ifdef USE_SDL_AUDIO
@@ -1228,7 +1236,7 @@ static int bincue_core_audio_callback(void)
 		CDPlayer *player = *it;
 		
 		int frames = player->soundoutput.bufferSizeFrames();
-		uint8 *buf = fill_buffer(frames*4);
+		uint8 *buf = fill_buffer(frames*4, player);
 
 		//  D(bug("Audio request %d\n", stream_len));
 

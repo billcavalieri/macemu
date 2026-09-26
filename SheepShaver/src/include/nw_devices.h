@@ -105,6 +105,7 @@ struct nw_devices_clock {
 /* Registers the models with nw_io. Call once, before the guest runs. */
 void nw_devices_init(const struct nw_devices_clock *tb);
 /* Periodic work (OpenPIC timers); call from the CPU's coarse tick. */
+void nw_devices_note_pc(uint32_t pc);
 void nw_devices_tick(void);
 
 enum nw_pmu_power_event {
@@ -147,6 +148,7 @@ int nw_pmu_state(void);
 void nw_adb_key(uint8_t code, int down);
 void nw_adb_mouse_move(int dx, int dy);
 void nw_adb_mouse_button(int button, int down);
+void nw_adb_mouse_clear_delta(void);
 /* Keylargo GPIO pin register n (0..35) and pin input drive. */
 uint32_t nw_gpio_read(uint32_t n);
 void nw_gpio_set(uint32_t n, int state);

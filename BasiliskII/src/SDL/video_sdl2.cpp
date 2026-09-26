@@ -2325,7 +2325,7 @@ void VideoHostPresent(void)
 void VideoDriverVBL(void)
 {
 	nw_display_vbl_clear();
-	if (private_data != NULL && private_data->interruptsEnabled) {
+	if (VideoVBLShouldService()) {
 #ifdef SHEEPSHAVER
 		const uint64 t0 = GetTicks_usec();
 		const uint64 i0 = nw_jit_other_insns();

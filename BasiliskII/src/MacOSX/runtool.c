@@ -1,6 +1,7 @@
 /*
- *  runtool.m - Run an external program as root for networking
+ *  runtool.c - Run the BPF ethernet helper as root
  *  Copyright (C) 2010, Daniel Sumorok
+ *  Copyright (C) 2026 Bill Cavalieri
  *
  *  Basilisk II (C) 1997-2008 Christian Bauer
  *
@@ -20,116 +21,174 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <net/if_dl.h>
-#include <ifaddrs.h>
+#include <sys/un.h>
 #include <errno.h>
-
 #include <unistd.h>
+#include <spawn.h>
 
-#include <net/if.h>
-#include <sys/time.h>
-#include <sys/ioctl.h>
-#include <net/bpf.h>
-#include <fcntl.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <Foundation/Foundation.h>
+#include <ServiceManagement/ServiceManagement.h>
 
-#include <strings.h>
+extern char **environ;
 
-#include <Carbon/Carbon.h>
+#define ETHER_SOCK "/var/run/com.sheepshaver.etherhelper.sock"
 
 FILE * run_tool(const char *if_name, const char *tool_name);
 
-FILE * run_tool(const char *if_name, const char *tool_name)
+static int connect_helper(void)
 {
-	OSStatus auth_status;
-	FILE *fp = NULL;
-	char *args[] = {NULL, NULL, NULL};
-	char path_buffer[256];
-	AuthorizationFlags auth_flags;
-	AuthorizationRef auth_ref;
-	AuthorizationItem auth_items[1];
-	AuthorizationRights auth_rights;
-	CFBundleRef bundle_ref;
-	CFURLRef url_ref;
-	CFStringRef path_str;
-	CFStringRef tool_name_str;
+	int fd;
+	struct sockaddr_un addr;
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0)
+		return -1;
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, ETHER_SOCK, sizeof(addr.sun_path) - 1);
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+static int bless_helper(void)
+{
+	NSError *error = nil;
+	SMAppService *service;
+	int i;
+
+	service = [SMAppService daemonServiceWithPlistName:@"com.sheepshaver.etherhelper.plist"];
+	if (service.status != SMAppServiceStatusEnabled) {
+		if (![service registerAndReturnError:&error])
+			return -1;
+	}
+	for (i = 0; i < 50; i++) {
+		int probe = connect_helper();
+		if (probe >= 0) {
+			close(probe);
+			return 0;
+		}
+		usleep(100000);
+	}
+	return -1;
+}
+
+/* Already-root parent: same packet pipe, no launchd. */
+static FILE *spawn_direct(const char *path, const char *if_name)
+{
+	int sv[2];
+	posix_spawn_file_actions_t actions;
+	pid_t pid;
+	char *argv[3];
+	FILE *fp;
 	char c;
 
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
+		return NULL;
+	if (posix_spawn_file_actions_init(&actions) != 0) {
+		close(sv[0]);
+		close(sv[1]);
+		return NULL;
+	}
+	posix_spawn_file_actions_adddup2(&actions, sv[1], STDIN_FILENO);
+	posix_spawn_file_actions_adddup2(&actions, sv[1], STDOUT_FILENO);
+	posix_spawn_file_actions_addclose(&actions, sv[0]);
+	argv[0] = (char *)path;
+	argv[1] = (char *)if_name;
+	argv[2] = NULL;
+	if (posix_spawn(&pid, path, &actions, NULL, argv, environ) != 0) {
+		posix_spawn_file_actions_destroy(&actions);
+		close(sv[0]);
+		close(sv[1]);
+		return NULL;
+	}
+	posix_spawn_file_actions_destroy(&actions);
+	close(sv[1]);
+	fp = fdopen(sv[0], "r+");
+	if (fp == NULL) {
+		close(sv[0]);
+		return NULL;
+	}
+	if (fread(&c, 1, 1, fp) != 1) {
+		fclose(fp);
+		return NULL;
+	}
+	return fp;
+}
+
+static int helper_path(const char *tool_name, char *path_buffer, size_t path_len)
+{
+	CFBundleRef bundle_ref;
+	CFStringRef tool_name_str;
+	CFURLRef url_ref;
+	CFStringRef path_str;
+
 	bundle_ref = CFBundleGetMainBundle();
-	if(bundle_ref == NULL) {
-		return NULL;
-	}
-
-	tool_name_str = CFStringCreateWithCString(NULL, tool_name,
-						  kCFStringEncodingUTF8);
-
-	url_ref = CFBundleCopyResourceURL(bundle_ref, tool_name_str,
-					 NULL, NULL);
+	if (bundle_ref == NULL)
+		return -1;
+	tool_name_str = CFStringCreateWithCString(NULL, tool_name, kCFStringEncodingUTF8);
+	url_ref = CFBundleCopyResourceURL(bundle_ref, tool_name_str, NULL, NULL);
 	CFRelease(tool_name_str);
-
-	if(url_ref == NULL) {
-		return NULL;
-	}
-
+	if (url_ref == NULL)
+		return -1;
 	path_str = CFURLCopyFileSystemPath(url_ref, kCFURLPOSIXPathStyle);
 	CFRelease(url_ref);
-
-	if(path_str == NULL) {
-		return NULL;
-	}
-
-	if(!CFStringGetCString(path_str, path_buffer, sizeof(path_buffer),
-			       kCFStringEncodingUTF8)) {
+	if (path_str == NULL)
+		return -1;
+	if (!CFStringGetCString(path_str, path_buffer, path_len, kCFStringEncodingUTF8)) {
 		CFRelease(path_str);
-		return NULL;
+		return -1;
 	}
 	CFRelease(path_str);
+	return 0;
+}
 
-	args[0] = (char *)tool_name;
-	args[1] = (char *)if_name;
-  
-	auth_flags = kAuthorizationFlagExtendRights |
-		kAuthorizationFlagInteractionAllowed |
-		kAuthorizationFlagPreAuthorize;
- 
-	auth_items[0].name = "system.privilege.admin";
-	auth_items[0].valueLength = 0;
-	auth_items[0].value = NULL;
-	auth_items[0].flags = 0;
+FILE * run_tool(const char *if_name, const char *tool_name)
+{
+	char path_buffer[1024];
+	char line[256];
+	int fd;
+	int n;
+	FILE *fp;
+	char c;
 
-	auth_rights.count = sizeof (auth_items) / sizeof (auth_items[0]);
-	auth_rights.items = auth_items;
-  
-	auth_status = AuthorizationCreate(&auth_rights,
-					  kAuthorizationEmptyEnvironment,
-					  auth_flags,
-					  &auth_ref);
-  
-	if (auth_status != errAuthorizationSuccess) {
-		fprintf(stderr, "%s: AuthorizationCreate() failed.\n",
+	if (helper_path(tool_name, path_buffer, sizeof(path_buffer)) != 0)
+		return NULL;
+
+	fd = connect_helper();
+	if (fd < 0) {
+		if (bless_helper() == 0)
+			fd = connect_helper();
+	}
+	if (fd < 0) {
+		if (geteuid() == 0)
+			return spawn_direct(path_buffer, if_name);
+		fprintf(stderr, "%s: SMJobBless failed; BPF ethernet needs a signed app or root.\n",
 			__func__);
 		return NULL;
 	}
 
-	auth_status = AuthorizationExecuteWithPrivileges(auth_ref,
-							 path_buffer,
-							 kAuthorizationFlagDefaults,
-							 args + 1,
-							 &fp);
-
-	if (auth_status != errAuthorizationSuccess) {
-		fprintf(stderr, "%s: AuthorizationExecWithPrivileges() failed.\n", 
-			__func__);
+	n = snprintf(line, sizeof(line), "%s\n", if_name);
+	if (n < 0 || n >= (int)sizeof(line) || write(fd, line, (size_t)n) != n) {
+		close(fd);
 		return NULL;
 	}
-
-	if(fread(&c, 1, 1, fp) != 1) {
-	  fclose(fp);
-	  return NULL;
+	fp = fdopen(fd, "r+");
+	if (fp == NULL) {
+		close(fd);
+		return NULL;
 	}
-
+	if (fread(&c, 1, 1, fp) != 1) {
+		fclose(fp);
+		return NULL;
+	}
 	return fp;
 }

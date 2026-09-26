@@ -218,7 +218,8 @@ static void generate_powerpc_thunks(void)
 	};
 	const uint32 get_named_resource_template_size = sizeof(get_named_resource_template);
 
-	xlm_index = -1, check_load_invoc_index = -1;
+	xlm_index = -1;
+	check_load_invoc_index = -1;
 	for (int i = 0; i < get_resource_template_size/4; i++) {
 		uint32 opcode = ntohl(get_resource_template[i]);
 		switch (opcode) {
@@ -262,7 +263,7 @@ bool ThunksInit(void)
 {
 #if EMULATED_PPC
 	for (int i = 0; i < NATIVE_OP_MAX; i++) {
-		uintptr base = SheepMem::Reserve(16);
+		uint32 base = SheepMem::Reserve(16);
 		WriteMacInt32(base + 0, base + 8);
 		WriteMacInt32(base + 4, 0); // Fake TVECT
 		WriteMacInt32(base + 8, NativeOpcode(i));

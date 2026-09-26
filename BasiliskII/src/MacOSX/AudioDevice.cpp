@@ -1,101 +1,109 @@
-/*	Copyright: 	© Copyright 2004 Apple Computer, Inc. All rights reserved.
-
-	Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
-			("Apple") in consideration of your agreement to the following terms, and your
-			use, installation, modification or redistribution of this Apple software
-			constitutes acceptance of these terms.  If you do not agree with these terms,
-			please do not use, install, modify or redistribute this Apple software.
-
-			In consideration of your agreement to abide by the following terms, and subject
-			to these terms, Apple grants you a personal, non-exclusive license, under Apple’s
-			copyrights in this original Apple software (the "Apple Software"), to use,
-			reproduce, modify and redistribute the Apple Software, with or without
-			modifications, in source and/or binary forms; provided that if you redistribute
-			the Apple Software in its entirety and without modifications, you must retain
-			this notice and the following text and disclaimers in all such redistributions of
-			the Apple Software.  Neither the name, trademarks, service marks or logos of
-			Apple Computer, Inc. may be used to endorse or promote products derived from the
-			Apple Software without specific prior written permission from Apple.  Except as
-			expressly stated in this notice, no other rights or licenses, express or implied,
-			are granted by Apple herein, including but not limited to any patent rights that
-			may be infringed by your derivative works or by other works in which the Apple
-			Software may be incorporated.
-
-			The Apple Software is provided by Apple on an "AS IS" basis.  APPLE MAKES NO
-			WARRANTIES, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION THE IMPLIED
-			WARRANTIES OF NON-INFRINGEMENT, MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-			PURPOSE, REGARDING THE APPLE SOFTWARE OR ITS USE AND OPERATION ALONE OR IN
-			COMBINATION WITH YOUR PRODUCTS.
-
-			IN NO EVENT SHALL APPLE BE LIABLE FOR ANY SPECIAL, INDIRECT, INCIDENTAL OR
-			CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
-			GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-			ARISING IN ANY WAY OUT OF THE USE, REPRODUCTION, MODIFICATION AND/OR DISTRIBUTION
-			OF THE APPLE SOFTWARE, HOWEVER CAUSED AND WHETHER UNDER THEORY OF CONTRACT, TORT
-			(INCLUDING NEGLIGENCE), STRICT LIABILITY OR OTHERWISE, EVEN IF APPLE HAS BEEN
-			ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
-/*=============================================================================
-	AudioDevice.cpp
-	
-=============================================================================*/
+/*
+ *  AudioDevice.cpp - Core Audio device properties
+ *
+ *  Apple sample, 2004. Property calls updated to AudioObjectGetPropertyData.
+ *
+ *  Basilisk II (C) 1997-2008 Christian Bauer
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ */
 
 #include "AudioDevice.h"
 
-#ifndef __Verify_noErr
-#define __Verify_noErr	verify_noerr
-#endif
+#include <stdlib.h>
+#include <string.h>
+#include <CoreFoundation/CoreFoundation.h>
 
-void	AudioDevice::Init(AudioDeviceID devid, bool isInput)
+static AudioObjectPropertyScope device_scope(bool isInput)
+{
+	return isInput ? kAudioDevicePropertyScopeInput : kAudioDevicePropertyScopeOutput;
+}
+
+static OSStatus device_get(AudioObjectID id, AudioObjectPropertySelector sel,
+			   AudioObjectPropertyScope scope, void *out, UInt32 *size)
+{
+	AudioObjectPropertyAddress addr;
+	addr.mSelector = sel;
+	addr.mScope = scope;
+	addr.mElement = kAudioObjectPropertyElementMain;
+	return AudioObjectGetPropertyData(id, &addr, 0, NULL, size, out);
+}
+
+static OSStatus device_set(AudioObjectID id, AudioObjectPropertySelector sel,
+			   AudioObjectPropertyScope scope, const void *in, UInt32 size)
+{
+	AudioObjectPropertyAddress addr;
+	addr.mSelector = sel;
+	addr.mScope = scope;
+	addr.mElement = kAudioObjectPropertyElementMain;
+	return AudioObjectSetPropertyData(id, &addr, 0, NULL, size, in);
+}
+
+void AudioDevice::Init(AudioDeviceID devid, bool isInput)
 {
 	mID = devid;
 	mIsInput = isInput;
-	if (mID == kAudioDeviceUnknown) return;
-	
-	UInt32 propsize;
-	
-	propsize = sizeof(UInt32);
-	__Verify_noErr(AudioDeviceGetProperty(mID, 0, mIsInput, kAudioDevicePropertySafetyOffset, &propsize, &mSafetyOffset));
-	
-	propsize = sizeof(UInt32);
-	__Verify_noErr(AudioDeviceGetProperty(mID, 0, mIsInput, kAudioDevicePropertyBufferFrameSize, &propsize, &mBufferSizeFrames));
-	
-	propsize = sizeof(AudioStreamBasicDescription);
-	__Verify_noErr(AudioDeviceGetProperty(mID, 0, mIsInput, kAudioDevicePropertyStreamFormat, &propsize, &mFormat));
+	mSafetyOffset = 0;
+	mBufferSizeFrames = 0;
+	memset(&mFormat, 0, sizeof(mFormat));
+	if (mID == kAudioDeviceUnknown)
+		return;
 
+	AudioObjectPropertyScope scope = device_scope(mIsInput);
+	UInt32 size = sizeof(mSafetyOffset);
+	device_get(mID, kAudioDevicePropertySafetyOffset, scope, &mSafetyOffset, &size);
+	size = sizeof(mBufferSizeFrames);
+	device_get(mID, kAudioDevicePropertyBufferFrameSize, scope, &mBufferSizeFrames, &size);
+	size = sizeof(mFormat);
+	device_get(mID, kAudioDevicePropertyStreamFormat, scope, &mFormat, &size);
 }
 
-void	AudioDevice::SetBufferSize(UInt32 size)
+void AudioDevice::SetBufferSize(UInt32 size)
 {
-	UInt32 propsize = sizeof(UInt32);
-	__Verify_noErr(AudioDeviceSetProperty(mID, NULL, 0, mIsInput, kAudioDevicePropertyBufferFrameSize, propsize, &size));
-
-	propsize = sizeof(UInt32);
-	__Verify_noErr(AudioDeviceGetProperty(mID, 0, mIsInput, kAudioDevicePropertyBufferFrameSize, &propsize, &mBufferSizeFrames));
+	AudioObjectPropertyScope scope = device_scope(mIsInput);
+	device_set(mID, kAudioDevicePropertyBufferFrameSize, scope, &size, sizeof(size));
+	UInt32 got = sizeof(mBufferSizeFrames);
+	device_get(mID, kAudioDevicePropertyBufferFrameSize, scope, &mBufferSizeFrames, &got);
 }
 
-int		AudioDevice::CountChannels()
+int AudioDevice::CountChannels()
 {
-	OSStatus err;
-	UInt32 propSize;
-	int result = 0;
-	
-	err = AudioDeviceGetPropertyInfo(mID, 0, mIsInput, kAudioDevicePropertyStreamConfiguration, &propSize, NULL);
-	if (err) return 0;
-
+	AudioObjectPropertyAddress addr;
+	addr.mSelector = kAudioDevicePropertyStreamConfiguration;
+	addr.mScope = device_scope(mIsInput);
+	addr.mElement = kAudioObjectPropertyElementMain;
+	UInt32 propSize = 0;
+	if (AudioObjectGetPropertyDataSize(mID, &addr, 0, NULL, &propSize) != noErr || propSize == 0)
+		return 0;
 	AudioBufferList *buflist = (AudioBufferList *)malloc(propSize);
-	err = AudioDeviceGetProperty(mID, 0, mIsInput, kAudioDevicePropertyStreamConfiguration, &propSize, buflist);
-	if (!err) {
-		for (UInt32 i = 0; i < buflist->mNumberBuffers; ++i) {
-			result += buflist->mBuffers[i].mNumberChannels;
-		}
+	if (!buflist)
+		return 0;
+	int result = 0;
+	if (AudioObjectGetPropertyData(mID, &addr, 0, NULL, &propSize, buflist) == noErr) {
+		for (UInt32 i = 0; i < buflist->mNumberBuffers; ++i)
+			result += (int)buflist->mBuffers[i].mNumberChannels;
 	}
 	free(buflist);
 	return result;
 }
 
-char *	AudioDevice::GetName(char *buf, UInt32 maxlen)
+char *AudioDevice::GetName(char *buf, UInt32 maxlen)
 {
-	__Verify_noErr(AudioDeviceGetProperty(mID, 0, mIsInput, kAudioDevicePropertyDeviceName, &maxlen, buf));
+	if (!buf || maxlen == 0)
+		return buf;
+	buf[0] = 0;
+	CFStringRef name = NULL;
+	UInt32 size = sizeof(name);
+	AudioObjectPropertyAddress addr;
+	addr.mSelector = kAudioObjectPropertyName;
+	addr.mScope = kAudioObjectPropertyScopeGlobal;
+	addr.mElement = kAudioObjectPropertyElementMain;
+	if (AudioObjectGetPropertyData(mID, &addr, 0, NULL, &size, &name) == noErr && name) {
+		CFStringGetCString(name, buf, (CFIndex)maxlen, kCFStringEncodingUTF8);
+		CFRelease(name);
+	}
 	return buf;
 }

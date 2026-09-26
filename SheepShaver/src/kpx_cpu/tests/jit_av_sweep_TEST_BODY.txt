@@ -1,0 +1,70 @@
+/* G2 jit-av-sweep — one interp_n vs compile per previously-untested AltiVec name.
+ * FAIL line: FAIL jit-av-<name> ...
+ * Skip MEM_X here (lve*/stve*/lvsl/lvsr) — wave2 with mem harness.
+ */
+{
+	int av_fail = 0, av_run = 0, av_skip = 0;
+	for (int i = 0; i < JIT_AV_SWEEP_N; i++) {
+		const struct jit_av_case *c = &jit_av_sweep_cases[i];
+		if (c->kind == JIT_AV_MEM_X) { av_skip++; continue; }
+		memset(&a, 0, sizeof(a));
+		a.lr = 0x2000u;
+		for (int w = 0; w < 4; w++) {
+			a.vr[1][w] = 0x01020304u + (uint32_t)w * 0x1010101u;
+			a.vr[2][w] = 0x05060708u + (uint32_t)w * 0x01010101u;
+			a.vr[4][w] = 0x0a0b0c0du;
+		}
+		/* FP-friendly lanes */
+		a.vr[1][0] = 0x3f800000u; /* 1.0f */
+		a.vr[2][0] = 0x40000000u; /* 2.0f */
+		a.vr[1][1] = 0x40400000u; /* 3.0f */
+		a.vr[2][1] = 0x40800000u; /* 4.0f */
+		uint32_t op;
+		switch (c->kind) {
+		case JIT_AV_SPLAT_S: op = jit_av_encode(c, 3, 5, 0, 0); break;
+		case JIT_AV_SPLAT_U: op = jit_av_encode(c, 3, 2, 1, 0); break;
+		case JIT_AV_VX_VB:   op = jit_av_encode(c, 3, 0, 1, 0); break;
+		case JIT_AV_MFVSCR:  op = jit_av_encode(c, 3, 0, 0, 0); break;
+		case JIT_AV_MTVSCR:  op = jit_av_encode(c, 0, 0, 2, 0); break;
+		default:             op = jit_av_encode(c, 3, 1, 2, 4); break;
+		}
+		if (!nw_jit_op_supported(op)) {
+			printf("FAIL jit-av-%s not in allowlist op=%08x\n", c->name, (unsigned)op);
+			av_fail++;
+			continue;
+		}
+		ops[0] = op;
+		ops[1] = nw_ppc_blr();
+		b = a;
+		const uint32_t pc = 0x3000u + (uint32_t)i * 0x10u;
+		if (nw_jit_interp_n(&a, ops, 2, pc) != 1) {
+			printf("FAIL jit-av-%s interp_n\n", c->name);
+			av_fail++;
+			continue;
+		}
+		nw_jit_fn fn = nw_jit_compile(ops, 2, pc, 0x1000u, 0, 0);
+		if (!fn) {
+			printf("FAIL jit-av-%s compile_null\n", c->name);
+			av_fail++;
+			continue;
+		}
+		fn(&b);
+		int same = (a.vscr == b.vscr) && (a.pc == b.pc);
+		for (int w = 0; w < 4; w++)
+			if (a.vr[3][w] != b.vr[3][w]) same = 0;
+		/* compares may write CR; check CR0 nibble at least */
+		if ((a.cr ^ b.cr) & 0xf0000000u) same = 0;
+		av_run++;
+		if (!same) {
+			printf("FAIL jit-av-%s interp vr3=%08x_%08x_%08x_%08x jit=%08x_%08x_%08x_%08x vscr %08x/%08x cr %08x/%08x\n",
+			       c->name,
+			       a.vr[3][0], a.vr[3][1], a.vr[3][2], a.vr[3][3],
+			       b.vr[3][0], b.vr[3][1], b.vr[3][2], b.vr[3][3],
+			       (unsigned)a.vscr, (unsigned)b.vscr,
+			       (unsigned)a.cr, (unsigned)b.cr);
+			av_fail++;
+		}
+	}
+	printf("G2 jit-av-sweep run=%d skip_mem=%d fail=%d\n", av_run, av_skip, av_fail);
+	CHECK(av_fail == 0);
+}

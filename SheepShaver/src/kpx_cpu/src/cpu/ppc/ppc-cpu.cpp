@@ -1278,6 +1278,7 @@ void powerpc_cpu::tick_decrementer()
 	if (dec_ & 0x80000000u)
 		dec_pending_ = true;
 #ifdef SHEEPSHAVER
+	nw_devices_note_pc(pc());
 	nw_devices_tick();
 	nw_host_tick();
 	nw_script_tick();
@@ -1305,7 +1306,7 @@ void powerpc_cpu::tick_decrementer()
 		if (RAMBaseHost)
 			tm = ReadMacInt32(0x16A);	/* Time Manager Ticks */
 		nw_event_tick(pc(), ppc32_guest_mmu().msr(),
-			      GetTicks_usec(), tb_ticks(), tm);
+			      GetTicks_usec(), tb_ticks(), tm, lr(), gpr(1));
 	}
 #endif
 #if defined(NW_BOOT_LOG) && NW_BOOT_LOG
@@ -1398,6 +1399,20 @@ static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
 		return;
 	const uint32 trap = (ppc->gpr(29) >> 3) & 0xffffu;
 	nw_event_aline(trap, ppc->gpr(24) - 2u, h);
+	if (trap == 0xa9c9) {
+		static int n_syserr;
+		if (n_syserr < 16) {
+			n_syserr++;
+			uint32 pc68 = ppc->gpr(24) - 2u;
+			uint16 op = 0;
+			uint8 *hp = vm_do_get_real_address(nw_la_to_pa(pc68));
+			if (hp)
+				op = (uint16)((hp[0] << 8) | hp[1]);
+			printf("NW-BOOT SysError #%d 68k_pc=%08x opcode=%04x\n",
+			       (int)ppc->gpr(8), (unsigned)pc68, (unsigned)op);
+			fflush(stdout);
+		}
+	}
 	if (trap == 0xaafeu) {
 		nw_mixedmode_enter();
 		const uint32 rd_la = ppc->gpr(24) - 2u;
@@ -1630,8 +1645,10 @@ void *powerpc_cpu::operator new(size_t size)
 
 	// Align memory
 	int ofs = 0;
-	while ((((uintptr)ptr) % ALIGN) != 0)
-		ofs++, ptr++;
+	while ((((uintptr)ptr) % ALIGN) != 0) {
+		ofs++;
+		ptr++;
+	}
 
 	// Insert signature and offset
 	struct aligned_block_t {
@@ -1642,7 +1659,7 @@ void *powerpc_cpu::operator new(size_t size)
 	};
 	aligned_block_t *blk = (aligned_block_t *)ptr;
 	blk->signature = 0x53435055;		/* 'SCPU' */
-	blk->offset = ofs + (&blk->data[0] - (uint8 *)blk);
+	blk->offset = (uint32)(ofs + (&blk->data[0] - (uint8 *)blk));
 	assert((((uintptr)&blk->data) % ALIGN) == 0);
 	return &blk->data[0];
 }
@@ -2945,6 +2962,8 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	nw_jit_fn fn = nw_jit_cache_get(phys_page, guest_pc, msr_ir, 0, &n,
 					&uses_fpr, &uses_vr, &chain_pc, &gpr_mask,
 					&chain_disp);
+	if (fn == NW_JIT_INTERPRET)
+		return 0;
 	if (fn && n > 0 && n <= NW_JIT_MAX_BLOCK) {
 		hit = 1;
 		/* ON hit: do not re-fetch ops[]. VERIFY still needs them for
@@ -3698,7 +3717,7 @@ void powerpc_cpu::execute(uint32 entry)
 				if (di >= decode_cache_end_p) {
 					// Invalidate cache and move current code to start
 					invalidate_cache();
-					const int blocklen = di - bi->di;
+					const int blocklen = (int)(di - bi->di);
 					memmove(decode_cache_p, bi->di, blocklen * sizeof(*di));
 					bi->di = decode_cache_p;
 					di = bi->di + blocklen;
@@ -3707,7 +3726,7 @@ void powerpc_cpu::execute(uint32 entry)
 			bi->end_pc = dpc;
 			bi->min_pc = dpc;
 			bi->max_pc = entry;
-			bi->size = di - bi->di;
+			bi->size = (uint32)(di - bi->di);
 			my_block_cache.add_to_cl_list(bi);
 			my_block_cache.add_to_active_list(bi);
 			decode_cache_p += bi->size;

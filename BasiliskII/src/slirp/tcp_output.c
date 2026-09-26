@@ -64,8 +64,7 @@ u_char  tcp_outflags[TCP_NSTATES] = {
  * Tcp output routine: figure out what should be sent and send it.
  */
 int
-tcp_output(tp)
-	register struct tcpcb *tp;
+tcp_output(register struct tcpcb * tp)
 {
 	register struct socket *so = tp->t_socket;
 	register long len, win;
@@ -177,8 +176,9 @@ again:
 	if (len) {
 		if (len == tp->t_maxseg)
 			goto send;
-		if ((1 || idle || tp->t_flags & TF_NODELAY) &&
-		    len + off >= so->so_snd.sb_cc)
+		/* The leading `1 ||` made this clause always true and left the
+		 * idle/NODELAY test unreachable. The comparison is the whole test. */
+		if (len + off >= so->so_snd.sb_cc)
 			goto send;
 		if (tp->t_force)
 			goto send;
@@ -518,7 +518,7 @@ send:
 		}
 	} else
 		if (SEQ_GT(tp->snd_nxt + len, tp->snd_max))
-			tp->snd_max = tp->snd_nxt + len;
+			tp->snd_max = (tcp_seq)(tp->snd_nxt + len);
 
 	/*
 	 * Fill in IP length and desired time to live and
@@ -526,7 +526,7 @@ send:
 	 * to handle ttl and tos; we could keep them in
 	 * the template, but need a way to checksum without them.
 	 */
-	m->m_len = hdrlen + len; /* XXX Needed? m_len should be correct */
+	m->m_len = (int)(hdrlen + len); /* XXX Needed? m_len should be correct */
 	
     {
 	    
@@ -572,7 +572,7 @@ out:
 	 * Any pending ACK has now been sent.
 	 */
 	if (win > 0 && SEQ_GT(tp->rcv_nxt+win, tp->rcv_adv))
-		tp->rcv_adv = tp->rcv_nxt + win;
+		tp->rcv_adv = (tcp_seq)(tp->rcv_nxt + win);
 	tp->last_ack_sent = tp->rcv_nxt;
 	tp->t_flags &= ~(TF_ACKNOW|TF_DELACK);
 	if (sendalot)
@@ -582,8 +582,7 @@ out:
 }
 
 void
-tcp_setpersist(tp)
-	register struct tcpcb *tp;
+tcp_setpersist(register struct tcpcb * tp)
 {
     int t = ((tp->t_srtt >> 2) + tp->t_rttvar) >> 1;
 

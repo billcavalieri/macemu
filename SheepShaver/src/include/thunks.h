@@ -146,14 +146,15 @@ inline uint32 SheepMem::PageSize()
 
 inline uint32 SheepMem::ZeroPage()
 {
-  return zero_page;
+  /* zero_page is a guest address stored in a host uintptr. */
+  return (uint32)zero_page;
 }
 
 inline uint32 SheepMem::Reserve(uint32 size)
 {
 	data -= align(size);
 	assert(data >= proc);
-	return data;
+	return (uint32)data;
 }
 
 inline void SheepMem::Release(uint32 size)
@@ -163,7 +164,7 @@ inline void SheepMem::Release(uint32 size)
 
 inline uint32 SheepMem::ReserveProc(uint32 size)
 {
-	uint32 mproc = proc;
+	uint32 mproc = (uint32)proc;
 	proc += align(size);
 	assert(proc < data);
 	return mproc;
@@ -215,7 +216,7 @@ struct SheepVar32 : public SheepVar
 
 struct SheepString : public SheepVar
 {
-	SheepString(const char *str) : SheepVar(strlen(str) + 1)
+	SheepString(const char *str) : SheepVar((uint32)(strlen(str) + 1))
 		{ if (str) strcpy(value(), str); else WriteMacInt8(addr(), 0); }
 	char *value() const
 		{ return (char *)Mac2HostAddr(addr()); }

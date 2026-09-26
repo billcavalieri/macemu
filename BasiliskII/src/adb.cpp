@@ -25,6 +25,7 @@
  */
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "sysdeps.h"
 #include "cpu_emulation.h"
@@ -108,6 +109,9 @@ void ADBInit(void)
 
 void ADBExit(void)
 {
+#ifdef POWERPC_ROM
+	ADBRemoveAbsCursor();
+#endif
 	if (mouse_lock) {
 		B2_delete_mutex(mouse_lock);
 		mouse_lock = NULL;
@@ -337,6 +341,122 @@ void ADBSetRelMouseMode(bool relative)
 		mouse_x = mouse_y = 0;
     }
 }
+
+#ifdef POWERPC_ROM
+enum {	// TMTask
+	absTmAddr = 6,
+	SIZEOF_ABS_TMTask = 22
+};
+static const int abs_prime_ms = 8;
+static uint32 abs_tm, abs_cdm_slot, abs_cdm;
+static uint32 abs_next_proc, abs_move_proc;
+static bool abs_tm_installed, abs_tm_armed;
+static int abs_x, abs_y, abs_sent_x = -1, abs_sent_y = -1;
+static bool abs_have_pos;
+
+void ADBSetAbsMouse(int x, int y)
+{
+	int dx = 0, dy = 0;
+	bool use_adb = false;
+	B2_lock_mutex(mouse_lock);
+	if (abs_have_pos) {
+		dx = x - abs_x;
+		dy = y - abs_y;
+	}
+	abs_x = x;
+	abs_y = y;
+	abs_have_pos = true;
+	use_adb = (abs_cdm == 0);
+	B2_unlock_mutex(mouse_lock);
+	/* CDM is often missing until the desktop. ADB + VSL still moves the
+	 * boot/Disk First Aid arrow. Stop deltas once MoveTo has a device. */
+	if (use_adb && (dx != 0 || dy != 0))
+		nw_adb_mouse_move(dx, dy);
+}
+
+void ADBAbsMousePulse(void)
+{
+	int x, y;
+	bool have;
+	B2_lock_mutex(mouse_lock);
+	x = abs_x;
+	y = abs_y;
+	have = abs_have_pos;
+	B2_unlock_mutex(mouse_lock);
+	if (!have)
+		return;
+	if (abs_cdm == 0 && abs_cdm_slot && abs_next_proc) {
+		WriteMacInt32(abs_cdm_slot, 0);
+		M68kRegisters r;
+		memset(&r, 0, sizeof r);
+		r.a[0] = abs_cdm_slot;
+		Execute68k(abs_next_proc, &r);
+		abs_cdm = ReadMacInt32(abs_cdm_slot);
+		static int n_log;
+		if (n_log < 8) {
+			n_log++;
+			printf("NW-BOOT G1: CursorDeviceNextDevice #%d device=%08x d0=%08x\n",
+			       n_log, (unsigned)abs_cdm, (unsigned)r.d[0]);
+			fflush(stdout);
+		}
+	}
+	if (abs_cdm != 0 && abs_move_proc && (x != abs_sent_x || y != abs_sent_y)) {
+		M68kRegisters r;
+		memset(&r, 0, sizeof r);
+		r.a[0] = abs_cdm;
+		r.d[0] = x;
+		r.d[1] = y;
+		Execute68k(abs_move_proc, &r);
+		abs_sent_x = x;
+		abs_sent_y = y;
+	}
+}
+
+int32 ADBAbsMouseTick(uint32 *task)
+{
+	*task = abs_tm;
+	abs_tm_armed = false;
+	if (!abs_tm_installed)
+		return 0;
+	ADBAbsMousePulse();
+	return abs_prime_ms;
+}
+
+void ADBRemoveAbsCursor(void)
+{
+	abs_tm_installed = false;
+	abs_tm_armed = false;
+	abs_cdm = 0;
+	abs_sent_x = abs_sent_y = -1;
+}
+
+void ADBInstallAbsCursor(void)
+{
+	if (!nw_input())
+		return;
+	if (abs_next_proc != 0)
+		return;
+	static const uint8 next_template[] = {
+		0x2f, 0x08,		// move.l a0,-(sp)
+		0x70, 0x00,		// moveq #0,d0 (NextDevice)
+		0xaa, 0xdb,		// CursorDeviceDispatch
+		M68K_RTS >> 8, M68K_RTS & 0xff
+	};
+	static const uint8 move_template[] = {
+		0x2f, 0x08,		// move.l a0,-(sp)
+		0x2f, 0x00,		// move.l d0,-(sp)
+		0x2f, 0x01,		// move.l d1,-(sp)
+		0x70, 0x01,		// moveq #1,d0 (MoveTo)
+		0xaa, 0xdb,		// CursorDeviceDispatch
+		M68K_RTS >> 8, M68K_RTS & 0xff
+	};
+	abs_next_proc = SheepProc(next_template, sizeof next_template);
+	abs_move_proc = SheepProc(move_template, sizeof move_template);
+	abs_cdm_slot = SheepMem::Reserve(4);
+	printf("NW-BOOT G1: abs cursor MoveTo procs installed\n");
+	fflush(stdout);
+}
+#endif
 
 
 /*

@@ -162,7 +162,7 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 		      uint32_t endian, nw_jit_fn fn, int n,
 		      uint32_t first_opcode = 0, int uses_fpr = 0, int uses_vr = 0,
 		      uint32_t chain_pc = 0, uint32_t gpr_mask = 0xffffffffu,
-		      int16_t chain_disp = 0);
+		      int16_t chain_disp = 0, uint32_t code_bytes = 0);
 uint64_t nw_jit_chain_hops(void);
 void nw_jit_note_chain(int hops);
 void nw_jit_tail_begin(void);

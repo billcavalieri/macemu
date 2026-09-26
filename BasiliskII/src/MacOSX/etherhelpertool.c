@@ -22,7 +22,9 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -40,10 +42,14 @@
 #include <fcntl.h>
 
 #include <strings.h>
+#include <sys/stat.h>
 
-#include <Carbon/Carbon.h>
+#include <sys/un.h>
 
+#define ETHER_SOCK "/var/run/com.sheepshaver.etherhelper.sock"
 #define STR_MAX 256
+
+static int helper_session(char *if_name);
 #define MAX_ARGV 10
 
 static int open_bpf(char *ifname);
@@ -58,19 +64,71 @@ static void do_exit();
 static char remove_bridge[STR_MAX];
 static const char *exec_name = "etherhelpertool";
 
+static int daemon_main(void)
+{
+	int s, c;
+	struct sockaddr_un addr;
+
+	if (geteuid() != 0)
+		return 254;
+	signal(SIGCHLD, SIG_IGN);
+	s = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (s < 0)
+		return 253;
+	unlink(ETHER_SOCK);
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, ETHER_SOCK, sizeof(addr.sun_path) - 1);
+	if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+		return 252;
+	chmod(ETHER_SOCK, 0666);
+	if (listen(s, 4) < 0)
+		return 251;
+	for (;;) {
+		c = accept(s, NULL, NULL);
+		if (c < 0)
+			continue;
+		if (fork() == 0) {
+			char name[STR_MAX];
+			int n = 0;
+			close(s);
+			while (n < (int)sizeof(name) - 1) {
+				char ch;
+				if (read(c, &ch, 1) != 1)
+					_exit(250);
+				if (ch == '\n')
+					break;
+				name[n++] = ch;
+			}
+			name[n] = 0;
+			dup2(c, 0);
+			dup2(c, 1);
+			if (c > 1)
+				close(c);
+			_exit(helper_session(name));
+		}
+		close(c);
+	}
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
-	char *if_name;
+	/* launchd starts the blessed helper with no arguments. */
+	if ((argc == 2 && strcmp(argv[1], "--daemon") == 0) ||
+	    (argc == 1 && geteuid() == 0))
+		return daemon_main();
+	if (argc != 2)
+		return 255;
+	return helper_session(argv[1]);
+}
+
+static int helper_session(char *if_name)
+{
 	int ret = 255;
 	int sd;
         int tapNum;
         int use_bpf;
-
-	if (argc != 2) {
-		return 255;
-	}
-	
-	if_name = argv[1];
 
         do {
                 ret = retreive_auth_info();
@@ -303,48 +361,10 @@ static int main_loop(int sd, int use_bpf)
 
 static int retreive_auth_info(void)
 {
-	AuthorizationRef aRef;
-	OSStatus status;
-	AuthorizationRights myRights;
-	AuthorizationRights *newRights;
-	AuthorizationItem *myItem;
-	AuthorizationItem myItems[1];
-	AuthorizationItemSet *mySet;
-	int i;
-
-	status = AuthorizationCopyPrivilegedReference(&aRef, kAuthorizationFlagDefaults);
-	if (status != errAuthorizationSuccess) {
-		return -1;
-	}
-
-	status = AuthorizationCopyInfo(aRef, NULL, &mySet);
-	if (status != errAuthorizationSuccess) {
-		AuthorizationFree(aRef, kAuthorizationFlagDestroyRights);
-		return -1;
-	}
-
-	myItems[0].name = "system.privilege.admin";
-	myItems[0].valueLength = 0;
-	myItems[0].value = NULL;
-	myItems[0].flags = 0;
-
-	myRights.count = sizeof (myItems) / sizeof (myItems[0]);
-	myRights.items = myItems;
-
-	status = AuthorizationCopyRights(aRef, &myRights, NULL,
-					 kAuthorizationFlagExtendRights,
-					 &newRights);
-	if (status != errAuthorizationSuccess) {
-		AuthorizationFreeItemSet(mySet);
-		AuthorizationFree(aRef, kAuthorizationFlagDestroyRights);
-		return -2;
-	}
-
-	AuthorizationFreeItemSet(newRights);
-	AuthorizationFreeItemSet(mySet);
-	AuthorizationFree(aRef, kAuthorizationFlagDestroyRights);  
-
-	return 0;
+	/* Launchd (SMJobBless) or a root parent is the privilege boundary.
+	 * AuthorizationCopyPrivilegedReference only existed for the old
+	 * AuthorizationExecuteWithPrivileges pipe. */
+	return geteuid() == 0 ? 0 : -1;
 }
 
 static int open_tap(char *ifname)

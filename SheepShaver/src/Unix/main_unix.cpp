@@ -93,6 +93,9 @@
 #include <sys/param.h>
 #include <signal.h>
 #include <string>
+#if defined(__APPLE__)
+#include <execinfo.h>
+#endif
 
 #include "sysdeps.h"
 #include "main.h"
@@ -145,6 +148,11 @@
 
 #if SDL_PLATFORM_MACOS
 #include "utils_macosx.h"
+#endif
+
+#ifdef USE_MACOS_VIDEO
+extern "C" const char *SheepHostWaitForConfig(void);
+extern "C" void VideoHostRun(void);
 #endif
 
 #ifdef ENABLE_GTK
@@ -284,6 +292,9 @@ static bool shm_map_address(int kernel_area, uint32 addr);
 #endif
 static void Quit(void);
 static void *emul_func(void *arg);
+#ifdef USE_MACOS_VIDEO
+static void *emul_thread_main(void *arg);
+#endif
 static void *nvram_func(void *arg);
 static void *tick_func(void *arg);
 #if EMULATED_PPC
@@ -373,10 +384,12 @@ int atomic_or(int *var, int v)
  *  Memory management helpers
  */
 
+#if REAL_ADDRESSING || !(defined(NATMEM_OFFSET) || defined(MEM_BULK))
 static inline uint8 *vm_mac_acquire(uint32 size)
 {
 	return (uint8 *)vm_acquire(size);
 }
+#endif
 
 static inline int vm_mac_acquire_fixed(uint32 addr, uint32 size)
 {
@@ -406,7 +419,7 @@ static void usage(const char *prg_name)
 static bool valid_vmdir(const char *path)
 {
 	const int suffix_len = sizeof(".sheepvm") - 1;
-	int len = strlen(path);
+	int len = (int)strlen(path);
 	if (len && path[len - 1] == '/') // to support both ".sheepvm" and ".sheepvm/"
 		len--;
 	if (len > suffix_len && !strncmp(path + len - suffix_len, ".sheepvm", suffix_len)) {
@@ -484,7 +497,7 @@ static void get_system_info(void)
 		fclose(proc_file);
 	} else {
 		char str[256];
-		sprintf(str, GetString(STR_PROC_CPUINFO_WARN), strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_PROC_CPUINFO_WARN), strerror(errno));
 		WarningAlert(str);
 	}
 #else
@@ -582,7 +595,7 @@ static void get_system_info(void)
 		fclose(proc_file);
 	} else {
 		char str[256];
-		sprintf(str, GetString(STR_PROC_CPUINFO_WARN), strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_PROC_CPUINFO_WARN), strerror(errno));
 		WarningAlert(str);
 	}
 
@@ -603,7 +616,7 @@ static void get_system_info(void)
 		while ((cpu_entry = readdir(cpus_dir)) != NULL) {
 			if (strstr(cpu_entry->d_name, "PowerPC,") == cpu_entry->d_name) {
 				char timebase_freq_node[256];
-				sprintf(timebase_freq_node, "/proc/device-tree/cpus/%s/timebase-frequency", cpu_entry->d_name);
+				snprintf(timebase_freq_node, sizeof(timebase_freq_node), "/proc/device-tree/cpus/%s/timebase-frequency", cpu_entry->d_name);
 				proc_file = fopen(timebase_freq_node, "r");
 				if (proc_file) {
 					union { uint8 b[4]; uint32 l; } value;
@@ -655,7 +668,7 @@ static bool load_rom_from_host_file(const char *path)
 		return false;
 	printf("%s", GetString(STR_READING_ROM_FILE));
 	uint8 *rom_tmp = new uint8[ROM_SIZE];
-	uint32 actual = read(rom_fd, (void *)rom_tmp, ROM_SIZE);
+	uint32 actual = (uint32)read(rom_fd, (void *)rom_tmp, ROM_SIZE);
 	close(rom_fd);
 	bool ok = DecodeROM(rom_tmp, actual);
 	delete[] rom_tmp;
@@ -716,7 +729,7 @@ static bool install_signal_handlers(void)
 	sig_stack.ss_flags = 0;
 	sig_stack.ss_size = SIG_STACK_SIZE;
 	if (sigaltstack(&sig_stack, NULL) < 0) {
-		sprintf(str, GetString(STR_SIGALTSTACK_ERR), strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_SIGALTSTACK_ERR), strerror(errno));
 		ErrorAlert(str);
 		return false;
 	}
@@ -738,19 +751,19 @@ static bool install_signal_handlers(void)
 	sigsegv_action.sa_restorer = NULL;
 #endif
 	if (sigaction(SIGSEGV, &sigsegv_action, NULL) < 0) {
-		sprintf(str, GetString(STR_SIG_INSTALL_ERR), "SIGSEGV", strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_SIG_INSTALL_ERR), "SIGSEGV", strerror(errno));
 		ErrorAlert(str);
 		return false;
 	}
 	if (sigaction(SIGBUS, &sigsegv_action, NULL) < 0) {
-		sprintf(str, GetString(STR_SIG_INSTALL_ERR), "SIGBUS", strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_SIG_INSTALL_ERR), "SIGBUS", strerror(errno));
 		ErrorAlert(str);
 		return false;
 	}
 #else
 	// Install SIGSEGV handler for CPU emulator
 	if (!sigsegv_install_handler(sigsegv_handler)) {
-		sprintf(str, GetString(STR_SIG_INSTALL_ERR), "SIGSEGV", strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_SIG_INSTALL_ERR), "SIGSEGV", strerror(errno));
 		ErrorAlert(str);
 		return false;
 	}
@@ -791,7 +804,7 @@ static bool init_sdl()
 	SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
 	if (SDL_Init(sdl_flags) == -1) {
 		char str[256];
-		sprintf(str, "Could not initialize SDL: %s.\n", SDL_GetError());
+		snprintf(str, sizeof(str), "Could not initialize SDL: %s.\n", SDL_GetError());
 		ErrorAlert(str);
 		return false;
 	}
@@ -995,6 +1008,17 @@ int main(int argc, char **argv)
 		}
 	}
 
+#ifdef USE_MACOS_VIDEO
+	{
+		extern std::string UserPrefsPath;
+		if (UserPrefsPath.empty()) {
+			const char *chosen = SheepHostWaitForConfig();
+			if (chosen && chosen[0])
+				UserPrefsPath = chosen;
+		}
+	}
+#endif
+
 	// Read preferences
 	PrefsInit(vmdir, argc, argv);
 	// Only use nogui preference if not passed as command line argument
@@ -1025,7 +1049,7 @@ int main(int argc, char **argv)
 	x_display = XOpenDisplay(x_display_name);
 	if (x_display == NULL) {
 		char str[256];
-		sprintf(str, GetString(STR_NO_XSERVER_ERR), XDisplayName(x_display_name));
+		snprintf(str, sizeof(str), GetString(STR_NO_XSERVER_ERR), XDisplayName(x_display_name));
 		ErrorAlert(str);
 		goto quit;
 	}
@@ -1081,7 +1105,7 @@ int main(int argc, char **argv)
 	// Open /dev/zero
 	zero_fd = open("/dev/zero", O_RDWR);
 	if (zero_fd < 0) {
-		sprintf(str, GetString(STR_NO_DEV_ZERO_ERR), strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_NO_DEV_ZERO_ERR), strerror(errno));
 		ErrorAlert(str);
 		goto quit;
 	}
@@ -1099,20 +1123,20 @@ int main(int argc, char **argv)
 #if 0
 	// Create area for DR Cache
 	if (vm_mac_acquire_fixed(DR_EMULATOR_BASE, DR_EMULATOR_SIZE) < 0) {
-		sprintf(str, GetString(STR_DR_EMULATOR_MMAP_ERR), strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_DR_EMULATOR_MMAP_ERR), strerror(errno));
 		ErrorAlert(str);
 		goto quit;
 	}
 	dr_emulator_area_mapped = true;
 	if (vm_mac_acquire_fixed(DR_CACHE_BASE, DR_CACHE_SIZE) < 0) {
-		sprintf(str, GetString(STR_DR_CACHE_MMAP_ERR), strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_DR_CACHE_MMAP_ERR), strerror(errno));
 		ErrorAlert(str);
 		goto quit;
 	}
 	dr_cache_area_mapped = true;
 #if !EMULATED_PPC
 	if (vm_protect((char *)DR_CACHE_BASE, DR_CACHE_SIZE, VM_PAGE_READ | VM_PAGE_WRITE | VM_PAGE_EXECUTE) < 0) {
-		sprintf(str, GetString(STR_DR_CACHE_MMAP_ERR), strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_DR_CACHE_MMAP_ERR), strerror(errno));
 		ErrorAlert(str);
 		goto quit;
 	}
@@ -1146,7 +1170,7 @@ int main(int argc, char **argv)
 		// globals up to 0x3000; New World keeps the NK's exception vector
 		// stubs at PA 0 and the Trampoline's ConfigInfo page at PA 0x3000)
 		if (vm_mac_acquire_fixed(0, 0x4000) < 0) {
-			sprintf(str, GetString(STR_LOW_MEM_MMAP_ERR), strerror(errno));
+			snprintf(str, sizeof(str), GetString(STR_LOW_MEM_MMAP_ERR), strerror(errno));
 			ErrorAlert(str);
 			goto quit;
 		}
@@ -1157,7 +1181,7 @@ int main(int argc, char **argv)
 		// and ROM areas contiguously, plus a little extra to allow for ROM address alignment.
 		RAMBaseHost = vm_mac_acquire(RAMSize + ROM_AREA_SIZE + ROM_ALIGNMENT + SIG_STACK_SIZE);
 		if (RAMBaseHost == VM_MAP_FAILED) {
-			sprintf(str, GetString(STR_RAM_ROM_MMAP_ERR), strerror(errno));
+			snprintf(str, sizeof(str), GetString(STR_RAM_ROM_MMAP_ERR), strerror(errno));
 			ErrorAlert(str);
 			goto quit;
 		}
@@ -1169,7 +1193,7 @@ int main(int argc, char **argv)
 		ram_rom_areas_contiguous = true;
 #else
 		if (vm_mac_acquire_fixed(RAM_BASE, RAMSize) < 0) {
-			sprintf(str, GetString(STR_RAM_MMAP_ERR), strerror(errno));
+			snprintf(str, sizeof(str), GetString(STR_RAM_MMAP_ERR), strerror(errno));
 			ErrorAlert(str);
 			goto quit;
 		}
@@ -1179,7 +1203,7 @@ int main(int argc, char **argv)
 	}
 #if !EMULATED_PPC
 	if (vm_protect(RAMBaseHost, RAMSize, VM_PAGE_READ | VM_PAGE_WRITE | VM_PAGE_EXECUTE) < 0) {
-		sprintf(str, GetString(STR_RAM_MMAP_ERR), strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_RAM_MMAP_ERR), strerror(errno));
 		ErrorAlert(str);
 		goto quit;
 	}
@@ -1195,7 +1219,7 @@ int main(int argc, char **argv)
 	// Create area for Mac ROM
 	if (!ram_rom_areas_contiguous) {
 		if (vm_mac_acquire_fixed(ROM_BASE, ROM_AREA_SIZE + SIG_STACK_SIZE) < 0) {
-			sprintf(str, GetString(STR_ROM_MMAP_ERR), strerror(errno));
+			snprintf(str, sizeof(str), GetString(STR_ROM_MMAP_ERR), strerror(errno));
 			ErrorAlert(str);
 			goto quit;
 		}
@@ -1205,7 +1229,7 @@ int main(int argc, char **argv)
 	}
 #if !EMULATED_PPC
 	if (vm_protect(ROMBaseHost, ROM_AREA_SIZE, VM_PAGE_READ | VM_PAGE_WRITE | VM_PAGE_EXECUTE) < 0) {
-		sprintf(str, GetString(STR_ROM_MMAP_ERR), strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_ROM_MMAP_ERR), strerror(errno));
 		ErrorAlert(str);
 		goto quit;
 	}
@@ -1220,7 +1244,7 @@ int main(int argc, char **argv)
 
 	// Create area for SheepShaver data
 	if (!SheepMem::Init()) {
-		sprintf(str, GetString(STR_SHEEP_MEM_MMAP_ERR), strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_SHEEP_MEM_MMAP_ERR), strerror(errno));
 		ErrorAlert(str);
 		goto quit;
 	}
@@ -1290,7 +1314,7 @@ int main(int argc, char **argv)
 	sigill_action.sa_restorer = NULL;
 #endif
 	if (sigaction(SIGILL, &sigill_action, NULL) < 0) {
-		sprintf(str, GetString(STR_SIG_INSTALL_ERR), "SIGILL", strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_SIG_INSTALL_ERR), "SIGILL", strerror(errno));
 		ErrorAlert(str);
 		goto quit;
 	}
@@ -1305,16 +1329,27 @@ int main(int argc, char **argv)
 	sigusr2_action.sa_restorer = NULL;
 #endif
 	if (sigaction(SIGUSR2, &sigusr2_action, NULL) < 0) {
-		sprintf(str, GetString(STR_SIG_INSTALL_ERR), "SIGUSR2", strerror(errno));
+		snprintf(str, sizeof(str), GetString(STR_SIG_INSTALL_ERR), "SIGUSR2", strerror(errno));
 		ErrorAlert(str);
 		goto quit;
 	}
 #endif
 
-	// Get my thread ID and execute MacOS thread function
+	// The Mac host keeps NSApp on this thread. The ROM runs on
+	// emul_thread so the window receives events while the guest is busy.
+#ifdef USE_MACOS_VIDEO
+	if (pthread_create(&emul_thread, NULL, emul_thread_main, NULL) != 0) {
+		snprintf(str, sizeof(str), "Cannot start the Mac OS thread: %s", strerror(errno));
+		ErrorAlert(str);
+		goto quit;
+	}
+	D(bug("MacOS thread is %ld\n", emul_thread));
+	VideoHostRun();
+#else
 	emul_thread = pthread_self();
 	D(bug("MacOS thread is %ld\n", emul_thread));
 	emul_func(NULL);
+#endif
 
 quit:
 	Quit();
@@ -1471,7 +1506,7 @@ static bool kernel_data_init(void)
 	}
 
 	char str[256];
-	sprintf(str, GetString(error_string), strerror(errno));
+	snprintf(str, sizeof(str), GetString(error_string), strerror(errno));
 	ErrorAlert(str);
 	return false;
 }
@@ -1504,6 +1539,14 @@ void jump_to_rom(uint32 entry)
 /*
  *  Emulator thread function
  */
+
+#ifdef USE_MACOS_VIDEO
+static void *emul_thread_main(void *arg)
+{
+	emul_thread = pthread_self();
+	return emul_func(arg);
+}
+#endif
 
 static void *emul_func(void *arg)
 {
@@ -1566,6 +1609,17 @@ void Execute68kTrap(uint16 trap, M68kRegisters *r)
 
 void QuitEmulator(void)
 {
+#if defined(__APPLE__)
+	static int once;
+	if (!once) {
+		once = 1;
+		void *stack[16];
+		int n = backtrace(stack, 16);
+		printf("QUIT\n");
+		fflush(stdout);
+		backtrace_symbols_fd(stack, n, STDOUT_FILENO);
+	}
+#endif
 #if EMULATED_PPC
 	Quit();
 #else
@@ -1642,6 +1696,41 @@ static void *nvram_func(void *arg)
  */
 
 bool tick_inhibit;
+
+#if defined(__APPLE__)
+/* Strong copies live in video_macos.mm and the Mac audio backend. A Unix
+ * build that does not link those keeps these zeros. */
+extern "C" __attribute__((weak)) void VideoPlaybackTake(uint64_t *presents, uint64_t *present_us_max, uint64_t *pictures)
+{
+	if (presents) *presents = 0;
+	if (present_us_max) *present_us_max = 0;
+	if (pictures) *pictures = 0;
+}
+extern "C" __attribute__((weak)) void AudioBackEndTakeStats(uint64_t *callbacks, uint64_t *max_us)
+{
+	if (callbacks) *callbacks = 0;
+	if (max_us) *max_us = 0;
+}
+extern "C" __attribute__((weak)) uint64_t AudioShortPulls(void)
+{
+	return 0;
+}
+extern "C" __attribute__((weak)) void SheepBlasterTakeStats(uint64_t *in_frames, uint64_t *out_frames,
+	uint64_t *ring_full, uint64_t *unsent, uint32_t *min_have, uint32_t *max_have,
+	uint32_t *submits, uint64_t *src_frames, uint32_t *rate_hz)
+{
+	if (in_frames) *in_frames = 0;
+	if (out_frames) *out_frames = 0;
+	if (ring_full) *ring_full = 0;
+	if (unsent) *unsent = 0;
+	if (min_have) *min_have = 0;
+	if (max_have) *max_have = 0;
+	if (submits) *submits = 0;
+	if (src_frames) *src_frames = 0;
+	if (rate_hz) *rate_hz = 0;
+}
+#endif
+
 static void *tick_func(void *arg)
 {
 	int tick_counter = 0;
@@ -1660,6 +1749,29 @@ static void *tick_func(void *arg)
 			next = GetTicks_usec();
 		if (tick_inhibit) continue;
 		ticks++;
+
+#if defined(__APPLE__)
+		/* Once a second, from this thread, so the line still prints if the
+		 * emulator is stuck inside a present or a guest frame. */
+		if ((ticks % 60) == 0) {
+			uint64_t presents = 0, present_us = 0, pictures = 0, cbs = 0, cb_us = 0;
+			VideoPlaybackTake(&presents, &present_us, &pictures);
+			AudioBackEndTakeStats(&cbs, &cb_us);
+			uint64_t sb_in = 0, sb_out = 0, sb_full = 0, sb_unsent = 0, sb_src = 0;
+			uint32_t sb_min = 0, sb_max = 0, sb_sub = 0, sb_rate = 0;
+			SheepBlasterTakeStats(&sb_in, &sb_out, &sb_full, &sb_unsent, &sb_min, &sb_max,
+					      &sb_sub, &sb_src, &sb_rate);
+			printf("PLAY presents=%llu present_max_us=%llu pictures=%llu audio_cb=%llu audio_cb_max_us=%llu short_pulls=%llu sb_in=%llu sb_out=%llu sb_min=%u sb_max=%u sb_full=%llu sb_unsent=%llu sb_sub=%u sb_src=%llu sb_rate=%u\n",
+			       (unsigned long long)presents, (unsigned long long)present_us,
+			       (unsigned long long)pictures, (unsigned long long)cbs,
+			       (unsigned long long)cb_us, (unsigned long long)AudioShortPulls(),
+			       (unsigned long long)sb_in, (unsigned long long)sb_out,
+			       (unsigned)sb_min, (unsigned)sb_max,
+			       (unsigned long long)sb_full, (unsigned long long)sb_unsent,
+			       (unsigned)sb_sub, (unsigned long long)sb_src, (unsigned)sb_rate);
+			fflush(stdout);
+		}
+#endif
 
 #if !EMULATED_PPC
 		// Did we crash?
@@ -2218,9 +2330,9 @@ static void sigsegv_handler(int sig, siginfo_t *sip, void *scp)
 		if (use_gui) {
 			char str[256];
 			if (transfer_type == TYPE_LOAD || transfer_type == TYPE_STORE)
-				sprintf(str, GetString(STR_MEM_ACCESS_ERR), transfer_size == SIZE_BYTE ? "byte" : transfer_size == SIZE_HALFWORD ? "halfword" : "word", transfer_type == TYPE_LOAD ? GetString(STR_MEM_ACCESS_READ) : GetString(STR_MEM_ACCESS_WRITE), addr, r->pc(), r->gpr(24), r->gpr(1));
+				snprintf(str, sizeof(str), GetString(STR_MEM_ACCESS_ERR), transfer_size == SIZE_BYTE ? "byte" : transfer_size == SIZE_HALFWORD ? "halfword" : "word", transfer_type == TYPE_LOAD ? GetString(STR_MEM_ACCESS_READ) : GetString(STR_MEM_ACCESS_WRITE), addr, r->pc(), r->gpr(24), r->gpr(1));
 			else
-				sprintf(str, GetString(STR_UNKNOWN_SEGV_ERR), r->pc(), r->gpr(24), r->gpr(1), opcode);
+				snprintf(str, sizeof(str), GetString(STR_UNKNOWN_SEGV_ERR), r->pc(), r->gpr(24), r->gpr(1), opcode);
 			ErrorAlert(str);
 			QuitEmulator();
 			return;
@@ -2300,7 +2412,7 @@ static void sigill_handler(int sig, siginfo_t *sip, void *scp)
 		switch (primop) {
 			case 9:		// POWER instructions
 			case 22:
-power_inst:		sprintf(str, GetString(STR_POWER_INSTRUCTION_ERR), r->pc(), r->gpr(1), opcode);
+power_inst:		snprintf(str, sizeof(str), GetString(STR_POWER_INSTRUCTION_ERR), r->pc(), r->gpr(1), opcode);
 				ErrorAlert(str);
 				QuitEmulator();
 				return;
@@ -2394,7 +2506,7 @@ power_inst:		sprintf(str, GetString(STR_POWER_INSTRUCTION_ERR), r->pc(), r->gpr(
 
 		// In GUI mode, show error alert
 		if (use_gui) {
-			sprintf(str, GetString(STR_UNKNOWN_SEGV_ERR), r->pc(), r->gpr(24), r->gpr(1), opcode);
+			snprintf(str, sizeof(str), GetString(STR_UNKNOWN_SEGV_ERR), r->pc(), r->gpr(24), r->gpr(1), opcode);
 			ErrorAlert(str);
 			QuitEmulator();
 			return;
@@ -2465,8 +2577,8 @@ bool SheepMem::Init(void)
 	// Allocate page with all bits set to 0, right in the middle
 	// This is also used to catch undesired overlaps between proc and data areas
 	zero_page = proc + (size / 2);
-	Mac_memset(zero_page, 0, page_size);
-	if (vm_protect(Mac2HostAddr(zero_page), page_size, VM_PAGE_READ) < 0)
+	Mac_memset((uint32)zero_page, 0, page_size);
+	if (vm_protect(Mac2HostAddr((uint32)zero_page), page_size, VM_PAGE_READ) < 0)
 		return false;
 
 #if EMULATED_PPC
@@ -2481,11 +2593,11 @@ void SheepMem::Exit(void)
 {
 	if (data) {
 		// Delete SheepShaver globals
-		vm_mac_release(base, size);
+		vm_mac_release((uint32)base, size);
 
 #if EMULATED_PPC
 		// Delete alternate stack for PowerPC interrupt routine
-		vm_mac_release(sig_stack, SIG_STACK_SIZE);
+		vm_mac_release((uint32)sig_stack, SIG_STACK_SIZE);
 #endif
 	}
 }

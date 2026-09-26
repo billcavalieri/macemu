@@ -313,7 +313,7 @@ struct RoutineRecord {
 	int8 							reserved1;					/* Must be 0 */
 	ISAType 						ISA;						/* Instruction Set Architecture */
 	RoutineFlagsType 				routineFlags;				/* Flags for each routine */
-	ProcPtr 						procDescriptor;				/* Where is the thing we’re calling? */
+	ProcPtr 						procDescriptor;				/* Where is the thing we?re calling? */
 	uint32 							reserved2;					/* Must be 0 */
 	uint32 							selector;					/* For dispatched routines, the selector */
 };
@@ -335,14 +335,15 @@ struct SheepRoutineDescriptor
 	SheepRoutineDescriptor(ProcInfoType procInfo, uint32 procedure)
 		: SheepVar(sizeof(RoutineDescriptor))
 	{
-		const uintptr desc = addr();
+		const uint32 desc = addr();
 		Mac_memset(desc, 0, sizeof(RoutineDescriptor));
-		WriteMacInt16(desc + offsetof(RoutineDescriptor, goMixedModeTrap), 0xAAFE);
-		WriteMacInt8 (desc + offsetof(RoutineDescriptor, version), 7);
-		WriteMacInt32(desc + offsetof(RoutineDescriptor, routineRecords) + offsetof(RoutineRecord, procInfo), procInfo);
-		WriteMacInt8 (desc + offsetof(RoutineDescriptor, routineRecords) + offsetof(RoutineRecord, ISA), 1);
-		WriteMacInt16(desc + offsetof(RoutineDescriptor, routineRecords) + offsetof(RoutineRecord, routineFlags), 0 | 0 | 4);
-		WriteMacInt32(desc + offsetof(RoutineDescriptor, routineRecords) + offsetof(RoutineRecord, procDescriptor), procedure);
+		/* offsetof is size_t. Add it as uint32 so the guest address stays 32-bit. */
+		WriteMacInt16(desc + (uint32)offsetof(RoutineDescriptor, goMixedModeTrap), 0xAAFE);
+		WriteMacInt8 (desc + (uint32)offsetof(RoutineDescriptor, version), 7);
+		WriteMacInt32(desc + (uint32)offsetof(RoutineDescriptor, routineRecords) + (uint32)offsetof(RoutineRecord, procInfo), procInfo);
+		WriteMacInt8 (desc + (uint32)offsetof(RoutineDescriptor, routineRecords) + (uint32)offsetof(RoutineRecord, ISA), 1);
+		WriteMacInt16(desc + (uint32)offsetof(RoutineDescriptor, routineRecords) + (uint32)offsetof(RoutineRecord, routineFlags), 0 | 0 | 4);
+		WriteMacInt32(desc + (uint32)offsetof(RoutineDescriptor, routineRecords) + (uint32)offsetof(RoutineRecord, procDescriptor), procedure);
 	}
 };
 

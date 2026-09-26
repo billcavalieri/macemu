@@ -97,7 +97,7 @@ int prepare_host_domain_suffixes(char * buf) {
 	return pos;
 }
 
-void load_host_domains() {
+void load_host_domains(void) {
 	const int size = prepare_host_domain_suffixes(NULL);
 	char * buf = malloc(size);
 	if (buf) {
@@ -107,7 +107,7 @@ void load_host_domains() {
 	}
 }
 
-void unload_host_domains() {
+void unload_host_domains(void) {
 	if (host_resolved_domain_suffixes) {
 		free((char *) host_resolved_domain_suffixes);
 		host_resolved_domain_suffixes = NULL;
@@ -115,19 +115,14 @@ void unload_host_domains() {
 }
 
 void
-so_init()
+so_init(void)
 {
 	/* Nothing yet */
 }
 
 
 struct socket *
-solookup(head, laddr, lport, faddr, fport)
-	struct socket *head;
-	struct in_addr laddr;
-	u_int lport;
-	struct in_addr faddr;
-	u_int fport;
+solookup(struct socket * head, struct in_addr laddr, u_int lport, struct in_addr faddr, u_int fport)
 {
 	struct socket *so;
 	
@@ -151,7 +146,7 @@ solookup(head, laddr, lport, faddr, fport)
  * insque() it into the correct linked-list
  */
 struct socket *
-socreate()
+socreate(void)
 {
   struct socket *so;
 	
@@ -168,8 +163,7 @@ socreate()
  * remque and free a socket, clobber cache
  */
 void
-sofree(so)
-	struct socket *so;
+sofree(struct socket * so)
 {
   if (so->so_emu==EMU_RSH && so->extra) {
 	sofree(so->extra);
@@ -194,8 +188,7 @@ sofree(so)
  * a read() of 0 (or less) means it's disconnected
  */
 int
-soread(so)
-	struct socket *so;
+soread(struct socket * so)
 {
 	int n, nn, lss, total;
 	struct sbuf *sb = &so->so_snd;
@@ -232,7 +225,7 @@ soread(so)
 			iov[1].iov_len = sb->sb_rptr - sb->sb_data;
 			if(iov[1].iov_len > len)
 			   iov[1].iov_len = len;
-			total = iov[0].iov_len + iov[1].iov_len;
+			total = (int)(iov[0].iov_len + iov[1].iov_len);
 			if (total > mss) {
 				lss = total%mss;
 				if (iov[1].iov_len > lss) {
@@ -256,7 +249,7 @@ soread(so)
 	nn = readv(so->s, (struct iovec *)iov, n);
 	DEBUG_MISC((dfd, " ... read nn = %d bytes\n", nn));
 #else
-	nn = recv(so->s, iov[0].iov_base, iov[0].iov_len,0);
+	nn = (int)recv(so->s, iov[0].iov_base, iov[0].iov_len,0);
 #endif	
 	if (nn <= 0) {
 		if (nn < 0 && (errno == EINTR || errno == EAGAIN))
@@ -281,7 +274,7 @@ soread(so)
 	 */
 	if (n == 2 && nn == iov[0].iov_len) {
             int ret;
-            ret = recv(so->s, iov[1].iov_base, iov[1].iov_len,0);
+            ret = (int)recv(so->s, iov[1].iov_base, iov[1].iov_len,0);
             if (ret > 0)
                 nn += ret;
         }
@@ -305,8 +298,7 @@ soread(so)
  * in the send buffer is sent as urgent data
  */
 void
-sorecvoob(so)
-	struct socket *so;
+sorecvoob(struct socket * so)
 {
 	struct tcpcb *tp = sototcpcb(so);
 
@@ -333,8 +325,7 @@ sorecvoob(so)
  * There's a lot duplicated code here, but...
  */
 int
-sosendoob(so)
-	struct socket *so;
+sosendoob(struct socket * so)
 {
 	struct sbuf *sb = &so->so_rcv;
 	char buff[2048]; /* XXX Shouldn't be sending more oob data than this */
@@ -350,7 +341,7 @@ sosendoob(so)
 	
 	if (sb->sb_rptr < sb->sb_wptr) {
 		/* We can send it directly */
-		n = send(so->s, sb->sb_rptr, so->so_urgc, (MSG_OOB)); /* |MSG_DONTWAIT)); */
+		n = (int)send(so->s, sb->sb_rptr, so->so_urgc, (MSG_OOB)); /* |MSG_DONTWAIT)); */
 		so->so_urgc -= n;
 		
 		DEBUG_MISC((dfd, " --- sent %d bytes urgent data, %d urgent bytes left\n", n, so->so_urgc));
@@ -360,18 +351,18 @@ sosendoob(so)
 		 * we must copy all data to a linear buffer then
 		 * send it all
 		 */
-		len = (sb->sb_data + sb->sb_datalen) - sb->sb_rptr;
+		len = (int)((sb->sb_data + sb->sb_datalen) - sb->sb_rptr);
 		if (len > so->so_urgc) len = so->so_urgc;
 		memcpy(buff, sb->sb_rptr, len);
 		so->so_urgc -= len;
 		if (so->so_urgc) {
-			n = sb->sb_wptr - sb->sb_data;
+			n = (int)(sb->sb_wptr - sb->sb_data);
 			if (n > so->so_urgc) n = so->so_urgc;
 			memcpy((buff + len), sb->sb_data, n);
 			so->so_urgc -= n;
 			len += n;
 		}
-		n = send(so->s, buff, len, (MSG_OOB)); /* |MSG_DONTWAIT)); */
+		n = (int)send(so->s, buff, len, (MSG_OOB)); /* |MSG_DONTWAIT)); */
 #ifdef DEBUG
 		if (n != len)
 		   DEBUG_ERROR((dfd, "Didn't send all data urgently XXXXX\n"));
@@ -392,8 +383,7 @@ sosendoob(so)
  * updating all sbuf field as necessary
  */
 int
-sowrite(so)
-	struct socket *so;
+sowrite(struct socket * so)
 {
 	int  n,nn;
 	struct sbuf *sb = &so->so_rcv;
@@ -441,7 +431,7 @@ sowrite(so)
 	
 	DEBUG_MISC((dfd, "  ... wrote nn = %d bytes\n", nn));
 #else
-	nn = send(so->s, iov[0].iov_base, iov[0].iov_len,0);
+	nn = (int)send(so->s, iov[0].iov_base, iov[0].iov_len,0);
 #endif
 	/* This should never happen, but people tell me it does *shrug* */
 	if (nn < 0 && (errno == EAGAIN || errno == EINTR))
@@ -458,7 +448,7 @@ sowrite(so)
 #ifndef HAVE_READV
 	if (n == 2 && nn == iov[0].iov_len) {
             int ret;
-            ret = send(so->s, iov[1].iov_base, iov[1].iov_len,0);
+            ret = (int)send(so->s, iov[1].iov_base, iov[1].iov_len,0);
             if (ret > 0)
                 nn += ret;
         }
@@ -485,8 +475,7 @@ sowrite(so)
  * recvfrom() a UDP socket
  */
 void
-sorecvfrom(so)
-	struct socket *so;
+sorecvfrom(struct socket * so)
 {
 	struct sockaddr_in addr;
 	socklen_t addrlen = sizeof(struct sockaddr_in);
@@ -498,7 +487,7 @@ sorecvfrom(so)
 	  char buff[256];
 	  int len;
 		
-	  len = recvfrom(so->s, buff, 256, 0, 
+	  len = (int)recvfrom(so->s, buff, 256, 0, 
 			 (struct sockaddr *)&addr, &addrlen);
 	  /* XXX Check if reply is "correct"? */
 	  
@@ -529,18 +518,18 @@ sorecvfrom(so)
 	   * XXX Shouldn't FIONREAD packets destined for port 53,
 	   * but I don't know the max packet size for DNS lookups
 	   */
-	  len = M_FREEROOM(m);
+	  len = (int)M_FREEROOM(m);
 	  /* if (so->so_fport != htons(53)) { */
 	  ioctlsocket(so->s, FIONREAD, &n);
 	  
 	  if (n > len) {
-	    n = (m->m_data - m->m_dat) + m->m_len + n + 1;
+	    n = (int)((m->m_data - m->m_dat) + m->m_len + n + 1);
 	    m_inc(m, n);
-	    len = M_FREEROOM(m);
+	    len = (int)M_FREEROOM(m);
 	  }
 	  /* } */
 		
-	  m->m_len = recvfrom(so->s, m->m_data, len, 0,
+	  m->m_len = (int)recvfrom(so->s, m->m_data, len, 0,
 			      (struct sockaddr *)&addr, &addrlen);
 	  DEBUG_MISC((dfd, " did recvfrom %d, errno = %d-%s\n", 
 		      m->m_len, errno,strerror(errno)));
@@ -646,7 +635,7 @@ size_t strnlen(const char *s, size_t maxlen) {
 #define POP_STR(varname, data, len) \
 	const char * varname; \
 	{ \
-	int pop_str_len = strnlen(data, len); \
+	int pop_str_len = (int)strnlen(data, len); \
 	if (pop_str_len == len) { \
 		varname = NULL; \
 	} else { \
@@ -667,12 +656,12 @@ static void inject_udp_packet_to_guest(struct socket * so, struct sockaddr_in ad
 	if (!(m = m_get())) return;
 	m->m_data += if_maxlinkhdr;
 	
-	len = M_FREEROOM(m);
+	len = (int)M_FREEROOM(m);
 	
 	if (packet_len > len) {
-		packet_len = (m->m_data - m->m_dat) + m->m_len + packet_len + 1;
+		packet_len = (int)((m->m_data - m->m_dat) + m->m_len + packet_len + 1);
 		m_inc(m, packet_len);
-		len = M_FREEROOM(m);
+		len = (int)M_FREEROOM(m);
 	}
 
 	assert(len >= packet_len);
@@ -686,7 +675,7 @@ static void inject_udp_packet_to_guest(struct socket * so, struct sockaddr_in ad
  e.g. "\009something\004else\003com" for "something.else.com." */
 static char * decode_dns_name(const char * data) {
 
-	int query_str_len = strlen(data);
+	int query_str_len = (int)strlen(data);
 	char * decoded_name_str = malloc(query_str_len + 1);
 	if (decoded_name_str == NULL) { 
 		D("decode_dns_name(): out of memory\n");
@@ -787,7 +776,7 @@ static bool resolve_dns_request(struct socket * so, struct sockaddr_in addr, cad
 		const char * suffix = *suffix_ptr;
 
 		// ends with suffix?
-		int suffix_pos = strlen(decoded_name_str) - strlen(suffix);
+		int suffix_pos = (int)strlen(decoded_name_str) - (int)strlen(suffix);
 		if (suffix_pos > 0 && strcmp(decoded_name_str + suffix_pos, suffix) == 0) {
 			matched_suffix = suffix;
 			break;
@@ -825,7 +814,7 @@ static bool resolve_dns_request(struct socket * so, struct sockaddr_in addr, cad
 
 		D("DNS host query for %s: result count %d\n", decoded_name_str, results_count);
 
-		int original_query_str_size = strlen(original_query_str) + 1;
+		int original_query_str_size = (int)strlen(original_query_str) + 1;
 		int response_size = packet_len + results_count * (original_query_str_size + sizeof(struct R_DATA) + sizeof(struct in_addr));
 
 		caddr_t response_packet = malloc(response_size);
@@ -886,9 +875,7 @@ static bool resolve_dns_request(struct socket * so, struct sockaddr_in addr, cad
  * sendto() a socket
  */
 int
-sosendto(so, m)
-	struct socket *so;
-	struct mbuf *m;
+sosendto(struct socket * so, struct mbuf * m)
 {
 	int ret;
 	struct sockaddr_in addr;
@@ -920,7 +907,7 @@ sosendto(so, m)
 	DEBUG_MISC((dfd, " sendto()ing, addr.sin_port=%d, addr.sin_addr.s_addr=%.16s\n", ntohs(addr.sin_port), inet_ntoa(addr.sin_addr)));
 	
 	/* Don't care what port we get */
-	ret = sendto(so->s, m->m_data, m->m_len, 0,
+	ret = (int)sendto(so->s, m->m_data, m->m_len, 0,
 		     (struct sockaddr *)&addr, sizeof (struct sockaddr));
 	if (ret < 0)
 		return -1;
@@ -939,11 +926,7 @@ sosendto(so, m)
  * XXX This should really be tcp_listen
  */
 struct socket *
-solisten(port, laddr, lport, flags)
-	u_int port;
-	u_int32_t laddr;
-	u_int lport;
-	int flags;
+solisten(u_int port, u_int32_t laddr, u_int lport, int flags)
 {
 	struct sockaddr_in addr;
 	struct socket *so;
@@ -1019,8 +1002,7 @@ solisten(port, laddr, lport, flags)
  * XXX not yet...
  */
 void
-sorwakeup(so)
-	struct socket *so;
+sorwakeup(struct socket * so)
 {
 /*	sowrite(so); */
 /*	FD_CLR(so->s,&writefds); */
@@ -1032,8 +1014,7 @@ sorwakeup(so)
  * For now, don't read, it'll be done in the main loop
  */
 void
-sowwakeup(so)
-	struct socket *so;
+sowwakeup(struct socket * so)
 {
 	/* Nothing, yet */
 }
@@ -1045,8 +1026,7 @@ sowwakeup(so)
  * times each when only 1 was needed
  */
 void
-soisfconnecting(so)
-	register struct socket *so;
+soisfconnecting(register struct socket * so)
 {
 	so->so_state &= ~(SS_NOFDREF|SS_ISFCONNECTED|SS_FCANTRCVMORE|
 			  SS_FCANTSENDMORE|SS_FWDRAIN);
@@ -1054,16 +1034,14 @@ soisfconnecting(so)
 }
 
 void
-soisfconnected(so)
-        register struct socket *so;
+soisfconnected(register struct socket * so)
 {
 	so->so_state &= ~(SS_ISFCONNECTING|SS_FWDRAIN|SS_NOFDREF);
 	so->so_state |= SS_ISFCONNECTED; /* Clobber other states */
 }
 
 void
-sofcantrcvmore(so)
-	struct  socket *so;
+sofcantrcvmore(struct  socket * so)
 {
 	if ((so->so_state & SS_NOFDREF) == 0) {
 		shutdown(so->s,0);
@@ -1079,8 +1057,7 @@ sofcantrcvmore(so)
 }
 
 void
-sofcantsendmore(so)
-	struct socket *so;
+sofcantsendmore(struct socket * so)
 {
 	if ((so->so_state & SS_NOFDREF) == 0) {
             shutdown(so->s,1);           /* send FIN to fhost */
@@ -1099,8 +1076,7 @@ sofcantsendmore(so)
 }
 
 void
-soisfdisconnected(so)
-	struct socket *so;
+soisfdisconnected(struct socket * so)
 {
 /*	so->so_state &= ~(SS_ISFCONNECTING|SS_ISFCONNECTED); */
 /*	close(so->s); */
@@ -1115,8 +1091,7 @@ soisfdisconnected(so)
  * Set CANTSENDMORE once all data has been write()n
  */
 void
-sofwdrain(so)
-	struct socket *so;
+sofwdrain(struct socket * so)
 {
 	if (so->so_rcv.sb_cc)
 		so->so_state |= SS_FWDRAIN;

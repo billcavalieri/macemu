@@ -472,14 +472,16 @@ extern X11_LOCK_TYPE x_display_lock;
 #endif
 
 // Macro for calling MacOS routines
-#define CallMacOS(type, tvect) call_macos((uintptr)tvect)
-#define CallMacOS1(type, tvect, arg1) call_macos1((uintptr)tvect, (uintptr)arg1)
-#define CallMacOS2(type, tvect, arg1, arg2) call_macos2((uintptr)tvect, (uintptr)arg1, (uintptr)arg2)
-#define CallMacOS3(type, tvect, arg1, arg2, arg3) call_macos3((uintptr)tvect, (uintptr)arg1, (uintptr)arg2, (uintptr)arg3)
-#define CallMacOS4(type, tvect, arg1, arg2, arg3, arg4) call_macos4((uintptr)tvect, (uintptr)arg1, (uintptr)arg2, (uintptr)arg3, (uintptr)arg4)
-#define CallMacOS5(type, tvect, arg1, arg2, arg3, arg4, arg5) call_macos5((uintptr)tvect, (uintptr)arg1, (uintptr)arg2, (uintptr)arg3, (uintptr)arg4, (uintptr)arg5)
-#define CallMacOS6(type, tvect, arg1, arg2, arg3, arg4, arg5, arg6) call_macos6((uintptr)tvect, (uintptr)arg1, (uintptr)arg2, (uintptr)arg3, (uintptr)arg4, (uintptr)arg5, (uintptr)arg6)
-#define CallMacOS7(type, tvect, arg1, arg2, arg3, arg4, arg5, arg6, arg7) call_macos7((uintptr)tvect, (uintptr)arg1, (uintptr)arg2, (uintptr)arg3, (uintptr)arg4, (uintptr)arg5, (uintptr)arg6, (uintptr)arg7)
+/* call_macos* takes guest uint32. The (uintptr) cast alone still
+ * narrows when passed through. Truncate explicitly. */
+#define CallMacOS(type, tvect) call_macos((uint32)(uintptr)(tvect))
+#define CallMacOS1(type, tvect, arg1) call_macos1((uint32)(uintptr)(tvect), (uint32)(uintptr)(arg1))
+#define CallMacOS2(type, tvect, arg1, arg2) call_macos2((uint32)(uintptr)(tvect), (uint32)(uintptr)(arg1), (uint32)(uintptr)(arg2))
+#define CallMacOS3(type, tvect, arg1, arg2, arg3) call_macos3((uint32)(uintptr)(tvect), (uint32)(uintptr)(arg1), (uint32)(uintptr)(arg2), (uint32)(uintptr)(arg3))
+#define CallMacOS4(type, tvect, arg1, arg2, arg3, arg4) call_macos4((uint32)(uintptr)(tvect), (uint32)(uintptr)(arg1), (uint32)(uintptr)(arg2), (uint32)(uintptr)(arg3), (uint32)(uintptr)(arg4))
+#define CallMacOS5(type, tvect, arg1, arg2, arg3, arg4, arg5) call_macos5((uint32)(uintptr)(tvect), (uint32)(uintptr)(arg1), (uint32)(uintptr)(arg2), (uint32)(uintptr)(arg3), (uint32)(uintptr)(arg4), (uint32)(uintptr)(arg5))
+#define CallMacOS6(type, tvect, arg1, arg2, arg3, arg4, arg5, arg6) call_macos6((uint32)(uintptr)(tvect), (uint32)(uintptr)(arg1), (uint32)(uintptr)(arg2), (uint32)(uintptr)(arg3), (uint32)(uintptr)(arg4), (uint32)(uintptr)(arg5), (uint32)(uintptr)(arg6))
+#define CallMacOS7(type, tvect, arg1, arg2, arg3, arg4, arg5, arg6, arg7) call_macos7((uint32)(uintptr)(tvect), (uint32)(uintptr)(arg1), (uint32)(uintptr)(arg2), (uint32)(uintptr)(arg3), (uint32)(uintptr)(arg4), (uint32)(uintptr)(arg5), (uint32)(uintptr)(arg6), (uint32)(uintptr)(arg7))
 
 #ifdef __cplusplus
 extern "C" {

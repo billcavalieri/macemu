@@ -5162,7 +5162,7 @@ powerpc_dialect (struct disassemble_info *info)
 int
 print_insn_ppc (bfd_vma memaddr, struct disassemble_info *info)
 {
-  int dialect = (char *) info->private_data - (char *) 0;
+  int dialect = (int)((char *) info->private_data - (char *) 0);
   return print_insn_powerpc (memaddr, info, 1, dialect);
 }
 
@@ -5171,7 +5171,7 @@ print_insn_ppc (bfd_vma memaddr, struct disassemble_info *info)
 int
 print_insn_big_powerpc (bfd_vma memaddr, struct disassemble_info *info)
 {
-  int dialect = (char *) info->private_data - (char *) 0;
+  int dialect = (int)((char *) info->private_data - (char *) 0);
   return print_insn_powerpc (memaddr, info, 1, dialect);
 }
 
@@ -5180,7 +5180,7 @@ print_insn_big_powerpc (bfd_vma memaddr, struct disassemble_info *info)
 int
 print_insn_little_powerpc (bfd_vma memaddr, struct disassemble_info *info)
 {
-  int dialect = (char *) info->private_data - (char *) 0;
+  int dialect = (int)((char *) info->private_data - (char *) 0);
   return print_insn_powerpc (memaddr, info, 0, dialect);
 }
 
@@ -5454,7 +5454,7 @@ print_insn_powerpc (bfd_vma memaddr,
 		  int cr;
 		  int cc;
 
-		  cr = value >> 2;
+		  cr = (int)(value >> 2);
 		  if (cr != 0)
 		    (*info->fprintf_func) (info->stream, "4*cr%d+", cr);
 		  cc = value & 3;

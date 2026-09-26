@@ -62,7 +62,7 @@ struct multicast_node {
 struct DLPIStream {
 	void SetGroupSAP(uint8 sap) 
 	{
-		group_sap[sap >> kGSshift] |= (1L << ((sap >> 1) & kGSmask));
+		group_sap[sap >> kGSshift] |= (uint32)(1L << ((sap >> 1) & kGSmask));
 	}
 
 	void ClearGroupSAP(uint8 sap)
@@ -423,7 +423,7 @@ uint8 InitStreamModule(void *theID)
 
 	// Import functions from the Ethernet driver
 #ifdef USE_ETHER_FULL_DRIVER
-	ether_dispatch_packet_tvect = (uintptr)theID;
+	ether_dispatch_packet_tvect = (uint32)(uintptr)theID;
 	D(bug("ether_dispatch_packet TVECT at %08lx\n", ether_dispatch_packet_tvect));
 	if (ether_dispatch_packet_tvect == 0)
 		net_open = false;
@@ -729,7 +729,7 @@ static void ether_ioctl(DLPIStream *the_stream, queue_t *q, mblk_t *mp)
 ioctl_ok:
 	ioc->ioc_count = 0;
 	for (mblk_t *mp1 = mp; (mp1 = mp1->b_cont) != NULL;)
-		ioc->ioc_count += mp1->b_wptr - mp1->b_rptr;
+		ioc->ioc_count += (int)(mp1->b_wptr - mp1->b_rptr);
 	ioc->ioc_error = 0;
 	mp->b_datap->db_type = M_IOCACK;
 	qreply(q, mp);

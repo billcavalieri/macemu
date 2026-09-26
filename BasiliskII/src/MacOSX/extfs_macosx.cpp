@@ -21,7 +21,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/attr.h>
-#include <sys/syscall.h>
+#include <sys/xattr.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -65,17 +65,17 @@ static bool g_use_xattrs = false;
 
 static bool get_xattr(const char *path, const char *name, void *value, uint32 size)
 {
-	return syscall(SYS_getxattr, path, name, value, size, 0, 0) == size;
+	return getxattr(path, name, value, size, 0, 0) == (ssize_t)size;
 }
 
 static bool set_xattr(const char *path, const char *name, const void *value, uint32 size)
 {
-	return syscall(SYS_setxattr, path, name, value, size, 0, 0) == 0;
+	return setxattr(path, name, value, size, 0, 0) == 0;
 }
 
 static bool remove_xattr(const char *path, const char *name)
 {
-	return syscall(SYS_removexattr, path, name, 0) == 0;
+	return removexattr(path, name, 0) == 0;
 }
 
 static bool check_xattr(void)
@@ -120,7 +120,7 @@ void extfs_exit(void)
 
 void add_path_component(char *path, const char *component)
 {
-	int l = strlen(path);
+	int l = (int)strlen(path);
 	if (l < MAX_PATH_LENGTH-1 && path[l-1] != '/') {
 		path[l] = '/';
 		path[l+1] = 0;
@@ -232,7 +232,7 @@ static int open_finf(const char *path, int flag)
 
 static void make_rsrc_path(const char *src, char *dest)
 {
-	int l = strlen(src);
+	int l = (int)strlen(src);
 	if (l + 1 + 16 + 1 <= MAX_PATH_LENGTH)
 		memcpy(dest, src, l + 1);
 	else {
@@ -517,7 +517,7 @@ uint32 get_rfork_size(const char *path)
 	
 	// Close file and return size
 	close(fd);
-	return size < 0 ? 0 : size;
+	return size < 0 ? 0 : (uint32)size;
 }
 
 int open_rfork(const char *path, int flag)

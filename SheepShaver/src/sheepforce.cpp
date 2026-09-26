@@ -87,7 +87,12 @@ void SheepForceSetVisiblePage(int page)
 		page = 0;
 	if (page >= SheepForcePageCount())
 		page = SheepForcePageCount() - 1;
-	g_visible = page;
+	if (g_visible != page) {
+		g_visible = page;
+#if defined(__APPLE__)
+		SheepForceMarkDirty();
+#endif
+	}
 }
 
 int SheepForceWidth(void) { return g_w; }
@@ -113,7 +118,18 @@ void SheepForceStartup(void *)
 }
 void SheepForceShutdown(void) {}
 void SheepForceSync(void) {}
+void SheepForceFlushCPU(uint8 *, int, int, int) {}
+void SheepForceLayoutDisplay(void) {}
+void SheepForceMarkDirty(void) {}
+void SheepForceLoadPalette(void) {}
+bool SheepForceAdoptHostFB(uint8 *, uint32) { return false; }
 bool SheepForcePresent(int, int, int, int) { return false; }
+uint32 SheepForcePresentedHash(int *have)
+{
+	if (have)
+		*have = 0;
+	return 0;
+}
 bool SheepForceTryFill(uint8 *, int, int, int, int, uint32) { return false; }
 bool SheepForceTryInvert(uint8 *, int, int, int, int) { return false; }
 bool SheepForceTryBlit(uint8 *, const uint8 *, int, int, int, int, int) { return false; }

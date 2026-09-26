@@ -261,8 +261,8 @@ pty_allocate(int *ptyfd, int *ttyfd, char *namebuf, int namebuflen)
 	int i;
 	const char *ptymajors = "pqrstuvwxyzabcdefghijklmnoABCDEFGHIJKLMNOPQRSTUVWXYZ";
 	const char *ptyminors = "0123456789abcdef";
-	int num_minors = strlen(ptyminors);
-	int num_ptys = strlen(ptymajors) * num_minors;
+	int num_minors = (int)strlen(ptyminors);
+	int num_ptys = (int)strlen(ptymajors) * num_minors;
 	struct termios tio;
 
 	for (i = 0; i < num_ptys; i++) {

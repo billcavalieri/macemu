@@ -277,7 +277,7 @@ void SysAddFloppyPrefs(void)
 		while ((floppy_dev = readdir(fd_dir)) != NULL) {
 			if (strstr(floppy_dev->d_name, "u1440") != NULL) {
 				char fd_dev[20];
-				sprintf(fd_dev, "/dev/floppy/%s", floppy_dev->d_name);
+				snprintf(fd_dev, sizeof(fd_dev), "/dev/floppy/%s", floppy_dev->d_name);
 				PrefsAddString("floppy", fd_dev);
 			}
 		}
@@ -362,7 +362,7 @@ void SysAddCDROMPrefs(void)
 			while ((cdrom_dev = readdir(cd_dir)) != NULL) {
 				if (strcmp(cdrom_dev->d_name, ".") != 0 && strcmp(cdrom_dev->d_name, "..") != 0) {
 					char cd_dev[20];
-					sprintf(cd_dev, "/dev/cdroms/%s", cdrom_dev->d_name);
+					snprintf(cd_dev, sizeof(cd_dev), "/dev/cdroms/%s", cdrom_dev->d_name);
 					PrefsAddString("cdrom", cd_dev);
 				}
 			}
@@ -581,11 +581,11 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
 	char mount_name[256];
 	if (!is_file && !read_only && is_drive_mounted(name, mount_name)) {
 		char str[512];
-		sprintf(str, GetString(STR_VOLUME_IS_MOUNTED_WARN), mount_name);
+		snprintf(str, sizeof(str), GetString(STR_VOLUME_IS_MOUNTED_WARN), mount_name);
 		WarningAlert(str);
-		sprintf(str, "umount %s", mount_name);
+		snprintf(str, sizeof(str), "umount %s", mount_name);
 		if (system(str)) {
-			sprintf(str, GetString(STR_CANNOT_UNMOUNT_WARN), mount_name, strerror(errno));
+			snprintf(str, sizeof(str), GetString(STR_CANNOT_UNMOUNT_WARN), mount_name, strerror(errno));
 			WarningAlert(str);
 			return NULL;
 		}
@@ -928,8 +928,9 @@ void SysEject(void *arg)
 			// seconds to complete
 			if (fh->ioctl_name) {
 				static const char eject_cmd[] = "/usr/sbin/diskutil eject %s 2>&1 >/dev/null";
-				char *cmd = (char *)alloca(strlen(eject_cmd) + strlen(fh->ioctl_name) + 1);
-				sprintf(cmd, eject_cmd, fh->ioctl_name);
+				size_t cmd_len = strlen(eject_cmd) + strlen(fh->ioctl_name) + 1;
+				char *cmd = (char *)alloca(cmd_len);
+				snprintf(cmd, cmd_len, eject_cmd, fh->ioctl_name);
 				system(cmd);
 			}
 		}

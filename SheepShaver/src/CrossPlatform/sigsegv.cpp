@@ -2713,7 +2713,7 @@ template<typename T> void safeStore(uint32_t a, T d) {
 static bool handle_badaccess(SIGSEGV_FAULT_HANDLER_ARGLIST_1)
 {
 	sigsegv_info_t SI;
-	SI.addr = (sigsegv_address_t)SIGSEGV_FAULT_ADDRESS_FAST;
+	SI.addr = (sigsegv_address_t)(uintptr_t)SIGSEGV_FAULT_ADDRESS_FAST;
 	SI.pc = (sigsegv_address_t)SIGSEGV_FAULT_INSTRUCTION_FAST;
 #ifdef HAVE_MACH_EXCEPTIONS
 	SI.thread = thread;

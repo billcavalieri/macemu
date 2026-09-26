@@ -297,6 +297,13 @@ void nw_display_vbl_clear(void)
 	pic_set_irq(NW_VBL_IRQ, 0);
 }
 
+static uint32_t g_guest_pc;
+
+void nw_devices_note_pc(uint32_t pc)
+{
+	g_guest_pc = pc;
+}
+
 static void vbl_tick(void)
 {
 	if (g_tb.hz == 0)
@@ -310,6 +317,19 @@ static void vbl_tick(void)
 		return;
 	}
 	vbl_next += period;
+	/* The video hit iack 9439 and never wrote EOI, then sat in the
+	 * idle loop at 0027bae0 with this source still in service. A new
+	 * VBL cannot be delivered while that bit is set. Clear it only
+	 * from the idle loop. A slow handler is still at its own PC, and
+	 * clearing there dropped the startup screen's EOI. */
+	if (pic.src[NW_VBL_IRQ].servicing && g_guest_pc == 0x0027bae0u) {
+		pic.src[NW_VBL_IRQ].servicing = 0;
+		pic_update();
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+		printf("NW-BOOT G1: vbl idle serv cleared pc=%08x\n", g_guest_pc);
+		fflush(stdout);
+#endif
+	}
 #if defined(NW_BOOT_LOG) && NW_BOOT_LOG
 	{
 		static unsigned n;
@@ -954,7 +974,7 @@ static uint32_t pmu_rtc_now(void)
  *  adb-mouse. Host input lands in a key ring and mouse accumulators from
  *  the UI thread; the CPU thread drains them through register 0 reads.
  */
-enum { ADB_KEY_RING = 256 };
+enum { ADB_KEY_RING = 256, ADB_BTN_RING = 32 };
 
 static struct {
 	/* keyboard */
@@ -966,6 +986,8 @@ static struct {
 	std::atomic<int> dx, dy;
 	std::atomic<unsigned> buttons;		/* bit 0 primary, bit 1 secondary */
 	unsigned last_buttons;
+	uint8_t btn[ADB_BTN_RING];		/* queued down/up; high bit set = up */
+	std::atomic<unsigned> btn_wr, btn_rd;
 	/* bus */
 	int autopoll;				/* enabled by the guest */
 	uint16_t autopoll_mask;
@@ -993,6 +1015,7 @@ static void adb_reset(void)
 	adb.last_buttons = adb.buttons.load();
 	adb.dx.store(0);
 	adb.dy.store(0);
+	adb.btn_rd.store(adb.btn_wr.load());
 }
 
 static inline uint8_t adb_r3_hi(uint8_t flags, uint8_t addr)
@@ -1015,6 +1038,12 @@ void nw_adb_mouse_move(int dx, int dy)
 	adb.dy.fetch_add(dy);
 }
 
+void nw_adb_mouse_clear_delta(void)
+{
+	adb.dx.store(0);
+	adb.dy.store(0);
+}
+
 void nw_adb_mouse_button(int button, int down)
 {
 	if (button < 0 || button > 1)
@@ -1023,6 +1052,11 @@ void nw_adb_mouse_button(int button, int down)
 		adb.buttons.fetch_or(1u << button);
 	else
 		adb.buttons.fetch_and(~(1u << button));
+	const unsigned wr = adb.btn_wr.load(std::memory_order_relaxed);
+	if (wr - adb.btn_rd.load(std::memory_order_acquire) >= ADB_BTN_RING)
+		return;
+	adb.btn[wr % ADB_BTN_RING] = (uint8_t)((button & 0x3) | (down ? 0 : 0x80));
+	adb.btn_wr.store(wr + 1, std::memory_order_release);
 }
 
 static int adb_kbd_poll(uint8_t *obuf)
@@ -1084,17 +1118,37 @@ static int adb_kbd_request(uint8_t *obuf, const uint8_t *buf, int len)
 
 static int adb_mouse_poll(uint8_t *obuf)
 {
-	const unsigned buttons = adb.buttons.load();
 	int dx = adb.dx.load(), dy = adb.dy.load();
-	if (buttons == adb.last_buttons && dx == 0 && dy == 0)
+	if (dx != 0 || dy != 0) {
+		if (dx < -63) dx = -63; else if (dx > 63) dx = 63;
+		if (dy < -63) dy = -63; else if (dy > 63) dy = 63;
+		adb.dx.fetch_sub(dx);
+		adb.dy.fetch_sub(dy);
+		const unsigned buttons = adb.last_buttons;
+		obuf[0] = (uint8_t)((dy & 0x7f) | ((buttons & 1) ? 0 : 0x80));
+		obuf[1] = (uint8_t)((dx & 0x7f) | ((buttons & 2) ? 0 : 0x80));
+		return 2;
+	}
+	const unsigned rd = adb.btn_rd.load(std::memory_order_relaxed);
+	if (rd != adb.btn_wr.load(std::memory_order_acquire)) {
+		const uint8_t e = adb.btn[rd % ADB_BTN_RING];
+		adb.btn_rd.store(rd + 1, std::memory_order_release);
+		const unsigned bit = 1u << (e & 0x3);
+		if (e & 0x80)
+			adb.last_buttons &= ~bit;
+		else
+			adb.last_buttons |= bit;
+		const unsigned buttons = adb.last_buttons;
+		obuf[0] = (uint8_t)(0 | ((buttons & 1) ? 0 : 0x80));
+		obuf[1] = (uint8_t)(0 | ((buttons & 2) ? 0 : 0x80));
+		return 2;
+	}
+	const unsigned buttons = adb.buttons.load();
+	if (buttons == adb.last_buttons)
 		return 0;
-	if (dx < -63) dx = -63; else if (dx > 63) dx = 63;
-	if (dy < -63) dy = -63; else if (dy > 63) dy = 63;
-	adb.dx.fetch_sub(dx);
-	adb.dy.fetch_sub(dy);
 	adb.last_buttons = buttons;
-	obuf[0] = (uint8_t)((dy & 0x7f) | ((buttons & 1) ? 0 : 0x80));
-	obuf[1] = (uint8_t)((dx & 0x7f) | ((buttons & 2) ? 0 : 0x80));
+	obuf[0] = (uint8_t)(0 | ((buttons & 1) ? 0 : 0x80));
+	obuf[1] = (uint8_t)(0 | ((buttons & 2) ? 0 : 0x80));
 	return 2;
 }
 
@@ -1105,6 +1159,7 @@ static int adb_mouse_request(uint8_t *obuf, const uint8_t *buf, int len)
 		adb.last_buttons = adb.buttons.load();
 		adb.dx.store(0);
 		adb.dy.store(0);
+		adb.btn_rd.store(adb.btn_wr.load());
 		return 0;
 	}
 	if (cmd == NW_ADB_WRITEREG) {
@@ -1126,6 +1181,8 @@ static int adb_mouse_request(uint8_t *obuf, const uint8_t *buf, int len)
 				adb.mouse_addr = buf[1] & 0xf;
 				if (buf[2] == 1 || buf[2] == 2)
 					adb.mouse_handler = buf[2];
+				printf("NW-BOOT G1: adb mouse reg3 addr=%u handler=%u raw=%02x\n",
+				       (unsigned)adb.mouse_addr, (unsigned)adb.mouse_handler, buf[2]);
 				break;
 			}
 		}
@@ -1587,7 +1644,10 @@ static void via_tick(void)
 /* Absent: reads 0, writes dropped. The guest still probes SCC and both
  * keylargo-ata buses (and RMW's Keylargo FCR0..4 on PMU reset); the tree
  * presents no escc, and the ATA ndrv deletes empty buses. Claiming the
- * pages keeps `IO page … first` for surprises. */
+ * pages keeps `IO page … first` for surprises.
+ *
+ * Status must stay 0, not 0xff. 0xff has BSY set, so keylargo-ata waits
+ * ~30s for a drive that never appears (checkerboard strip, then boot). */
 static uint32_t absent_io_read(void *, uint32_t, int)
 {
 	return 0;
@@ -1611,6 +1671,16 @@ static int sb_rate = 44100;
 static int sb_drops;
 static int sb_plays;
 static int sb_peak;
+static std::atomic<uint64_t> sb_stat_in;
+static std::atomic<uint64_t> sb_stat_out;
+static std::atomic<uint64_t> sb_stat_full;
+static std::atomic<uint64_t> sb_stat_unsent;
+static std::atomic<uint32_t> sb_stat_submits;
+static std::atomic<uint64_t> sb_stat_src;
+static std::atomic<uint32_t> sb_stat_rate;
+static std::atomic<uint32_t> sb_min_have{0xffffffffu};
+static std::atomic<uint32_t> sb_max_have{0};
+static std::atomic<uint32_t> sb_have_n{0};
 
 void nw_sheepblaster_set_ready(int on)
 {
@@ -1755,6 +1825,19 @@ int nw_sheepblaster_play(const uint8_t *bytes, uint32_t frames,
 	}
 	sb_peak = peak;
 	sb_wr.store(w, std::memory_order_release);
+	sb_stat_in.fetch_add((uint64_t)out, std::memory_order_relaxed);
+	sb_stat_submits.fetch_add(1, std::memory_order_relaxed);
+	sb_stat_src.fetch_add((uint64_t)frames, std::memory_order_relaxed);
+	sb_stat_rate.store(rate_fixed >> 16, std::memory_order_relaxed);
+	{
+		uint32_t consumed = pos >> 16;
+		if (consumed > frames)
+			consumed = frames;
+		if (consumed < frames) {
+			sb_stat_full.fetch_add(1, std::memory_order_relaxed);
+			sb_stat_unsent.fetch_add((uint64_t)(frames - consumed), std::memory_order_relaxed);
+		}
+	}
 	sb_plays++;
 	if (sb_plays <= 8)
 		printf("NW-BOOT G1: sheepblaster play #%d in=%u rate=%u ch=%d bits=%d fmt=%08x out=%d\n",
@@ -1774,25 +1857,36 @@ int nw_sheepblaster_pull(uint8_t *dst, int bytes)
 		return 0;
 	int frames = bytes / 4;
 	int have = sb_count();
+	{
+		uint32_t h = (uint32_t)have;
+		uint32_t prev = sb_min_have.load(std::memory_order_relaxed);
+		while (h < prev &&
+		       !sb_min_have.compare_exchange_weak(prev, h, std::memory_order_relaxed))
+			;
+		prev = sb_max_have.load(std::memory_order_relaxed);
+		while (h > prev &&
+		       !sb_max_have.compare_exchange_weak(prev, h, std::memory_order_relaxed))
+			;
+		sb_have_n.fetch_add(1, std::memory_order_relaxed);
+	}
 	if (frames > have)
 		frames = have;
 	if (frames == 0)
 		return 0;
 	int r = sb_rd.load(std::memory_order_relaxed);
-	uint8_t *out = dst;
-	for (int i = 0; i < frames; i++) {
-		int16 l = sb_ring[r * 2];
-		int16 ri = sb_ring[r * 2 + 1];
-		out[0] = (uint8_t)(l >> 8);
-		out[1] = (uint8_t)l;
-		out[2] = (uint8_t)(ri >> 8);
-		out[3] = (uint8_t)ri;
-		out += 4;
-		r++;
-		if (r >= SB_FRAMES)
-			r = 0;
-	}
+	int first = frames;
+	int until_end = SB_FRAMES - r;
+	if (first > until_end)
+		first = until_end;
+	memcpy(dst, &sb_ring[r * 2], (size_t)first * 4);
+	if (frames > first)
+		memcpy(dst + first * 4, &sb_ring[0], (size_t)(frames - first) * 4);
+	r += frames;
+	if (r >= SB_FRAMES)
+		r -= SB_FRAMES;
 	sb_rd.store(r, std::memory_order_release);
+	sb_stat_out.fetch_add((uint64_t)frames, std::memory_order_relaxed);
+	uint8_t *out = dst + frames * 4;
 	int n = frames * 4;
 	/* A long repeat of the last sample is the robotic buzz. Hold it
 	 * for at most 1 ms, then silence. */
@@ -1812,6 +1906,40 @@ int nw_sheepblaster_pull(uint8_t *dst, int bytes)
 		n = bytes;
 	}
 	return n;
+}
+
+extern "C" void SheepBlasterTakeStats(uint64_t *in_frames, uint64_t *out_frames,
+	uint64_t *ring_full, uint64_t *unsent, uint32_t *min_have, uint32_t *max_have,
+	uint32_t *submits, uint64_t *src_frames, uint32_t *rate_hz)
+{
+	const uint64_t in = sb_stat_in.exchange(0, std::memory_order_relaxed);
+	const uint64_t out = sb_stat_out.exchange(0, std::memory_order_relaxed);
+	const uint64_t full = sb_stat_full.exchange(0, std::memory_order_relaxed);
+	const uint64_t drop = sb_stat_unsent.exchange(0, std::memory_order_relaxed);
+	const uint32_t n = sb_have_n.exchange(0, std::memory_order_relaxed);
+	const uint32_t mn = sb_min_have.exchange(0xffffffffu, std::memory_order_relaxed);
+	const uint32_t mx = sb_max_have.exchange(0, std::memory_order_relaxed);
+	const uint32_t calls = sb_stat_submits.exchange(0, std::memory_order_relaxed);
+	const uint64_t src = sb_stat_src.exchange(0, std::memory_order_relaxed);
+	const uint32_t rate = sb_stat_rate.exchange(0, std::memory_order_relaxed);
+	if (in_frames)
+		*in_frames = in;
+	if (out_frames)
+		*out_frames = out;
+	if (ring_full)
+		*ring_full = full;
+	if (unsent)
+		*unsent = drop;
+	if (min_have)
+		*min_have = n ? mn : 0;
+	if (max_have)
+		*max_have = n ? mx : 0;
+	if (submits)
+		*submits = calls;
+	if (src_frames)
+		*src_frames = src;
+	if (rate_hz)
+		*rate_hz = rate;
 }
 
 static uint32_t sb_read(void *, uint32_t off, int)

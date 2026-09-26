@@ -70,6 +70,21 @@ static int sb_in_mixer;				// Component call already inside the mixer
 static bool sb_run;				// Play/Start armed it; Stop/Pause cleared it
 #endif
 
+int audio_sheepblaster_host_pull(void)
+{
+#if defined(SHEEPSHAVER)
+	/* The card is registered at the Finder. That must not silence
+	 * Built-in. Pull the ring only while this device is actually open
+	 * or a buffer is queued. Execute68k from the host interrupt while
+	 * the tick is inside the mixer is what bombed iTunes. */
+	if (sb_tm_installed || sb_in_tick || sb_in_mixer || sb_sources > 0 || sb_run)
+		return 1;
+	if (nw_sheepblaster_pending() > 0)
+		return 1;
+#endif
+	return 0;
+}
+
 bool AudioAvailable = false;		// Flag: audio output available (from the software point of view)
 
 int SoundInSource = 2;
@@ -90,6 +105,22 @@ void AudioReset(void)
  *  Get audio info
  */
 
+/* Frames one GetSourceData should return. The host plays
+ * audio_frames_per_block (512). 2048 is large enough for one guest
+ * buffer to come out whole; the next buffer is held, not chained. */
+#if defined(SHEEPSHAVER)
+static int sb_chunk_frames = 2048;
+#endif
+
+static int audio_mixer_frames(void)
+{
+#if defined(SHEEPSHAVER)
+	if (sb_chunk_frames >= 512)
+		return sb_chunk_frames;
+#endif
+	return audio_frames_per_block > 0 ? audio_frames_per_block : 512;
+}
+
 static int32 AudioGetInfo(uint32 infoPtr, uint32 selector, uint32 sourceID)
 {
 	D(bug(" AudioGetInfo %c%c%c%c, infoPtr %08lx, source ID %08lx\n", selector >> 24, (selector >> 16) & 0xff, (selector >> 8) & 0xff, selector & 0xff, infoPtr, sourceID));
@@ -101,12 +132,12 @@ static int32 AudioGetInfo(uint32 infoPtr, uint32 selector, uint32 sourceID)
 			break;
 
 		case siSampleSizeAvailable: {
-			r.d[0] = audio_sample_sizes.size() * 2;
+			r.d[0] = (uint32)(audio_sample_sizes.size() * 2);
 			Execute68kTrap(0xa122, &r);	// NewHandle()
 			uint32 h = r.a[0];
 			if (h == 0)
 				return memFullErr;
-			WriteMacInt16(infoPtr + sil_count, audio_sample_sizes.size());
+			WriteMacInt16(infoPtr + sil_count, (uint32)audio_sample_sizes.size());
 			WriteMacInt32(infoPtr + sil_infoHandle, h);
 			uint32 sp = ReadMacInt32(h);
 			for (unsigned i=0; i<audio_sample_sizes.size(); i++)
@@ -119,12 +150,12 @@ static int32 AudioGetInfo(uint32 infoPtr, uint32 selector, uint32 sourceID)
 			break;
 
 		case siChannelAvailable: {
-			r.d[0] = audio_channel_counts.size() * 2;
+			r.d[0] = (uint32)(audio_channel_counts.size() * 2);
 			Execute68kTrap(0xa122, &r);	// NewHandle()
 			uint32 h = r.a[0];
 			if (h == 0)
 				return memFullErr;
-			WriteMacInt16(infoPtr + sil_count, audio_channel_counts.size());
+			WriteMacInt16(infoPtr + sil_count, (uint32)audio_channel_counts.size());
 			WriteMacInt32(infoPtr + sil_infoHandle, h);
 			uint32 sp = ReadMacInt32(h);
 			for (unsigned i=0; i<audio_channel_counts.size(); i++)
@@ -137,12 +168,12 @@ static int32 AudioGetInfo(uint32 infoPtr, uint32 selector, uint32 sourceID)
 			break;
 
 		case siSampleRateAvailable: {
-			r.d[0] = audio_sample_rates.size() * 4;
+			r.d[0] = (uint32)(audio_sample_rates.size() * 4);
 			Execute68kTrap(0xa122, &r);	// NewHandle()
 			uint32 h = r.a[0];
 			if (h == 0)
 				return memFullErr;
-			WriteMacInt16(infoPtr + sil_count, audio_sample_rates.size());
+			WriteMacInt16(infoPtr + sil_count, (uint32)audio_sample_rates.size());
 			WriteMacInt32(infoPtr + sil_infoHandle, h);
 			uint32 lp = ReadMacInt32(h);
 			for (unsigned i=0; i<audio_sample_rates.size(); i++)
@@ -180,7 +211,7 @@ static int32 AudioGetInfo(uint32 infoPtr, uint32 selector, uint32 sourceID)
 			WriteMacInt16(infoPtr + scd_numChannels, AudioStatus.channels);
 			WriteMacInt16(infoPtr + scd_sampleSize, AudioStatus.sample_size);
 			WriteMacInt32(infoPtr + scd_sampleRate, AudioStatus.sample_rate);
-			WriteMacInt32(infoPtr + scd_sampleCount, audio_frames_per_block);
+			WriteMacInt32(infoPtr + scd_sampleCount, audio_mixer_frames());
 			WriteMacInt32(infoPtr + scd_buffer, 0);
 			WriteMacInt32(infoPtr + scd_reserved, 0);
 			break;
@@ -325,12 +356,17 @@ enum {	// TMTask struct
 enum {
 	SB_PRIME_MS = 10,		// First wake after Play/Start
 	SB_PULL_MS = 10,		// Wake again after a GetSourceData
-	SB_IDLE_MAX_MS = 40,		// Longest sleep while the ring is ahead
-	/* Quarter second at 44100 Hz. One GetSourceData used to fill 4096
-	 * frames (~93 ms) by chaining every small guest buffer before
-	 * returning. Sleep until the cushion is actually used, then pull
-	 * a 512-frame chunk. */
-	SB_LOW_WATER = 11025
+	SB_IDLE_MAX_MS = 40,		// Poll while a wake came back empty
+	/* QuickTime clocks the movie from this component. A buffer counts
+	 * as played when GetSourceData finishes it, which is when it
+	 * enters the ring, not when the speaker reaches it. The ring
+	 * therefore stays one host period above empty (512 frames, the
+	 * CoreAudio buffer, about 12 ms). Each wake plays the one buffer
+	 * already queued and holds the buffer the completion just
+	 * submitted. The clock moves by that one buffer, for whatever
+	 * size the movie submitted, when the speaker is about to play it.
+	 * A deeper cushion leads every movie by the same fixed amount. */
+	SB_LOW_WATER = 512
 };
 
 static bool sb_active(void)
@@ -342,21 +378,29 @@ static bool sb_active(void)
  * the completion calls PlaySourceBuffer. Doing that inline decodes the
  * rest of the song before the Finder runs. Keep the block and give it
  * to the mixer on the next wake. */
-static uint32 sb_hold_base;
+/* Two slots so the buffer the mixer is reading stays intact when its
+ * completion submits the next one. 64 KB covers a stereo 16-bit slice
+ * of up to 16384 frames; larger slices keep the caller's pointer. */
+enum { SB_HOLD_BYTES = 65536, SB_HOLD_SLOT = 192 + SB_HOLD_BYTES };
+static uint32 sb_hold_mem[2];
+static int sb_hold_cur;
+static int sb_hold_flushing;
 static int sb_hold_on;
 static int sb_hold_lock;
 
 static void sb_hold_store(uint32 params)
 {
-	if (sb_hold_base == 0 || params == 0)
+	int slot = sb_hold_flushing ? (sb_hold_cur ^ 1) : sb_hold_cur;
+	uint32 base = sb_hold_mem[slot];
+	if (base == 0 || params == 0)
 		return;
 	for (int i = 0; i < 32; i++)
-		WriteMacInt8(sb_hold_base + i, ReadMacInt8(params + i));
+		WriteMacInt8(base + i, ReadMacInt8(params + i));
 	uint32 pb = ReadMacInt32(params + cp_params + 4);
 	if (pb) {
 		for (int i = 0; i < 128; i++)
-			WriteMacInt8(sb_hold_base + 64 + i, ReadMacInt8(pb + i));
-		WriteMacInt32(sb_hold_base + cp_params + 4, sb_hold_base + 64);
+			WriteMacInt8(base + 64 + i, ReadMacInt8(pb + i));
+		WriteMacInt32(base + cp_params + 4, base + 64);
 		/* iTunes reuses this buffer on the next decode. Copy the
 		 * samples now or the next wake plays torn audio. */
 		uint32 frames = ReadMacInt32(pb + 4 + scd_sampleCount);
@@ -368,12 +412,12 @@ static void sb_hold_store(uint32 params)
 		if (bits < 8)
 			bits = 8;
 		int nbytes = 0;
-		if (frames > 0 && frames <= 2048 && src >= 0x1000)
+		if (frames > 0 && frames <= 65536 && src >= 0x1000)
 			nbytes = (int)frames * ch * (bits >> 3);
-		if (nbytes > 0 && nbytes <= 8192) {
-			uint32 dst = sb_hold_base + 192;
+		if (nbytes > 0 && nbytes <= SB_HOLD_BYTES) {
+			uint32 dst = base + 192;
 			memcpy(Mac2HostAddr(dst), Mac2HostAddr(src), (size_t)nbytes);
-			WriteMacInt32(sb_hold_base + 64 + 4 + scd_buffer, dst);
+			WriteMacInt32(base + 64 + 4 + scd_buffer, dst);
 		}
 	}
 	sb_hold_on = 1;
@@ -383,14 +427,19 @@ static void sb_hold_flush(void)
 {
 	if (!sb_hold_on || audio_data == 0 || AudioStatus.mixer == 0)
 		return;
+	int slot = sb_hold_cur;
 	sb_hold_on = 0;
+	sb_hold_flushing = 1;
 	M68kRegisters r;
 	memset(&r, 0, sizeof r);
 	r.a[0] = AudioStatus.mixer;
-	r.a[1] = sb_hold_base;
+	r.a[1] = sb_hold_mem[slot];
 	sb_hold_lock = 1;
 	Execute68k(audio_data + adatDelegateCall, &r);
 	sb_hold_lock = 0;
+	sb_hold_flushing = 0;
+	if (sb_hold_on)
+		sb_hold_cur ^= 1;
 }
 
 static void sb_tm_prime(void)
@@ -420,7 +469,8 @@ static void sb_tm_install(void)
 		};
 		sb_tm_proc = SheepProc(proc, sizeof proc);
 		sb_tm = SheepMem::Reserve(SIZEOF_TMTask);
-		sb_hold_base = SheepMem::Reserve(192 + 8192);
+		sb_hold_mem[0] = SheepMem::Reserve(SB_HOLD_SLOT);
+		sb_hold_mem[1] = SheepMem::Reserve(SB_HOLD_SLOT);
 	}
 	for (uint32 i = 0; i < SIZEOF_TMTask; i += 2)
 		WriteMacInt16(sb_tm + i, 0);
@@ -450,6 +500,7 @@ static bool sb_pull(void)
 {
 	uint32 ad = audio_data;
 	WriteMacInt32(ad + adatStreamInfo, 0);
+	WriteMacInt32(ad + adatData + scd_sampleCount, (uint32)audio_mixer_frames());
 	M68kRegisters r;
 	memset(&r, 0, sizeof r);
 	r.a[0] = ad + adatStreamInfo;
@@ -486,6 +537,31 @@ static bool sb_pull(void)
 		format ? format : FOURCC('t','w','o','s'), ch, bits, rate);
 	return true;
 }
+
+/* The first real PlaySourceBuffer used to wait for the timer, and the
+ * tick then filled a cushion the speaker had not reached. Queue one
+ * buffer and stop once the speaker has a host period. A pull that has
+ * already taken 12 ms does not start another. */
+static void sb_prime_pull(void)
+{
+	if (audio_data == 0 || AudioStatus.mixer == 0 || sb_sources <= 0 || !sb_run || sb_in_tick)
+		return;
+	sb_in_tick = true;
+	nw_jit_pull_set(1);
+	uint64 t_pull = GetTicks_usec();
+	for (int pulls = 0; pulls < 8 && sb_run && !sb_in_mixer; pulls++) {
+		if (nw_sheepblaster_pending() >= SB_LOW_WATER)
+			break;
+		if (pulls > 0 && GetTicks_usec() - t_pull > 12000ull)
+			break;
+		if (sb_hold_on)
+			sb_hold_flush();
+		if (!sb_pull())
+			break;
+	}
+	nw_jit_pull_set(0);
+	sb_in_tick = false;
+}
 #endif
 
 /*
@@ -506,16 +582,15 @@ int32 AudioSheepBlasterTick(uint32 *task)
 	}
 	if (audio_data == 0 || AudioStatus.mixer == 0 || sb_sources <= 0 || !sb_run)
 		return 0;
-	/* Already ahead of the host: do not enter the mixer. Sleep only
-	 * for the surplus above the cushion, so the next pull is one
-	 * small chunk instead of a catch-up. */
+	/* Speaker still has a host period. Stay out of the mixer, and
+	 * wake before that period runs out. */
 	int pending = nw_sheepblaster_pending();
 	if (pending >= SB_LOW_WATER) {
 		int ms = (pending - SB_LOW_WATER) / 44;
-		if (ms < SB_PULL_MS)
-			ms = SB_PULL_MS;
-		if (ms > SB_IDLE_MAX_MS)
-			ms = SB_IDLE_MAX_MS;
+		if (ms < 1)
+			ms = 1;
+		if (ms > 11)
+			ms = 11;
 		sb_tm_armed = true;
 		return ms;
 	}
@@ -529,12 +604,9 @@ int32 AudioSheepBlasterTick(uint32 *task)
 	if (owed < 1)
 		owed = 1;
 	sb_in_tick = true;
-	if (sb_hold_on)
-		sb_hold_flush();
-	/* The completion's next buffer is held, so another pull of this
-	 * 1536-frame buffer is a copy. Take what the speaker used since
-	 * the last wake, or enough to reach the cushion. Stop at 3 pulls
-	 * or 3 ms so a decode cannot fill the wake. */
+	/* One queued buffer per pull. The completion's next buffer is
+	 * held, so this wake cannot walk the rest of the movie. Stop
+	 * once the speaker has a host period, or after 12 ms. */
 	int gained = 0;
 	uint64 spent = 0;
 	uint64 t_pull = GetTicks_usec();
@@ -542,8 +614,10 @@ int32 AudioSheepBlasterTick(uint32 *task)
 	for (int pulls = 0; sb_run && !sb_in_mixer && pulls < 3 && gained < owed; pulls++) {
 		if (nw_sheepblaster_pending() >= SB_LOW_WATER)
 			break;
-		if (pulls > 0 && GetTicks_usec() - t_pull > 3000ull)
+		if (pulls > 0 && GetTicks_usec() - t_pull > 12000ull)
 			break;
+		if (sb_hold_on)
+			sb_hold_flush();
 		int before = nw_sheepblaster_pending();
 		uint64 t0 = GetTicks_usec();
 		if (!sb_pull()) {
@@ -590,7 +664,17 @@ int32 AudioSheepBlasterTick(uint32 *task)
 		sb_got = 1;
 		sb_empty = 0;
 		sb_tm_armed = true;
-		return SB_PULL_MS;
+		/* One host buffer is 512 frames, 11.6 ms at 44100 (86 Hz).
+		 * The pull already used `spent` of that. Adding a fixed 10 ms
+		 * made the period about 16 ms, 60 buffers a second, ~32000
+		 * frames. A pull slower than one period still waits 10 ms so
+		 * a decode does not own the CPU. */
+		int ms = 12 - (int)(spent / 1000ull);
+		if (ms < 1)
+			ms = 1;
+		if (ms > SB_PULL_MS || spent > 12000ull)
+			ms = SB_PULL_MS;
+		return ms;
 	}
 	/* A movie stalls while a frame is drawn, or while the host window
 	 * is in the background. Stopping here is what left QuickTime silent
@@ -810,10 +894,21 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 					sb_run = false;
 #endif
 					if (AudioStatus.mixer) {
-						// Close Apple Mixer
+#if defined(SHEEPSHAVER)
+						/* 9.2.1 hands back an odd mixer id (this run:
+						 * 0081000b). CloseMixer dereferences it and the
+						 * guest takes SysError(2) as QuickTime opens. */
+						if (AudioStatus.mixer & 1) {
+							printf("NW-BOOT G1: audio-close skip mixer=%08x\n",
+							       (unsigned)AudioStatus.mixer);
+							fflush(stdout);
+						} else
+#endif
+						{
 						r.a[0] = AudioStatus.mixer;
 						Execute68k(audio_data + adatCloseMixer, &r);
 						D(bug(" CloseMixer() returns %08lx, mixer %08lx\n", r.d[0], AudioStatus.mixer));
+						}
 						AudioStatus.mixer = 0;
 					}
 					r.a[0] = audio_data;
@@ -862,7 +957,7 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 			WriteMacInt16(audio_data + adatData + scd_numChannels, AudioStatus.channels);
 			WriteMacInt16(audio_data + adatData + scd_sampleSize, AudioStatus.sample_size);
 			WriteMacInt32(audio_data + adatData + scd_sampleRate, AudioStatus.sample_rate);
-			WriteMacInt32(audio_data + adatData + scd_sampleCount, audio_frames_per_block);
+			WriteMacInt32(audio_data + adatData + scd_sampleCount, audio_mixer_frames());
 			WriteMacInt32(audio_data + adatData + scd_buffer, 0);
 			WriteMacInt32(audio_data + adatData + scd_reserved, 0);
 			WriteMacInt32(audio_data + adatStreamInfo, 0);
@@ -972,19 +1067,22 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 #if defined(SHEEPSHAVER)
 			if (sb_active()) {
 				static int n_psb;
+				uint32 pb = ReadMacInt32(p + 4);
+				uint32 completion = pb ? ReadMacInt32(pb + 52) : 0;
 				if (n_psb < 8) {
 					n_psb++;
-					uint32 pb = ReadMacInt32(p + 4);
 					printf("NW-BOOT G1: sheepblaster psb #%d pb=%08x frames=%u completion=%08x sources=%d\n",
 					       n_psb, (unsigned)pb,
 					       pb ? (unsigned)ReadMacInt32(pb + 4 + scd_sampleCount) : 0u,
-					       pb ? (unsigned)ReadMacInt32(pb + 52) : 0u, sb_sources);
+					       (unsigned)completion, sb_sources);
 					fflush(stdout);
 				}
 				if (audio_data == 0 || AudioStatus.mixer == 0)
 					return noErr;
-				/* Inside GetSourceData, or while delivering a held
-				 * block. Queue the next buffer for the next wake. */
+				/* Inside GetSourceData, or while the mixer is taking the
+				 * buffer we just flushed. That completion is the next
+				 * movie slice. Queuing it in this same pull would mark
+				 * it played before the speaker reaches it. Hold it. */
 				if (sb_in_tick || sb_hold_lock) {
 					sb_hold_store(params);
 					sb_run = true;
@@ -996,6 +1094,12 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 				Execute68k(audio_data + adatDelegateCall, &r);
 				sb_in_mixer--;
 				sb_run = true;
+				/* The 512-frame probe has no completion; Stop follows
+				 * it and a pull here would decode into a ring that is
+				 * about to be dropped. The real buffer (completion set)
+				 * queues the first slice before QuickTime moves on. */
+				if (completion != 0)
+					sb_prime_pull();
 				sb_tm_prime();
 				return r.d[0];
 			}

@@ -2,10 +2,12 @@
  *  nw_boot_contract.cpp - New World / nanokernel v2 boot contract (G0–G2) + S4 event stream
  */
 
+#include "sysdeps.h"
 #include "nw_boot_contract.h"
 #include "nw_devices.h"
 #include "nw_jit.h"
 #include "nw_io.h"
+#include "cpu_emulation.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1477,7 +1479,8 @@ int nw_clock_sample_due(uint64_t now_us, uint64_t *last_us, uint64_t period_us)
 	return 1;
 }
 
-void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, uint32_t tm_ticks)
+void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, uint32_t tm_ticks,
+		   uint32_t lr, uint32_t sp)
 {
 	if (!nw_jit_stats_wanted()) {
 #if !NW_BOOT_LOG
@@ -1486,10 +1489,14 @@ void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, u
 		(void)host_us;
 		(void)mftb;
 		(void)tm_ticks;
+		(void)lr;
+		(void)sp;
 		return;
 #endif
 	}
 	static uint64_t last_clock_us, last_host_us, last_mftb, last_frames, last_codec, last_other;
+	static int idle_n, idle_win, idle_lr_n, idle_lr2_n;
+	static uint32_t idle_lr, idle_lr2, idle_stk;
 	if (nw_jit_stats_wanted() && nw_clock_sample_due(host_us, &last_clock_us, 100000ull)) {
 		const uint64_t d_us = (last_host_us && host_us >= last_host_us) ? host_us - last_host_us : 0;
 		const uint64_t d_tb = (last_mftb && mftb >= last_mftb) ? mftb - last_mftb : 0;
@@ -1499,7 +1506,7 @@ void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, u
 		const uint64_t other = nw_jit_other_insns();
 		const uint64_t d_codec = (codec >= last_codec) ? codec - last_codec : 0;
 		const uint64_t d_other = (other >= last_other) ? other - last_other : 0;
-		printf("NW-BOOT G1: clock10 host_us=%llu d_us=%llu mftb=%llu d_tb=%llu tm=%u fps_frames=%llu d_fr=%llu fps_flat=%u codec=%llu d_codec=%llu other=%llu d_other=%llu pc=%08x\n",
+		printf("NW-BOOT G1: clock10 host_us=%llu d_us=%llu mftb=%llu d_tb=%llu tm=%u fps_frames=%llu d_fr=%llu fps_flat=%u codec=%llu d_codec=%llu other=%llu d_other=%llu pc=%08x lr=%08x\n",
 		       (unsigned long long)host_us, (unsigned long long)d_us,
 		       (unsigned long long)mftb, (unsigned long long)d_tb,
 		       (unsigned)tm_ticks,
@@ -1507,13 +1514,59 @@ void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, u
 		       nw_fb_fps_proxy_flat_max(),
 		       (unsigned long long)codec, (unsigned long long)d_codec,
 		       (unsigned long long)other, (unsigned long long)d_other,
-		       (unsigned)pc);
+		       (unsigned)pc, (unsigned)lr);
 		fflush(stdout);
 		last_host_us = host_us;
 		last_mftb = mftb;
 		last_frames = frames;
 		last_codec = codec;
 		last_other = other;
+		/* 0027bae0 is the idle loop the movie sat in while audio
+		 * kept playing. lr is who branched here; stk is the saved
+		 * link at sp+8 when that address is in guest RAM. */
+		idle_win++;
+		if (pc == 0x0027bae0u) {
+			idle_n++;
+			if ((sp & 3u) == 0 && sp >= 32u && nw_la_ram_size != 0 &&
+			    sp + 8u < nw_la_ram_size && sp + 8u != 0x680b07f0u)
+				idle_stk = ReadMacInt32(sp + 8u);
+			if (idle_lr_n == 0 || lr == idle_lr) {
+				idle_lr = lr;
+				idle_lr_n++;
+			} else if (idle_lr2_n == 0 || lr == idle_lr2) {
+				idle_lr2 = lr;
+				idle_lr2_n++;
+			}
+		}
+		if (idle_win >= 10) {
+			if (idle_n) {
+				printf("NW-BOOT G1: idle n=%d/%d lr=%08x lr_n=%d lr2=%08x lr2_n=%d stk=%08x ext=%d\n",
+				       idle_n, idle_win,
+				       (unsigned)idle_lr, idle_lr_n,
+				       (unsigned)idle_lr2, idle_lr2_n,
+				       (unsigned)idle_stk, nw_io_ext_irq);
+				fflush(stdout);
+			}
+			/* SysZone 0x2A6, ApplZone 0x2AA. zcbFree is 12 bytes
+			 * into the zone header. The emulator thread only:
+			 * FreeMem is a trap and the HAL thread must not call it. */
+			uint32_t sys_free = 0, app_free = 0;
+			if (nw_la_ram_size > 0x2aeu) {
+				const uint32_t zones[2] = { ReadMacInt32(0x2a6), ReadMacInt32(0x2aa) };
+				uint32_t *outp[2] = { &sys_free, &app_free };
+				for (int zi = 0; zi < 2; zi++) {
+					const uint32_t z = zones[zi];
+					if (z >= 32u && z != 0x680b07f0u &&
+					    z + 16u < nw_la_ram_size && (z & 1u) == 0)
+						*outp[zi] = ReadMacInt32(z + 12u);
+				}
+			}
+			printf("NW-BOOT G1: mem sys=%u app=%u\n",
+			       (unsigned)sys_free, (unsigned)app_free);
+			fflush(stdout);
+			idle_n = idle_win = idle_lr_n = idle_lr2_n = 0;
+			idle_lr = idle_lr2 = idle_stk = 0;
+		}
 	}
 	static time_t last;
 	struct timeval tv;
