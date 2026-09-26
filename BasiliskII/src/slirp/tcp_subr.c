@@ -53,7 +53,7 @@ int	tcp_sndspace;	/* Keep small if you have an error prone link */
  * Tcp initialization
  */
 void
-tcp_init()
+tcp_init(void)
 {
 	tcp_iss = 1;		/* wrong */
 	tcb.so_next = tcb.so_prev = &tcb;
@@ -75,8 +75,7 @@ tcp_init()
  */
 /* struct tcpiphdr * */
 void
-tcp_template(tp)
-	struct tcpcb *tp;
+tcp_template(struct tcpcb * tp)
 {
 	struct socket *so = tp->t_socket;
 	register struct tcpiphdr *n = &tp->t_template;
@@ -114,12 +113,7 @@ tcp_template(tp)
  * segment are as specified by the parameters.
  */
 void
-tcp_respond(tp, ti, m, ack, seq, flags)
-	struct tcpcb *tp;
-	register struct tcpiphdr *ti;
-	register struct mbuf *m;
-	tcp_seq ack, seq;
-	int flags;
+tcp_respond(struct tcpcb * tp, register struct tcpiphdr * ti, register struct mbuf * m, tcp_seq ack, tcp_seq seq, int flags)
 {
 	register int tlen;
 	int win = 0;
@@ -194,8 +188,7 @@ tcp_respond(tp, ti, m, ack, seq, flags)
  * protocol control block.
  */
 struct tcpcb *
-tcp_newtcpcb(so)
-	struct socket *so;
+tcp_newtcpcb(struct socket * so)
 {
 	register struct tcpcb *tp;
 	
@@ -269,8 +262,7 @@ struct tcpcb *tcp_drop(struct tcpcb *tp, int err)
  *	wake up any sleepers
  */
 struct tcpcb *
-tcp_close(tp)
-	register struct tcpcb *tp;
+tcp_close(register struct tcpcb * tp)
 {
 	register struct tcpiphdr *t;
 	struct socket *so = tp->t_socket;
@@ -307,7 +299,7 @@ tcp_close(tp)
 }
 
 void
-tcp_drain()
+tcp_drain(void)
 {
 	/* XXX */
 }
@@ -347,8 +339,7 @@ tcp_quench(i, errno)
  * We can let the user exit from the close as soon as the FIN is acked.
  */
 void
-tcp_sockclosed(tp)
-	struct tcpcb *tp;
+tcp_sockclosed(struct tcpcb * tp)
 {
 
 	DEBUG_CALL("tcp_sockclosed");
@@ -389,8 +380,7 @@ tcp_sockclosed(tp)
  * nonblocking.  Connect returns after the SYN is sent, and does 
  * not wait for ACK+SYN.
  */
-int tcp_fconnect(so)
-     struct socket *so;
+int tcp_fconnect(struct socket *so)
 {
   int ret=0;
   
@@ -453,8 +443,7 @@ int tcp_fconnect(so)
  * here and SYN the local-host.
  */ 
 void
-tcp_connect(inso)
-	struct socket *inso;
+tcp_connect(struct socket * inso)
 {
 	struct socket *so;
 	struct sockaddr_in addr;
@@ -540,8 +529,7 @@ tcp_connect(inso)
  * Attach a TCPCB to a socket.
  */
 int
-tcp_attach(so)
-	struct socket *so;
+tcp_attach(struct socket * so)
 {
 	if ((so->so_tcpcb = tcp_newtcpcb(so)) == NULL)
 	   return -1;
@@ -576,8 +564,7 @@ struct emu_t *tcpemu = 0;
  * Return TOS according to the above table
  */
 u_int8_t
-tcp_tos(so)
-	struct socket *so;
+tcp_tos(struct socket * so)
 {
 	int i = 0;
 	struct emu_t *emup;
@@ -630,9 +617,7 @@ int do_echo = -1;
  * NOTE: if you return 0 you MUST m_free() the mbuf!
  */
 int
-tcp_emu(so, m)
-	struct socket *so;
-	struct mbuf *m;
+tcp_emu(struct socket * so, struct mbuf * m)
 {
 	u_int n1, n2, n3, n4, n5, n6;
 	char buff[256];
@@ -949,7 +934,7 @@ tcp_emu(so, m)
 					*(so_rcv->sb_rptr + num) = 0;
 					if (ctl_password && !ctl_password_ok) {
 						/* Need a password */
-						if (sscanf(so_rcv->sb_rptr, "pass %256s", buff) == 1) {
+						if (sscanf(so_rcv->sb_rptr, "pass %255s", buff) == 1) {
 							if (strcmp(buff, ctl_password) == 0) {
 								ctl_password_ok = 1;
 								n = sprintf(so_snd->sb_wptr,
@@ -990,7 +975,7 @@ do_prompt:
 			/*
 			 * Need to emulate the PORT command
 			 */			
-			x = sscanf(bptr, "ORT %d,%d,%d,%d,%d,%d\r\n%256[^\177]", 
+			x = sscanf(bptr, "ORT %d,%d,%d,%d,%d,%d\r\n%255[^\177]", 
 				   &n1, &n2, &n3, &n4, &n5, &n6, buff);
 			if (x < 6)
 			   return 1;
@@ -1025,7 +1010,7 @@ do_prompt:
 			n3 = ((laddr >> 8)  & 0xff);
 			n4 =  (laddr & 0xff);
 			
-			m->m_len = bptr - m->m_data; /* Adjust length */
+			m->m_len = (int)(bptr - m->m_data); /* Adjust length */
 			m->m_len += sprintf(bptr,"ORT %d,%d,%d,%d,%d,%d\r\n%s", 
 					    n1, n2, n3, n4, n5, n6, x==7?buff:"");
 			return 1;
@@ -1033,7 +1018,7 @@ do_prompt:
 			/*
 			 * Need to emulate the PASV response
 			 */
-			x = sscanf(bptr, "27 Entering Passive Mode (%d,%d,%d,%d,%d,%d)\r\n%256[^\177]",
+			x = sscanf(bptr, "27 Entering Passive Mode (%d,%d,%d,%d,%d,%d)\r\n%255[^\177]",
 				   &n1, &n2, &n3, &n4, &n5, &n6, buff);
 			if (x < 6)
 			   return 1;
@@ -1056,7 +1041,7 @@ do_prompt:
 			n3 = ((laddr >> 8)  & 0xff);
 			n4 =  (laddr & 0xff);
 			
-			m->m_len = bptr - m->m_data; /* Adjust length */
+			m->m_len = (int)(bptr - m->m_data); /* Adjust length */
 			m->m_len += sprintf(bptr,"27 Entering Passive Mode (%d,%d,%d,%d,%d,%d)\r\n%s",
 					    n1, n2, n3, n4, n5, n6, x==7?buff:"");
 			
@@ -1092,28 +1077,28 @@ do_prompt:
 		if ((bptr = (char *)strstr(m->m_data, "DCC")) == NULL)
 			 return 1;
 		
-		/* The %256s is for the broken mIRC */
-		if (sscanf(bptr, "DCC CHAT %256s %u %u", buff, &laddr, &lport) == 3) {
+		/* The %255s is for the broken mIRC */
+		if (sscanf(bptr, "DCC CHAT %255s %u %u", buff, &laddr, &lport) == 3) {
 			if ((so = solisten(0, htonl(laddr), htons(lport), SS_FACCEPTONCE)) == NULL)
 				return 1;
 			
-			m->m_len = bptr - m->m_data; /* Adjust length */
+			m->m_len = (int)(bptr - m->m_data); /* Adjust length */
 			m->m_len += sprintf(bptr, "DCC CHAT chat %lu %u%c\n",
 			     (unsigned long)ntohl(so->so_faddr.s_addr),
 			     ntohs(so->so_fport), 1);
-		} else if (sscanf(bptr, "DCC SEND %256s %u %u %u", buff, &laddr, &lport, &n1) == 4) {
+		} else if (sscanf(bptr, "DCC SEND %255s %u %u %u", buff, &laddr, &lport, &n1) == 4) {
 			if ((so = solisten(0, htonl(laddr), htons(lport), SS_FACCEPTONCE)) == NULL)
 				return 1;
 			
-			m->m_len = bptr - m->m_data; /* Adjust length */
+			m->m_len = (int)(bptr - m->m_data); /* Adjust length */
 			m->m_len += sprintf(bptr, "DCC SEND %s %lu %u %u%c\n", 
 			      buff, (unsigned long)ntohl(so->so_faddr.s_addr),
 			      ntohs(so->so_fport), n1, 1);
-		} else if (sscanf(bptr, "DCC MOVE %256s %u %u %u", buff, &laddr, &lport, &n1) == 4) {
+		} else if (sscanf(bptr, "DCC MOVE %255s %u %u %u", buff, &laddr, &lport, &n1) == 4) {
 			if ((so = solisten(0, htonl(laddr), htons(lport), SS_FACCEPTONCE)) == NULL)
 				return 1;
 			
-			m->m_len = bptr - m->m_data; /* Adjust length */
+			m->m_len = (int)(bptr - m->m_data); /* Adjust length */
 			m->m_len += sprintf(bptr, "DCC MOVE %s %lu %u %u%c\n",
 			      buff, (unsigned long)ntohl(so->so_faddr.s_addr),
 			      ntohs(so->so_fport), n1, 1);
@@ -1133,7 +1118,7 @@ do_prompt:
 		 * A typical packet for player version 1.0 (release version):
 		 *        
 		 * 0000:50 4E 41 00 05 
-		 * 0000:00 01 00 02 1B D7 00 00 67 E6 6C DC 63 00 12 50 .....×..gælÜc..P
+		 * 0000:00 01 00 02 1B D7 00 00 67 E6 6C DC 63 00 12 50 .....?..g?l?c..P
 		 * 0010:4E 43 4C 49 45 4E 54 20 31 30 31 20 41 4C 50 48 NCLIENT 101 ALPH
 		 * 0020:41 6C 00 00 52 00 17 72 61 66 69 6C 65 73 2F 76 Al..R..rafiles/v
 		 * 0030:6F 61 2F 65 6E 67 6C 69 73 68 5F 2E 72 61 79 42 oa/english_.rayB
@@ -1145,8 +1130,8 @@ do_prompt:
 		 *
 		 * A typical packet for player version 2.0 (beta):
 		 *        
-		 * 0000:50 4E 41 00 06 00 02 00 00 00 01 00 02 1B C1 00 PNA...........Á.
-		 * 0010:00 67 75 78 F5 63 00 0A 57 69 6E 32 2E 30 2E 30 .guxõc..Win2.0.0
+		 * 0000:50 4E 41 00 06 00 02 00 00 00 01 00 02 1B C1 00 PNA...........?.
+		 * 0010:00 67 75 78 F5 63 00 0A 57 69 6E 32 2E 30 2E 30 .gux?c..Win2.0.0
 		 * 0020:2E 35 6C 00 00 52 00 1C 72 61 66 69 6C 65 73 2F .5l..R..rafiles/
 		 * 0030:77 65 62 73 69 74 65 2F 32 30 72 65 6C 65 61 73 website/20releas
 		 * 0040:65 2E 72 61 79 53 00 00 06 36 42                e.rayS...6B
@@ -1259,8 +1244,7 @@ do_prompt:
  * return 2 if this is a command-line connection
  */
 int
-tcp_ctl(so)
-	struct socket *so;
+tcp_ctl(struct socket * so)
 {
 	struct sbuf *sb = &so->so_snd;
 	int command;

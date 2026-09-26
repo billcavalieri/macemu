@@ -37,11 +37,21 @@ extern int SheepForceHeight(void);
 extern int SheepForceRowBytes(void);
 extern int SheepForceDepth(void);
 extern bool SheepForceOwns(uint32 mac_addr);
+extern bool SheepForceAdoptHostFB(uint8 *host, uint32 bytes);
 
 extern void SheepForceStartup(void *sdl_window);
 extern void SheepForceShutdown(void);
 extern void SheepForceSync(void);
+/* Wait for an in-flight GPU write that overlaps this CPU rectangle.
+ * A null dest waits for whatever is pending. */
+extern void SheepForceFlushCPU(uint8 *dest, int rowbytes, int width_bytes, int height);
+extern void SheepForceLayoutDisplay(void);
+extern void SheepForceMarkDirty(void);
+extern void SheepForceLoadPalette(void);
 extern bool SheepForcePresent(int x, int y, int w, int h);
+/* Hash of the visible page the last present handed the GPU, plus the
+ * palette. *have is 0 until a present has a page to hash. */
+extern uint32 SheepForcePresentedHash(int *have);
 
 extern bool SheepForceTryFill(uint8 *dest, int bpp, int rowbytes, int width_bytes, int height, uint32 color);
 extern bool SheepForceTryInvert(uint8 *dest, int bpp, int rowbytes, int width_bytes, int height);

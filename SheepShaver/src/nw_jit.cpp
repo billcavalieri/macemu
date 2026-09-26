@@ -168,11 +168,12 @@ void nw_jit_helper_mtfsb(struct nw_jit_cpu *cpu, uint32_t crbd, uint32_t setbit)
 void nw_jit_helper_mtfsfi(struct nw_jit_cpu *cpu, uint32_t crfd, uint32_t imm);
 void *nw_jit_helper_chain(struct nw_jit_cpu *cpu, uint32_t chain_pc, uint32_t cur_class);
 
-enum { NW_JIT_CODE_SIZE = 1 << 25, NW_JIT_CACHE = 262144, NW_JIT_PROBE = 16 };
+enum { NW_JIT_CODE_SIZE = 64 << 20, NW_JIT_CACHE = 262144, NW_JIT_PROBE = 16 };
 enum { NW_JIT_USED_EMPTY = 0, NW_JIT_USED_LIVE = 1, NW_JIT_USED_TOMB = 2 };
-enum { NW_JIT_BANKS = 8, NW_JIT_BANK_SIZE = NW_JIT_CODE_SIZE / NW_JIT_BANKS };
+enum { NW_JIT_BANKS = 16, NW_JIT_BANK_SIZE = NW_JIT_CODE_SIZE / NW_JIT_BANKS };
 static_assert((NW_JIT_CACHE & (NW_JIT_CACHE - 1)) == 0, "cache size power of two");
 static_assert(NW_JIT_CODE_SIZE % NW_JIT_BANKS == 0, "even banks");
+static_assert(NW_JIT_BANK_SIZE == (4 << 20), "4 MB banks");
 enum { NW_JIT_HITS_AGE = 4096 };
 enum { NW_JIT_RAM_PAGES = 131072, NW_JIT_ROM_PAGES = 2048 };
 
@@ -188,10 +189,12 @@ struct nw_jit_entry {
 	uint16_t hits;
 	int16_t chain_disp;	/* bc taken displacement; 0 if last is not bc */
 	uint32_t gpr_mask;	/* GPRs this block reads or writes; 0xffffffff = all */
+	uint32_t code_bytes;	/* host bytes at fn; 0 if this entry is not movable */
 };
 static_assert(sizeof(struct nw_jit_entry) == 48, "nw_jit_entry stays 48 bytes");
 
 static uint8_t *g_code;
+static uint8_t *g_code_spare;
 static size_t g_code_used;
 static struct nw_jit_entry g_cache[NW_JIT_CACHE];
 static uint8_t g_pagebit_ram[(NW_JIT_RAM_PAGES + 7) / 8];
@@ -4237,7 +4240,8 @@ nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 		      uint32_t endian, nw_jit_fn fn, int n,
 		      uint32_t first_opcode, int uses_fpr, int uses_vr,
-		      uint32_t chain_pc, uint32_t gpr_mask, int16_t chain_disp)
+		      uint32_t chain_pc, uint32_t gpr_mask, int16_t chain_disp,
+		      uint32_t code_bytes)
 {
 	int i = cache_slot(phys_page, guest_pc, msr_ir, endian);
 	int slot = -1, reuse = -1;
@@ -4293,6 +4297,7 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 	g_cache[slot].chain_pc = chain_pc;
 	g_cache[slot].chain_disp = chain_disp;
 	g_cache[slot].gpr_mask = gpr_mask;
+	g_cache[slot].code_bytes = code_bytes;
 	g_cache[slot].used = NW_JIT_USED_LIVE;
 	g_cache[slot].n = (uint8_t)(n < 0 ? 0 : n > 255 ? 255 : n);
 	if (!same) {
@@ -5846,11 +5851,6 @@ static void record_cr_s(struct nw_jit_cpu *cpu, int crfd, int32_t a, int32_t b)
 	const int sh = 28 - 4 * crfd;
 	const uint32_t mask = 0xfu << sh;
 	cpu->cr = (cpu->cr & ~mask) | (f << sh);
-}
-
-static void record_cr0_cmp(struct nw_jit_cpu *cpu, int32_t a, int32_t b)
-{
-	record_cr_s(cpu, 0, a, b);
 }
 
 static uint32_t ra_or_0(const struct nw_jit_cpu *cpu, int ra)
@@ -7760,11 +7760,6 @@ static uint32_t a64_cmp_imm1(int rn)
 	return 0x7100041fu | ((uint32_t)rn << 5);
 }
 
-static uint32_t a64_subs_imm1(int rd, int rn)
-{
-	return 0x71000400u | ((uint32_t)rn << 5) | (uint32_t)rd;
-}
-
 static uint32_t a64_sub_reg(int rd, int rn, int rm)
 {
 	return 0x4b000000u | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
@@ -9144,14 +9139,6 @@ static int emit_cr0_from_w8(struct emit *e)
 	if (!emit_w(e, 0x7100011fu))			/* SUBS WZR, W8, #0 */
 		return 0;
 	return emit_cr0_from_flags(e, 0x54000084u);	/* B.MI +4 */
-}
-
-/* Signed compare of W8 vs W9. B.LT is N!=V, not N (B.MI). vs-kpx 7c13a000. */
-static int emit_cr0_from_cmp_w8_w9(struct emit *e)
-{
-	if (!emit_w(e, 0x6b09011fu))			/* SUBS WZR, W8, W9 */
-		return 0;
-	return emit_cr0_from_flags(e, 0x5400008bu);	/* B.LT +4 */
 }
 
 static int emit_maybe_cr1(struct emit *e, uint32_t op)
@@ -11835,25 +11822,230 @@ static int16_t block_chain_disp(const uint32_t *ops, int n)
 	return 0;
 }
 
-static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
+/* Pack live translations to the front of a spare buffer and swap.
+ * A bank wipe throws away every translation in the next 4 MB. The movie
+ * log showed ~8000 of them still live at each wipe (live stayed ~20k,
+ * occ_max 54858 of 262144 slots) while store/icbi had already tombstoned
+ * the holes in between. Compaction drops the holes and keeps the code
+ * the decoder is still running. Returns 0 if the spare buffer cannot
+ * be mapped; the caller then falls back to the bank wipe. */
+static int compact_code(void)
 {
+	if (!g_code)
+		return 0;
+	if (!g_code_spare) {
+		void *m = mmap(NULL, NW_JIT_CODE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
+			       MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
+		if (m == MAP_FAILED)
+			return 0;
+		g_code_spare = (uint8_t *)m;
+	}
+	const size_t before = g_code_used;
+	size_t used = 0;
+	int live = 0;
+	int dropped = 0;
+#ifdef __APPLE__
+	pthread_jit_write_protect_np(0);
+#endif
+	for (int i = 0; i < NW_JIT_CACHE; i++) {
+		if (g_cache[i].used != NW_JIT_USED_LIVE)
+			continue;
+		if (g_cache[i].fn == NW_JIT_INTERPRET)
+			continue;
+		const uint32_t nb = g_cache[i].code_bytes;
+		uint8_t *src = (uint8_t *)g_cache[i].fn;
+		const int movable = nb >= 4 && (nb & 3u) == 0 &&
+			src >= g_code && src + nb <= g_code + NW_JIT_CODE_SIZE;
+		if (!movable) {
+			g_cache[i].used = NW_JIT_USED_TOMB;
+			g_flush++;
+			g_flush_src[NW_JIT_FL_WRAP]++;
+			dropped++;
+			continue;
+		}
+		const size_t next = (used + nb + 15u) & ~(size_t)15u;
+		if (next > NW_JIT_CODE_SIZE) {
+			g_cache[i].used = NW_JIT_USED_TOMB;
+			g_flush++;
+			g_flush_src[NW_JIT_FL_WRAP]++;
+			dropped++;
+			continue;
+		}
+		memcpy(g_code_spare + used, src, nb);
+		g_cache[i].fn = (nw_jit_fn)(g_code_spare + used);
+		used = next;
+		live++;
+	}
+#ifdef __APPLE__
+	sys_icache_invalidate(g_code_spare, used ? used : 4);
+	pthread_jit_write_protect_np(1);
+#endif
+	__builtin___clear_cache((char *)g_code_spare, (char *)g_code_spare + (used ? used : 4));
+	uint8_t *old = g_code;
+	g_code = g_code_spare;
+	g_code_spare = old;
+	g_code_used = used;
+	if (dropped)
+		pagebit_rebuild();
+	if (nw_jit_stats_wanted()) {
+		printf("NW-BOOT G1: jit compact live %d kept %zu was %zu dropped %d\n",
+		       live, used, before, dropped);
+		fflush(stdout);
+	}
+	return 1;
+}
+
+static size_t live_movable_bytes(void)
+{
+	size_t n = 0;
+	if (!g_code)
+		return 0;
+	for (int i = 0; i < NW_JIT_CACHE; i++) {
+		if (g_cache[i].used != NW_JIT_USED_LIVE)
+			continue;
+		if (g_cache[i].fn == NW_JIT_INTERPRET)
+			continue;
+		const uint32_t nb = g_cache[i].code_bytes;
+		uint8_t *src = (uint8_t *)g_cache[i].fn;
+		if (nb < 4 || (nb & 3u) || src < g_code || src + nb > g_code + NW_JIT_CODE_SIZE)
+			continue;
+		n += (size_t)nb + 15u & ~(size_t)15u;
+	}
+	return n;
+}
+
+static int movable_block(int i)
+{
+	if (g_cache[i].used != NW_JIT_USED_LIVE)
+		return 0;
+	if (g_cache[i].fn == NW_JIT_INTERPRET)
+		return 0;
+	const uint32_t nb = g_cache[i].code_bytes;
+	uint8_t *src = (uint8_t *)g_cache[i].fn;
+	return nb >= 4 && (nb & 3u) == 0 &&
+		src >= g_code && src + nb <= g_code + NW_JIT_CODE_SIZE;
+}
+
+/* Tombstone the least-used live code until `want` bytes are free.
+ * QuickTime started with the 64 MB buffer already full and about 80 KB
+ * of padding. Recopying all of it on every new block stalled the guest. */
+static size_t evict_cold(size_t want)
+{
+	static size_t bucket[65536];
+	if (!g_code || want == 0)
+		return 0;
+	memset(bucket, 0, sizeof bucket);
+	for (int i = 0; i < NW_JIT_CACHE; i++) {
+		if (!movable_block(i))
+			continue;
+		bucket[g_cache[i].hits] += g_cache[i].code_bytes;
+	}
+	size_t acc = 0;
+	unsigned cut = 0;
+	for (; cut < 65536u; cut++) {
+		acc += bucket[cut];
+		if (acc >= want)
+			break;
+	}
+	size_t freed = 0;
+	int n = 0;
+	for (int i = 0; i < NW_JIT_CACHE && freed < want; i++) {
+		if (!movable_block(i) || g_cache[i].hits > cut)
+			continue;
+		freed += g_cache[i].code_bytes;
+		g_cache[i].used = NW_JIT_USED_TOMB;
+		g_flush++;
+		g_flush_src[NW_JIT_FL_WRAP]++;
+		n++;
+	}
+	if (n) {
+		g_flush_calls[NW_JIT_FL_WRAP]++;
+		pagebit_rebuild();
+		if (nw_jit_stats_wanted()) {
+			printf("NW-BOOT G1: jit evict freed %zu blocks %d hits<=%u\n",
+			       freed, n, cut);
+			fflush(stdout);
+		}
+	}
+	return freed;
+}
+
+static int g_jit_no_room;
+
+static int ensure_code_room(size_t need)
+{
+	if (g_code_used + need <= NW_JIT_CODE_SIZE) {
+		const size_t cur = g_code_used / NW_JIT_BANK_SIZE;
+		const size_t nxt = (g_code_used + need) / NW_JIT_BANK_SIZE;
+		if (nxt != cur && nxt < (size_t)NW_JIT_BANKS) {
+			/* The 64 KB reserve crosses into the next bank before the
+			 * cursor does. Pack first when the holes are large enough
+			 * to pull the cursor back. Boot sat in the last 64 KB of a
+			 * bank with nothing to drop and recopied 25 MB on every
+			 * new block (701 compacts). That stalled the VBL handler.
+			 * When packing cannot escape this bank, drop the next bank
+			 * once and keep writing. */
+			const size_t live = live_movable_bytes();
+			const size_t bank_end = (cur + 1) * NW_JIT_BANK_SIZE;
+			const size_t holes = g_code_used > live ? g_code_used - live : 0;
+			/* Opening the movie recopied 50 MB to reclaim 12 KB of
+			 * alignment so the reserve would fit, and a present took
+			 * 18 ms. Pack only when the holes are at least the reserve. */
+			if (holes >= need &&
+			    live + need <= bank_end && live + need <= NW_JIT_CODE_SIZE &&
+			    compact_code()) {
+				const size_t cur2 = g_code_used / NW_JIT_BANK_SIZE;
+				const size_t nxt2 = (g_code_used + need) / NW_JIT_BANK_SIZE;
+				if (nxt2 == cur2 || nxt2 >= (size_t)NW_JIT_BANKS)
+					return 1;
+			}
+			wrap_note_occupancy();
+			invalidate_bank((int)nxt);
+			g_code_used = nxt * NW_JIT_BANK_SIZE;
+		}
+		return 1;
+	}
+	/* The buffer is full. Holes of a few dozen KB are alignment, not
+	 * garbage: compacting 64 MB to reclaim them stalled QuickTime.
+	 * Drop the least-used bank's worth, pack once, and keep compiling.
+	 * Wiping bank 0 after a compact faulted stwux as the desktop
+	 * appeared, so cold blocks are tombstoned before the pack. */
+	const size_t live = live_movable_bytes();
+	const size_t holes = g_code_used > live ? g_code_used - live : 0;
+	const size_t want = (size_t)NW_JIT_BANK_SIZE;
+	if (holes < want && evict_cold(want - holes) == 0 && holes < need) {
+		g_jit_no_room = 1;
+		return 0;
+	}
+	if (compact_code() && g_code_used + need <= NW_JIT_CODE_SIZE)
+		return 1;
+	if (live <= NW_JIT_CODE_SIZE) {
+		g_jit_no_room = 1;
+		return 0;
+	}
+	if (nw_jit_stats_wanted()) {
+		printf("NW-BOOT G1: jit compact skip live_bytes %zu need %zu\n",
+		       live, need);
+		fflush(stdout);
+	}
+	wrap_note_occupancy();
+	invalidate_bank(0);
+	g_code_used = 0;
+	return g_code_used + need <= NW_JIT_CODE_SIZE;
+}
+
+static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc,
+			       size_t *code_bytes)
+{
+	if (code_bytes)
+		*code_bytes = 0;
+	g_jit_no_room = 0;
 	if (!code_ready() || n <= 0)
 		return NULL;
 	{
 		const size_t need = 65536;
-		if (g_code_used + need > NW_JIT_CODE_SIZE) {
-			wrap_note_occupancy();
-			invalidate_bank(0);
-			g_code_used = 0;
-		} else {
-			const size_t cur = g_code_used / NW_JIT_BANK_SIZE;
-			const size_t nxt = (g_code_used + need) / NW_JIT_BANK_SIZE;
-			if (nxt != cur && nxt < (size_t)NW_JIT_BANKS) {
-				wrap_note_occupancy();
-				invalidate_bank((int)nxt);
-				g_code_used = nxt * NW_JIT_BANK_SIZE;
-			}
-		}
+		if (!ensure_code_room(need))
+			return NULL;
 	}
 	g_compiles++;
 	if ((g_compiles & (NW_JIT_HITS_AGE - 1u)) == 0) {
@@ -11963,6 +12155,8 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc)
 	size_t bytes = (size_t)((uint8_t *)e.p - (g_code + g_code_used));
 	g_code_used += bytes;
 	g_code_emitted += bytes;
+	if (code_bytes)
+		*code_bytes = bytes;
 #ifdef __APPLE__
 	{
 		uint64_t t0 = nw_nsnow();
@@ -11988,9 +12182,18 @@ nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
 		return hit;
 	if (hit && hit != NW_JIT_INTERPRET && cached_n != n)
 		g_recompile_n++;
-	nw_jit_fn fn = compile_block(ops, n, guest_pc);
-	if (!fn)
+	size_t code_bytes = 0;
+	nw_jit_fn fn = compile_block(ops, n, guest_pc, &code_bytes);
+	if (!fn) {
+		/* Remember a full buffer so the next execution interprets
+		 * instead of scanning the cache and recopying it. */
+		if (g_jit_no_room) {
+			const uint32_t op0 = (n > 0) ? ops[0] : 0;
+			nw_jit_cache_put(phys_page, guest_pc, msr_ir, endian,
+					 NW_JIT_INTERPRET, n, op0, 0, 0, 0, 0, 0, 0);
+		}
 		return NULL;
+	}
 	const uint32_t op0 = (n > 0) ? ops[0] : 0;
 	const int prim = (int)(op0 >> 26);
 	const int xo = (int)((op0 >> 1) & 0x3ff);
@@ -12021,7 +12224,7 @@ nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
 		gpr_mask |= nw_jit_op_gpr_mask(ops[i]);
 	nw_jit_cache_put(phys_page, guest_pc, msr_ir, endian, fn, n, op0, uses_fpr, uses_vr,
 			 block_chain_pc(ops, n, guest_pc), gpr_mask,
-			 block_chain_disp(ops, n));
+			 block_chain_disp(ops, n), (uint32_t)code_bytes);
 	return fn;
 }
 

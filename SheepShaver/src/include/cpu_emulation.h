@@ -21,6 +21,8 @@
 #ifndef CPU_EMULATION_H
 #define CPU_EMULATION_H
 
+#include <assert.h>
+
 
 /*
  *  Memory system
@@ -89,7 +91,12 @@ static inline void WriteMacInt64(uint32 addr, uint64 v) {
 	vm_write_memory_8(pa, v);
 	nw_jit_invalidate_range_src(pa, 8, NW_JIT_FL_HOST);
 }
-static inline uint32 Host2MacAddr(uint8 *addr) {return nw_pa_to_la(vm_do_get_virtual_address(addr));}
+static inline uint32 Host2MacAddr(uint8 *addr) {
+	/* Guest physical addresses are 32-bit. Truncate the host vm_addr_t once. */
+	const vm_addr_t va = vm_do_get_virtual_address(addr);
+	assert(va == (vm_addr_t)(uint32)va);
+	return nw_pa_to_la((uint32)va);
+}
 static inline uint8 *Mac2HostAddr(uint32 addr) {return vm_do_get_real_address(nw_la_to_pa(addr));}
 static inline void *Mac_memset(uint32 addr, int c, size_t n) {
 	uint32 pa = nw_la_to_pa(addr);
@@ -119,8 +126,8 @@ static inline uint64 ReadMacInt64(uint32 addr) {return *(uint64 *)addr;}
 static inline void WriteMacInt16(uint32 addr, uint32 w) {*(uint16 *)addr = w;}
 static inline void WriteMacInt32(uint32 addr, uint32 l) {*(uint32 *)addr = l;}
 static inline void WriteMacInt64(uint32 addr, uint64 ll) {*(uint64 *)addr = ll;}
-static inline uint32 Host2MacAddr(uint8 *addr) {return (uint32)addr;}
-static inline uint8 *Mac2HostAddr(uint32 addr) {return (uint8 *)addr;}
+static inline uint32 Host2MacAddr(uint8 *addr) {return (uint32)(uintptr)addr;}
+static inline uint8 *Mac2HostAddr(uint32 addr) {return (uint8 *)(uintptr)addr;}
 static inline void *Mac_memset(uint32 addr, int c, size_t n) {return memset(Mac2HostAddr(addr), c, n);}
 static inline void *Mac2Host_memcpy(void *dest, uint32 src, size_t n) {return memcpy(dest, Mac2HostAddr(src), n);}
 static inline void *Host2Mac_memcpy(uint32 dest, const void *src, size_t n) {return memcpy(Mac2HostAddr(dest), src, n);}

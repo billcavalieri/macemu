@@ -738,7 +738,7 @@ void *XSERDPort::input_func(void *arg)
 		void *buf = Mac2HostAddr(ReadMacInt32(s->input_pb + ioBuffer));
 		uint32 length = ReadMacInt32(s->input_pb + ioReqCount);
 		D(bug("input_func waiting for %ld bytes of data...\n", length));
-		int32 actual = read(s->fd, buf, length);
+		int32 actual = (int32)read(s->fd, buf, length);
 		D(bug(" %ld bytes received\n", actual));
 
 #if MONITOR
@@ -807,7 +807,7 @@ void *XSERDPort::output_func(void *arg)
 		bug("\n");
 #endif
 
-		int32 actual = write(s->fd, buf, length);
+		int32 actual = (int32)write(s->fd, buf, length);
 		D(bug(" %ld bytes transmitted\n", actual));
 
 		// KillIO called? Then simply return

@@ -1,30 +1,62 @@
 /*
+ *  AudioBackEnd.cpp - Default Output AudioUnit and a two-slot ring
  *
- * This is based on Apple example software AudioBackEnd.cpp
- * 
- * Copyright © 2004 Apple Computer, Inc., All Rights Reserved
- * Original Apple code modified by Daniel Sumorok
- * 
+ *  Based on Apple example software, Daniel Sumorok, 2004-2006.
+ *  Rewritten 2026: one AudioUnit, no AUGraph. The HAL thread copies one
+ *  period. The emulator thread fills the other. PCM in the ring is
+ *  host-endian signed integer.
+ *
+ *  Basilisk II (C) 1997-2008 Christian Bauer
+ *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2 of the License, or
  *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- */ 
+ */
 
 #include "AudioBackEnd.h"
 
-#pragma mark ---Public Methods---
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+static void check_err(OSStatus err, const char *file, int line)
+{
+	if (err)
+		fprintf(stderr, "AudioBackEnd Error: %d -> %s: %d\n", (int)err, file, line);
+}
+
+#define checkErr(err) check_err((OSStatus)(err), __FILE__, __LINE__)
+
+static std::atomic<uint64_t> g_audio_cb_n;
+static std::atomic<uint64_t> g_audio_cb_us_max;
+
+static uint64_t mono_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+}
+
+extern "C" void AudioBackEndTakeStats(uint64_t *callbacks, uint64_t *max_us)
+{
+	if (callbacks)
+		*callbacks = g_audio_cb_n.exchange(0, std::memory_order_relaxed);
+	if (max_us)
+		*max_us = g_audio_cb_us_max.exchange(0, std::memory_order_relaxed);
+}
+
+static UInt32 ring_add(UInt32 index, UInt32 bytes, UInt32 size)
+{
+	index += bytes;
+	if (index >= size)
+		index -= size;
+	return index;
+}
 
 AudioBackEnd::AudioBackEnd(int bitsPerSample, int numChannels, int sampleRate):
+  mOutputUnit(NULL),
   mBitsPerSample(bitsPerSample),
   mSampleRate(sampleRate),
   mNumChannels(numChannels),
@@ -36,248 +68,207 @@ AudioBackEnd::AudioBackEnd(int bitsPerSample, int numChannels, int sampleRate):
   mAudioBufferWriteIndex(0),
   mAudioBufferReadIndex(0),
   mBytesPerFrame(0),
-  mAudioBufferSize(0) {
-  OSStatus err = noErr;
-  err = Init();
-  if(err) {
-    fprintf(stderr,"AudioBackEnd ERROR: Cannot Init AudioBackEnd");
+  mAudioBufferSize(0),
+  mPeriodBytes(0) {
+  OSStatus err = Init();
+  if (err) {
+    fprintf(stderr, "AudioBackEnd ERROR: Cannot Init AudioBackEnd\n");
     exit(1);
   }
 }
 
-AudioBackEnd::~AudioBackEnd() {   //clean up
+AudioBackEnd::~AudioBackEnd() {
   Stop();
-
-  AUGraphClose(mGraph);
-  DisposeAUGraph(mGraph);
-        
-  if(mAudioBuffer != NULL) {
-    delete mAudioBuffer;
-    mAudioBuffer = NULL;
-    mAudioBufferSize = 0;
+  if (mOutputUnit) {
+    AudioUnitUninitialize(mOutputUnit);
+    AudioComponentInstanceDispose(mOutputUnit);
+    mOutputUnit = NULL;
   }
+  delete[] mAudioBuffer;
+  mAudioBuffer = NULL;
 }
 
 OSStatus AudioBackEnd::Init() {
-  OSStatus err = noErr;
-
-  err = SetupGraph();   
+  OSStatus err = SetupUnit();
   checkErr(err);
-
+  if (err)
+    return err;
   err = SetupBuffers();
   checkErr(err);
-
-  err = AUGraphInitialize(mGraph); 
+  if (err)
+    return err;
+  err = AudioUnitInitialize(mOutputUnit);
   checkErr(err);
+  if (err)
+    return err;
 
-  return err;   
+  /* The callback's inNumberFrames is the unit's buffer, which can
+   * differ from the device property read before the format was set.
+   * A mismatch walks the read index off the two slots and plays silence. */
+  UInt32 frames = 0;
+  UInt32 size = sizeof(frames);
+  if (AudioUnitGetProperty(mOutputUnit, kAudioDevicePropertyBufferFrameSize,
+                           kAudioUnitScope_Global, 0, &frames, &size) == noErr &&
+      frames > 0 && frames != mBufferSizeFrames) {
+    mBufferSizeFrames = frames;
+    delete[] mAudioBuffer;
+    mPeriodBytes = mBytesPerFrame * mBufferSizeFrames;
+    mAudioBufferSize = mPeriodBytes * 2;
+    mAudioBuffer = new UInt8[mAudioBufferSize];
+    memset(mAudioBuffer, 0, mAudioBufferSize);
+  }
+  printf("AudioBackEnd: %u Hz %u ch %u-bit buffer %u frames\n",
+         (unsigned)mSampleRate, (unsigned)mNumChannels,
+         (unsigned)mBitsPerSample, (unsigned)mBufferSizeFrames);
+  fflush(stdout);
+  return noErr;
 }
-
-#pragma mark --- Operation---
 
 OSStatus AudioBackEnd::Start()
 {
-  OSStatus err = noErr;
-  if(!IsRunning()) {
-    mFramesProcessed = 0;
-    mAudioBufferWriteIndex = 0;         
-    mAudioBufferReadIndex = 0;
-                
-    err = AUGraphStart(mGraph);
+  if (IsRunning())
+    return noErr;
+  mFramesProcessed = 0;
+  mAudioBufferWriteIndex.store(0, std::memory_order_relaxed);
+  mAudioBufferReadIndex.store(0, std::memory_order_relaxed);
+  if (mAudioBuffer && mAudioBufferSize)
+    memset(mAudioBuffer, 0, mAudioBufferSize);
+  OSStatus err = AudioOutputUnitStart(mOutputUnit);
+  if (err) {
+    printf("AudioBackEnd: start failed %d\n", (int)err);
+    fflush(stdout);
   }
-  return err;   
+  return err;
 }
 
 OSStatus AudioBackEnd::Stop() {
-  OSStatus err = noErr;
-
-  if(IsRunning()) {
-    err = AUGraphStop(mGraph);
-  }
-  return err;
+  if (!mOutputUnit || !IsRunning())
+    return noErr;
+  return AudioOutputUnitStop(mOutputUnit);
 }
 
-Boolean AudioBackEnd::IsRunning() {     
-  OSStatus err = noErr;
-  Boolean graphRunning;
-
-  err = AUGraphIsRunning(mGraph,&graphRunning);
-        
-  return (graphRunning);        
+Boolean AudioBackEnd::IsRunning() {
+  if (!mOutputUnit)
+    return false;
+  UInt32 running = 0;
+  UInt32 size = sizeof(running);
+  if (AudioUnitGetProperty(mOutputUnit, kAudioOutputUnitProperty_IsRunning,
+                           kAudioUnitScope_Global, 0, &running, &size) != noErr)
+    return false;
+  return running != 0;
 }
 
-#pragma mark -
-#pragma mark --Private methods---
-OSStatus AudioBackEnd::SetupGraph() {
-  OSStatus err = noErr;
+OSStatus AudioBackEnd::SetupUnit() {
+  AudioComponentDescription desc;
+  memset(&desc, 0, sizeof(desc));
+  desc.componentType = kAudioUnitType_Output;
+  desc.componentSubType = kAudioUnitSubType_DefaultOutput;
+  desc.componentManufacturer = kAudioUnitManufacturer_Apple;
+
+  AudioComponent comp = AudioComponentFindNext(NULL, &desc);
+  if (!comp)
+    return -1;
+  OSStatus err = AudioComponentInstanceNew(comp, &mOutputUnit);
+  if (err)
+    return err;
+
   AURenderCallbackStruct output;
-  UInt32 size;
-  ComponentDescription outDesc;
-  AudioDeviceID out;
-
-  //Make a New Graph
-  err = NewAUGraph(&mGraph);  
-  checkErr(err);
-
-  //Open the Graph, AudioUnits are opened but not initialized    
-  err = AUGraphOpen(mGraph);
-  checkErr(err);
-  
-  outDesc.componentType = kAudioUnitType_Output;
-  outDesc.componentSubType = kAudioUnitSubType_DefaultOutput;
-  outDesc.componentManufacturer = kAudioUnitManufacturer_Apple;
-  outDesc.componentFlags = 0;
-  outDesc.componentFlagsMask = 0;
-        
-  //////////////////////////
-  ///MAKE NODES
-  //This creates a node in the graph that is an AudioUnit, using
-  //the supplied ComponentDescription to find and open that unit        
-  err = AUGraphNewNode(mGraph, &outDesc, 0, NULL, &mOutputNode);
-  checkErr(err);
-        
-  //Get Audio Units from AUGraph node
-  err = AUGraphGetNodeInfo(mGraph, mOutputNode, NULL, NULL, NULL, &mOutputUnit);         
-  checkErr(err);
-        
-  err = AUGraphUpdate(mGraph, NULL);
-  checkErr(err);
-
-  size = sizeof(AudioDeviceID);
-  err = AudioHardwareGetProperty(kAudioHardwarePropertyDefaultOutputDevice,
-                                 &size, &out);
-  checkErr(err);
-  mOutputDevice.Init(out, false);
-        
-  //Set the Current Device to the Default Output Unit.
-  err = AudioUnitSetProperty(mOutputUnit,
-                             kAudioOutputUnitProperty_CurrentDevice, 
-                             kAudioUnitScope_Global, 
-                             0, 
-                             &out, 
-                             sizeof(out));
-  checkErr(err);
-                        
   output.inputProc = OutputProc;
   output.inputProcRefCon = this;
-        
-  err = AudioUnitSetProperty(mOutputUnit, 
-                             kAudioUnitProperty_SetRenderCallback, 
+  err = AudioUnitSetProperty(mOutputUnit,
+                             kAudioUnitProperty_SetRenderCallback,
                              kAudioUnitScope_Input,
                              0,
-                             &output, 
+                             &output,
                              sizeof(output));
-  checkErr(err);                                          
-  return err;
+  if (err)
+    return err;
+
+  AudioDeviceID dev = kAudioDeviceUnknown;
+  UInt32 size = sizeof(dev);
+  err = AudioUnitGetProperty(mOutputUnit,
+                             kAudioOutputUnitProperty_CurrentDevice,
+                             kAudioUnitScope_Global,
+                             0,
+                             &dev,
+                             &size);
+  if (err)
+    return err;
+  mOutputDevice.Init(dev, false);
+  mBufferSizeFrames = mOutputDevice.mBufferSizeFrames;
+  if (mBufferSizeFrames == 0)
+    mBufferSizeFrames = 512;
+  return noErr;
 }
 
-//Allocate Audio Buffer List(s) to hold the data from input.
 OSStatus AudioBackEnd::SetupBuffers() {
-  OSStatus err = noErr;
-  UInt32 safetyOffset;
   AudioStreamBasicDescription asbd;
-  UInt32 propertySize;
-
-  propertySize = sizeof(mBufferSizeFrames);
-  err = AudioUnitGetProperty(mOutputUnit, kAudioDevicePropertyBufferFrameSize, 
-                             kAudioUnitScope_Global, 0, &mBufferSizeFrames, 
-                             &propertySize);
-
-  propertySize = sizeof(safetyOffset);
-  safetyOffset = 0;
-  err = AudioUnitGetProperty(mOutputUnit, kAudioDevicePropertySafetyOffset, 
-                             kAudioUnitScope_Global, 0, &safetyOffset, 
-                             &propertySize);
-                             
-
-  asbd.mFormatID = 0x6c70636d; // 'lpcm'
-  asbd.mFormatFlags = (kAudioFormatFlagIsSignedInteger |
-                       kAudioFormatFlagIsBigEndian |
-                       kAudioFormatFlagIsPacked);
-  asbd.mChannelsPerFrame = mNumChannels;
+  memset(&asbd, 0, sizeof(asbd));
+  asbd.mFormatID = kAudioFormatLinearPCM;
+  asbd.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+  asbd.mChannelsPerFrame = (UInt32)mNumChannels;
   asbd.mSampleRate = mSampleRate;
-        
-  if(asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) {
-    asbd.mBitsPerChannel = mBitsPerSample;
-  } else if(asbd.mFormatFlags & kAudioFormatFlagIsFloat)        {
-    asbd.mBitsPerChannel = 32;
-  } else {
-    asbd.mBitsPerChannel = 0;
-  }
-
+  asbd.mBitsPerChannel = (UInt32)mBitsPerSample;
   asbd.mFramesPerPacket = 1;
   asbd.mBytesPerFrame = (asbd.mBitsPerChannel / 8) * asbd.mChannelsPerFrame;
-  asbd.mBytesPerPacket = asbd.mBytesPerFrame * asbd.mFramesPerPacket;
-
-  asbd.mReserved = 0;
+  asbd.mBytesPerPacket = asbd.mBytesPerFrame;
 
   mBytesPerFrame = asbd.mBytesPerFrame;
-  if((mBytesPerFrame & (mBytesPerFrame - 1)) != 0) {
-    printf("Audio buffer size must be a power of two!\n");
+  if (mBytesPerFrame == 0)
     return -1;
-  }
 
-  propertySize = sizeof(asbd);
-  err = AudioUnitSetProperty(mOutputUnit, kAudioUnitProperty_StreamFormat, 
-                             kAudioUnitScope_Input, 0, &asbd, propertySize);
-  checkErr(err);
+  OSStatus err = AudioUnitSetProperty(mOutputUnit, kAudioUnitProperty_StreamFormat,
+                                      kAudioUnitScope_Input, 0, &asbd, sizeof(asbd));
+  if (err)
+    return err;
 
-  if(mAudioBuffer != NULL) {
-    delete mAudioBuffer;
-    mAudioBufferSize = 0;
-  }
-
-  mAudioBufferSize = mBytesPerFrame * mBufferSizeFrames * 2;
+  delete[] mAudioBuffer;
+  mPeriodBytes = mBytesPerFrame * mBufferSizeFrames;
+  mAudioBufferSize = mPeriodBytes * 2;
   mAudioBuffer = new UInt8[mAudioBufferSize];
-  bzero(mAudioBuffer, mAudioBufferSize);
-  return err;
+  memset(mAudioBuffer, 0, mAudioBufferSize);
+  return noErr;
 }
 
-#pragma mark -
-#pragma mark -- IO Procs --
 OSStatus AudioBackEnd::OutputProc(void *inRefCon,
-                                  AudioUnitRenderActionFlags *ioActionFlags,
-                                  const AudioTimeStamp *TimeStamp,
-                                  UInt32 inBusNumber,
+                                  AudioUnitRenderActionFlags *,
+                                  const AudioTimeStamp *,
+                                  UInt32,
                                   UInt32 inNumberFrames,
-                                  AudioBufferList * ioData) {
-  OSStatus err = noErr;
+                                  AudioBufferList *ioData) {
   AudioBackEnd *This = (AudioBackEnd *)inRefCon;
-  UInt8 *dstPtr;
-  UInt32 bytesToCopy;
-  UInt32 bytesUntilEnd;
+  const uint64_t t0 = mono_us();
+  UInt8 *dst = (UInt8 *)ioData->mBuffers[0].mData;
+  UInt32 bytes = inNumberFrames * This->mBytesPerFrame;
 
-  This->mFramesProcessed += inNumberFrames;
-
-  dstPtr = (UInt8 *)ioData->mBuffers[0].mData;
-  if(This->mAudioBuffer == NULL) {
-    bzero(dstPtr, inNumberFrames * This->mBytesPerFrame);
+  if (!This->mAudioBuffer || This->mAudioBufferSize == 0) {
+    memset(dst, 0, bytes);
     return noErr;
   }
 
-  bytesToCopy = inNumberFrames * This->mBytesPerFrame;
-  bytesUntilEnd = This->mAudioBufferSize - This->mAudioBufferReadIndex;
-  if(bytesUntilEnd < bytesToCopy) {
-    memcpy(dstPtr, &This->mAudioBuffer[This->mAudioBufferReadIndex], 
-           bytesUntilEnd);
-    memcpy(dstPtr, This->mAudioBuffer, bytesToCopy - bytesUntilEnd);
-
-    This->mAudioBufferReadIndex = bytesToCopy - bytesUntilEnd;
+  UInt32 read = This->mAudioBufferReadIndex.load(std::memory_order_acquire);
+  UInt32 until_end = This->mAudioBufferSize - read;
+  if (until_end < bytes) {
+    memcpy(dst, &This->mAudioBuffer[read], until_end);
+    memcpy(dst + until_end, This->mAudioBuffer, bytes - until_end);
   } else {
-    memcpy(dstPtr, &This->mAudioBuffer[This->mAudioBufferReadIndex], 
-           bytesToCopy);
-    This->mAudioBufferReadIndex += bytesToCopy;
+    memcpy(dst, &This->mAudioBuffer[read], bytes);
   }
+  This->mAudioBufferReadIndex.store(ring_add(read, bytes, This->mAudioBufferSize),
+                                    std::memory_order_release);
 
-
-  while(This->mFramesProcessed >= This->mBufferSizeFrames) {
+  This->mFramesProcessed += inNumberFrames;
+  while (This->mFramesProcessed >= This->mBufferSizeFrames) {
     This->mFramesProcessed -= This->mBufferSizeFrames;
-    if(This->mCallback != NULL) {
+    if (This->mCallback)
       This->mCallback(This->mCallbackArg);
-    }
   }
-
-  return err;
+  const uint64_t dt = mono_us() - t0;
+  g_audio_cb_n.fetch_add(1, std::memory_order_relaxed);
+  uint64_t prev = g_audio_cb_us_max.load(std::memory_order_relaxed);
+  while (dt > prev && !g_audio_cb_us_max.compare_exchange_weak(prev, dt, std::memory_order_relaxed))
+    ;
+  return noErr;
 }
 
 void AudioBackEnd::setCallback(playthruCallback func, void *arg) {
@@ -289,19 +280,37 @@ UInt32 AudioBackEnd::BufferSizeFrames() {
   return mBufferSizeFrames;
 }
 
-int AudioBackEnd::sendAudioBuffer(void *buffer, int numFrames) {
-  UInt8 *dstBuffer;
-  int totalBytes;
-        
-  mAudioBufferWriteIndex += (mAudioBufferSize / 2);
-  mAudioBufferWriteIndex &= (mAudioBufferSize - 1);
+int AudioBackEnd::sendAudioBuffer(void *buffer, int numFrames, int big_endian) {
+  if (!mAudioBuffer || mPeriodBytes == 0)
+    return 0;
 
-  dstBuffer = &mAudioBuffer[mAudioBufferWriteIndex];
-  totalBytes = mBytesPerFrame * numFrames;
-  memcpy(dstBuffer, buffer, totalBytes);
+  UInt32 w = mAudioBufferWriteIndex.load(std::memory_order_relaxed);
+  w = ring_add(w, mPeriodBytes, mAudioBufferSize);
+  UInt8 *dst = &mAudioBuffer[w];
 
-  dstBuffer += totalBytes;
-  bzero(dstBuffer, (mBufferSizeFrames * mBytesPerFrame) - totalBytes);
+  UInt32 nbytes = 0;
+  if (buffer && numFrames > 0)
+    nbytes = mBytesPerFrame * (UInt32)numFrames;
+  if (nbytes > mPeriodBytes)
+    nbytes = mPeriodBytes;
 
+  if (nbytes == 0 || buffer == NULL) {
+    memset(dst, 0, mPeriodBytes);
+  } else if (big_endian && mBytesPerFrame >= 2) {
+    const UInt8 *src = (const UInt8 *)buffer;
+    UInt32 i = 0;
+    for (; i + 1 < nbytes; i += 2) {
+      dst[i] = src[i + 1];
+      dst[i + 1] = src[i];
+    }
+    if (nbytes < mPeriodBytes)
+      memset(dst + nbytes, 0, mPeriodBytes - nbytes);
+  } else {
+    memcpy(dst, buffer, nbytes);
+    if (nbytes < mPeriodBytes)
+      memset(dst + nbytes, 0, mPeriodBytes - nbytes);
+  }
+
+  mAudioBufferWriteIndex.store(w, std::memory_order_release);
   return numFrames;
 }

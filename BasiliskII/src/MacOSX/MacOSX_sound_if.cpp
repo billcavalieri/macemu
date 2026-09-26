@@ -77,9 +77,9 @@ unsigned int OSXsoundOutput::bufferSizeFrames() {
   return 0;
 }
 
-int OSXsoundOutput::sendAudioBuffer(void *buffer, int numFrames) {
+int OSXsoundOutput::sendAudioBuffer(void *buffer, int numFrames, int big_endian) {
   if(player != NULL) {
-    return player->sendAudioBuffer(buffer, numFrames);
+    return player->sendAudioBuffer(buffer, numFrames, big_endian);
   }
         
   return 0;

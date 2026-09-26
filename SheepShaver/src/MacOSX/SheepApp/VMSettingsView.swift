@@ -7,47 +7,6 @@
 
 import SwiftUI
 
-@_silgen_name("SheepPrefsGetString")
-private func SheepPrefsGetString(_ key: UnsafePointer<CChar>) -> UnsafePointer<CChar>
-@_silgen_name("SheepPrefsSetString")
-private func SheepPrefsSetString(_ key: UnsafePointer<CChar>, _ value: UnsafePointer<CChar>)
-@_silgen_name("SheepPrefsGetBool")
-private func SheepPrefsGetBool(_ key: UnsafePointer<CChar>) -> Int32
-@_silgen_name("SheepPrefsSetBool")
-private func SheepPrefsSetBool(_ key: UnsafePointer<CChar>, _ value: Int32)
-@_silgen_name("SheepPrefsGetInt")
-private func SheepPrefsGetInt(_ key: UnsafePointer<CChar>) -> Int32
-@_silgen_name("SheepPrefsSetInt")
-private func SheepPrefsSetInt(_ key: UnsafePointer<CChar>, _ value: Int32)
-@_silgen_name("SheepPrefsSave")
-private func SheepPrefsSave()
-
-private func prefString(_ key: String) -> String {
-    key.withCString { String(cString: SheepPrefsGetString($0)) }
-}
-
-private func setPrefString(_ key: String, _ value: String) {
-    key.withCString { keyPtr in
-        value.withCString { SheepPrefsSetString(keyPtr, $0) }
-    }
-}
-
-private func prefBool(_ key: String) -> Bool {
-    key.withCString { SheepPrefsGetBool($0) != 0 }
-}
-
-private func setPrefBool(_ key: String, _ value: Bool) {
-    key.withCString { SheepPrefsSetBool($0, value ? 1 : 0) }
-}
-
-private func prefInt(_ key: String) -> Int {
-    key.withCString { Int(SheepPrefsGetInt($0)) }
-}
-
-private func setPrefInt(_ key: String, _ value: Int) {
-    key.withCString { SheepPrefsSetInt($0, Int32(value)) }
-}
-
 private enum SettingsPage: String, CaseIterable, Identifiable {
     case drives = "Drives"
     case display = "Display"
@@ -58,7 +17,10 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
 }
 
 struct VMSettingsView: View {
-    @Environment(\.dismiss) private var dismiss
+    var prefsPath: String?
+    var live: Bool
+    var onClose: () -> Void
+
     @State private var page: SettingsPage = .drives
 
     @State private var disk = ""
@@ -81,6 +43,7 @@ struct VMSettingsView: View {
     @State private var initGrab = false
 
     @State private var nosound = false
+    @State private var bootchime = true
     @State private var soundBuffer = 0
     @State private var dsp = "/dev/dsp"
     @State private var mixer = "/dev/mixer"
@@ -109,6 +72,7 @@ struct VMSettingsView: View {
     @State private var keycodefile = ""
     @State private var mousewheelmode = 1
     @State private var mousewheellines = 3
+    @State private var edgegrab = true
     @State private var nameEncoding = 0
 
     var body: some View {
@@ -142,6 +106,7 @@ struct VMSettingsView: View {
                     Toggle("init_grab", isOn: $initGrab)
                 case .sound:
                     Toggle("nosound", isOn: $nosound)
+                    Toggle("bootchime", isOn: $bootchime)
                     TextField("sound_buffer", value: $soundBuffer, format: .number)
                     TextField("dsp", text: $dsp)
                     TextField("mixer", text: $mixer)
@@ -171,6 +136,7 @@ struct VMSettingsView: View {
                     TextField("keycodefile", text: $keycodefile)
                     TextField("mousewheelmode", value: $mousewheelmode, format: .number)
                     TextField("mousewheellines", value: $mousewheellines, format: .number)
+                    Toggle("edgegrab", isOn: $edgegrab)
                 }
             }
             .formStyle(.grouped)
@@ -179,112 +145,225 @@ struct VMSettingsView: View {
         .onAppear(perform: load)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { onClose() }
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
                     save()
-                    dismiss()
+                    onClose()
                 }
             }
         }
     }
 
     private func load() {
-        disk = prefString("disk")
-        cdrom = prefString("cdrom")
-        extfs = prefString("extfs")
-        bootdrive = prefInt("bootdrive")
-        bootdriver = prefInt("bootdriver")
-        nocdrom = prefBool("nocdrom")
-        screen = prefString("screen")
-        windowmodes = prefInt("windowmodes")
-        screenmodes = prefInt("screenmodes")
-        frameskip = prefInt("frameskip")
-        gfxaccel = prefBool("gfxaccel")
-        sheepforce = prefBool("sheepforce")
-        qtcodec = prefBool("qtcodec")
-        hardcursor = prefBool("hardcursor")
-        scaleNearest = prefBool("scale_nearest")
-        scaleInteger = prefBool("scale_integer")
-        initGrab = prefBool("init_grab")
-        nosound = prefBool("nosound")
-        soundBuffer = prefInt("sound_buffer")
-        dsp = prefString("dsp")
-        mixer = prefString("mixer")
-        ramMB = max(prefInt("ramsize") / (1024 * 1024), 1)
-        rom = prefString("rom")
-        jit = prefBool("jit")
-        jit68k = prefBool("jit68k")
-        ignoresegv = prefBool("ignoresegv")
-        ignoreillegal = prefBool("ignoreillegal")
-        cpuclock = prefInt("cpuclock")
-        yearofs = prefInt("yearofs")
-        dayofs = prefInt("dayofs")
-        nogui = prefBool("nogui")
-        noclipconversion = prefBool("noclipconversion")
-        nonet = prefBool("nonet")
-        ether = prefString("ether")
-        idlewait = prefBool("idlewait")
-        nameEncoding = prefInt("name_encoding")
-        seriala = prefString("seriala")
-        serialb = prefString("serialb")
-        keyboardtype = prefInt("keyboardtype")
-        hotkey = prefInt("hotkey")
-        swapOptCmd = prefBool("swap_opt_cmd")
-        keycodes = prefBool("keycodes")
-        keycodefile = prefString("keycodefile")
-        mousewheelmode = prefInt("mousewheelmode")
-        mousewheellines = prefInt("mousewheellines")
+        if live {
+            disk = PrefsBridge.string("disk")
+            cdrom = PrefsBridge.string("cdrom")
+            extfs = PrefsBridge.string("extfs")
+            bootdrive = PrefsBridge.int("bootdrive")
+            bootdriver = PrefsBridge.int("bootdriver")
+            nocdrom = PrefsBridge.bool("nocdrom")
+            screen = PrefsBridge.string("screen")
+            windowmodes = PrefsBridge.int("windowmodes")
+            screenmodes = PrefsBridge.int("screenmodes")
+            frameskip = PrefsBridge.int("frameskip")
+            gfxaccel = PrefsBridge.bool("gfxaccel")
+            sheepforce = PrefsBridge.bool("sheepforce")
+            qtcodec = PrefsBridge.bool("qtcodec")
+            hardcursor = PrefsBridge.bool("hardcursor")
+            scaleNearest = PrefsBridge.bool("scale_nearest")
+            scaleInteger = PrefsBridge.bool("scale_integer")
+            initGrab = PrefsBridge.bool("init_grab")
+            nosound = PrefsBridge.bool("nosound")
+            bootchime = PrefsBridge.bool("bootchime")
+            soundBuffer = PrefsBridge.int("sound_buffer")
+            dsp = PrefsBridge.string("dsp")
+            mixer = PrefsBridge.string("mixer")
+            ramMB = max(PrefsBridge.int("ramsize") / (1024 * 1024), 1)
+            rom = PrefsBridge.string("rom")
+            jit = PrefsBridge.bool("jit")
+            jit68k = PrefsBridge.bool("jit68k")
+            ignoresegv = PrefsBridge.bool("ignoresegv")
+            ignoreillegal = PrefsBridge.bool("ignoreillegal")
+            cpuclock = PrefsBridge.int("cpuclock")
+            yearofs = PrefsBridge.int("yearofs")
+            dayofs = PrefsBridge.int("dayofs")
+            nogui = PrefsBridge.bool("nogui")
+            noclipconversion = PrefsBridge.bool("noclipconversion")
+            nonet = PrefsBridge.bool("nonet")
+            ether = PrefsBridge.string("ether")
+            idlewait = PrefsBridge.bool("idlewait")
+            nameEncoding = PrefsBridge.int("name_encoding")
+            seriala = PrefsBridge.string("seriala")
+            serialb = PrefsBridge.string("serialb")
+            keyboardtype = PrefsBridge.int("keyboardtype")
+            hotkey = PrefsBridge.int("hotkey")
+            swapOptCmd = PrefsBridge.bool("swap_opt_cmd")
+            keycodes = PrefsBridge.bool("keycodes")
+            keycodefile = PrefsBridge.string("keycodefile")
+            mousewheelmode = PrefsBridge.int("mousewheelmode")
+            mousewheellines = PrefsBridge.int("mousewheellines")
+            edgegrab = PrefsBridge.bool("edgegrab")
+            return
+        }
+        guard let prefsPath else { return }
+        let values = PrefsFile.load(prefsPath)
+        disk = PrefsFile.string(values, "disk")
+        cdrom = PrefsFile.string(values, "cdrom")
+        extfs = PrefsFile.string(values, "extfs")
+        bootdrive = PrefsFile.int(values, "bootdrive")
+        bootdriver = PrefsFile.int(values, "bootdriver")
+        nocdrom = PrefsFile.bool(values, "nocdrom")
+        screen = PrefsFile.string(values, "screen", "win/1024/768")
+        windowmodes = PrefsFile.int(values, "windowmodes")
+        screenmodes = PrefsFile.int(values, "screenmodes")
+        frameskip = PrefsFile.int(values, "frameskip", 1)
+        gfxaccel = PrefsFile.bool(values, "gfxaccel", true)
+        sheepforce = PrefsFile.bool(values, "sheepforce", true)
+        qtcodec = PrefsFile.bool(values, "qtcodec", true)
+        hardcursor = PrefsFile.bool(values, "hardcursor")
+        scaleNearest = PrefsFile.bool(values, "scale_nearest")
+        scaleInteger = PrefsFile.bool(values, "scale_integer")
+        initGrab = PrefsFile.bool(values, "init_grab")
+        nosound = PrefsFile.bool(values, "nosound")
+        bootchime = PrefsFile.bool(values, "bootchime", true)
+        soundBuffer = PrefsFile.int(values, "sound_buffer")
+        dsp = PrefsFile.string(values, "dsp", "/dev/dsp")
+        mixer = PrefsFile.string(values, "mixer", "/dev/mixer")
+        ramMB = max(PrefsFile.int(values, "ramsize", 536870912) / (1024 * 1024), 1)
+        rom = PrefsFile.string(values, "rom")
+        jit = PrefsFile.bool(values, "jit", true)
+        jit68k = PrefsFile.bool(values, "jit68k")
+        ignoresegv = PrefsFile.bool(values, "ignoresegv", true)
+        ignoreillegal = PrefsFile.bool(values, "ignoreillegal", true)
+        cpuclock = PrefsFile.int(values, "cpuclock")
+        yearofs = PrefsFile.int(values, "yearofs")
+        dayofs = PrefsFile.int(values, "dayofs")
+        nogui = PrefsFile.bool(values, "nogui")
+        noclipconversion = PrefsFile.bool(values, "noclipconversion")
+        nonet = PrefsFile.bool(values, "nonet")
+        ether = PrefsFile.string(values, "ether")
+        idlewait = PrefsFile.bool(values, "idlewait", true)
+        nameEncoding = PrefsFile.int(values, "name_encoding")
+        seriala = PrefsFile.string(values, "seriala", "/dev/null")
+        serialb = PrefsFile.string(values, "serialb", "/dev/null")
+        keyboardtype = PrefsFile.int(values, "keyboardtype", 5)
+        hotkey = PrefsFile.int(values, "hotkey")
+        swapOptCmd = PrefsFile.bool(values, "swap_opt_cmd")
+        keycodes = PrefsFile.bool(values, "keycodes")
+        keycodefile = PrefsFile.string(values, "keycodefile")
+        mousewheelmode = PrefsFile.int(values, "mousewheelmode", 1)
+        mousewheellines = PrefsFile.int(values, "mousewheellines", 3)
+        edgegrab = PrefsFile.bool(values, "edgegrab", true)
+    }
+
+    private func documentValues() -> [String: String] {
+        [
+            "disk": disk,
+            "cdrom": cdrom,
+            "extfs": extfs,
+            "bootdrive": "\(bootdrive)",
+            "bootdriver": "\(bootdriver)",
+            "nocdrom": nocdrom ? "true" : "false",
+            "screen": screen,
+            "windowmodes": "\(windowmodes)",
+            "screenmodes": "\(screenmodes)",
+            "frameskip": "\(frameskip)",
+            "gfxaccel": gfxaccel ? "true" : "false",
+            "sheepforce": sheepforce ? "true" : "false",
+            "qtcodec": qtcodec ? "true" : "false",
+            "hardcursor": hardcursor ? "true" : "false",
+            "scale_nearest": scaleNearest ? "true" : "false",
+            "scale_integer": scaleInteger ? "true" : "false",
+            "init_grab": initGrab ? "true" : "false",
+            "nosound": nosound ? "true" : "false",
+            "bootchime": bootchime ? "true" : "false",
+            "sound_buffer": "\(soundBuffer)",
+            "dsp": dsp,
+            "mixer": mixer,
+            "ramsize": "\(ramMB * 1024 * 1024)",
+            "rom": rom,
+            "jit": jit ? "true" : "false",
+            "jit68k": jit68k ? "true" : "false",
+            "ignoresegv": ignoresegv ? "true" : "false",
+            "ignoreillegal": ignoreillegal ? "true" : "false",
+            "cpuclock": "\(cpuclock)",
+            "yearofs": "\(yearofs)",
+            "dayofs": "\(dayofs)",
+            "nogui": nogui ? "true" : "false",
+            "noclipconversion": noclipconversion ? "true" : "false",
+            "nonet": nonet ? "true" : "false",
+            "ether": ether,
+            "idlewait": idlewait ? "true" : "false",
+            "name_encoding": "\(nameEncoding)",
+            "seriala": seriala,
+            "serialb": serialb,
+            "keyboardtype": "\(keyboardtype)",
+            "hotkey": "\(hotkey)",
+            "swap_opt_cmd": swapOptCmd ? "true" : "false",
+            "keycodes": keycodes ? "true" : "false",
+            "keycodefile": keycodefile,
+            "mousewheelmode": "\(mousewheelmode)",
+            "mousewheellines": "\(mousewheellines)",
+            "edgegrab": edgegrab ? "true" : "false"
+        ]
     }
 
     private func save() {
-        setPrefString("disk", disk)
-        setPrefString("cdrom", cdrom)
-        setPrefString("extfs", extfs)
-        setPrefInt("bootdrive", bootdrive)
-        setPrefInt("bootdriver", bootdriver)
-        setPrefBool("nocdrom", nocdrom)
-        setPrefString("screen", screen)
-        setPrefInt("windowmodes", windowmodes)
-        setPrefInt("screenmodes", screenmodes)
-        setPrefInt("frameskip", frameskip)
-        setPrefBool("gfxaccel", gfxaccel)
-        setPrefBool("sheepforce", sheepforce)
-        setPrefBool("qtcodec", qtcodec)
-        setPrefBool("hardcursor", hardcursor)
-        setPrefBool("scale_nearest", scaleNearest)
-        setPrefBool("scale_integer", scaleInteger)
-        setPrefBool("init_grab", initGrab)
-        setPrefBool("nosound", nosound)
-        setPrefInt("sound_buffer", soundBuffer)
-        setPrefString("dsp", dsp)
-        setPrefString("mixer", mixer)
-        setPrefInt("ramsize", ramMB * 1024 * 1024)
-        setPrefString("rom", rom)
-        setPrefBool("jit", jit)
-        setPrefBool("jit68k", jit68k)
-        setPrefBool("ignoresegv", ignoresegv)
-        setPrefBool("ignoreillegal", ignoreillegal)
-        setPrefInt("cpuclock", cpuclock)
-        setPrefInt("yearofs", yearofs)
-        setPrefInt("dayofs", dayofs)
-        setPrefBool("nogui", nogui)
-        setPrefBool("noclipconversion", noclipconversion)
-        setPrefBool("nonet", nonet)
-        setPrefString("ether", ether)
-        setPrefBool("idlewait", idlewait)
-        setPrefInt("name_encoding", nameEncoding)
-        setPrefString("seriala", seriala)
-        setPrefString("serialb", serialb)
-        setPrefInt("keyboardtype", keyboardtype)
-        setPrefInt("hotkey", hotkey)
-        setPrefBool("swap_opt_cmd", swapOptCmd)
-        setPrefBool("keycodes", keycodes)
-        setPrefString("keycodefile", keycodefile)
-        setPrefInt("mousewheelmode", mousewheelmode)
-        setPrefInt("mousewheellines", mousewheellines)
-        SheepPrefsSave()
+        if live {
+            PrefsBridge.setString("disk", disk)
+            PrefsBridge.setString("cdrom", cdrom)
+            PrefsBridge.setString("extfs", extfs)
+            PrefsBridge.setInt("bootdrive", bootdrive)
+            PrefsBridge.setInt("bootdriver", bootdriver)
+            PrefsBridge.setBool("nocdrom", nocdrom)
+            PrefsBridge.setString("screen", screen)
+            PrefsBridge.setInt("windowmodes", windowmodes)
+            PrefsBridge.setInt("screenmodes", screenmodes)
+            PrefsBridge.setInt("frameskip", frameskip)
+            PrefsBridge.setBool("gfxaccel", gfxaccel)
+            PrefsBridge.setBool("sheepforce", sheepforce)
+            PrefsBridge.setBool("qtcodec", qtcodec)
+            PrefsBridge.setBool("hardcursor", hardcursor)
+            PrefsBridge.setBool("scale_nearest", scaleNearest)
+            PrefsBridge.setBool("scale_integer", scaleInteger)
+            PrefsBridge.setBool("init_grab", initGrab)
+            PrefsBridge.setBool("nosound", nosound)
+            PrefsBridge.setBool("bootchime", bootchime)
+            PrefsBridge.setInt("sound_buffer", soundBuffer)
+            PrefsBridge.setString("dsp", dsp)
+            PrefsBridge.setString("mixer", mixer)
+            PrefsBridge.setInt("ramsize", ramMB * 1024 * 1024)
+            PrefsBridge.setString("rom", rom)
+            PrefsBridge.setBool("jit", jit)
+            PrefsBridge.setBool("jit68k", jit68k)
+            PrefsBridge.setBool("ignoresegv", ignoresegv)
+            PrefsBridge.setBool("ignoreillegal", ignoreillegal)
+            PrefsBridge.setInt("cpuclock", cpuclock)
+            PrefsBridge.setInt("yearofs", yearofs)
+            PrefsBridge.setInt("dayofs", dayofs)
+            PrefsBridge.setBool("nogui", nogui)
+            PrefsBridge.setBool("noclipconversion", noclipconversion)
+            PrefsBridge.setBool("nonet", nonet)
+            PrefsBridge.setString("ether", ether)
+            PrefsBridge.setBool("idlewait", idlewait)
+            PrefsBridge.setInt("name_encoding", nameEncoding)
+            PrefsBridge.setString("seriala", seriala)
+            PrefsBridge.setString("serialb", serialb)
+            PrefsBridge.setInt("keyboardtype", keyboardtype)
+            PrefsBridge.setInt("hotkey", hotkey)
+            PrefsBridge.setBool("swap_opt_cmd", swapOptCmd)
+            PrefsBridge.setBool("keycodes", keycodes)
+            PrefsBridge.setString("keycodefile", keycodefile)
+            PrefsBridge.setInt("mousewheelmode", mousewheelmode)
+            PrefsBridge.setInt("mousewheellines", mousewheellines)
+            PrefsBridge.setBool("edgegrab", edgegrab)
+            PrefsBridge.save()
+        }
+        if let prefsPath {
+            PrefsFile.save(prefsPath, documentValues())
+        }
     }
 
     private func icon(_ page: SettingsPage) -> String {

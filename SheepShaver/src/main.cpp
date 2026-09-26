@@ -191,9 +191,9 @@ bool InitAll(const char *vmdir)
 		WriteMacInt32(KERNEL_DATA_BASE + 0xc50, RAMBase);
 		WriteMacInt32(KERNEL_DATA_BASE + 0xc54, RAMSize);
 		WriteMacInt32(KERNEL_DATA_BASE + 0xf60, PVR);
-		WriteMacInt32(KERNEL_DATA_BASE + 0xf64, CPUClockSpeed);			// clock-frequency
-		WriteMacInt32(KERNEL_DATA_BASE + 0xf68, BusClockSpeed);			// bus-frequency
-		WriteMacInt32(KERNEL_DATA_BASE + 0xf6c, TimebaseSpeed);			// timebase-frequency
+		WriteMacInt32(KERNEL_DATA_BASE + 0xf64, (uint32)CPUClockSpeed);			// clock-frequency
+		WriteMacInt32(KERNEL_DATA_BASE + 0xf68, (uint32)BusClockSpeed);			// bus-frequency
+		WriteMacInt32(KERNEL_DATA_BASE + 0xf6c, (uint32)TimebaseSpeed);			// timebase-frequency
 
 		/* G1: Hnfo skips CPU probe / mfsdr1; BATRangeInit; saveKernelDataPtr adjacency. */
 		uint8 kdp_page[NW_KDP_PAGE_SIZE];
@@ -221,9 +221,9 @@ bool InitAll(const char *vmdir)
 		WriteMacInt32(KERNEL_DATA_BASE + 0xcb0, RAMBase);
 		WriteMacInt32(KERNEL_DATA_BASE + 0xcb4, RAMSize);
 		WriteMacInt32(KERNEL_DATA_BASE + 0xf60, PVR);
-		WriteMacInt32(KERNEL_DATA_BASE + 0xf64, CPUClockSpeed);			// clock-frequency
-		WriteMacInt32(KERNEL_DATA_BASE + 0xf68, BusClockSpeed);			// bus-frequency
-		WriteMacInt32(KERNEL_DATA_BASE + 0xf6c, TimebaseSpeed);			// timebase-frequency
+		WriteMacInt32(KERNEL_DATA_BASE + 0xf64, (uint32)CPUClockSpeed);			// clock-frequency
+		WriteMacInt32(KERNEL_DATA_BASE + 0xf68, (uint32)BusClockSpeed);			// bus-frequency
+		WriteMacInt32(KERNEL_DATA_BASE + 0xf6c, (uint32)TimebaseSpeed);			// timebase-frequency
 	} else {
 		WriteMacInt32(KERNEL_DATA_BASE + 0xc80, RAMSize);
 		WriteMacInt32(KERNEL_DATA_BASE + 0xc84, RAMSize);
@@ -235,9 +235,9 @@ bool InitAll(const char *vmdir)
 		WriteMacInt32(KERNEL_DATA_BASE + 0xcb0, RAMBase);
 		WriteMacInt32(KERNEL_DATA_BASE + 0xcb4, RAMSize);
 		WriteMacInt32(KERNEL_DATA_BASE + 0xf80, PVR);
-		WriteMacInt32(KERNEL_DATA_BASE + 0xf84, CPUClockSpeed);			// clock-frequency
-		WriteMacInt32(KERNEL_DATA_BASE + 0xf88, BusClockSpeed);			// bus-frequency
-		WriteMacInt32(KERNEL_DATA_BASE + 0xf8c, TimebaseSpeed);			// timebase-frequency
+		WriteMacInt32(KERNEL_DATA_BASE + 0xf84, (uint32)CPUClockSpeed);			// clock-frequency
+		WriteMacInt32(KERNEL_DATA_BASE + 0xf88, (uint32)BusClockSpeed);			// bus-frequency
+		WriteMacInt32(KERNEL_DATA_BASE + 0xf8c, (uint32)TimebaseSpeed);			// timebase-frequency
 	}
 
 	// Initialize extra low memory
@@ -246,7 +246,7 @@ bool InitAll(const char *vmdir)
 	WriteMacInt32(XLM_SIGNATURE, FOURCC('B','a','a','h'));			// Signature to detect SheepShaver
 	WriteMacInt32(XLM_KERNEL_DATA, KernelDataAddr);					// For trap replacement routines
 	WriteMacInt32(XLM_PVR, PVR);									// Theoretical PVR
-	WriteMacInt32(XLM_BUS_CLOCK, BusClockSpeed);					// For DriverServicesLib patch
+	WriteMacInt32(XLM_BUS_CLOCK, (uint32)BusClockSpeed);					// For DriverServicesLib patch
 	WriteMacInt16(XLM_EXEC_RETURN_OPCODE, M68K_EXEC_RETURN);		// For Execute68k() (RTS from the executed 68k code will jump here and end 68k mode)
 	WriteMacInt32(XLM_ZERO_PAGE, SheepMem::ZeroPage());				// Pointer to read-only page with all bits set to 0
 #if !EMULATED_PPC

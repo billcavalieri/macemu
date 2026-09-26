@@ -177,13 +177,13 @@ static void *media_poll_func(void *)
 	CFRunLoopSourceRef loopSource = NULL;
 	CFRunLoopSourceRef dummySource = NULL;
 
-	if ((kernResult = IOMasterPort(bootstrap_port, &masterPort)) != KERN_SUCCESS)
-		fprintf(stderr, "IOMasterPort() returned %d\n", kernResult);
+	if ((kernResult = IOMainPort(bootstrap_port, &masterPort)) != KERN_SUCCESS)
+		fprintf(stderr, "IOMainPort() returned %d\n", kernResult);
 	else if ((matchingDictionary = IOServiceMatching(kIOCDMediaClass)) == NULL)
 		fprintf(stderr, "IOServiceMatching() returned a NULL dictionary\n");
 	else {
 		matchingDictionary = (CFMutableDictionaryRef)CFRetain(matchingDictionary);
-		IONotificationPortRef notificationPort = IONotificationPortCreate(kIOMasterPortDefault);
+		IONotificationPortRef notificationPort = IONotificationPortCreate(kIOMainPortDefault);
 		loopSource = IONotificationPortGetRunLoopSource(notificationPort);
 		CFRunLoopAddSource(media_poll_loop, loopSource, kCFRunLoopDefaultMode);
 
@@ -231,8 +231,8 @@ void DarwinAddFloppyPrefs(void)
 	io_object_t				nextFloppy;
 
 
-	if ( IOMasterPort(MACH_PORT_NULL, &masterPort) != KERN_SUCCESS )
-		bug("IOMasterPort failed. Won't be able to do anything with floppy drives\n");
+	if ( IOMainPort(MACH_PORT_NULL, &masterPort) != KERN_SUCCESS )
+		bug("IOMainPort failed. Won't be able to do anything with floppy drives\n");
 
 
 	// This selects all partitions of all disks
@@ -306,8 +306,8 @@ void DarwinAddSerialPrefs(void)
 	io_object_t				nextModem;
 
 
-	if ( IOMasterPort(MACH_PORT_NULL, &masterPort) != KERN_SUCCESS )
-		bug("IOMasterPort failed. Won't be able to do anything with modems\n");
+	if ( IOMainPort(MACH_PORT_NULL, &masterPort) != KERN_SUCCESS )
+		bug("IOMainPort failed. Won't be able to do anything with modems\n");
 
 
     // Serial devices are instances of class IOSerialBSDClient
@@ -395,7 +395,8 @@ bool DarwinCDReadTOC(char *name, uint8 *toc)
 		return false;
 
 	for ( c = devname; *c; ++c ) ;	// Go to the end of the name,
-	--c, --c;						// point to the 's1' on the end,
+	--c;							// point to the 's1' on the end,
+	--c;
 	*c = '\0';						// and truncate the string
 
 	fd = open(devname, O_RDONLY);

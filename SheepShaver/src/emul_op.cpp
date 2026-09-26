@@ -297,7 +297,7 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 	/* Not from the Time Manager task: registration allocates memory,
 	 * which is not allowed at interrupt time. */
 	bool sb_op = selector == OP_AUDIO_DISPATCH || selector == OP_SHEEPBLASTER ||
-		selector == OP_SHEEPBLASTER_TICK;
+		selector == OP_SHEEPBLASTER_TICK || selector == OP_MOUSE_TICK;
 	if (!sb_op) {
 		nw_register_output();
 		QtCodecRegister();
@@ -449,6 +449,14 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 
 		case OP_RAVE:
 			r->d[0] = SheepForceRaveGuest(r->a[3], r->a[4]);
+			break;
+
+		case OP_MOUSE_TICK:		// Absolute cursor Time Manager task
+#ifdef POWERPC_ROM
+			r->d[0] = ADBAbsMouseTick(&r->a[0]);
+#else
+			r->d[0] = 0;
+#endif
 			break;
 
 		case OP_SHEEPBLASTER: {		// AWACS `link a6,#0`, then the original body
@@ -608,11 +616,13 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 			EtherResetCachedAllocation();
 			ether_reset();
 			AudioReset();
-#ifdef USE_SDL_AUDIO
+#if defined(USE_SDL_AUDIO) || defined(__APPLE__)
 			PlayStartupSound();
 #endif
-			// Enable DR emulator (disabled for now)
-			if (PrefsFindBool("jit68k") && 0) {
+#if 0
+			/* DR emulator block. Left out of the compiled image so the
+			 * dead (void *) cast and unreachable body do not warn. */
+			if (PrefsFindBool("jit68k")) {
 				D(bug("DR activated\n"));
 				WriteMacInt32(KernelDataAddr + 0x17a0, 3);		// Prepare for DR emulator activation
 				WriteMacInt32(KernelDataAddr + 0x17c0, DR_CACHE_BASE);
@@ -622,6 +632,7 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 				memcpy((void *)DR_EMULATOR_BASE, (void *)(ROMBase + 0x370000), DR_EMULATOR_SIZE);
 				MakeExecutable(0, DR_EMULATOR_BASE, DR_EMULATOR_SIZE);
 			}
+#endif
 			tick_inhibit = false;
 			break;
 

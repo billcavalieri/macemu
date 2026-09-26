@@ -370,8 +370,8 @@ int16 SonyPrime(uint32 pb, uint32 dce)
 	}
 
 	// Update ParamBlock and DCE
-	WriteMacInt32(pb + ioActCount, actual);
-	WriteMacInt32(dce + dCtlPosition, ReadMacInt32(dce + dCtlPosition) + actual);
+	WriteMacInt32(pb + ioActCount, (uint32)actual);
+	WriteMacInt32(dce + dCtlPosition, ReadMacInt32(dce + dCtlPosition) + (uint32)actual);
 	return set_dsk_err(noErr);
 }
 

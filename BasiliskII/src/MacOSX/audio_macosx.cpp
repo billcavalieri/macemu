@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <atomic>
 
 #include "cpu_emulation.h"
 #include "main.h"
@@ -36,6 +37,9 @@
 #include "audio.h"
 #include "audio_defs.h"
 #include "MacOSX_sound_if.h"
+#ifdef SHEEPSHAVER
+#include "nw_io.h"
+#endif
 
 #define DEBUG 0
 #include "debug.h"
@@ -51,6 +55,12 @@ static int audio_channel_count_index = 0;
 static OSXsoundOutput *soundOutput = NULL;
 static bool main_mute = false;
 static bool speaker_mute = false;
+static std::atomic<uint64_t> g_short_pulls;
+
+extern "C" uint64_t AudioShortPulls(void)
+{
+	return g_short_pulls.exchange(0, std::memory_order_relaxed);
+}
 
 /*
  *  Initialization
@@ -93,9 +103,9 @@ void AudioInit(void)
 	audio_sample_rates.push_back(44100 << 16);
 
 	// Default to highest supported values
-	audio_sample_rate_index   = audio_sample_rates.size() - 1;
-	audio_sample_size_index   = audio_sample_sizes.size() - 1;
-	audio_channel_count_index = audio_channel_counts.size() - 1;
+	audio_sample_rate_index   = (int)(audio_sample_rates.size() - 1);
+	audio_sample_size_index   = (int)(audio_sample_sizes.size() - 1);
+	audio_channel_count_index = (int)(audio_channel_counts.size() - 1);
 
 	AudioStatus.mixer = 0;
 	AudioStatus.num_sources = 0;
@@ -157,6 +167,31 @@ void audio_exit_stream()
 void AudioInterrupt(void)
 {
 	D(bug("AudioInterrupt\n"));
+#ifdef SHEEPSHAVER
+	/* SheepBlaster pulls the mixer from a guest Time Manager task.
+	 * Execute68k from this host interrupt corrupts PPC r0–r12 and
+	 * jumps to 0x2cc78 (zeros). iTunes died that way on AddSource
+	 * (SysError type 3, bomb blamed on Control Strip). */
+	if (audio_sheepblaster_host_pull()) {
+		int frames = audio_frames_per_block;
+		if (frames < 1)
+			frames = 512;
+		if (frames > 4096)
+			frames = 4096;
+		static uint8 buf[4096 * 4];
+		int want = frames * 4;
+		int got = nw_sheepblaster_pull(buf, want);
+		if (got < want) {
+			g_short_pulls.fetch_add(1, std::memory_order_relaxed);
+			memset(buf + got, 0, (size_t)(want - got));
+		}
+		if (main_mute || speaker_mute)
+			memset(buf, 0, (size_t)want);
+		if (soundOutput)
+			soundOutput->sendAudioBuffer(buf, frames);
+		return;
+	}
+#endif
 	uint32 apple_stream_info;
 	uint32 numSamples;
 	int16 *p;
@@ -164,8 +199,8 @@ void AudioInterrupt(void)
 
 	if (!AudioStatus.mixer)
 	{
-		numSamples = 0;
-		soundOutput->sendAudioBuffer((void *)p, (int)numSamples);
+		if (soundOutput)
+			soundOutput->sendAudioBuffer(NULL, 0);
 		D(bug("AudioInterrupt done\n"));
 		return;
 	}
@@ -188,7 +223,7 @@ void AudioInterrupt(void)
 		p = NULL;
 	}
 
-	soundOutput->sendAudioBuffer((void *)p, (int)numSamples);
+	soundOutput->sendAudioBuffer((void *)p, (int)numSamples, 1);
 
 	D(bug("AudioInterrupt done\n"));
 }

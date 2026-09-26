@@ -457,7 +457,8 @@ void nw_atrap_hist_dump(const char *why);
  * once per second. pc/msr are extra fields (the golden importer ignores
  * them) so a silent spin still names where the CPU is. nI is interpreter
  * ops, nF is VideoHostPresent calls (Debug / NW_BOOT_LOG only). */
-void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, uint32_t tm_ticks);
+void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, uint32_t tm_ticks,
+		   uint32_t lr, uint32_t sp);
 /* 1 if now_us is ≥ period_us after *last_us (or last is 0). Updates *last_us. */
 int nw_clock_sample_due(uint64_t now_us, uint64_t *last_us, uint64_t period_us);
 #if NW_BOOT_LOG

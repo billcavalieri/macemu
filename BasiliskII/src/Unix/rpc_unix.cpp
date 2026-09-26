@@ -125,7 +125,7 @@ int rpc_connection_busy(rpc_connection_t *connection)
 static int _rpc_socket_path(char **pathp, const char *ident)
 {
   int i, len;
-  len = strlen(ident);
+	len = (int)strlen(ident);
 
   if (pathp == NULL)
 	return 0;
@@ -595,7 +595,7 @@ int rpc_message_send_string(rpc_message_t *message, const char *str)
 {
   D(bug("  send STRING \"%s\"\n", str));
 
-  int error, length = str ? strlen(str) : 0;
+	int error, length = (int)(str ? strlen(str) : 0);
   uint32_t e_value = htonl(length);
   if (message->offset + sizeof(e_value) >= sizeof(message->buffer)) {
 	error = rpc_message_flush(message);
@@ -710,7 +710,7 @@ static int rpc_message_send_args(rpc_message_t *message, va_list args)
 static inline int _rpc_message_recv_bytes(rpc_message_t *message, unsigned char *bytes, int count)
 {
   do {
-	int n = recv(message->socket, bytes, count, 0);
+	int n = (int)recv(message->socket, bytes, count, 0);
 	if (n > 0) {
 	  count -= n;
 	  bytes += n;

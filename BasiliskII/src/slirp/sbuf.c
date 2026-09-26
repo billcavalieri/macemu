@@ -17,16 +17,13 @@
  */
 
 void
-sbfree(sb)
-	struct sbuf *sb;
+sbfree(struct sbuf * sb)
 {
 	free(sb->sb_data);
 }
 
 void
-sbdrop(sb, num)
-	struct sbuf *sb;
-	int num; 
+sbdrop(struct sbuf * sb, int num)
 {
 	/* 
 	 * We can only drop how much we have
@@ -42,9 +39,7 @@ sbdrop(sb, num)
 }
 
 void
-sbreserve(sb, size)
-	struct sbuf *sb;
-	int size;
+sbreserve(struct sbuf * sb, int size)
 {
 	if (sb->sb_data) {
 		/* Already alloced, realloc if necessary */
@@ -73,9 +68,7 @@ sbreserve(sb, size)
  * (the socket is non-blocking, so we won't hang)
  */
 void
-sbappend(so, m)
-	struct socket *so;
-	struct mbuf *m;
+sbappend(struct socket * so, struct mbuf * m)
 {
 	int ret = 0;
 	
@@ -107,7 +100,7 @@ sbappend(so, m)
 	 * ottherwise it'll arrive out of order, and hence corrupt
 	 */
 	if (!so->so_rcv.sb_cc)
-	   ret = send(so->s, m->m_data, m->m_len, 0);
+	   ret = (int)send(so->s, m->m_data, m->m_len, 0);
 	
 	if (ret <= 0) {
 		/* 
@@ -135,27 +128,25 @@ sbappend(so, m)
  * The caller is responsible to make sure there's enough room
  */
 void
-sbappendsb(sb, m)
-	 struct sbuf *sb;
-	 struct mbuf *m;
+sbappendsb(struct sbuf * sb, struct mbuf * m)
 {
 	int len, n,  nn;
 	
 	len = m->m_len;
 
 	if (sb->sb_wptr < sb->sb_rptr) {
-		n = sb->sb_rptr - sb->sb_wptr;
+		n = (int)(sb->sb_rptr - sb->sb_wptr);
 		if (n > len) n = len;
 		memcpy(sb->sb_wptr, m->m_data, n);
 	} else {
 		/* Do the right edge first */
-		n = sb->sb_data + sb->sb_datalen - sb->sb_wptr;
+		n = (int)(sb->sb_data + sb->sb_datalen - sb->sb_wptr);
 		if (n > len) n = len;
 		memcpy(sb->sb_wptr, m->m_data, n);
 		len -= n;
 		if (len) {
 			/* Now the left edge */
-			nn = sb->sb_rptr - sb->sb_data;
+			nn = (int)(sb->sb_rptr - sb->sb_data);
 			if (nn > len) nn = len;
 			memcpy(sb->sb_data,m->m_data+n,nn);
 			n += nn;
@@ -174,11 +165,7 @@ sbappendsb(sb, m)
  * done in sbdrop when the data is acked
  */
 void
-sbcopy(sb, off, len, to)
-	struct sbuf *sb;
-	int off;
-	int len;
-	char *to;
+sbcopy(struct sbuf * sb, int off, int len, char * to)
 {
 	char *from;
 	
@@ -191,7 +178,7 @@ sbcopy(sb, off, len, to)
 		memcpy(to,from,len);
 	} else {
 		/* reuse off */
-		off = (sb->sb_data + sb->sb_datalen) - from;
+		off = (int)((sb->sb_data + sb->sb_datalen) - from);
 		if (off > len) off = len;
 		memcpy(to,from,off);
 		len -= off;

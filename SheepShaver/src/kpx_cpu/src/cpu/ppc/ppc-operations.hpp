@@ -300,10 +300,10 @@ DEFINE_OP2(addcuw, uint32, ((uint64)x + (uint64)y) >> 32);
 DEFINE_OP2(subcuw, uint32, (~((int64)x - (int64)y) >> 32) & 1);
 DEFINE_OP2(avgsb, int8,   (((int16)x + (int16)y + 1) >> 1));
 DEFINE_OP2(avgsh, int16,  (((int32)x + (int32)y + 1) >> 1));
-DEFINE_OP2(avgsw, int32,  (((int64)x + (int64)y + 1) >> 1));
+DEFINE_OP2(avgsw, int32,  (int32)(((int64)x + (int64)y + 1) >> 1));
 DEFINE_OP2(avgub, uint8,  ((uint16)x + (uint16)y + 1) >> 1);
 DEFINE_OP2(avguh, uint16, ((uint32)x + (uint32)y + 1) >> 1);
-DEFINE_OP2(avguw, uint32, ((uint64)x + (uint64)y + 1) >> 1);
+DEFINE_OP2(avguw, uint32, (uint32)(((uint64)x + (uint64)y + 1) >> 1));
 
 
 #undef DEFINE_OP1

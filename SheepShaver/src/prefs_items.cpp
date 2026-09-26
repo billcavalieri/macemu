@@ -54,6 +54,7 @@ prefs_desc common_prefs_items[] = {
 	{"nocdrom", TYPE_BOOLEAN, false,    "don't install CD-ROM driver"},
 	{"nonet", TYPE_BOOLEAN, false,      "don't use Ethernet"},
 	{"nosound", TYPE_BOOLEAN, false,    "don't enable sound output"},
+	{"bootchime", TYPE_BOOLEAN, false,  "play host startup chime at Mac reset"},
 	{"nogui", TYPE_BOOLEAN, false,      "disable GUI"},
 	{"noclipconversion", TYPE_BOOLEAN, false, "don't convert clipboard contents"},
 	{"ignoresegv", TYPE_BOOLEAN, false, "ignore illegal memory accesses"},
@@ -77,6 +78,7 @@ prefs_desc common_prefs_items[] = {
 	{"sound_buffer", TYPE_INT32, false,	"sound buffer length"},
 	{"name_encoding", TYPE_INT32, false,	"file name encoding"},
 	{"init_grab", TYPE_BOOLEAN, false,	"initially grabbing mouse"},
+	{"edgegrab", TYPE_BOOLEAN, false,	"grab the pointer on enter and release it at the window edge"},
 	{NULL, TYPE_END, false, NULL} // End of list
 };
 
@@ -99,6 +101,7 @@ void AddPrefsDefaults(void)
 	PrefsAddBool("nocdrom", false);
 	PrefsAddBool("nonet", false);
 	PrefsAddBool("nosound", false);
+	PrefsAddBool("bootchime", true);
 	PrefsAddBool("nogui", false);
 	PrefsAddBool("noclipconversion", false);
 	PrefsAddBool("ignoresegv", true);
@@ -113,6 +116,7 @@ void AddPrefsDefaults(void)
 	PrefsAddBool("jit68k", false);
 
 	PrefsAddInt32("keyboardtype", 5);
+	PrefsAddBool("edgegrab", true);
 
 #ifdef __APPLE__
 	PrefsAddBool("swap_opt_cmd", false);

@@ -302,7 +302,7 @@ uint32 FindLibSymbol(const char *lib_str, const char *sym_str)
 
 	} else {
 
-		if (GetSharedLibrary == NULL || FindSymbol == NULL) {
+		if (gsl_tvect == 0 || fs_tvect == 0) {
 			printf("FATAL: FindLibSymbol() called too early\n");
 			return 0;
 		}

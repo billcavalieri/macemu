@@ -261,7 +261,7 @@ struct v4si_sat_operand : vector_saturate_operand< field, value_type, sat_type >
 		return (sat_type)(value_type)reg.w[i];
 	}
 	static inline void set_element(powerpc_vr & reg, int i, sat_type value) {
-		reg.w[i] = value;
+		reg.w[i] = (uint32)value;
 	}
 };
 

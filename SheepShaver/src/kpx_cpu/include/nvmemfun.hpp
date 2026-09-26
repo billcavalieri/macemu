@@ -23,6 +23,7 @@
 
 #include <functional>
 
+
 #ifdef __MINGW32__
 #include "vm_alloc.h"
 #endif
@@ -70,7 +71,7 @@ inline PF nv_mem_fun_of(PMF pmf) {
 }
 
 template< class R, class T >
-class nv_mem_fun_t : public std::unary_function<T, R> {
+class nv_mem_fun_t {
 	typedef R (T::*pmf_t)();
 	typedef R (* PF_CONVENTION pf_t)(T *);
 	pf_t pf;
@@ -81,7 +82,7 @@ public:
 };
 
 template< class R, class T >
-class const_nv_mem_fun_t : public std::unary_function<T, R> {
+class const_nv_mem_fun_t {
 	typedef R (T::*pmf_t)();
 	typedef R (* PF_CONVENTION pf_t)(T *);
 	pf_t const pf;
@@ -92,7 +93,7 @@ public:
 };
 
 template< class R, class T, class A >
-class nv_mem_fun1_t : public std::binary_function<T, A, R> {
+class nv_mem_fun1_t {
 	typedef R (T::*pmf_t)(A);
 	typedef R (* PF_CONVENTION pf_t)(T *, A x);
 #ifdef __MINGW32__
@@ -223,7 +224,7 @@ public:
 };
 
 template< class R, class T, class A >
-class const_nv_mem_fun1_t : public std::binary_function<T, A, R> {
+class const_nv_mem_fun1_t {
 	typedef R (T::*pmf_t)(A);
 	typedef R (* PF_CONVENTION pf_t)(T *, A x);
 	pf_t const pf;
@@ -236,7 +237,7 @@ public:
 #else
 
 template< class R, class T >
-class nv_mem_fun_t : public std::unary_function<T, R> {
+class nv_mem_fun_t {
 	typedef R (T::*pmf_t)();
 	pmf_t pf;
 public:
@@ -246,7 +247,7 @@ public:
 };
 
 template< class R, class T >
-class const_nv_mem_fun_t : public std::unary_function<T, R> {
+class const_nv_mem_fun_t {
 	typedef R (T::*pmf_t)() const;
 	pmf_t pf;
 public:
@@ -256,7 +257,7 @@ public:
 };
 
 template< class R, class T, class A >
-class nv_mem_fun1_t : public std::binary_function<T, A, R> {
+class nv_mem_fun1_t {
 	typedef R (T::*pmf_t)(A);
 	pmf_t pf;
 public:
@@ -266,7 +267,7 @@ public:
 };
 
 template< class R, class T, class A >
-class const_nv_mem_fun1_t : public std::binary_function<T, A, R> {
+class const_nv_mem_fun1_t {
 	typedef R (T::*pmf_t)(A) const;
 	pmf_t pf;
 public:

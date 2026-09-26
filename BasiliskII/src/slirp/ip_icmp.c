@@ -66,9 +66,7 @@ static int icmp_flush[19] = {
  * Process a received ICMP message.
  */
 void
-icmp_input(m, hlen)
-     struct mbuf *m;
-     int hlen;
+icmp_input(struct mbuf * m, int hlen)
 {
   register struct icmp *icp;
   register struct ip *ip=mtod(m, struct ip *);
@@ -283,7 +281,7 @@ icmp_error(
   if(message) {           /* DEBUG : append message to ICMP packet */
     int message_len;
     char *cpnt;
-    message_len=strlen(message);
+    message_len=(int)strlen(message);
     if(message_len>ICMP_MAXDATALEN) message_len=ICMP_MAXDATALEN;
     cpnt=(char *)m->m_data+m->m_len;
     memcpy(cpnt, message, message_len);
@@ -321,8 +319,7 @@ end_error:
  * Reflect the ip packet back to the source
  */
 void
-icmp_reflect(m)
-     struct mbuf *m;
+icmp_reflect(struct mbuf * m)
 {
   register struct ip *ip = mtod(m, struct ip *);
   int hlen = ip->ip_hl << 2;

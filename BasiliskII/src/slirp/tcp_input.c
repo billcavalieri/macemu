@@ -111,10 +111,7 @@ tcp_seq tcp_iss;                /* tcp initial send seq # */
 #endif
 
 int
-tcp_reass(tp, ti, m)
-	register struct tcpcb *tp;
-	register struct tcpiphdr *ti;
-	struct mbuf *m;
+tcp_reass(register struct tcpcb * tp, register struct tcpiphdr * ti, struct mbuf * m)
 {
 	register struct tcpiphdr *q;
 	struct socket *so = tp->t_socket;
@@ -229,10 +226,7 @@ present:
  * protocol specification dated September, 1981 very closely.
  */
 void
-tcp_input(m, iphlen, inso)
-	register struct mbuf *m;
-	int iphlen;
-	struct socket *inso;
+tcp_input(register struct mbuf * m, int iphlen, struct socket * inso)
 {
   	struct ip save_ip, *ip;
 	register struct tcpiphdr *ti;
@@ -1282,7 +1276,7 @@ step6:
 		if (ti->ti_len == 0 &&
 		    tp->snd_wl2 == ti->ti_ack && tiwin > tp->snd_wnd)
 			tcpstat.tcps_rcvwinupd++;
-		tp->snd_wnd = tiwin;
+		tp->snd_wnd = (u_int32_t)tiwin;
 		tp->snd_wl1 = ti->ti_seq;
 		tp->snd_wl2 = ti->ti_ack;
 		if (tp->snd_wnd > tp->max_sndwnd)
@@ -1488,11 +1482,7 @@ drop:
  *	u_int32_t *ts_val, *ts_ecr;
  */
 void
-tcp_dooptions(tp, cp, cnt, ti)
-	struct tcpcb *tp;
-	u_char *cp;
-	int cnt;
-	struct tcpiphdr *ti;
+tcp_dooptions(struct tcpcb * tp, u_char * cp, int cnt, struct tcpiphdr * ti)
 {
 	u_int16_t mss;
 	int opt, optlen;
@@ -1569,10 +1559,7 @@ tcp_dooptions(tp, cp, cnt, ti)
 #ifdef notdef
 
 void
-tcp_pulloutofband(so, ti, m)
-	struct socket *so;
-	struct tcpiphdr *ti;
-	register struct mbuf *m;
+tcp_pulloutofband(struct socket * so, struct tcpiphdr * ti, register struct mbuf * m)
 {
 	int cnt = ti->ti_urp - 1;
 	
@@ -1603,9 +1590,7 @@ tcp_pulloutofband(so, ti, m)
  */
 
 void
-tcp_xmit_timer(tp, rtt)
-	register struct tcpcb *tp;
-	int rtt;
+tcp_xmit_timer(register struct tcpcb * tp, int rtt)
 {
 	register short delta;
 
@@ -1693,9 +1678,7 @@ tcp_xmit_timer(tp, rtt)
  */
 
 int
-tcp_mss(tp, offer)
-        register struct tcpcb *tp;
-        u_int offer;
+tcp_mss(register struct tcpcb * tp, u_int offer)
 {
 	struct socket *so = tp->t_socket;
 	int mss;

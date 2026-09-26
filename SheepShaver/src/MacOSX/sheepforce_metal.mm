@@ -22,8 +22,10 @@
 #include "sheepforce.h"
 #include "video.h"
 #include "cpu_emulation.h"
-#include <vector>
 #include <string.h>
+#include <stdlib.h>
+#include <math.h>
+#include <unistd.h>
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -39,12 +41,22 @@ static id<MTLComputePipelineState> g_blit_pipe;
 static id<MTLRenderPipelineState> g_tri_pipe;
 static CAMetalLayer *g_layer;
 static NSView *g_view;
-static id<MTLTexture> g_scan;
 static id<MTLBuffer> g_pal;
 static id<MTLBuffer> g_fb;
+static id<MTLBuffer> g_meta;
+static id<MTLCommandBuffer> g_pending;
+static id<MTLBuffer> g_src;
+static int g_flight_x, g_flight_y, g_flight_w, g_flight_h;
+static bool g_flight_on;
+static uint8 *g_fb_host;
+static const uint8 *g_presented;
+static uint32 g_presented_bytes;
+static bool g_fb_nocopy;
 static bool g_logged_fail;
-static int g_scan_w, g_scan_h;
-static uint g_scan_depth;
+static bool g_logged_copy;
+static bool g_dirty = true;
+static int g_layout_w, g_layout_h;
+static uint g_meta_depth = 32;
 
 static NSString *SheepForceShaderSource(void)
 {
@@ -58,17 +70,40 @@ static NSString *SheepForceShaderSource(void)
 	"  o.uv = float2(q[id].x * 0.5 + 0.5, 1.0 - (q[id].y * 0.5 + 0.5));\n"
 	"  return o;\n"
 	"}\n"
-	"fragment float4 sf_fs(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],\n"
-	"    constant uchar4 *pal [[buffer(0)]], constant uint &depth [[buffer(1)]]) {\n"
-	"  constexpr sampler smp(filter::nearest, address::clamp_to_edge);\n"
-	"  float4 c = tex.sample(smp, in.uv);\n"
-	"  if (depth == 8u) {\n"
-	"    uint i = min(uint(c.x * 255.0 + 0.5), 255u);\n"
-	"    uchar4 p = pal[i];\n"
-	"    return float4(float(p.z) / 255.0, float(p.y) / 255.0, float(p.x) / 255.0, 1.0);\n"
+	"static float4 pal_rgb(constant uchar4 *pal, uint i) {\n"
+	"  uchar4 p = pal[i];\n"
+	"  return float4(float(p.z) / 255.0, float(p.y) / 255.0, float(p.x) / 255.0, 1.0);\n"
+	"}\n"
+	"fragment float4 sf_fs(VOut in [[stage_in]], constant uchar4 *pal [[buffer(0)]],\n"
+	"    device const uchar *pix [[buffer(2)]], constant uint *meta [[buffer(3)]]) {\n"
+	"  uint w = meta[0], h = meta[1], row = meta[2], depth = meta[3], off = meta[4];\n"
+	"  uint x = min(uint(in.uv.x * float(w)), w - 1u);\n"
+	"  uint y = min(uint(in.uv.y * float(h)), h - 1u);\n"
+	"  if (depth == 1u) {\n"
+	"    uint byte = pix[off + y * row + (x >> 3)];\n"
+	"    uint bit = 0x80u >> (x & 7u);\n"
+	"    return pal_rgb(pal, (byte & bit) ? 1u : 0u);\n"
 	"  }\n"
-	"  /* 32-bit guest bytes are 00,R,G,B. RGBA8 reads that as (0, R, G, B). */\n"
-	"  return float4(c.g, c.b, c.a, 1.0);\n"
+	"  if (depth == 2u) {\n"
+	"    uint byte = pix[off + y * row + (x >> 2)];\n"
+	"    uint shift = (3u - (x & 3u)) * 2u;\n"
+	"    return pal_rgb(pal, (byte >> shift) & 3u);\n"
+	"  }\n"
+	"  if (depth == 4u) {\n"
+	"    uint byte = pix[off + y * row + (x >> 1)];\n"
+	"    uint i = ((x & 1u) == 0u) ? (byte >> 4) : (byte & 15u);\n"
+	"    return pal_rgb(pal, i);\n"
+	"  }\n"
+	"  if (depth == 8u) {\n"
+	"    return pal_rgb(pal, pix[off + y * row + x]);\n"
+	"  }\n"
+	"  if (depth == 16u) {\n"
+	"    uint a = off + y * row + x * 2u;\n"
+	"    uint v = (uint(pix[a]) << 8) | uint(pix[a + 1]);\n"
+	"    return float4(float((v >> 10) & 31u) / 31.0, float((v >> 5) & 31u) / 31.0, float(v & 31u) / 31.0, 1.0);\n"
+	"  }\n"
+	"  uint a = off + y * row + x * 4u;\n"
+	"  return float4(float(pix[a + 1]) / 255.0, float(pix[a + 2]) / 255.0, float(pix[a + 3]) / 255.0, 1.0);\n"
 	"}\n"
 	"struct FillU { uint x, y, w, h, row, bpp, color; };\n"
 	"kernel void sf_fill(device uchar *pix [[buffer(0)]], constant FillU &u [[buffer(1)]],\n"
@@ -100,31 +135,109 @@ static NSString *SheepForceShaderSource(void)
 	"fragment float4 sf_tri_fs(TriV in [[stage_in]]) { return in.color; }\n";
 }
 
-static bool SheepForceLoadLibrary(void)
+static bool SheepForceMakePipes(void)
 {
-	NSError *err = nil;
-	g_lib = [g_dev newLibraryWithSource:SheepForceShaderSource() options:nil error:&err];
-	if (!g_lib) {
-		if (!g_logged_fail) {
-			g_logged_fail = true;
-			printf("SheepForce: Metal library failed\n");
-		}
+	if (!g_dev || !g_lib)
 		return false;
-	}
+	NSError *err = nil;
+	id<MTLFunction> vs = [g_lib newFunctionWithName:@"sf_vs"];
+	id<MTLFunction> fs = [g_lib newFunctionWithName:@"sf_fs"];
+	id<MTLFunction> fill = [g_lib newFunctionWithName:@"sf_fill"];
+	id<MTLFunction> inv = [g_lib newFunctionWithName:@"sf_inv"];
+	id<MTLFunction> blit = [g_lib newFunctionWithName:@"sf_blit"];
+	id<MTLFunction> tvs = [g_lib newFunctionWithName:@"sf_tri_vs"];
+	id<MTLFunction> tfs = [g_lib newFunctionWithName:@"sf_tri_fs"];
+	if (!vs || !fs || !fill || !inv || !blit || !tvs || !tfs)
+		return false;
 	MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
-	pd.vertexFunction = [g_lib newFunctionWithName:@"sf_vs"];
-	pd.fragmentFunction = [g_lib newFunctionWithName:@"sf_fs"];
+	pd.vertexFunction = vs;
+	pd.fragmentFunction = fs;
 	pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
 	g_present_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
-	g_fill_pipe = [g_dev newComputePipelineStateWithFunction:[g_lib newFunctionWithName:@"sf_fill"] error:&err];
-	g_inv_pipe = [g_dev newComputePipelineStateWithFunction:[g_lib newFunctionWithName:@"sf_inv"] error:&err];
-	g_blit_pipe = [g_dev newComputePipelineStateWithFunction:[g_lib newFunctionWithName:@"sf_blit"] error:&err];
+	g_fill_pipe = [g_dev newComputePipelineStateWithFunction:fill error:&err];
+	g_inv_pipe = [g_dev newComputePipelineStateWithFunction:inv error:&err];
+	g_blit_pipe = [g_dev newComputePipelineStateWithFunction:blit error:&err];
 	MTLRenderPipelineDescriptor *td = [[MTLRenderPipelineDescriptor alloc] init];
-	td.vertexFunction = [g_lib newFunctionWithName:@"sf_tri_vs"];
-	td.fragmentFunction = [g_lib newFunctionWithName:@"sf_tri_fs"];
+	td.vertexFunction = tvs;
+	td.fragmentFunction = tfs;
 	td.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
 	g_tri_pipe = [g_dev newRenderPipelineStateWithDescriptor:td error:&err];
 	return g_present_pipe != nil && g_fill_pipe != nil && g_tri_pipe != nil;
+}
+
+static bool SheepForceLoadLibrary(void)
+{
+	NSError *err = nil;
+	g_lib = [g_dev newDefaultLibrary];
+	if (!SheepForceMakePipes()) {
+		g_lib = [g_dev newLibraryWithSource:SheepForceShaderSource() options:nil error:&err];
+		if (!SheepForceMakePipes()) {
+			if (!g_logged_fail) {
+				g_logged_fail = true;
+				printf("SheepForce: Metal library failed\n");
+			}
+			return false;
+		}
+	}
+	return true;
+}
+
+void SheepForceMarkDirty(void)
+{
+	g_dirty = true;
+}
+
+static bool flight_hits(int x, int y, int w, int h)
+{
+	return g_flight_on && w > 0 && h > 0 && g_flight_w > 0 && g_flight_h > 0
+		&& x < g_flight_x + g_flight_w && g_flight_x < x + w
+		&& y < g_flight_y + g_flight_h && g_flight_y < y + h;
+}
+
+static void note_flight(uint8 *dest, int rowbytes, int width_bytes, int height)
+{
+	uint8 *base = SheepForcePageHost(0);
+	g_flight_on = false;
+	if (!base || !dest || dest < base || rowbytes < 1 || width_bytes < 1 || height < 1)
+		return;
+	uint32 off = (uint32)(dest - base);
+	g_flight_x = (int)(off % (uint32)rowbytes);
+	g_flight_y = (int)(off / (uint32)rowbytes);
+	g_flight_w = width_bytes;
+	g_flight_h = height;
+	g_flight_on = true;
+}
+
+void SheepForceFlushCPU(uint8 *dest, int rowbytes, int width_bytes, int height)
+{
+	if (!g_pending)
+		return;
+	if (dest && rowbytes > 0) {
+		uint8 *base = SheepForcePageHost(0);
+		if (!base || dest < base)
+			return;
+		uint32 off = (uint32)(dest - base);
+		int x = (int)(off % (uint32)rowbytes);
+		int y = (int)(off / (uint32)rowbytes);
+		if (!flight_hits(x, y, width_bytes, height))
+			return;
+	}
+	[g_pending waitUntilCompleted];
+	g_pending = nil;
+	g_flight_on = false;
+}
+
+static void SheepForceTrack(id<MTLCommandBuffer> cb)
+{
+	g_pending = cb;
+}
+
+static void on_main(void (^block)(void))
+{
+	if ([NSThread isMainThread])
+		block();
+	else
+		dispatch_sync(dispatch_get_main_queue(), block);
 }
 
 void SheepForceStartup(void *ns_view)
@@ -148,44 +261,78 @@ void SheepForceStartup(void *ns_view)
 		g_dev = nil;
 		return;
 	}
-	NSView *view = (NSView *)ns_view;
+	NSView *view = (__bridge NSView *)ns_view;
 	if (!view)
 		return;
-	g_view = view;
-	g_layer = [CAMetalLayer layer];
-	g_layer.device = g_dev;
-	g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-	g_layer.framebufferOnly = NO;
-	g_layer.opaque = YES;
-	g_layer.frame = view.bounds;
-	g_layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
-	CGFloat scale = view.window.backingScaleFactor > 0 ? view.window.backingScaleFactor : 1;
-	g_layer.contentsScale = scale;
-	g_layer.drawableSize = CGSizeMake(view.bounds.size.width * scale, view.bounds.size.height * scale);
-	[view setLayer:g_layer];
-	[view setWantsLayer:YES];
-	printf("SheepForce: Metal scanout on (%g x %g)\n",
-	       view.bounds.size.width, view.bounds.size.height);
+	on_main(^{
+		g_view = view;
+		[view setWantsLayer:YES];
+		CAMetalLayer *layer = [view.layer isKindOfClass:[CAMetalLayer class]] ?
+			(CAMetalLayer *)view.layer : [CAMetalLayer layer];
+		if (view.layer != layer) {
+			[view setLayer:layer];
+			[view setWantsLayer:YES];
+		}
+		g_layer = layer;
+		g_layer.device = g_dev;
+		g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+		g_layer.framebufferOnly = YES;
+		g_layer.opaque = YES;
+		g_layer.allowsNextDrawableTimeout = YES;
+		g_layer.contentsGravity = kCAGravityResize;
+		g_layer.magnificationFilter = kCAFilterNearest;
+		g_layer.minificationFilter = kCAFilterNearest;
+		SheepForceLayoutDisplay();
+	});
+	g_meta = [g_dev newBufferWithLength:5 * sizeof(uint) options:MTLResourceStorageModeShared];
+	g_pal = [g_dev newBufferWithLength:256 * 4 options:MTLResourceStorageModeShared];
+	memset(g_pal.contents, 0, 256 * 4);
+	g_dirty = true;
+	printf("SheepForce: Metal scanout on the window\n");
 }
 
-static void SheepForceLayoutLayer(void)
+void SheepForceLayoutDisplay(void)
 {
+	if (![NSThread isMainThread]) {
+		on_main(^{ SheepForceLayoutDisplay(); });
+		return;
+	}
 	if (!g_layer || !g_view)
 		return;
-	g_layer.frame = g_view.bounds;
-	CGFloat scale = g_view.window.backingScaleFactor > 0 ? g_view.window.backingScaleFactor : 1;
-	g_layer.contentsScale = scale;
-	g_layer.drawableSize = CGSizeMake(g_view.bounds.size.width * scale,
-					   g_view.bounds.size.height * scale);
+	/* Backing-layer frame is NSView's. Setting it ourselves clips scanout
+	 * to a strip at the top (1-bit grey shown as a checkerboard band). */
+	if (g_layer != g_view.layer)
+		g_layer.frame = g_view.bounds;
+	/* Match the window scale so AppKit mouse points agree with the
+	 * picture. drawableSize stays at guest pixels. */
+	{
+		NSWindow *win = g_view.window;
+		g_layer.contentsScale = win ? win.backingScaleFactor : 1;
+	}
+	const int gw = SheepForceWidth();
+	const int gh = SheepForceHeight();
+	if (gw >= 1 && gh >= 1)
+		g_layer.drawableSize = CGSizeMake(gw, gh);
+	NSSize b = g_view.bounds.size;
+	g_layout_w = (int)b.width;
+	g_layout_h = (int)b.height;
 }
 
 void SheepForceShutdown(void)
 {
+	SheepForceFlushCPU(NULL, 0, 0, 0);
 	g_view = nil;
 	g_layer = nil;
-	g_scan = nil;
 	g_fb = nil;
+	g_fb_host = NULL;
+	g_presented = NULL;
+	g_presented_bytes = 0;
+	g_fb_nocopy = false;
 	g_pal = nil;
+	g_meta = nil;
+	g_src = nil;
+	g_pending = nil;
+	g_flight_on = false;
 	g_present_pipe = nil;
 	g_tri_pipe = nil;
 	g_lib = nil;
@@ -193,42 +340,85 @@ void SheepForceShutdown(void)
 	g_dev = nil;
 }
 
+bool SheepForceAdoptHostFB(uint8 *host, uint32 bytes)
+{
+	if (!g_dev) {
+		g_dev = MTLCreateSystemDefaultDevice();
+		if (g_dev)
+			g_queue = [g_dev newCommandQueue];
+	}
+	if (!g_dev || !host || bytes == 0)
+		return false;
+	const NSUInteger page = (NSUInteger)getpagesize();
+	NSUInteger length = ((NSUInteger)bytes + page - 1) & ~(page - 1);
+	if (g_fb && g_fb_host == host && g_fb.length >= length && g_fb_nocopy)
+		return true;
+	g_fb = nil;
+	g_fb_host = host;
+	g_fb_nocopy = false;
+	/* Guest PA must stay in the NATMEM window. Wrap those pages as the
+	 * Metal buffer so scanout has no second copy. Do not remap: OVERWRITE
+	 * of that window hung boot at the grey screen (illegal at 00017840). */
+	if (((uintptr_t)host & (page - 1)) == 0) {
+		g_fb = [g_dev newBufferWithBytesNoCopy:host length:length
+			options:MTLResourceStorageModeShared deallocator:nil];
+		if (g_fb) {
+			g_fb_nocopy = true;
+			printf("SheepForce: guest FB wrapped as Metal buffer %p %u\n",
+			       host, (unsigned)length);
+			fflush(stdout);
+			return true;
+		}
+	}
+	g_fb = [g_dev newBufferWithLength:length options:MTLResourceStorageModeShared];
+	if (!g_logged_copy) {
+		g_logged_copy = true;
+		printf("SheepForce: framebuffer is not a shared Metal buffer; CPU copy scanout\n");
+	}
+	return g_fb != nil;
+}
+
 static bool SheepForceBindFB(void)
 {
 	uint8 *host = SheepForcePageHost(0);
 	uint32 bytes = SheepForcePageBytes() * (uint32)SheepForcePageCount();
-	if (!g_dev || !host || bytes == 0)
-		return false;
-	if (g_fb && g_fb.contents == host && g_fb.length >= bytes)
-		return true;
-	g_fb = [g_dev newBufferWithBytesNoCopy:host length:bytes options:MTLResourceStorageModeShared deallocator:nil];
-	return g_fb != nil;
+	return SheepForceAdoptHostFB(host, bytes);
 }
 
 void SheepForceSync(void)
 {
-	if (!g_queue)
+	SheepForceFlushCPU(NULL, 0, 0, 0);
+}
+
+void SheepForceLoadPalette(void)
+{
+	if (!g_pal)
 		return;
-	id<MTLCommandBuffer> cb = [g_queue commandBuffer];
-	[cb commit];
-	[cb waitUntilCompleted];
+	uint8 *pal = (uint8 *)g_pal.contents;
+	for (int i = 0; i < 256; i++) {
+		pal[i * 4 + 0] = mac_gamma[mac_pal[i].red].red;
+		pal[i * 4 + 1] = mac_gamma[mac_pal[i].green].green;
+		pal[i * 4 + 2] = mac_gamma[mac_pal[i].blue].blue;
+		pal[i * 4 + 3] = 255;
+	}
+	g_dirty = true;
 }
 
 static void SheepForceDispatch(id<MTLComputePipelineState> pipe, const void *uni, size_t uni_len, uint w, uint h)
 {
 	if (!pipe || w == 0 || h == 0 || !SheepForceBindFB())
 		return;
-	id<MTLBuffer> ub = [g_dev newBufferWithBytes:uni length:uni_len options:MTLResourceStorageModeShared];
 	id<MTLCommandBuffer> cb = [g_queue commandBuffer];
 	id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 	[enc setComputePipelineState:pipe];
 	[enc setBuffer:g_fb offset:0 atIndex:0];
-	[enc setBuffer:ub offset:0 atIndex:1];
+	[enc setBytes:uni length:uni_len atIndex:1];
 	NSUInteger tw = pipe.threadExecutionWidth > 0 ? pipe.threadExecutionWidth : 16;
 	[enc dispatchThreads:MTLSizeMake(w, h, 1) threadsPerThreadgroup:MTLSizeMake(tw, 1, 1)];
 	[enc endEncoding];
 	[cb commit];
-	[cb waitUntilCompleted];
+	SheepForceTrack(cb);
+	g_dirty = true;
 }
 
 bool SheepForceTryFill(uint8 *dest, int bpp, int rowbytes, int width_bytes, int height, uint32 color)
@@ -236,7 +426,7 @@ bool SheepForceTryFill(uint8 *dest, int bpp, int rowbytes, int width_bytes, int 
 	uint8 *base = SheepForcePageHost(0);
 	if (!g_dev || !base || bpp < 1 || height <= 0 || width_bytes < bpp || dest < base)
 		return false;
-	if (!SheepForceBindFB())
+	if (!SheepForceBindFB() || !g_fb_nocopy)
 		return false;
 	uint32 off = (uint32)(dest - base);
 	struct { uint x, y, w, h, row, bpp, color; } u;
@@ -247,6 +437,7 @@ bool SheepForceTryFill(uint8 *dest, int bpp, int rowbytes, int width_bytes, int 
 	u.row = (uint)rowbytes;
 	u.bpp = (uint)bpp;
 	u.color = color;
+	note_flight(dest, rowbytes, width_bytes, height);
 	SheepForceDispatch(g_fill_pipe, &u, sizeof u, u.w, u.h);
 	return true;
 }
@@ -256,7 +447,7 @@ bool SheepForceTryInvert(uint8 *dest, int bpp, int rowbytes, int width_bytes, in
 	uint8 *base = SheepForcePageHost(0);
 	if (!g_dev || !base || bpp < 1 || height <= 0 || dest < base)
 		return false;
-	if (!SheepForceBindFB())
+	if (!SheepForceBindFB() || !g_fb_nocopy)
 		return false;
 	uint32 off = (uint32)(dest - base);
 	struct { uint x, y, w, h, row, bpp, color; } u;
@@ -267,6 +458,7 @@ bool SheepForceTryInvert(uint8 *dest, int bpp, int rowbytes, int width_bytes, in
 	u.row = (uint)rowbytes;
 	u.bpp = (uint)bpp;
 	u.color = 0;
+	note_flight(dest, rowbytes, width_bytes, height);
 	SheepForceDispatch(g_inv_pipe, &u, sizeof u, u.w, u.h);
 	return true;
 }
@@ -274,82 +466,60 @@ bool SheepForceTryInvert(uint8 *dest, int bpp, int rowbytes, int width_bytes, in
 bool SheepForceTryBlit(uint8 *dest, const uint8 *src, int bpp, int dst_row, int src_row, int width_bytes, int height)
 {
 	uint8 *base = SheepForcePageHost(0);
-	if (!g_dev || !base || !src || bpp < 1 || height <= 0 || dest < base || src < base)
+	if (!g_dev || !g_blit_pipe || !base || !src || !dest || bpp < 1 || height <= 0
+	    || width_bytes < bpp || dest < base || dst_row < width_bytes || src_row < width_bytes)
 		return false;
-	if (!SheepForceBindFB())
+	if (!SheepForceBindFB() || !g_fb_nocopy)
 		return false;
+	uint32 fb_bytes = SheepForcePageBytes() * (uint32)SheepForcePageCount();
+	bool src_in = src >= base && (uint32)(src - base) < fb_bytes;
+	if (src_in) {
+		uint32 s0 = (uint32)(src - base);
+		uint32 d0 = (uint32)(dest - base);
+		uint32 sbytes = (uint32)src_row * (uint32)(height - 1) + (uint32)width_bytes;
+		uint32 dbytes = (uint32)dst_row * (uint32)(height - 1) + (uint32)width_bytes;
+		if (s0 < d0 + dbytes && d0 < s0 + sbytes)
+			return false;
+	}
 	struct { uint w, h, dst_row, src_row, bpp; } u;
 	u.w = (uint)(width_bytes / bpp);
 	u.h = (uint)height;
 	u.dst_row = (uint)dst_row;
-	u.src_row = (uint)src_row;
 	u.bpp = (uint)bpp;
+	id<MTLBuffer> src_buf = g_fb;
+	uint32 soff = 0;
+	if (src_in) {
+		soff = (uint32)(src - base);
+		u.src_row = (uint)src_row;
+	} else {
+		size_t need = (size_t)width_bytes * (size_t)height;
+		if (!g_src || g_src.length < need) {
+			g_src = [g_dev newBufferWithLength:need options:MTLResourceStorageModeShared];
+			if (!g_src)
+				return false;
+		}
+		uint8 *packed = (uint8 *)g_src.contents;
+		for (int y = 0; y < height; y++)
+			memcpy(packed + (size_t)y * (size_t)width_bytes,
+			       src + (size_t)y * (size_t)src_row, (size_t)width_bytes);
+		src_buf = g_src;
+		u.src_row = (uint)width_bytes;
+	}
 	uint32 doff = (uint32)(dest - base);
-	uint32 soff = (uint32)(src - base);
-	id<MTLBuffer> ub = [g_dev newBufferWithBytes:&u length:sizeof u options:MTLResourceStorageModeShared];
+	note_flight(dest, dst_row, width_bytes, height);
 	id<MTLCommandBuffer> cb = [g_queue commandBuffer];
 	id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 	[enc setComputePipelineState:g_blit_pipe];
 	[enc setBuffer:g_fb offset:doff atIndex:0];
-	[enc setBuffer:g_fb offset:soff atIndex:1];
-	[enc setBuffer:ub offset:0 atIndex:2];
+	[enc setBuffer:src_buf offset:soff atIndex:1];
+	[enc setBytes:&u length:sizeof u atIndex:2];
 	NSUInteger tw = g_blit_pipe.threadExecutionWidth > 0 ? g_blit_pipe.threadExecutionWidth : 16;
 	[enc dispatchThreads:MTLSizeMake(u.w, u.h, 1) threadsPerThreadgroup:MTLSizeMake(tw, 1, 1)];
 	[enc endEncoding];
 	[cb commit];
-	[cb waitUntilCompleted];
+	SheepForceTrack(cb);
+	g_dirty = true;
 	return true;
-}
-
-static void SheepForceUploadPage(void)
-{
-	const int w = SheepForceWidth();
-	const int h = SheepForceHeight();
-	const int row = SheepForceRowBytes();
-	const int depth = SheepForceDepth();
-	uint8 *page = SheepForcePageHost(SheepForceVisiblePage());
-	if (!page || w <= 0 || h <= 0 || row <= 0)
-		return;
-	MTLPixelFormat fmt = (depth == 8) ? MTLPixelFormatR8Unorm : MTLPixelFormatRGBA8Unorm;
-	if (!g_scan || g_scan_w != w || g_scan_h != h || g_scan_depth != (uint)depth) {
-		MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt width:w height:h mipmapped:NO];
-		td.usage = MTLTextureUsageShaderRead;
-		g_scan = [g_dev newTextureWithDescriptor:td];
-		g_scan_w = w;
-		g_scan_h = h;
-		g_scan_depth = (uint)depth;
-	}
-	if (depth == 8) {
-		uint8 pal[256 * 4];
-		for (int i = 0; i < 256; i++) {
-			pal[i * 4 + 0] = mac_gamma[mac_pal[i].red].red;
-			pal[i * 4 + 1] = mac_gamma[mac_pal[i].green].green;
-			pal[i * 4 + 2] = mac_gamma[mac_pal[i].blue].blue;
-			pal[i * 4 + 3] = 255;
-		}
-		if (!g_pal)
-			g_pal = [g_dev newBufferWithLength:sizeof pal options:MTLResourceStorageModeShared];
-		memcpy(g_pal.contents, pal, sizeof pal);
-		[g_scan replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:page bytesPerRow:row];
-	} else if (depth == 32) {
-		[g_scan replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:page bytesPerRow:row];
-	} else {
-		std::vector<uint8> tmp((size_t)w * (size_t)h * 4);
-		for (int y = 0; y < h; y++) {
-			const uint8 *s = page + y * row;
-			uint8 *d = &tmp[(size_t)y * (size_t)w * 4];
-			for (int x = 0; x < w; x++) {
-				uint16 v = (uint16)((s[0] << 8) | s[1]);
-				d[0] = 0;
-				d[1] = (uint8)(((v >> 10) & 31) * 255 / 31);
-				d[2] = (uint8)(((v >> 5) & 31) * 255 / 31);
-				d[3] = (uint8)((v & 31) * 255 / 31);
-				s += 2;
-				d += 4;
-			}
-		}
-		[g_scan replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:tmp.data() bytesPerRow:w * 4];
-	}
 }
 
 bool SheepForcePresent(int x, int y, int w, int h)
@@ -357,37 +527,58 @@ bool SheepForcePresent(int x, int y, int w, int h)
 	(void)x; (void)y; (void)w; (void)h;
 	if (!g_layer || !g_present_pipe || SheepForceWidth() <= 0)
 		return false;
-	SheepForceSync();
-	SheepForceUploadPage();
-	if (!g_scan)
+	if (!g_view.window || g_view.window.miniaturized)
 		return false;
-	static int g_fb_logged;
-	if (!g_fb_logged) {
-		g_fb_logged = 1;
-		uint8 *page = SheepForcePageHost(SheepForceVisiblePage());
-		uint32 nonzero = 0;
-		uint32 n = SheepForceRowBytes() * SheepForceHeight();
-		if (page && n > 16) {
-			for (uint32 i = 0; i < n; i += 64)
-				nonzero += page[i] | page[i + 1] | page[i + 2] | page[i + 3];
-		}
-		printf("SheepForce: framebuffer %s (%u x %u)\n",
-		       nonzero ? "has pixels" : "is empty",
-		       (unsigned)SheepForceWidth(), (unsigned)SheepForceHeight());
-		fflush(stdout);
+	if (g_view.bounds.size.width < 1 || g_view.bounds.size.height < 1) {
+		[g_view.window layoutIfNeeded];
+		SheepForceLayoutDisplay();
+		if (g_view.bounds.size.width < 1 || g_view.bounds.size.height < 1)
+			return false;
 	}
-	SheepForceLayoutLayer();
+	if (!SheepForceBindFB() || !g_fb || !g_meta)
+		return false;
+	g_presented = NULL;
+	g_presented_bytes = 0;
+	const int gw = SheepForceWidth();
+	const int gh = SheepForceHeight();
+	const int row = SheepForceRowBytes();
+	const int depth = SheepForceDepth();
+	const int page = SheepForceVisiblePage();
+	NSRect bounds = g_view.bounds;
+	if ((int)bounds.size.width != g_layout_w || (int)bounds.size.height != g_layout_h
+	    || fabs(g_layer.drawableSize.width - gw) > 0.5
+	    || fabs(g_layer.drawableSize.height - gh) > 0.5)
+		SheepForceLayoutDisplay();
+	if (g_layer.drawableSize.width < 1 || g_layer.drawableSize.height < 1)
+		SheepForceLayoutDisplay();
 	if (g_layer.drawableSize.width < 1 || g_layer.drawableSize.height < 1)
 		return false;
+	if (!g_fb_nocopy && g_fb_host) {
+		SheepForceFlushCPU(NULL, 0, 0, 0);
+		uint32 bytes = SheepForcePageBytes() * (uint32)SheepForcePageCount();
+		if (bytes > g_fb.length)
+			bytes = (uint32)g_fb.length;
+		memcpy(g_fb.contents, g_fb_host, bytes);
+	}
+	{
+		const uint32 pb = SheepForcePageBytes();
+		const uint32 off = (uint32)page * pb;
+		const uint8 *base = (const uint8 *)g_fb.contents;
+		if (base && pb >= 64 && off + pb <= (uint32)g_fb.length) {
+			g_presented = base + off;
+			g_presented_bytes = pb;
+		}
+	}
 	id<CAMetalDrawable> drawable = [g_layer nextDrawable];
 	if (!drawable)
 		return false;
-	uint depth = (SheepForceDepth() == 8) ? 8u : 32u;
-	id<MTLBuffer> db = [g_dev newBufferWithBytes:&depth length:sizeof depth options:MTLResourceStorageModeShared];
-	if (!g_pal) {
-		g_pal = [g_dev newBufferWithLength:256 * 4 options:MTLResourceStorageModeShared];
-		memset(g_pal.contents, 0, 256 * 4);
-	}
+	uint *meta = (uint *)g_meta.contents;
+	meta[0] = (uint)gw;
+	meta[1] = (uint)gh;
+	meta[2] = (uint)row;
+	meta[3] = (uint)depth;
+	meta[4] = (uint)page * SheepForcePageBytes();
+	g_meta_depth = meta[3];
 	MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
 	rp.colorAttachments[0].texture = drawable.texture;
 	rp.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -396,14 +587,75 @@ bool SheepForcePresent(int x, int y, int w, int h)
 	id<MTLCommandBuffer> cb = [g_queue commandBuffer];
 	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
 	[enc setRenderPipelineState:g_present_pipe];
-	[enc setFragmentTexture:g_scan atIndex:0];
 	[enc setFragmentBuffer:g_pal offset:0 atIndex:0];
-	[enc setFragmentBuffer:db offset:0 atIndex:1];
+	[enc setFragmentBuffer:g_fb offset:0 atIndex:2];
+	[enc setFragmentBuffer:g_meta offset:0 atIndex:3];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 	[enc endEncoding];
 	[cb presentDrawable:drawable];
 	[cb commit];
+	g_dirty = false;
 	return true;
+}
+
+uint32 SheepForcePresentedHash(int *have)
+{
+	if (have)
+		*have = 0;
+	if (!g_presented || g_presented_bytes < 64)
+		return 0;
+	if (have)
+		*have = 1;
+	/* Every 16 bytes of the page Metal just showed, then the palette.
+	 * Sixteen rows of the guest mapping stayed constant for a whole
+	 * movie that was on screen; an 8-bit movie can also move by the
+	 * color table alone. */
+	uint32 hash = 2166136261u;
+	const uint8 *p = g_presented;
+	for (uint32 i = 0; i < g_presented_bytes; i += 16) {
+		hash ^= p[i];
+		hash *= 16777619u;
+	}
+	if (g_pal && g_pal.length >= 1024) {
+		const uint8 *pal = (const uint8 *)g_pal.contents;
+		for (int i = 0; i < 1024; i += 4) {
+			hash ^= pal[i];
+			hash *= 16777619u;
+		}
+	}
+	return hash;
+}
+
+static void SheepForceMac32ToBGRA(uint8 *dst, const uint8 *src, int width, int height, int src_row, int dst_row)
+{
+	for (int y = 0; y < height; y++) {
+		const uint8 *s = src + y * src_row;
+		uint8 *d = dst + y * dst_row;
+		for (int x = 0; x < width; x++) {
+			d[0] = s[3];
+			d[1] = s[2];
+			d[2] = s[1];
+			d[3] = 255;
+			s += 4;
+			d += 4;
+		}
+	}
+}
+
+static void SheepForceBGRAToMac32(uint8 *dst, const uint8 *src, int width, int height, int dst_row, int src_row)
+{
+	for (int y = 0; y < height; y++) {
+		uint8 *d = dst + y * dst_row;
+		const uint8 *s = src + y * src_row;
+		for (int x = 0; x < width; x++) {
+			d[0] = 0;
+			d[1] = s[2];
+			d[2] = s[1];
+			d[3] = s[0];
+			s += 4;
+			d += 4;
+		}
+	}
 }
 
 int SheepForceRaveTriangle(uint8 *pixmap, int width, int height, int rowbytes, int depth_bits,
@@ -412,10 +664,18 @@ int SheepForceRaveTriangle(uint8 *pixmap, int width, int height, int rowbytes, i
 {
 	if (!g_dev || !g_tri_pipe || !pixmap || width <= 0 || height <= 0 || depth_bits != 32)
 		return -1;
+	if (rowbytes < width * 4)
+		return -1;
+	SheepForceFlushCPU(NULL, 0, 0, 0);
+	const int bgra_row = width * 4;
+	uint8 *bgra = (uint8 *)malloc((size_t)bgra_row * (size_t)height);
+	if (!bgra)
+		return -1;
+	SheepForceMac32ToBGRA(bgra, pixmap, width, height, rowbytes, bgra_row);
 	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
 	td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	id<MTLTexture> tex = [g_dev newTextureWithDescriptor:td];
-	[tex replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixmap bytesPerRow:rowbytes];
+	[tex replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:bgra bytesPerRow:bgra_row];
 	float xy[6] = { x0 / width, y0 / height, x1 / width, y1 / height, x2 / width, y2 / height };
 	float color[4] = { r / 255.f, g / 255.f, b / 255.f, 1.f };
 	id<MTLBuffer> xb = [g_dev newBufferWithBytes:xy length:sizeof xy options:MTLResourceStorageModeShared];
@@ -433,7 +693,10 @@ int SheepForceRaveTriangle(uint8 *pixmap, int width, int height, int rowbytes, i
 	[enc endEncoding];
 	[cb commit];
 	[cb waitUntilCompleted];
-	[tex getBytes:pixmap bytesPerRow:rowbytes fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+	[tex getBytes:bgra bytesPerRow:bgra_row fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+	SheepForceBGRAToMac32(pixmap, bgra, width, height, rowbytes, bgra_row);
+	free(bgra);
+	g_dirty = true;
 	return 0;
 }
 

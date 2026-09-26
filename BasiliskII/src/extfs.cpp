@@ -1878,7 +1878,7 @@ static int16 fs_read(uint32 pb)
 	ssize_t actual = extfs_read(fd, Mac2HostAddr(ReadMacInt32(pb + ioBuffer)), ReadMacInt32(pb + ioReqCount));
 	int16 read_err = errno2oserr();
 	D(bug("  actual %d\n", actual));
-	WriteMacInt32(pb + ioActCount, actual >= 0 ? actual : 0);
+	WriteMacInt32(pb + ioActCount, (uint32)(actual >= 0 ? actual : 0));
 	uint32 pos = (uint32) lseek(fd, 0, SEEK_CUR);
 	WriteMacInt32(fcb + fcbCrPs, pos);
 	WriteMacInt32(pb + ioPosOffset, pos);
@@ -1932,7 +1932,7 @@ static int16 fs_write(uint32 pb)
 	ssize_t actual = extfs_write(fd, Mac2HostAddr(ReadMacInt32(pb + ioBuffer)), ReadMacInt32(pb + ioReqCount));
 	int16 write_err = errno2oserr();
 	D(bug("  actual %d\n", actual));
-	WriteMacInt32(pb + ioActCount, actual >= 0 ? actual : 0);
+	WriteMacInt32(pb + ioActCount, (uint32)(actual >= 0 ? actual : 0));
 	uint32 pos = (uint32) lseek(fd, 0, SEEK_CUR);
 	WriteMacInt32(fcb + fcbCrPs, pos);
 	WriteMacInt32(pb + ioPosOffset, pos);

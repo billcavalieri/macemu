@@ -511,7 +511,7 @@ static void Long(uint32 value)
 
 static void gen_ain_driver(uintptr addr)
 {
-	SetLongBase(addr);
+	SetLongBase((uint32)addr);
 
 	// .AIn driver header
 	Long(0x4d000000); Long(0x00000000);
@@ -542,7 +542,7 @@ static void gen_ain_driver(uintptr addr)
 
 static void gen_aout_driver(uintptr addr)
 {
-	SetLongBase(addr);
+	SetLongBase((uint32)addr);
 
 	// .AOut driver header
 	Long(0x4d000000); Long(0x00000000);
@@ -573,7 +573,7 @@ static void gen_aout_driver(uintptr addr)
 
 static void gen_bin_driver(uintptr addr)
 {
-	SetLongBase(addr);
+	SetLongBase((uint32)addr);
 
 	// .BIn driver header
 	Long(0x4d000000); Long(0x00000000);
@@ -604,7 +604,7 @@ static void gen_bin_driver(uintptr addr)
 
 static void gen_bout_driver(uintptr addr)
 {
-	SetLongBase(addr);
+	SetLongBase((uint32)addr);
 
 	// .BOut driver header
 	Long(0x4d000000); Long(0x00000000);
@@ -732,6 +732,16 @@ bool PatchROM(void)
 	// Install PowerPC breakpoint
 	uint32 *lp = (uint32 *)(ROMBaseHost + POWERPC_BREAK_POINT);
 	*lp = htonl(0);
+#endif
+
+#if defined(__APPLE__)
+	/* New World never runs the Old World SCC-init OP_RESET, so the host
+	 * chime starts here, once, before the nanokernel. A PMU restart
+	 * re-execs the process and plays it again. */
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		extern void PlayStartupSound(void);
+		PlayStartupSound();
+	}
 #endif
 
 	// Copy 68k emulator to 2MB boundary
@@ -935,7 +945,7 @@ static bool patch_nanokernel_boot(void)
 	uint32 ofs = ntohl(lp[7]) & 0xffff;
 	D(bug("ofs %08lx\n", ofs));
 	lp[8] = htonl((ntohl(lp[8]) & 0xffff) | 0x48000000);	// beq -> b
-	loc = (ntohl(lp[8]) & 0xffff) + (uintptr)(lp+8) - (uintptr)ROMBaseHost;
+	loc = (uint32)((ntohl(lp[8]) & 0xffff) + (uintptr)(lp+8) - (uintptr)ROMBaseHost);
 	D(bug("loc %08lx\n", loc));
 	lp = (uint32 *)(ROMBaseHost + ofs + 0x310000);
 	switch (PVR >> 16) {
@@ -1084,7 +1094,7 @@ static bool patch_nanokernel_boot(void)
 	// Don't write to DEC
 	lp = (uint32 *)(ROMBaseHost + loc + 0x70);
 	*lp++ = htonl(POWERPC_NOP);
-	loc = (ntohl(lp[0]) & 0xffff) + (uintptr)lp - (uintptr)ROMBaseHost;
+	loc = (uint32)((ntohl(lp[0]) & 0xffff) + (uintptr)lp - (uintptr)ROMBaseHost);
 	D(bug("loc %08lx\n", loc));
 
 	// Don't set SPRG3
@@ -1468,7 +1478,7 @@ twi_done:
 	return false;
 dr_found:
 	lp++;
-	loc = (uintptr)lp - (uintptr)ROMBaseHost;
+	loc = (uint32)((uintptr)lp - (uintptr)ROMBaseHost);
 	if ((base = rom_powerpc_branch_target(loc)) == 0) base = loc;
 	static const uint8 dr_ret_dat[] = {0x80, 0xbf, 0x08, 0x14, 0x53, 0x19, 0x4d, 0xac, 0x7c, 0xa8, 0x03, 0xa6};
 	if ((base = find_rom_data(base, 0x380000, dr_ret_dat, sizeof(dr_ret_dat))) == 0) {
@@ -1558,7 +1568,7 @@ void nw_install_drivers(void)
 {
 	M68kRegisters r;
 	SheepArray<SIZEOF_IOParam> pb_var;
-	const uintptr pb = pb_var.addr();
+	const uint32 pb = pb_var.addr();
 
 	/* .AppleCD is opened first so that the first CD is drive 1: the CD
 	 * driver's DriverGestalt 'boot' response carries the drive number in
@@ -1713,7 +1723,7 @@ static bool patch_nanokernel(void)
 	*lp++ = htonl(0x7d4903a6);					// mtctr	r10
 	*lp++ = htonl(0x7daff120);					// mtcr	r13
 	*lp = htonl(0x48000000 + ((0x318000 - ((uintptr)lp - (uintptr)ROMBaseHost)) & 0x03fffffc));	// b		ROMBase+0x318000
-	uint32 npc = (uintptr)(lp + 1) - (uintptr)ROMBaseHost;
+	uint32 npc = (uint32)((uintptr)(lp + 1) - (uintptr)ROMBaseHost);
 
 	lp = (uint32 *)(ROMBaseHost + 0x318000);
 	*lp++ = htonl(0x81400000 + XLM_IRQ_NEST);	// lwz	r10,XLM_IRQ_NEST
@@ -2045,7 +2055,7 @@ static bool patch_68k(void)
 	if ((base = find_rom_data(0x180, 0x1f0, scc_init_caller_dat, sizeof(scc_init_caller_dat))) == 0) return false;
 	D(bug("scc_init_caller %08lx\n", base + 12));
 	wp = (uint16 *)(ROMBaseHost + base + 12);
-	loc = ntohs(wp[1]) + ((uintptr)wp - (uintptr)ROMBaseHost) + 2;
+	loc = (uint32)(ntohs(wp[1]) + ((uintptr)wp - (uintptr)ROMBaseHost) + 2);
 	static const uint8 scc_init_dat[] = {0x20, 0x78, 0x01, 0xdc, 0x22, 0x78, 0x01, 0xd8};
 	if ((base = find_rom_data(loc, loc + 0x80, scc_init_dat, sizeof(scc_init_dat))) == 0) return false;
 	D(bug("scc_init %08lx\n", base));
@@ -2703,7 +2713,7 @@ void InstallDrivers(void)
 	D(bug("Installing drivers...\n"));
 	M68kRegisters r;
 	SheepArray<SIZEOF_IOParam> pb_var;
-	const uintptr pb = pb_var.addr();
+	const uint32 pb = pb_var.addr();
 
 #if DISABLE_SCSI
 	// Setup fake SCSI Globals

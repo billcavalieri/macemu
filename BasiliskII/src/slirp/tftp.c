@@ -112,7 +112,7 @@ static int tftp_read_data(struct tftp_session *spt, u_int16_t block_nr,
   if (len) {
     lseek(fd, block_nr * 512, SEEK_SET);
 
-    bytes_read = read(fd, buf, len);
+    bytes_read = (int)read(fd, buf, len);
   }
 
   close(fd);
@@ -154,8 +154,8 @@ static int tftp_send_error(struct tftp_session *spt,
 
   nobytes = 2;
 
-  m->m_len = sizeof(struct tftp_t) - 514 + 3 + strlen(msg) - 
-        sizeof(struct ip) - sizeof(struct udphdr);
+  m->m_len = (int)(sizeof(struct tftp_t) - 514 + 3 + strlen(msg) -
+        sizeof(struct ip) - sizeof(struct udphdr));
 
   udp_output2(NULL, m, &saddr, &daddr, IPTOS_LOWDELAY);
 
@@ -241,7 +241,7 @@ static void tftp_handle_rrq(struct tftp_t *tp, int pktlen)
 
   src = tp->x.tp_buf;
   dst = (u_int8_t *)spt->filename;
-  n = pktlen - ((uint8_t *)&tp->x.tp_buf[0] - (uint8_t *)tp);
+  n = (int)(pktlen - ((uint8_t *)&tp->x.tp_buf[0] - (uint8_t *)tp));
 
   /* get name */
 

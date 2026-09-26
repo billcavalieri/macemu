@@ -127,6 +127,7 @@ typedef int32 (*gif_ptr)(uint32, int32, void *, void *, void *, void *);
 static uint32 gif_tvect = 0;
 typedef void (*ien_ptr)(uint32, int32, void *);	/* InterruptSetMember by value: r3 setID, r4 member */
 static bool nw_vbl_installed = false;
+static bool nw_vbl_open_done = false;
 static uint32 nw_vbl_code = 0;
 
 static void nw_install_vbl_handler(VidLocals *csSave)
@@ -137,8 +138,8 @@ static void nw_install_vbl_handler(VidLocals *csSave)
 	SheepArray<IST_MEMBER_COUNT * 8> ist;	/* {setID, member} x 3 */
 	SheepVar32 size = IST_MEMBER_COUNT * 8;
 	SheepString name("driver-ist");
-	int32 err = (int32)CallMacOS4(rpg_ptr, rpg_tvect, (void *)csSave->regEntryID, (const char *)name.addr(),
-	                              (void *)ist.addr(), (uint32 *)size.addr());
+	int32 err = (int32)CallMacOS4(rpg_ptr, rpg_tvect, (void *)(uintptr)csSave->regEntryID, (const char *)(uintptr)name.addr(),
+	                              (void *)(uintptr)ist.addr(), (uint32 *)(uintptr)size.addr());
 	if (err != 0 || size.value() < 8) {
 		printf("NW-BOOT G1: video ndrv: no driver-ist on the display node (err %d); no VBL\n", (int)err);
 		return;
@@ -148,16 +149,63 @@ static void nw_install_vbl_handler(VidLocals *csSave)
 	/* the member's own enabler/disabler (the chip's mask bit); kept, and
 	 * the enabler run once the handler is in place, as an ndrv does */
 	SheepVar32 refcon = 0, handler = 0, enabler = 0, disabler = 0;
-	err = (int32)CallMacOS6(gif_ptr, gif_tvect, set_id, member, (void *)refcon.addr(),
-	                        (void *)handler.addr(), (void *)enabler.addr(), (void *)disabler.addr());
+	err = (int32)CallMacOS6(gif_ptr, gif_tvect, set_id, member, (void *)(uintptr)refcon.addr(),
+	                        (void *)(uintptr)handler.addr(), (void *)(uintptr)enabler.addr(), (void *)(uintptr)disabler.addr());
 	if (err != 0 || enabler.value() == 0) {
 		printf("NW-BOOT G1: video ndrv: GetInterruptFunctions -> %d enabler %08x; no VBL\n", (int)err, (unsigned)enabler.value());
+		return;
+	}
+	if (nw_vbl_code == 0) {
+		printf("NW-BOOT G1: video ndrv: no VBL stub\n");
+		return;
+	}
+	/* CFM function pointer: a transition vector, then the code it names.
+	 * The NativeOp's FN bit returns through LR. execute_native_op runs
+	 * VideoDriverVBL and sets r3 to kIsrIsComplete. */
+	WriteMacInt32(nw_vbl_code + 0, nw_vbl_code + 8);
+	WriteMacInt32(nw_vbl_code + 4, 0);
+	WriteMacInt32(nw_vbl_code + 8, NativeOpcode(NATIVE_VIDEO_VBL));
+	MakeExecutable(0, nw_vbl_code, 16);
+	err = (int32)CallMacOS6(iif_ptr, iif_tvect, set_id, member, (void *)(uintptr)refcon.value(),
+	                        (void *)(uintptr)nw_vbl_code, (void *)(uintptr)enabler.value(), (void *)(uintptr)disabler.value());
+	if (err != 0) {
+		printf("NW-BOOT G1: video ndrv: InstallInterruptFunctions -> %d\n", (int)err);
 		return;
 	}
 	CallMacOS3(ien_ptr, enabler.value(), set_id, member, (void *)0);
 	nw_vbl_installed = true;
 	nw_display_vbl_enable(1);
 	printf("NW-BOOT G1: video ndrv: VBL handler on interrupt set %08x member %d, enabled\n", (unsigned)set_id, (int)member);
+}
+
+/*
+ * VSLDoInterruptService from the first hardware VBL nested inside VideoOpen
+ * executes zeros at 000d22c0 (program exception, black screen). Arm VSL on
+ * the first VBL after Open has returned, and call it on the next one.
+ */
+bool VideoVBLShouldService(void)
+{
+	if (private_data == NULL || private_data->vslServiceID == 0)
+		return false;
+	if (!nw_vbl_open_done)
+		return false;
+	if (!private_data->interruptsEnabled) {
+		private_data->interruptsEnabled = true;
+		printf("NW-BOOT G1: video ndrv: VSL armed after Open\n");
+		fflush(stdout);
+		return false;
+	}
+	return true;
+}
+
+void VideoArmVBL(void)
+{
+	if (ROMType != ROMTYPE_NEWWORLD || private_data == NULL)
+		return;
+	if (!nw_vbl_installed)
+		nw_install_vbl_handler(private_data);
+	if (nw_vbl_installed)
+		private_data->interruptsEnabled = true;
 }
 
 
@@ -182,7 +230,7 @@ bool VideoActivated(void)
 bool VideoSnapshot(int xsize, int ysize, uint8 *p)
 {
 	if (display_type == DIS_WINDOW) {
-		uint8 *screen = (uint8 *)private_data->saveBaseAddr;
+		uint8 *screen = Mac2HostAddr(private_data->saveBaseAddr);
 		uint32 row_bytes = VModes[cur_mode].viRowBytes;	
 		uint32 y2size = VModes[cur_mode].viYsize;
 		uint32 x2size = VModes[cur_mode].viXsize;
@@ -250,16 +298,20 @@ static int16 VideoOpen(uint32 pb, VidLocals *csSave)
 	if (vslnewis_tvect != 0) {
 		VSLNewInterruptService(csSave->regEntryID, FOURCC('v','b','l',' '), theServiceID.addr());
 		csSave->vslServiceID = theServiceID.value();
-		csSave->interruptsEnabled = true;
+		csSave->interruptsEnabled = false;
 		if (ROMType == ROMTYPE_NEWWORLD)
 			nw_install_vbl_handler(csSave);
 	} else if (ROMType == ROMTYPE_NEWWORLD) {
 		csSave->vslServiceID = 0;
+		csSave->interruptsEnabled = false;
 		nw_install_vbl_handler(csSave);
-		csSave->interruptsEnabled = nw_vbl_installed;
 	} else {
 		csSave->vslServiceID = 0;
 		csSave->interruptsEnabled = false;
+	}
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		ADBInstallAbsCursor();
+		nw_vbl_open_done = true;
 	}
 
 	return noErr;
@@ -860,8 +912,8 @@ static int16 VideoStatus(uint32 pb, VidLocals *csSave)
 
 		case cscGetPreferredConfiguration:
 			D(bug("GetPreferredConfiguration \n"));
-			WriteMacInt16(param + csMode, save_conf_mode);
-			WriteMacInt32(param + csData, save_conf_id);
+			WriteMacInt16(param + csMode, (uint32)save_conf_mode);
+			WriteMacInt32(param + csData, (uint32)save_conf_id);
 			return noErr;
 
 		case cscGetNextResolution: {
@@ -891,11 +943,15 @@ static int16 VideoStatus(uint32 pb, VidLocals *csSave)
 			}
 			WriteMacInt32(param + csRIDisplayModeID, work_id);
 			WriteMacInt16(param + csMaxDepthMode, max_depth(work_id));
+			/* The New World display interrupt is NW_VBL_HZ (60), one timebase
+			 * period per blank. QuickTime steps movie time by 1/refresh per
+			 * blank, so a reported 75 Hz plays a 12.00 fps movie at
+			 * 12 * 60/75 = 9.6 fps. Report the rate we actually interrupt at. */
 			switch (work_id) {
 				case APPLE_640x480:
 					WriteMacInt32(param + csHorizontalPixels, 640);
 					WriteMacInt32(param + csVerticalLines, 480);
-					WriteMacInt32(param + csRefreshRate, 75<<16);
+					WriteMacInt32(param + csRefreshRate, 60<<16);
 					break;
 				case APPLE_W_640x480:
 					WriteMacInt32(param + csHorizontalPixels, 640);
@@ -905,7 +961,7 @@ static int16 VideoStatus(uint32 pb, VidLocals *csSave)
 				case APPLE_800x600:
 					WriteMacInt32(param + csHorizontalPixels, 800);
 					WriteMacInt32(param + csVerticalLines, 600);
-					WriteMacInt32(param + csRefreshRate, 75<<16);
+					WriteMacInt32(param + csRefreshRate, 60<<16);
 					break;
 				case APPLE_W_800x600:
 					WriteMacInt32(param + csHorizontalPixels, 800);
@@ -915,34 +971,34 @@ static int16 VideoStatus(uint32 pb, VidLocals *csSave)
 				case APPLE_1024x768:
 					WriteMacInt32(param + csHorizontalPixels, 1024);
 					WriteMacInt32(param + csVerticalLines, 768);
-					WriteMacInt32(param + csRefreshRate, 75<<16);
+					WriteMacInt32(param + csRefreshRate, 60<<16);
 					break;
 				case APPLE_1152x768:
 					WriteMacInt32(param + csHorizontalPixels, 1152);
 					WriteMacInt32(param + csVerticalLines, 768);
-					WriteMacInt32(param + csRefreshRate, 75<<16);
+					WriteMacInt32(param + csRefreshRate, 60<<16);
 					break;
 				case APPLE_1152x900:
 					WriteMacInt32(param + csHorizontalPixels, 1152);
 					WriteMacInt32(param + csVerticalLines, 900);
-					WriteMacInt32(param + csRefreshRate, 75<<16);
+					WriteMacInt32(param + csRefreshRate, 60<<16);
 					break;
 				case APPLE_1280x1024:
 					WriteMacInt32(param + csHorizontalPixels, 1280);
 					WriteMacInt32(param + csVerticalLines, 1024);
-					WriteMacInt32(param + csRefreshRate, 75<<16);
+					WriteMacInt32(param + csRefreshRate, 60<<16);
 					break;
 				case APPLE_1600x1200:
 					WriteMacInt32(param + csHorizontalPixels, 1600);
 					WriteMacInt32(param + csVerticalLines, 1200);
-					WriteMacInt32(param + csRefreshRate, 75<<16);
+					WriteMacInt32(param + csRefreshRate, 60<<16);
 					break;
 				case APPLE_CUSTOM: {
 					uint32 x, y;
 					get_size_of_resolution(work_id, x, y);
 					WriteMacInt32(param + csHorizontalPixels, x);
 					WriteMacInt32(param + csVerticalLines, y);
-					WriteMacInt32(param + csRefreshRate, 75<<16);
+					WriteMacInt32(param + csRefreshRate, 60<<16);
 					break;
 				}
 			}
@@ -1033,31 +1089,31 @@ static int16 VideoStatus(uint32 pb, VidLocals *csSave)
 						flags |= (1<<kModeDefault);
 					switch (VModes[i].viAppleID) {
 						case APPLE_640x480:
-							timing = timingVESA_640x480_75hz;
+							timing = timingVESA_640x480_60hz;
 							break;
 						case APPLE_W_640x480:
 							timing = timingVESA_640x480_60hz;
 							break;
 						case APPLE_800x600:
-							timing = timingVESA_800x600_75hz;
+							timing = timingVESA_800x600_60hz;
 							break;
 						case APPLE_W_800x600:
 							timing = timingVESA_800x600_60hz;
 							break;
 						case APPLE_1024x768:
-							timing = timingVESA_1024x768_75hz;
+							timing = timingVESA_1024x768_60hz;
 							break;
 						case APPLE_1152x768:
-							timing = timingApple_1152x870_75hz; // FIXME
+							timing = timingApple_1152x870_75hz; // FIXME: no 60 Hz timing id for this size
 							break;
 						case APPLE_1152x900:
-							timing = timingApple_1152x870_75hz;
+							timing = timingApple_1152x870_75hz; // FIXME: no 60 Hz timing id for this size
 							break;
 						case APPLE_1280x1024:
-							timing = timingVESA_1280x960_75hz;
+							timing = timingVESA_1280x1024_60hz;
 							break;
 						case APPLE_1600x1200:
-							timing = timingVESA_1600x1200_75hz;
+							timing = timingVESA_1600x1200_60hz;
 							break;
 						default:
 							timing = timingUnknown;
@@ -1104,6 +1160,9 @@ static int16 VideoClose(uint32 pb, VidLocals *csSave)
 
 	// Delete interrupt service
 	csSave->interruptsEnabled = false;
+	nw_vbl_open_done = false;
+	if (ROMType == ROMTYPE_NEWWORLD)
+		ADBRemoveAbsCursor();
 	if (vsldisposeis_tvect != 0)
 		VSLDisposeInterruptService(csSave->vslServiceID);
 

@@ -368,8 +368,8 @@ int tcp_emu _P((struct socket *, struct mbuf *));
 int tcp_ctl _P((struct socket *));
 struct tcpcb *tcp_drop(struct tcpcb *tp, int err);
 
-void load_host_domains();
-void unload_host_domains();
+void load_host_domains(void);
+void unload_host_domains(void);
 
 #ifdef USE_PPP
 #define MIN_MRU MINMRU

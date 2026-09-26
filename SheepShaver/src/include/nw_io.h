@@ -138,6 +138,18 @@ int nw_sheepblaster_play(const uint8_t *bytes, uint32_t frames,
 /* Frames waiting in the ring. The host plays 44100 of them per second. */
 int nw_sheepblaster_pending(void);
 int nw_sheepblaster_pull(uint8_t *dst, int bytes);
+/* One second of ring traffic, then the counters reset.
+ * in_frames: 44100 Hz frames the guest queued.
+ * out_frames: frames the host copied out (not the silence pad).
+ * ring_full: plays that stopped because the ring had no space.
+ * unsent: input frames those plays did not queue.
+ * min_have/max_have: ring depth at each pull. Both 0 if nothing pulled. */
+/* submits / src_frames / rate_hz: PlaySourceBuffer writes this second.
+ * src_frames is the guest's count, before the 44100 resample.
+ * rate_hz is the last rate the guest asked for. */
+extern "C" void SheepBlasterTakeStats(uint64_t *in_frames, uint64_t *out_frames,
+	uint64_t *ring_full, uint64_t *unsent, uint32_t *min_have, uint32_t *max_have,
+	uint32_t *submits, uint64_t *src_frames, uint32_t *rate_hz);
 
 /* WP5: 64-pixel tiles covering the New World frame buffer. Stores that
  * land in the layout mark tiles; present consumes them. */

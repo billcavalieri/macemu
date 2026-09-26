@@ -1504,8 +1504,8 @@ static uint64 muldiv64(uint64 a, uint32 b, uint32 c)
 	uint64 rl = (uint64)u.l.low * (uint64)b;
 	uint64 rh = (uint64)u.l.high * (uint64)b;
 	rh += (rl >> 32);
-	res.l.high = rh / c;
-	res.l.low = (((rh % c) << 32) + (rl & 0xffffffff)) / c;
+	res.l.high = (uint32)(rh / c);
+	res.l.low = (uint32)((((rh % c) << 32) + (rl & 0xffffffff)) / c);
 	return res.ll;
 }
 
@@ -1513,7 +1513,7 @@ static inline uint64 get_tb_ticks(void)
 {
 	uint64 ticks;
 #ifdef SHEEPSHAVER
-	const uint32 TBFreq = TimebaseSpeed;
+	const uint32 TBFreq = (uint32)TimebaseSpeed;
 	ticks = muldiv64(GetTicks_usec(), TBFreq, 1000000);
 #else
 	const uint32 TBFreq = 25 * 1000 * 1000; // 25 MHz

@@ -44,6 +44,9 @@ extern void AudioReset(void);
 
 extern void AudioInterrupt(void);
 extern int32 AudioSheepBlasterTick(uint32 *task);
+/* 1 when SheepBlaster owns playback. The host then only copies its ring.
+ * Registration alone does not: Built-in alerts still come from the mixer. */
+extern int audio_sheepblaster_host_pull(void);
 
 extern void audio_enter_stream(void);
 extern void audio_exit_stream(void);
