@@ -35,6 +35,9 @@
 #include <pthread.h>
 #include <time.h>
 #endif
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 uint32_t nw_jit_helper_lwz(struct nw_jit_cpu *cpu, uint32_t ea);
 void nw_jit_helper_stw(struct nw_jit_cpu *cpu, uint32_t ea, uint32_t val);
@@ -901,18 +904,51 @@ void nw_jit_helper_mcrf(struct nw_jit_cpu *cpu, uint32_t crfd, uint32_t crfs)
 	cpu->cr = (cpu->cr & ~(0xfu << shd)) | (f << shd);
 }
 
+#if defined(__aarch64__)
+/* Same bytes as the C loops. A call into those loops on every vperm/vand
+ * of the software cursor fell behind ADB, so the arrow never moved
+ * unless NW_JIT_AV_INLINE compiled the op in the block. */
+static uint32x4_t vr_u32(const struct nw_jit_cpu *cpu, unsigned r)
+{
+	return vld1q_u32(cpu->vr[r]);
+}
+static void vr_u32_store(struct nw_jit_cpu *cpu, unsigned r, uint32x4_t v)
+{
+	vst1q_u32(cpu->vr[r], v);
+}
+static uint8x16_t vr_u8(const struct nw_jit_cpu *cpu, unsigned r)
+{
+	return vld1q_u8((const uint8_t *)cpu->vr[r]);
+}
+static void vr_u8_store(struct nw_jit_cpu *cpu, unsigned r, uint8x16_t v)
+{
+	vst1q_u8((uint8_t *)cpu->vr[r], v);
+}
+#endif
+
 void nw_jit_helper_vadduwm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
 	nw_vxo_note(128);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint32x4_t a = vr_u32(cpu, va);
+	uint32x4_t b = vr_u32(cpu, vb);
+	vr_u32_store(cpu, vd, vaddq_u32(a, b));
+#else
 	for (int w = 0; w < 4; w++)
 		cpu->vr[vd][w] = cpu->vr[va][w] + cpu->vr[vb][w];
+#endif
 }
 
 void nw_jit_helper_vaddubm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
 	nw_vxo_note(0);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint8x16_t a = vr_u8(cpu, va);
+	uint8x16_t b = vr_u8(cpu, vb);
+	vr_u8_store(cpu, vd, vaddq_u8(a, b));
+#else
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
 		const uint32_t b = cpu->vr[vb][w];
@@ -924,26 +960,39 @@ void nw_jit_helper_vaddubm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uin
 		}
 		cpu->vr[vd][w] = r;
 	}
+#endif
 }
 
 void nw_jit_helper_vsraw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
 	nw_vxo_note(900);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint32x4_t a = vr_u32(cpu, va);
+	int32x4_t sh = vnegq_s32(vreinterpretq_s32_u32(vandq_u32(vr_u32(cpu, vb), vdupq_n_u32(31))));
+	vr_u32_store(cpu, vd, vreinterpretq_u32_s32(vshlq_s32(vreinterpretq_s32_u32(a), sh)));
+#else
 	for (int w = 0; w < 4; w++) {
 		const int sh = (int)(cpu->vr[vb][w] & 31u);
 		cpu->vr[vd][w] = (uint32_t)((int32_t)cpu->vr[va][w] >> sh);
 	}
+#endif
 }
 
 void nw_jit_helper_vsrw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
 	nw_vxo_note(644);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint32x4_t a = vr_u32(cpu, va);
+	int32x4_t sh = vnegq_s32(vreinterpretq_s32_u32(vandq_u32(vr_u32(cpu, vb), vdupq_n_u32(31))));
+	vr_u32_store(cpu, vd, vshlq_u32(a, sh));
+#else
 	for (int w = 0; w < 4; w++) {
 		const unsigned sh = cpu->vr[vb][w] & 31u;
 		cpu->vr[vd][w] = cpu->vr[va][w] >> sh;
 	}
+#endif
 }
 
 void nw_jit_helper_vspltisw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm)
@@ -1127,38 +1176,67 @@ void nw_jit_helper_vor(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_
 {
 	nw_vxo_note(1156);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint32x4_t a = vr_u32(cpu, va);
+	uint32x4_t b = vr_u32(cpu, vb);
+	vr_u32_store(cpu, vd, vorrq_u32(a, b));
+#else
 	for (int i = 0; i < 4; i++)
 		cpu->vr[vd][i] = cpu->vr[va][i] | cpu->vr[vb][i];
+#endif
 }
 
 void nw_jit_helper_vand(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
 	nw_vxo_note(1028);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint32x4_t a = vr_u32(cpu, va);
+	uint32x4_t b = vr_u32(cpu, vb);
+	vr_u32_store(cpu, vd, vandq_u32(a, b));
+#else
 	for (int i = 0; i < 4; i++)
 		cpu->vr[vd][i] = cpu->vr[va][i] & cpu->vr[vb][i];
+#endif
 }
 
 void nw_jit_helper_vandc(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
 	nw_vxo_note(1092);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint32x4_t a = vr_u32(cpu, va);
+	uint32x4_t b = vr_u32(cpu, vb);
+	vr_u32_store(cpu, vd, vbicq_u32(a, b));
+#else
 	for (int i = 0; i < 4; i++)
 		cpu->vr[vd][i] = cpu->vr[va][i] & ~cpu->vr[vb][i];
+#endif
 }
 
 void nw_jit_helper_vxor(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
 	nw_vxo_note(1220);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint32x4_t a = vr_u32(cpu, va);
+	uint32x4_t b = vr_u32(cpu, vb);
+	vr_u32_store(cpu, vd, veorq_u32(a, b));
+#else
 	for (int i = 0; i < 4; i++)
 		cpu->vr[vd][i] = cpu->vr[va][i] ^ cpu->vr[vb][i];
+#endif
 }
 
 void nw_jit_helper_vsububm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
 	nw_vxo_note(1024);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint8x16_t a = vr_u8(cpu, va);
+	uint8x16_t b = vr_u8(cpu, vb);
+	vr_u8_store(cpu, vd, vsubq_u8(a, b));
+#else
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
 		const uint32_t b = cpu->vr[vb][w];
@@ -1170,12 +1248,19 @@ void nw_jit_helper_vsububm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uin
 		}
 		cpu->vr[vd][w] = r;
 	}
+#endif
 }
 
 void nw_jit_helper_vslh(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
 	nw_vxo_note(324);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint16x8_t a = vld1q_u16((const uint16_t *)cpu->vr[va]);
+	uint16x8_t b = vld1q_u16((const uint16_t *)cpu->vr[vb]);
+	uint16x8_t m = vandq_u16(b, vdupq_n_u16(15));
+	vst1q_u16((uint16_t *)cpu->vr[vd], vshlq_u16(a, vreinterpretq_s16_u16(m)));
+#else
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
 		const uint32_t b = cpu->vr[vb][w];
@@ -1188,6 +1273,7 @@ void nw_jit_helper_vslh(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 		}
 		cpu->vr[vd][w] = r;
 	}
+#endif
 }
 
 static void record_cr6_cmp(struct nw_jit_cpu *cpu, int all1, int all0, uint32_t rc)
@@ -1383,6 +1469,11 @@ void nw_jit_helper_vsrb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 {
 	nw_vxo_note(516);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint8x16_t a = vr_u8(cpu, va);
+	uint8x16_t m = vandq_u8(vr_u8(cpu, vb), vdupq_n_u8(7));
+	vr_u8_store(cpu, vd, vshlq_u8(a, vnegq_s8(vreinterpretq_s8_u8(m))));
+#else
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
 		const uint32_t b = cpu->vr[vb][w];
@@ -1395,12 +1486,18 @@ void nw_jit_helper_vsrb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 		}
 		cpu->vr[vd][w] = r;
 	}
+#endif
 }
 
 void nw_jit_helper_vslb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
 	nw_vxo_note(260);
 	vd &= 31u; va &= 31u; vb &= 31u;
+#if defined(__aarch64__)
+	uint8x16_t a = vr_u8(cpu, va);
+	uint8x16_t m = vandq_u8(vr_u8(cpu, vb), vdupq_n_u8(7));
+	vr_u8_store(cpu, vd, vshlq_u8(a, vreinterpretq_s8_u8(m)));
+#else
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
 		const uint32_t b = cpu->vr[vb][w];
@@ -1413,6 +1510,7 @@ void nw_jit_helper_vslb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 		}
 		cpu->vr[vd][w] = r;
 	}
+#endif
 }
 
 void nw_jit_helper_fabs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb)
@@ -1438,8 +1536,15 @@ void nw_jit_helper_vsel(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 void nw_jit_helper_vperm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc)
 {
 	nw_vxo_note(43u | ((vc & 31u) << 6));
-	uint8_t src[32], c[16], d[16];
 	vd &= 31u; va &= 31u; vb &= 31u; vc &= 31u;
+#if defined(__aarch64__)
+	uint8x16_t a = vrev32q_u8(vr_u8(cpu, va));
+	uint8x16_t b = vrev32q_u8(vr_u8(cpu, vb));
+	uint8x16_t idx = vandq_u8(vrev32q_u8(vr_u8(cpu, vc)), vdupq_n_u8(31));
+	uint8x16x2_t tab = { { a, b } };
+	vr_u8_store(cpu, vd, vrev32q_u8(vqtbl2q_u8(tab, idx)));
+#else
+	uint8_t src[32], c[16], d[16];
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w], b = cpu->vr[vb][w];
 		src[w * 4] = (uint8_t)(a >> 24);
@@ -1461,6 +1566,7 @@ void nw_jit_helper_vperm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint3
 	for (int w = 0; w < 4; w++)
 		cpu->vr[vd][w] = ((uint32_t)d[w * 4] << 24) | ((uint32_t)d[w * 4 + 1] << 16) |
 				 ((uint32_t)d[w * 4 + 2] << 8) | (uint32_t)d[w * 4 + 3];
+#endif
 }
 
 void nw_jit_helper_vsldoi(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t shb)
