@@ -38,11 +38,22 @@ bool MetalIsAvailable() {
 	return r;
 }
 
+static BOOL keep_sidebar_command(NSMenuItem *item)
+{
+	if (item.action == @selector(toggleSidebar:))
+		return YES;
+	NSEventModifierFlags mask = item.keyEquivalentModifierMask;
+	NSEventModifierFlags sidebar = NSEventModifierFlagCommand | NSEventModifierFlagControl;
+	return [item.keyEquivalent isEqualToString:@"s"] && (mask & sidebar) == sidebar;
+}
+
 static void strip_menu_key_equivalents(NSMenu *menu)
 {
 	if (!menu)
 		return;
 	for (NSMenuItem *item in menu.itemArray) {
+		if (keep_sidebar_command(item))
+			continue;
 		item.keyEquivalent = @"";
 		item.keyEquivalentModifierMask = 0;
 		if (item.hasSubmenu)
@@ -57,13 +68,21 @@ void disable_SDL2_macosx_menu_bar_keyboard_shortcuts() {
 		});
 		return;
 	}
-	/* Cmd-Q (Quit) and Cmd-W (Close) must reach the guest, not Cocoa. */
+	/* Cmd-Q (Quit) and Cmd-W (Close) must reach the guest, not Cocoa.
+	   Hide Sidebar (⌃⌘S) stays. */
 	strip_menu_key_equivalents([NSApp mainMenu]);
-	for (NSMenuItem * menu_item in [NSApp mainMenu].itemArray) {
-		if ([menu_item.title isEqualToString:@"View"]) {
-			[[NSApp mainMenu] removeItem:menu_item];
-			break;
+	for (NSMenuItem * menu_item in [[NSApp mainMenu].itemArray copy]) {
+		if (![menu_item.title isEqualToString:@"View"])
+			continue;
+		BOOL keep = NO;
+		for (NSMenuItem *item in menu_item.submenu.itemArray) {
+			if (keep_sidebar_command(item)) {
+				keep = YES;
+				break;
+			}
 		}
+		if (!keep)
+			[[NSApp mainMenu] removeItem:menu_item];
 	}
 }
 

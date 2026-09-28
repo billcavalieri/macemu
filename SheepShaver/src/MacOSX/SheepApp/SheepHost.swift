@@ -1,12 +1,11 @@
 /*
- *  SheepHost.swift - AppKit host: one window, Metal scanout, VM library.
+ *  SheepHost.swift - Shows the library and the Mac OS picture in one window.
  *
  *  (C) 2026 Bill Cavalieri
  *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
  */
 
 import AppKit
-import SwiftUI
 
 @MainActor
 enum BootGate {
@@ -26,8 +25,8 @@ final class SheepHost: NSObject {
             NSApp.finishLaunching()
         }
         let wc = ensureWindow()
+        wc.installSidebarMenu()
         wc.showWindow(nil)
-        wc.sizeWindowToGuest()
         var chosen: String?
         while chosen == nil {
             if BootGate.quit {
@@ -62,16 +61,17 @@ final class SheepHost: NSObject {
         }
         let wc = ensureWindow()
         wc.booted = true
-        wc.pane.setGuestSize(width: Int(width), height: Int(height))
-        wc.display.setEdgeGrab(PrefsBridge.bool("edgegrab"))
+        wc.installSidebarMenu()
         wc.showWindow(nil)
-        wc.sizeWindowToGuest()
-        wc.window?.acceptsMouseMovedEvents = true
-        wc.window?.makeFirstResponder(wc.display)
+        wc.display.setGuestSize(width: Int(width), height: Int(height))
+        wc.display.inputEnabled = true
         wc.window?.layoutIfNeeded()
+        wc.display.applyMousePrefs()
+        wc.logDisplayGeometry()
+        wc.window?.makeFirstResponder(wc.display)
         DispatchQueue.main.async {
-            wc.sizeWindowToGuest()
             wc.window?.makeFirstResponder(wc.display)
+            wc.display.applyMousePrefs()
         }
         let path = PrefsBridge.path()
         if !path.isEmpty {
@@ -88,7 +88,9 @@ final class SheepHost: NSObject {
 
     @objc class func setGuestWidth(_ width: Int32, height: Int32) {
         hop {
-            controller?.pane.setGuestSize(width: Int(width), height: Int(height))
+            guard let controller else { return }
+            controller.display.setGuestSize(width: Int(width), height: Int(height))
+            controller.window?.layoutIfNeeded()
         }
     }
 
@@ -100,7 +102,7 @@ final class SheepHost: NSObject {
 
     @objc class func reloadEdgeGrab() {
         hop {
-            controller?.display.setEdgeGrab(PrefsBridge.bool("edgegrab"))
+            controller?.display.applyMousePrefs()
         }
     }
 

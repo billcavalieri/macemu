@@ -61,6 +61,7 @@ prefs_desc common_prefs_items[] = {
 	{"ignoreillegal", TYPE_BOOLEAN, false, "ignore illegal instructions"},
 	{"jit", TYPE_BOOLEAN, false,        "enable JIT compiler"},
 	{"jit68k", TYPE_BOOLEAN, false,     "enable 68k DR emulator"},
+	{"jit68k_host", TYPE_BOOLEAN, false, "opt-in host 68k fallback JIT"},
 	{"keyboardtype", TYPE_INT32, false, "hardware keyboard type"},
 	{"hardcursor", TYPE_BOOLEAN, false, "hardware mouse cursor"},
 	{"hotkey", TYPE_INT32, false,       "hotkey modifier"},
@@ -78,7 +79,8 @@ prefs_desc common_prefs_items[] = {
 	{"sound_buffer", TYPE_INT32, false,	"sound buffer length"},
 	{"name_encoding", TYPE_INT32, false,	"file name encoding"},
 	{"init_grab", TYPE_BOOLEAN, false,	"initially grabbing mouse"},
-	{"edgegrab", TYPE_BOOLEAN, false,	"grab the pointer on enter and release it at the window edge"},
+	{"mouse", TYPE_STRING, false,		"absolute (default): pointer tracks the picture. relative: click the picture to grab, release at the picture edge or with ctrl-g"},
+	{"edgegrab", TYPE_BOOLEAN, false,	"grab the pointer on enter. absolute releases at the left, right, or bottom; leaving the top leaves the guest cursor where it was. relative releases at any edge"},
 	{NULL, TYPE_END, false, NULL} // End of list
 };
 
@@ -114,8 +116,10 @@ void AddPrefsDefaults(void)
 	PrefsAddBool("jit", false);
 #endif
 	PrefsAddBool("jit68k", false);
+	PrefsAddBool("jit68k_host", false);
 
 	PrefsAddInt32("keyboardtype", 5);
+	PrefsAddString("mouse", "absolute");
 	PrefsAddBool("edgegrab", true);
 
 #ifdef __APPLE__

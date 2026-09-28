@@ -510,6 +510,23 @@ int16 DiskStatus(uint32 pb, uint32 dce)
 
 	// Drive-specific codes
 	switch (code) {
+		case 6: {	// Return list of supported disk formats
+			/* Same record the floppy driver returns: a block count and
+			 * a flags long. Bit 6 of the flags' high byte means "the
+			 * disk is this format". The boot ROM Status(6) fails the
+			 * happy-mac check when this returns an error, then waits
+			 * in bra.s * with the 68k mask at 5. */
+			if (ReadMacInt16(pb + csParam) <= 0)
+				return paramErr;
+			uint32 adr = ReadMacInt32(pb + csParam + 2);
+			if (adr == 0)
+				return paramErr;
+			WriteMacInt16(pb + csParam, 1);
+			WriteMacInt32(adr, info->num_blocks);
+			WriteMacInt32(adr + 4, 0xc0000000);
+			return noErr;
+		}
+
 		case 8:		// Get drive status
 			Mac2Mac_memcpy(pb + csParam, info->status, 22);
 			return noErr;

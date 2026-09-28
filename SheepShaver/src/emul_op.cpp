@@ -40,9 +40,9 @@
 #include "audio_defs.h"
 
 extern int32 QtCodecDispatch(uint32 selector_word, uint32 params);
-extern void QtCodecRegister(void);
+extern int QtCodecRegister(void);
 extern int32 SheepForceRaveGuest(uint32 selector_word, uint32 params);
-extern void SheepForceRaveRegister(void);
+extern int SheepForceRaveRegister(void);
 #include "ether.h"
 #include "serial.h"
 #include "clip.h"
@@ -297,11 +297,17 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 	/* Not from the Time Manager task: registration allocates memory,
 	 * which is not allowed at interrupt time. */
 	bool sb_op = selector == OP_AUDIO_DISPATCH || selector == OP_SHEEPBLASTER ||
-		selector == OP_SHEEPBLASTER_TICK || selector == OP_MOUSE_TICK;
+		selector == OP_SHEEPBLASTER_TICK;
+	/* One RegisterComponent per trap. All three on the first EmulOp
+	 * after the Finder name walks the component list and the desktop
+	 * does not return. */
 	if (!sb_op) {
-		nw_register_output();
-		QtCodecRegister();
-		SheepForceRaveRegister();
+		if (nw_reg_arm)
+			nw_register_output();
+		else if (QtCodecRegister())
+			;
+		else if (SheepForceRaveRegister())
+			;
 	}
 	if (nw_debug_arm && !sb_op) {
 		nw_debug_arm = 0;
@@ -449,14 +455,6 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 
 		case OP_RAVE:
 			r->d[0] = SheepForceRaveGuest(r->a[3], r->a[4]);
-			break;
-
-		case OP_MOUSE_TICK:		// Absolute cursor Time Manager task
-#ifdef POWERPC_ROM
-			r->d[0] = ADBAbsMouseTick(&r->a[0]);
-#else
-			r->d[0] = 0;
-#endif
 			break;
 
 		case OP_SHEEPBLASTER: {		// AWACS `link a6,#0`, then the original body

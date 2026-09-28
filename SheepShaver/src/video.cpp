@@ -30,7 +30,6 @@
 #include "video.h"
 #include "video_defs.h"
 #include "main.h"
-#include "adb.h"
 #include "macos_util.h"
 #include "user_strings.h"
 #include "version.h"
@@ -309,10 +308,8 @@ static int16 VideoOpen(uint32 pb, VidLocals *csSave)
 		csSave->vslServiceID = 0;
 		csSave->interruptsEnabled = false;
 	}
-	if (ROMType == ROMTYPE_NEWWORLD) {
-		ADBInstallAbsCursor();
+	if (ROMType == ROMTYPE_NEWWORLD)
 		nw_vbl_open_done = true;
-	}
 
 	return noErr;
 }
@@ -1161,8 +1158,6 @@ static int16 VideoClose(uint32 pb, VidLocals *csSave)
 	// Delete interrupt service
 	csSave->interruptsEnabled = false;
 	nw_vbl_open_done = false;
-	if (ROMType == ROMTYPE_NEWWORLD)
-		ADBRemoveAbsCursor();
 	if (vsldisposeis_tvect != 0)
 		VSLDisposeInterruptService(csSave->vslServiceID);
 

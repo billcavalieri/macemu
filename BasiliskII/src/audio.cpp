@@ -359,14 +359,12 @@ enum {
 	SB_IDLE_MAX_MS = 40,		// Poll while a wake came back empty
 	/* QuickTime clocks the movie from this component. A buffer counts
 	 * as played when GetSourceData finishes it, which is when it
-	 * enters the ring, not when the speaker reaches it. The ring
-	 * therefore stays one host period above empty (512 frames, the
-	 * CoreAudio buffer, about 12 ms). Each wake plays the one buffer
-	 * already queued and holds the buffer the completion just
-	 * submitted. The clock moves by that one buffer, for whatever
-	 * size the movie submitted, when the speaker is about to play it.
-	 * A deeper cushion leads every movie by the same fixed amount. */
-	SB_LOW_WATER = 512
+	 * enters the ring, not when the speaker reaches it. The host
+	 * period is 512 frames (about 12 ms). This task wakes on the
+	 * 60 Hz VIA tick, and 60 * 512 is 30720 frames/s. Two periods
+	 * (1024) cover the 735 frames that tick consumes at 44100. The
+	 * extra period is a fixed lead on the movie clock. */
+	SB_LOW_WATER = 1024
 };
 
 static bool sb_active(void)
@@ -582,8 +580,8 @@ int32 AudioSheepBlasterTick(uint32 *task)
 	}
 	if (audio_data == 0 || AudioStatus.mixer == 0 || sb_sources <= 0 || !sb_run)
 		return 0;
-	/* Speaker still has a host period. Stay out of the mixer, and
-	 * wake before that period runs out. */
+	/* Two host periods are queued. Stay out of the mixer until the
+	 * speaker has used the surplus above that. */
 	int pending = nw_sheepblaster_pending();
 	if (pending >= SB_LOW_WATER) {
 		int ms = (pending - SB_LOW_WATER) / 44;
@@ -604,9 +602,9 @@ int32 AudioSheepBlasterTick(uint32 *task)
 	if (owed < 1)
 		owed = 1;
 	sb_in_tick = true;
-	/* One queued buffer per pull. The completion's next buffer is
+	/* One host period per pull. The completion's next buffer is
 	 * held, so this wake cannot walk the rest of the movie. Stop
-	 * once the speaker has a host period, or after 12 ms. */
+	 * once two periods are queued (one 60 Hz tick), or after 12 ms. */
 	int gained = 0;
 	uint64 spent = 0;
 	uint64 t_pull = GetTicks_usec();

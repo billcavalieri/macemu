@@ -1,33 +1,51 @@
 /*
- *  SheepWindowController.swift - Chrome around the Metal guest surface.
+ *  SheepWindowController.swift - One window. Toolbar on the window,
+ *  split view with the VM list and the Metal screen.
  *
  *  (C) 2026 Bill Cavalieri
  *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
  */
 
 import AppKit
-import SwiftUI
 
 @_silgen_name("VideoHostRequestQuit")
 private func VideoHostRequestQuit()
 
 @MainActor
-final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSSplitViewDelegate {
-    let pane = GuestPaneView(frame: .zero)
-    let store = VirtualMachineStore()
-    var booted = false
-    private var settingsWindow: NSWindow?
-    private var newSheet: NewVMSheet?
-    private let split = NSSplitView()
-    private var sidebarHost: NSHostingView<VMLibraryView>!
-    private var sidebarWidth: CGFloat = 220
-    private var sidebarCollapsed = false
+final class SheepWindow: NSWindow {
+    weak var guestDisplay: GuestDisplayView?
 
-    var display: GuestDisplayView { pane.display }
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, let guestDisplay, guestDisplay.releaseByHotkey(event) {
+            return
+        }
+        if let guestDisplay, guestDisplay.claimMouse(event) {
+            return
+        }
+        super.sendEvent(event)
+    }
+}
+
+@MainActor
+final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSSplitViewDelegate {
+    let store = VirtualMachineStore()
+    /// Sidebar width the window is built with. A later resize keeps this width
+    /// unless the user has dragged the divider, and gives the rest to the picture.
+    private let sidebarWidth: CGFloat = 220
+    private var savedSidebarWidth: CGFloat = 220
+    private var sidebarShown = true
+    private var sidebarItem: NSToolbarItem?
+    let display = GuestDisplayView(frame: NSRect(x: 0, y: 0, width: 1024, height: 768))
+    var booted = false
+    private var sidebar: LibrarySidebar!
+    private var split: NSSplitView!
+    private var settings: SettingsSheet?
+    private var newSheet: NewVMSheet?
+    private var loggedPlacement = false
 
     init() {
-        let window = NSWindow(
-            contentRect: NSRect(x: 80, y: 80, width: 1244, height: 768),
+        let window = SheepWindow(
+            contentRect: NSRect(x: 80, y: 120, width: 1245, height: 768),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -37,38 +55,42 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         window.titlebarAppearsTransparent = false
         window.titlebarSeparatorStyle = .none
         window.isRestorable = false
+        window.isReleasedWhenClosed = false
+        window.styleMask.remove(.fullSizeContentView)
         super.init(window: window)
         window.delegate = self
-        window.styleMask.remove(.fullSizeContentView)
+        window.guestDisplay = display
 
-        let sidebarHost = NSHostingView(rootView: VMLibraryView(
+        sidebar = LibrarySidebar(
             store: store,
             onPlay: { [weak self] doc in self?.play(doc) },
             onSelect: { [weak self] doc in self?.setSubtitle(doc.name) }
-        ))
-        sidebarHost.sizingOptions = []
-        sidebarHost.frame.size.width = sidebarWidth
-        self.sidebarHost = sidebarHost
+        )
+        sidebar.frame = NSRect(x: 0, y: 0, width: sidebarWidth, height: 768)
+        display.frame = NSRect(x: sidebarWidth + 1, y: 0, width: 1024, height: 768)
 
+        let split = NSSplitView()
         split.isVertical = true
         split.dividerStyle = .thin
         split.delegate = self
         split.translatesAutoresizingMaskIntoConstraints = false
-        split.addArrangedSubview(sidebarHost)
-        split.addArrangedSubview(pane)
-        split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
+        split.addArrangedSubview(sidebar)
+        split.addArrangedSubview(display)
+        split.setHoldingPriority(.defaultHigh + 1, forSubviewAt: 0)
         split.setHoldingPriority(.defaultLow, forSubviewAt: 1)
+        self.split = split
 
         let root = NSView()
-        window.contentView = root
         root.addSubview(split)
+        window.contentView = root
         let guide = window.contentLayoutGuide as! NSLayoutGuide
         NSLayoutConstraint.activate([
             split.topAnchor.constraint(equalTo: guide.topAnchor),
+            split.bottomAnchor.constraint(equalTo: guide.bottomAnchor),
             split.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
-            split.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
-            split.bottomAnchor.constraint(equalTo: guide.bottomAnchor)
+            split.trailingAnchor.constraint(equalTo: guide.trailingAnchor)
         ])
+        updateMinSize()
 
         let toolbar = NSToolbar(identifier: "SheepToolbar")
         toolbar.delegate = self
@@ -77,47 +99,18 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         window.toolbar = toolbar
         window.toolbarStyle = .expanded
         window.styleMask.remove(.fullSizeContentView)
+        // Toolbar is on before the first layout, so the content size used
+        // below is the size the window actually has.
+        placePanes(in: split, sidebar: sidebarWidth)
+        split.setPosition(sidebarWidth, ofDividerAt: 0)
+        window.layoutIfNeeded()
+        placePanes(in: split, sidebar: sidebarWidth)
+        display.syncPointerToPicture()
+        installSidebarMenu()
         if let name = store.document(id: store.selection)?.name {
             window.subtitle = name
         }
-        split.setPosition(sidebarWidth, ofDividerAt: 0)
-        window.acceptsMouseMovedEvents = true
-        sizeWindowToGuest()
     }
-
-    func sizeWindowToGuest() {
-        guard let window else { return }
-        window.styleMask.remove(.fullSizeContentView)
-        let gw = max(pane.guestSize.width, 640)
-        let gh = max(pane.guestSize.height, 480)
-        let sidebarW = sidebarCollapsed ? 0 : max(sidebarHost.frame.width > 1 ? sidebarHost.frame.width : sidebarWidth, 180)
-        let target = NSSize(width: sidebarW + split.dividerThickness + gw, height: gh)
-        window.contentMinSize = NSSize(width: 640, height: 480)
-        window.setContentSize(target)
-        window.layoutIfNeeded()
-        split.adjustSubviews()
-        if sidebarCollapsed {
-            split.setPosition(0, ofDividerAt: 0)
-        } else {
-            split.setPosition(sidebarWidth, ofDividerAt: 0)
-        }
-        window.layoutIfNeeded()
-        pane.layoutSubtreeIfNeeded()
-        if grabLayoutLog < 8 {
-            grabLayoutLog += 1
-            let pf = pane.frame
-            let df = pane.display.frame
-            let sf = sidebarHost.frame
-            print(String(format: "NW-BOOT mouse layout #%d split=%.0fx%.0f side=%.0f,%.0f %.0fx%.0f pane=%.0f,%.0f %.0fx%.0f display=%.0f,%.0f %.0fx%.0f guest=%.0fx%.0f",
-                         grabLayoutLog, split.bounds.width, split.bounds.height,
-                         sf.minX, sf.minY, sf.width, sf.height,
-                         pf.minX, pf.minY, pf.width, pf.height,
-                         df.minX, df.minY, df.width, df.height,
-                         pane.guestSize.width, pane.guestSize.height))
-        }
-    }
-
-    private var grabLayoutLog = 0
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:)")
@@ -127,12 +120,29 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         window?.subtitle = name
     }
 
+    func logDisplayGeometry() {
+        guard !loggedPlacement, let window else { return }
+        window.layoutIfNeeded()
+        display.layoutSubtreeIfNeeded()
+        loggedPlacement = true
+        let bounds = display.bounds
+        let inWindow = display.convert(bounds, to: nil)
+        let line = String(
+            format: "NW-BOOT mouse view=%.0f,%.0f %.0fx%.0f inWindow=%.0f,%.0f %.0fx%.0f\n",
+            bounds.minX, bounds.minY, bounds.width, bounds.height,
+            inWindow.minX, inWindow.minY, inWindow.width, inWindow.height
+        )
+        fputs(line, stdout)
+        fflush(stdout)
+    }
+
     func play(_ doc: VirtualMachineDocument) {
         store.selection = doc.id
         setSubtitle(doc.name)
         if !booted {
             BootGate.path = doc.prefsPath
             store.runningID = doc.id
+            sidebar.reload()
             return
         }
         store.launch(doc)
@@ -147,12 +157,85 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         return true
     }
 
+    func windowDidResize(_ notification: Notification) {
+        guard let split else { return }
+        placePanes(in: split, sidebar: sidebarShown ? savedSidebarWidth : 0)
+        display.syncPointerToPicture()
+    }
+
+    /// Picture fills whatever width is left after the sidebar. At startup the
+    /// sidebar is `sidebarWidth`. After a drag, a resize keeps that dragged width.
+    /// Hidden, the picture is the full content width and the divider is gone.
+    private func placePanes(in splitView: NSSplitView, sidebar side: CGFloat) {
+        let height = splitView.bounds.height
+        let width = splitView.bounds.width
+        guard width > 1, height > 1 else { return }
+        if !sidebarShown {
+            sidebar.isHidden = true
+            sidebar.setFrameOrigin(.zero)
+            sidebar.setFrameSize(NSSize(width: 0, height: height))
+            display.setFrameOrigin(.zero)
+            display.setFrameSize(NSSize(width: width, height: height))
+            return
+        }
+        sidebar.isHidden = false
+        let divider = splitView.dividerThickness
+        let clamped = min(max(side, 180), min(320, width - divider - 160))
+        let picture = max(160, width - divider - clamped)
+        sidebar.setFrameOrigin(.zero)
+        sidebar.setFrameSize(NSSize(width: clamped, height: height))
+        display.setFrameOrigin(NSPoint(x: clamped + divider, y: 0))
+        display.setFrameSize(NSSize(width: picture, height: height))
+    }
+
+    private func updateMinSize() {
+        guard let split, let window else { return }
+        let width = sidebarShown ? 180 + split.dividerThickness + 160 : 160
+        window.contentMinSize = NSSize(width: width, height: 160)
+    }
+
+    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
+        let side = sidebarShown ? savedSidebarWidth : 0
+        placePanes(in: splitView, sidebar: side)
+    }
+
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
-        sidebarCollapsed ? 0 : 180
+        sidebarShown ? 180 : 0
     }
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
-        sidebarCollapsed ? 0 : 280
+        320
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainSplitPosition proposedPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        guard sidebarShown else { return 0 }
+        let minP = self.splitView(splitView, constrainMinCoordinate: proposedPosition, ofSubviewAt: dividerIndex)
+        let maxP = self.splitView(splitView, constrainMaxCoordinate: proposedPosition, ofSubviewAt: dividerIndex)
+        let clamped = min(max(proposedPosition, minP), maxP)
+        savedSidebarWidth = clamped
+        return clamped
+    }
+
+    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+        subview === sidebar
+    }
+
+    func splitView(_ splitView: NSSplitView, shouldHideDividerAt dividerIndex: Int) -> Bool {
+        !sidebarShown
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        if sidebarShown {
+            let width = sidebar.frame.width
+            if width >= 180 && width <= 320 {
+                savedSidebarWidth = width
+            }
+        }
+        display.syncPointerToPicture()
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -171,10 +254,14 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         switch itemIdentifier {
         case .toggleSidebar:
             let item = NSToolbarItem(itemIdentifier: .toggleSidebar)
-            item.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Hide Sidebar")
-            item.label = "Sidebar"
-            item.action = #selector(toggleSidebar)
+            item.image = NSImage(systemSymbolName: "sidebar.leading", accessibilityDescription: "Hide Sidebar")
+            item.label = "Toggle Sidebar"
+            item.paletteLabel = "Toggle Sidebar"
+            item.toolTip = "Hide Sidebar"
+            item.isNavigational = true
+            item.action = #selector(toggleSidebar(_:))
             item.target = self
+            sidebarItem = item
             return item
         case .plus:
             let item = NSToolbarItem(itemIdentifier: .plus)
@@ -195,17 +282,73 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         }
     }
 
-    @objc private func toggleSidebar() {
-        sidebarCollapsed.toggle()
-        if sidebarCollapsed {
-            sidebarWidth = max(sidebarHost.frame.width, 180)
-            sidebarHost.isHidden = true
-            split.setPosition(0, ofDividerAt: 0)
+    /// Leading toolbar button, and View > Hide Sidebar (⌃⌘S).
+    /// The picture takes the full content width while the sidebar is hidden.
+    @objc func toggleSidebar(_ sender: Any?) {
+        if sidebarShown {
+            let width = sidebar.frame.width
+            if width >= 180 { savedSidebarWidth = width }
+            sidebarShown = false
         } else {
-            sidebarHost.isHidden = false
-            split.setPosition(sidebarWidth, ofDividerAt: 0)
+            sidebarShown = true
         }
-        sizeWindowToGuest()
+        guard let split else { return }
+        updateMinSize()
+        placePanes(in: split, sidebar: sidebarShown ? savedSidebarWidth : 0)
+        window?.layoutIfNeeded()
+        display.syncPointerToPicture(recenterRelative: true)
+        refreshSidebarChrome()
+    }
+
+    @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleSidebar(_:)) {
+            menuItem.title = sidebarShown ? "Hide Sidebar" : "Show Sidebar"
+        }
+        return true
+    }
+
+    private func refreshSidebarChrome() {
+        let title = sidebarShown ? "Hide Sidebar" : "Show Sidebar"
+        sidebarItem?.toolTip = title
+        sidebarItem?.image?.accessibilityDescription = title
+        guard let menu = NSApp.mainMenu?.item(withTitle: "View")?.submenu else { return }
+        for item in menu.items where item.action == #selector(toggleSidebar(_:)) {
+            item.title = title
+        }
+    }
+
+    func installSidebarMenu() {
+        let main = NSApp.mainMenu ?? NSMenu()
+        if NSApp.mainMenu == nil {
+            NSApp.mainMenu = main
+        }
+        let viewItem: NSMenuItem
+        if let existing = main.items.first(where: { $0.title == "View" }) {
+            viewItem = existing
+        } else {
+            viewItem = NSMenuItem()
+            viewItem.title = "View"
+            viewItem.submenu = NSMenu(title: "View")
+            if let index = main.items.firstIndex(where: { $0.title == "Window" }) {
+                main.insertItem(viewItem, at: index)
+            } else {
+                main.addItem(viewItem)
+            }
+        }
+        let menu = viewItem.submenu ?? NSMenu(title: "View")
+        viewItem.submenu = menu
+        if menu.items.contains(where: { $0.action == #selector(toggleSidebar(_:)) }) {
+            refreshSidebarChrome()
+            return
+        }
+        let item = NSMenuItem(
+            title: "Hide Sidebar",
+            action: #selector(toggleSidebar(_:)),
+            keyEquivalent: "s"
+        )
+        item.keyEquivalentModifierMask = [.command, .control]
+        item.target = self
+        menu.addItem(item)
     }
 
     @objc private func newMachine() {
@@ -217,6 +360,7 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
             self?.newSheet = nil
             if let name, let disk, let rom, !name.isEmpty {
                 _ = self?.store.create(name: name, disk: disk, rom: rom)
+                self?.sidebar.reload()
             }
         }
         newSheet = sheet
@@ -229,22 +373,21 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         guard let window else { return }
         let prefs = store.document(id: store.selection)?.prefsPath
         let live = booted && store.selection == store.runningID
-        let host = NSHostingController(rootView: VMSettingsView(prefsPath: prefs, live: live) { [weak self] in
-            if let sheet = self?.settingsWindow {
-                self?.window?.endSheet(sheet)
+        let sheet = SettingsSheet(prefsPath: prefs, live: live) { [weak self] saved in
+            if let win = self?.settings?.window {
+                self?.window?.endSheet(win)
             }
-            self?.settingsWindow = nil
-            if live {
-                self?.display.setEdgeGrab(PrefsBridge.bool("edgegrab"))
+            self?.settings = nil
+            if saved && live {
+                self?.display.applyMousePrefs()
             }
-        })
-        host.view.frame = NSRect(x: 0, y: 0, width: 720, height: 480)
-        let sheet = NSWindow(contentViewController: host)
-        sheet.title = "Settings"
-        sheet.styleMask = [.titled, .closable]
-        settingsWindow = sheet
-        window.beginSheet(sheet)
+        }
+        settings = sheet
+        if let win = sheet.window {
+            window.beginSheet(win)
+        }
     }
+
 }
 
 private extension NSToolbarItem.Identifier {

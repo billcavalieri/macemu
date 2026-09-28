@@ -99,6 +99,9 @@
 		A10F9210BC10000000000063 /* nw_nvram.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000061 /* nw_nvram.cpp */; };
 		A10F9210BC10000000000072 /* nw_jit.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000071 /* nw_jit.cpp */; };
 		A10F9210BC10000000000073 /* nw_jit.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000071 /* nw_jit.cpp */; };
+		A10F9210BC10000000000082 /* nw_68k_jit.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000081 /* nw_68k_jit.cpp */; };
+		A10F9210BC10000000000083 /* nw_68k_jit.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A10F9210BC10000000000081 /* nw_68k_jit.cpp */; };
+		A10F9210BC10000000000084 /* prefs.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CE8B14A99EF0000B1711 /* prefs.cpp */; };
 		A1B2C3D4E5F60718293A4B02 /* sheepforce.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B01 /* sheepforce.cpp */; };
 		A1B2C3D4E5F60718293A4B04 /* qt_codec.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */; };
 		A1B2C3D4E5F60718293A4B06 /* sheepforce_metal.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B05 /* sheepforce_metal.mm */; };
@@ -381,6 +384,7 @@
 		A10F9210BC10000000000061 /* nw_nvram.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_nvram.cpp; path = ../nw_nvram.cpp; sourceTree = SOURCE_ROOT; };
 		A10F9210BC10000000000070 /* nw_jit.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = nw_jit.h; sourceTree = "<group>"; };
 		A10F9210BC10000000000071 /* nw_jit.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_jit.cpp; path = ../nw_jit.cpp; sourceTree = SOURCE_ROOT; };
+		A10F9210BC10000000000081 /* nw_68k_jit.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_68k_jit.cpp; path = ../nw_68k_jit.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B01 /* sheepforce.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = sheepforce.cpp; path = ../sheepforce.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = qt_codec.cpp; path = ../qt_codec.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B05 /* sheepforce_metal.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = sheepforce_metal.mm; sourceTree = "<group>"; };
@@ -551,6 +555,7 @@
 				A10F9210BC10000000000041 /* nw_devices.cpp */,
 				A10F9210BC10000000000061 /* nw_nvram.cpp */,
 				A10F9210BC10000000000071 /* nw_jit.cpp */,
+				A10F9210BC10000000000081 /* nw_68k_jit.cpp */,
 				A10F9210BC10000000000051 /* nw_script.cpp */,
 				0856CE0614A99EEF000B1711 /* MacOSX */,
 				0856CE8814A99EF0000B1711 /* main.cpp */,
@@ -1224,6 +1229,7 @@
 				A10F9210BC10000000000042 /* nw_devices.cpp in Sources */,
 				A10F9210BC10000000000062 /* nw_nvram.cpp in Sources */,
 				A10F9210BC10000000000072 /* nw_jit.cpp in Sources */,
+				A10F9210BC10000000000082 /* nw_68k_jit.cpp in Sources */,
 				A10F9210BC10000000000052 /* nw_script.cpp in Sources */,
 				0856D02514A99EF0000B1711 /* extfs_macosx.cpp in Sources */,
 				0856D05014A99EF1000B1711 /* prefs_macosx.mm in Sources */,
@@ -1305,6 +1311,8 @@
 				A10F9210BC10000000000043 /* nw_devices.cpp in Sources */,
 				A10F9210BC10000000000063 /* nw_nvram.cpp in Sources */,
 				A10F9210BC10000000000073 /* nw_jit.cpp in Sources */,
+				A10F9210BC10000000000083 /* nw_68k_jit.cpp in Sources */,
+				A10F9210BC10000000000084 /* prefs.cpp in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

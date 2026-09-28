@@ -28,6 +28,7 @@
 #include "nw_io.h"
 #include "nw_devices.h"
 #include "cpu_emulation.h"
+#include "xlowmem.h"
 
 
 static struct nw_devices_clock g_tb;
@@ -223,10 +224,23 @@ static uint32_t pic_iack(void)
 	{
 		static unsigned n;
 		n++;
-		if (n <= 32u || src == NW_VBL_IRQ)
-			printf("NW-BOOT G1: pic_iack n=%u src=%d vec=%02x pc=%08x ctpr=%u vbl_serv=%d ext=%d\n",
+		if (n <= 32u || src == NW_VBL_IRQ) {
+			/* NK: lbz level, 0x3f00(vector). That is the physical ConfigInfo
+			 * page at PA 0x3000. NW_CI_LA is not a host mapping. */
+			unsigned lvl = 0, mode = 0, tm = 0;
+			int nest = 0;
+			lvl = vm_read_memory_1(NW_CI_PA + 0xf00u + (vec & 0xffu));
+			if (RAMBaseHost) {
+				nest = (int)(int32)ReadMacInt32(XLM_IRQ_NEST);
+				mode = ReadMacInt32(XLM_RUN_MODE);
+				tm = ReadMacInt32(0x16A);
+			}
+			printf("NW-BOOT G1: pic_iack n=%u src=%d vec=%02x pc=%08x ctpr=%u vbl_serv=%d ext=%d lvl=%u nest=%d mode=%u tm=%u\n",
 			       n, src, (unsigned)vec, (unsigned)nw_io_last_pc(),
-			       (unsigned)pic.ctpr, pic.src[NW_VBL_IRQ].servicing, nw_io_ext_irq);
+			       (unsigned)pic.ctpr, pic.src[NW_VBL_IRQ].servicing, nw_io_ext_irq,
+			       lvl, nest, mode, tm);
+			fflush(stdout);
+		}
 	}
 #endif
 	return vec;
@@ -297,11 +311,9 @@ void nw_display_vbl_clear(void)
 	pic_set_irq(NW_VBL_IRQ, 0);
 }
 
-static uint32_t g_guest_pc;
-
-void nw_devices_note_pc(uint32_t pc)
+int nw_pic_vbl_servicing(void)
 {
-	g_guest_pc = pc;
+	return pic.src[NW_VBL_IRQ].servicing;
 }
 
 static void vbl_tick(void)
@@ -317,19 +329,10 @@ static void vbl_tick(void)
 		return;
 	}
 	vbl_next += period;
-	/* The video hit iack 9439 and never wrote EOI, then sat in the
-	 * idle loop at 0027bae0 with this source still in service. A new
-	 * VBL cannot be delivered while that bit is set. Clear it only
-	 * from the idle loop. A slow handler is still at its own PC, and
-	 * clearing there dropped the startup screen's EOI. */
-	if (pic.src[NW_VBL_IRQ].servicing && g_guest_pc == 0x0027bae0u) {
-		pic.src[NW_VBL_IRQ].servicing = 0;
-		pic_update();
-#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
-		printf("NW-BOOT G1: vbl idle serv cleared pc=%08x\n", g_guest_pc);
-		fflush(stdout);
-#endif
-	}
+	/* In-service stays set until the guest stores the OpenPIC EOI
+	 * (NK stwx at 50325168). Dropping it from the idle loop at
+	 * 0027bae0 raced that store: the next IACK was acknowledged by
+	 * the leftover completion path and Ticks at $016A stopped. */
 #if defined(NW_BOOT_LOG) && NW_BOOT_LOG
 	{
 		static unsigned n;
@@ -351,6 +354,9 @@ static void vbl_tick(void)
 
 void nw_devices_tick(void)
 {
+	/* Do not Execute68k from this tick: it runs inside execute() and
+	 * Execute68k writes XLM_RUN_MODE = EMUL_OP, which crashes the
+	 * native desktop. */
 	if (g_pmu_power_pending >= 0) {
 		const int ev = g_pmu_power_pending;
 		g_pmu_power_pending = -1;
@@ -1036,12 +1042,6 @@ void nw_adb_mouse_move(int dx, int dy)
 {
 	adb.dx.fetch_add(dx);
 	adb.dy.fetch_add(dy);
-}
-
-void nw_adb_mouse_clear_delta(void)
-{
-	adb.dx.store(0);
-	adb.dy.store(0);
 }
 
 void nw_adb_mouse_button(int button, int down)

@@ -278,16 +278,16 @@ void SheepForceComponentsArm(void)
 	components_armed = 1;
 }
 
-void QtCodecRegister(void)
+int QtCodecRegister(void)
 {
 	if (!components_armed || !PrefsFindBool("qtcodec"))
-		return;
-	static int once;
-	if (once)
-		return;
-	once = 1;
+		return 0;
+	static int next;
+	if (next >= 2)
+		return 0;
+	const int s = next++;
 	static const uint32 subtypes[2] = { 0x63766964u, 0x53565131u }; /* cvid, SVQ1 */
-	for (int s = 0; s < 2; s++) {
+	{
 		static const uint8 glue_template[] = {
 			0x4e, 0x56, 0x00, 0x00,
 			0x48, 0xe7, 0x80, 0x18,
@@ -331,6 +331,7 @@ void QtCodecRegister(void)
 		Execute68k(stub_addr, &rr);
 		printf("SheepForce: qtcodec register %08x -> %08x\n", subtypes[s], (unsigned)rr.d[0]);
 	}
+	return 1;
 }
 
 int32 SheepForceRaveGuest(uint32 selector_word, uint32 params)
@@ -345,13 +346,13 @@ int32 SheepForceRaveGuest(uint32 selector_word, uint32 params)
 	return -50;
 }
 
-void SheepForceRaveRegister(void)
+int SheepForceRaveRegister(void)
 {
 	if (!components_armed || !PrefsFindBool("sheepforce"))
-		return;
+		return 0;
 	static int once;
 	if (once)
-		return;
+		return 0;
 	once = 1;
 	static const uint8 glue_template[] = {
 		0x4e, 0x56, 0x00, 0x00,
@@ -394,4 +395,5 @@ void SheepForceRaveRegister(void)
 	memset(&rr, 0, sizeof rr);
 	Execute68k(SheepProc(stub, n), &rr);
 	printf("SheepForce: RAVE engine component %08x\n", (unsigned)rr.d[0]);
+	return 1;
 }

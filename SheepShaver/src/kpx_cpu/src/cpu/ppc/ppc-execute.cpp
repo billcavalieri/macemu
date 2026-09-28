@@ -1387,6 +1387,7 @@ void powerpc_cpu::execute_rfi(uint32 opcode)
 #ifdef SHEEPSHAVER
 		nw_log_msr_dr(srr1_);
 		nw_log_msr_write("rfi", srr0_, srr1_);
+		nw_log_emu_rfi(srr0_, srr1_, cr().get(), sprg(0));
 #endif
 		nw_jit_dtlb_flush_if_pr(old, srr1_, NW_JIT_DTLB_FL_RFI);
 		pc() = srr0_;

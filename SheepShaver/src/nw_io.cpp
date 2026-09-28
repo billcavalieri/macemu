@@ -546,6 +546,18 @@ void nw_fb_commit(void)
 	}
 }
 
+void nw_fb_fps_proxy_note(uint32_t hash, int have)
+{
+	if (!have)
+		return;
+	if (g_fps_have && hash != g_fps_hash) {
+		g_fps_frames++;
+		g_fps_frames_sec++;
+	}
+	g_fps_hash = hash;
+	g_fps_have = 1;
+}
+
 void nw_fb_fps_proxy_sample(const uint8_t *fb, uint32_t pitch, uint32_t w, uint32_t h)
 {
 	if (!fb || w < 32 || h < 32 || pitch == 0)
@@ -565,12 +577,7 @@ void nw_fb_fps_proxy_sample(const uint8_t *fb, uint32_t pitch, uint32_t w, uint3
 			if (bpp > 2) { hash ^= p[2]; hash *= 16777619u; }
 		}
 	}
-	if (g_fps_have && hash != g_fps_hash) {
-		g_fps_frames++;
-		g_fps_frames_sec++;
-	}
-	g_fps_hash = hash;
-	g_fps_have = 1;
+	nw_fb_fps_proxy_note(hash, 1);
 }
 
 void nw_fb_fps_proxy_tick(void)

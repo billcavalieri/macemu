@@ -105,7 +105,6 @@ struct nw_devices_clock {
 /* Registers the models with nw_io. Call once, before the guest runs. */
 void nw_devices_init(const struct nw_devices_clock *tb);
 /* Periodic work (OpenPIC timers); call from the CPU's coarse tick. */
-void nw_devices_note_pc(uint32_t pc);
 void nw_devices_tick(void);
 
 enum nw_pmu_power_event {
@@ -120,6 +119,7 @@ void nw_pmu_set_power_hook(void (*hook)(int event, void *ctx), void *ctx);
  * status clear (its interrupt handler). */
 void nw_display_vbl_enable(int on);
 void nw_display_vbl_clear(void);
+int nw_pic_vbl_servicing(void);
 
 /* OpenPIC external source n (0..63): level 1 asserts, 0 deasserts. Edge
  * sources (IVPR sense = 0) latch on the rising edge. */
@@ -148,7 +148,6 @@ int nw_pmu_state(void);
 void nw_adb_key(uint8_t code, int down);
 void nw_adb_mouse_move(int dx, int dy);
 void nw_adb_mouse_button(int button, int down);
-void nw_adb_mouse_clear_delta(void);
 /* Keylargo GPIO pin register n (0..35) and pin input drive. */
 uint32_t nw_gpio_read(uint32_t n);
 void nw_gpio_set(uint32_t n, int state);
@@ -204,7 +203,10 @@ enum {
 	/* ADB */
 	NW_ADB_BUSRESET = 0x0, NW_ADB_FLUSH = 0x1, NW_ADB_WRITEREG = 0x8, NW_ADB_READREG = 0xc,
 	NW_ADB_KBD_ADDR = 2, NW_ADB_MOUSE_ADDR = 3,
-	NW_ADB_POLL_MS = 20,
+	/* 63 pixels per poll is the ADB packet limit. 20 ms left the boot
+	 * arrow behind a fast move, so the hidden host pointer reached the
+	 * picture edge before the arrow reached Disk First Aid's Done. */
+	NW_ADB_POLL_MS = 8,
 	NW_PMU_INT_ACK = 0x78, NW_PMU_SET_INTR_MASK = 0x70, NW_PMU_ADB_CMD = 0x20,
 	NW_PMU_ADB_POLL_OFF = 0x21, NW_PMU_RESET = 0xd0, NW_PMU_SHUTDOWN = 0x7e,
 	NW_PMU_READ_RTC = 0x38, NW_PMU_SET_RTC = 0x30, NW_PMU_SYSTEM_READY = 0xdf,

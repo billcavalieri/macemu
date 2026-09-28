@@ -1,378 +1,328 @@
 /*
- *  VMSettingsView.swift - Settings sheet. Reads and writes the prefs file.
+ *  VMSettingsView.swift - AppKit settings sheet. Reads and writes the prefs file.
  *
  *  (C) 2026 Bill Cavalieri
  *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
  */
 
-import SwiftUI
+import AppKit
 
-private enum SettingsPage: String, CaseIterable, Identifiable {
-    case drives = "Drives"
-    case display = "Display"
-    case sound = "Sound"
-    case system = "System"
-    case input = "Input"
-    var id: String { rawValue }
-}
+@MainActor
+final class SettingsSheet: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+    private let prefsPath: String?
+    private let live: Bool
+    private let onClose: (Bool) -> Void
+    private let pages: [(title: String, rows: [PrefRow])]
+    private let pageTable = NSTableView()
+    private let detail = NSStackView()
+    private var controls: [String: NSControl] = [:]
+    private var pageRows: [[NSView]] = []
+    private var saved = false
 
-struct VMSettingsView: View {
-    var prefsPath: String?
-    var live: Bool
-    var onClose: () -> Void
+    init(prefsPath: String?, live: Bool, onClose: @escaping (Bool) -> Void) {
+        self.prefsPath = prefsPath
+        self.live = live
+        self.onClose = onClose
+        pages = Self.makePages()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Settings"
+        super.init(window: window)
+        build(window)
+        pageRows = pages.map { page in page.rows.map { rowView($0) } }
+        load()
+        pageTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        showPage(0)
+    }
 
-    @State private var page: SettingsPage = .drives
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:)")
+    }
 
-    @State private var disk = ""
-    @State private var cdrom = ""
-    @State private var extfs = ""
-    @State private var bootdrive = 0
-    @State private var bootdriver = 0
-    @State private var nocdrom = false
+    func numberOfRows(in tableView: NSTableView) -> Int { pages.count }
 
-    @State private var screen = "win/1024/768"
-    @State private var windowmodes = 0
-    @State private var screenmodes = 0
-    @State private var frameskip = 1
-    @State private var gfxaccel = true
-    @State private var sheepforce = true
-    @State private var qtcodec = true
-    @State private var hardcursor = false
-    @State private var scaleNearest = false
-    @State private var scaleInteger = false
-    @State private var initGrab = false
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let cell = NSTableCellView()
+        let label = NSTextField(labelWithString: pages[row].title)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        cell.textField = label
+        return cell
+    }
 
-    @State private var nosound = false
-    @State private var bootchime = true
-    @State private var soundBuffer = 0
-    @State private var dsp = "/dev/dsp"
-    @State private var mixer = "/dev/mixer"
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        let row = pageTable.selectedRow
+        if row >= 0 { showPage(row) }
+    }
 
-    @State private var ramMB = 512
-    @State private var rom = ""
-    @State private var jit = true
-    @State private var jit68k = false
-    @State private var ignoresegv = true
-    @State private var ignoreillegal = true
-    @State private var cpuclock = 0
-    @State private var yearofs = 0
-    @State private var dayofs = 0
-    @State private var nogui = false
-    @State private var noclipconversion = false
-    @State private var nonet = false
-    @State private var ether = ""
-    @State private var idlewait = true
+    private func build(_ window: NSWindow) {
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("page"))
+        column.width = 160
+        pageTable.addTableColumn(column)
+        pageTable.headerView = nil
+        pageTable.dataSource = self
+        pageTable.delegate = self
+        let pageScroll = NSScrollView()
+        pageScroll.documentView = pageTable
+        pageScroll.hasVerticalScroller = true
+        pageScroll.translatesAutoresizingMaskIntoConstraints = false
 
-    @State private var seriala = "/dev/null"
-    @State private var serialb = "/dev/null"
-    @State private var keyboardtype = 5
-    @State private var hotkey = 0
-    @State private var swapOptCmd = false
-    @State private var keycodes = false
-    @State private var keycodefile = ""
-    @State private var mousewheelmode = 1
-    @State private var mousewheellines = 3
-    @State private var edgegrab = true
-    @State private var nameEncoding = 0
+        detail.orientation = .vertical
+        detail.alignment = .leading
+        detail.spacing = 8
+        detail.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        detail.translatesAutoresizingMaskIntoConstraints = false
+        let detailScroll = NSScrollView()
+        detailScroll.documentView = detail
+        detailScroll.hasVerticalScroller = true
+        detailScroll.drawsBackground = false
+        detailScroll.translatesAutoresizingMaskIntoConstraints = false
 
-    var body: some View {
-        NavigationSplitView {
-            List(SettingsPage.allCases, selection: $page) { item in
-                Label(item.rawValue, systemImage: icon(item))
-                    .tag(item)
-            }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-        } detail: {
-            Form {
-                switch page {
-                case .drives:
-                    TextField("disk", text: $disk)
-                    TextField("cdrom", text: $cdrom)
-                    TextField("extfs", text: $extfs)
-                    TextField("bootdrive", value: $bootdrive, format: .number)
-                    TextField("bootdriver", value: $bootdriver, format: .number)
-                    Toggle("nocdrom", isOn: $nocdrom)
-                case .display:
-                    TextField("screen", text: $screen)
-                    TextField("windowmodes", value: $windowmodes, format: .number)
-                    TextField("screenmodes", value: $screenmodes, format: .number)
-                    TextField("frameskip", value: $frameskip, format: .number)
-                    Toggle("gfxaccel", isOn: $gfxaccel)
-                    Toggle("sheepforce", isOn: $sheepforce)
-                    Toggle("qtcodec", isOn: $qtcodec)
-                    Toggle("hardcursor", isOn: $hardcursor)
-                    Toggle("scale_nearest", isOn: $scaleNearest)
-                    Toggle("scale_integer", isOn: $scaleInteger)
-                    Toggle("init_grab", isOn: $initGrab)
-                case .sound:
-                    Toggle("nosound", isOn: $nosound)
-                    Toggle("bootchime", isOn: $bootchime)
-                    TextField("sound_buffer", value: $soundBuffer, format: .number)
-                    TextField("dsp", text: $dsp)
-                    TextField("mixer", text: $mixer)
-                case .system:
-                    TextField("ramsize (MB)", value: $ramMB, format: .number)
-                    TextField("rom", text: $rom)
-                    Toggle("jit", isOn: $jit)
-                    Toggle("jit68k", isOn: $jit68k)
-                    Toggle("ignoresegv", isOn: $ignoresegv)
-                    Toggle("ignoreillegal", isOn: $ignoreillegal)
-                    TextField("cpuclock", value: $cpuclock, format: .number)
-                    TextField("yearofs", value: $yearofs, format: .number)
-                    TextField("dayofs", value: $dayofs, format: .number)
-                    Toggle("nogui", isOn: $nogui)
-                    Toggle("noclipconversion", isOn: $noclipconversion)
-                    Toggle("nonet", isOn: $nonet)
-                    TextField("ether", text: $ether)
-                    Toggle("idlewait", isOn: $idlewait)
-                    TextField("name_encoding", value: $nameEncoding, format: .number)
-                case .input:
-                    TextField("seriala", text: $seriala)
-                    TextField("serialb", text: $serialb)
-                    TextField("keyboardtype", value: $keyboardtype, format: .number)
-                    TextField("hotkey", value: $hotkey, format: .number)
-                    Toggle("swap_opt_cmd", isOn: $swapOptCmd)
-                    Toggle("keycodes", isOn: $keycodes)
-                    TextField("keycodefile", text: $keycodefile)
-                    TextField("mousewheelmode", value: $mousewheelmode, format: .number)
-                    TextField("mousewheellines", value: $mousewheellines, format: .number)
-                    Toggle("edgegrab", isOn: $edgegrab)
-                }
-            }
-            .formStyle(.grouped)
-            .navigationTitle(page.rawValue)
+        let split = NSSplitView()
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.translatesAutoresizingMaskIntoConstraints = false
+        split.addArrangedSubview(pageScroll)
+        split.addArrangedSubview(detailScroll)
+
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelSheet))
+        let save = NSButton(title: "Save", target: self, action: #selector(saveSheet))
+        save.keyEquivalent = "\r"
+        let buttons = NSStackView(views: [NSView(), cancel, save])
+        buttons.orientation = .horizontal
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+
+        let root = NSView()
+        root.addSubview(split)
+        root.addSubview(buttons)
+        window.contentView = root
+        NSLayoutConstraint.activate([
+            split.topAnchor.constraint(equalTo: root.topAnchor),
+            split.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            split.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            buttons.topAnchor.constraint(equalTo: split.bottomAnchor, constant: 8),
+            buttons.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            buttons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
+            pageScroll.widthAnchor.constraint(equalToConstant: 180),
+            detail.widthAnchor.constraint(greaterThanOrEqualToConstant: 480)
+        ])
+    }
+
+    private func showPage(_ index: Int) {
+        for view in detail.arrangedSubviews {
+            detail.removeArrangedSubview(view)
+            view.removeFromSuperview()
         }
-        .onAppear(perform: load)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { onClose() }
+        guard index >= 0, index < pageRows.count else { return }
+        for view in pageRows[index] {
+            detail.addArrangedSubview(view)
+        }
+    }
+
+    private func rowView(_ row: PrefRow) -> NSView {
+        let line = NSStackView()
+        line.orientation = .horizontal
+        line.alignment = .centerY
+        let label = NSTextField(labelWithString: row.label)
+        label.alignment = .right
+        label.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        line.addArrangedSubview(label)
+        let control = makeControl(row)
+        controls[row.key] = control
+        line.addArrangedSubview(control)
+        if row.key == "mouse" {
+            let wrap = NSStackView()
+            wrap.orientation = .vertical
+            wrap.alignment = .leading
+            wrap.addArrangedSubview(line)
+            let note = NSTextField(wrappingLabelWithString: "Relative grabs when you click the picture. The picture edge releases the pointer. ctrl-g releases it too.")
+            note.textColor = .secondaryLabelColor
+            note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            note.preferredMaxLayoutWidth = 360
+            wrap.addArrangedSubview(note)
+            return wrap
+        }
+        return line
+    }
+
+    private func makeControl(_ row: PrefRow) -> NSControl {
+        switch row.kind {
+        case .toggle, .mouse:
+            let button = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+            button.setButtonType(.switch)
+            return button
+        case .text, .integer, .ramMB:
+            let field = NSTextField(string: "")
+            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
+            if row.kind != .text {
+                let formatter = NumberFormatter()
+                formatter.allowsFloats = false
+                field.formatter = formatter
             }
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Save") {
-                    save()
-                    onClose()
-                }
-            }
+            return field
         }
     }
 
     private func load() {
-        if live {
-            disk = PrefsBridge.string("disk")
-            cdrom = PrefsBridge.string("cdrom")
-            extfs = PrefsBridge.string("extfs")
-            bootdrive = PrefsBridge.int("bootdrive")
-            bootdriver = PrefsBridge.int("bootdriver")
-            nocdrom = PrefsBridge.bool("nocdrom")
-            screen = PrefsBridge.string("screen")
-            windowmodes = PrefsBridge.int("windowmodes")
-            screenmodes = PrefsBridge.int("screenmodes")
-            frameskip = PrefsBridge.int("frameskip")
-            gfxaccel = PrefsBridge.bool("gfxaccel")
-            sheepforce = PrefsBridge.bool("sheepforce")
-            qtcodec = PrefsBridge.bool("qtcodec")
-            hardcursor = PrefsBridge.bool("hardcursor")
-            scaleNearest = PrefsBridge.bool("scale_nearest")
-            scaleInteger = PrefsBridge.bool("scale_integer")
-            initGrab = PrefsBridge.bool("init_grab")
-            nosound = PrefsBridge.bool("nosound")
-            bootchime = PrefsBridge.bool("bootchime")
-            soundBuffer = PrefsBridge.int("sound_buffer")
-            dsp = PrefsBridge.string("dsp")
-            mixer = PrefsBridge.string("mixer")
-            ramMB = max(PrefsBridge.int("ramsize") / (1024 * 1024), 1)
-            rom = PrefsBridge.string("rom")
-            jit = PrefsBridge.bool("jit")
-            jit68k = PrefsBridge.bool("jit68k")
-            ignoresegv = PrefsBridge.bool("ignoresegv")
-            ignoreillegal = PrefsBridge.bool("ignoreillegal")
-            cpuclock = PrefsBridge.int("cpuclock")
-            yearofs = PrefsBridge.int("yearofs")
-            dayofs = PrefsBridge.int("dayofs")
-            nogui = PrefsBridge.bool("nogui")
-            noclipconversion = PrefsBridge.bool("noclipconversion")
-            nonet = PrefsBridge.bool("nonet")
-            ether = PrefsBridge.string("ether")
-            idlewait = PrefsBridge.bool("idlewait")
-            nameEncoding = PrefsBridge.int("name_encoding")
-            seriala = PrefsBridge.string("seriala")
-            serialb = PrefsBridge.string("serialb")
-            keyboardtype = PrefsBridge.int("keyboardtype")
-            hotkey = PrefsBridge.int("hotkey")
-            swapOptCmd = PrefsBridge.bool("swap_opt_cmd")
-            keycodes = PrefsBridge.bool("keycodes")
-            keycodefile = PrefsBridge.string("keycodefile")
-            mousewheelmode = PrefsBridge.int("mousewheelmode")
-            mousewheellines = PrefsBridge.int("mousewheellines")
-            edgegrab = PrefsBridge.bool("edgegrab")
-            return
+        let values = live ? nil : prefsPath.map { PrefsFile.load($0) }
+        for page in pages {
+            for row in page.rows {
+                guard let control = controls[row.key] else { continue }
+                switch row.kind {
+                case .text:
+                    (control as? NSTextField)?.stringValue = readString(row.key, row.fallback, values)
+                case .integer:
+                    (control as? NSTextField)?.stringValue = "\(readInt(row.key, Int(row.fallback) ?? 0, values))"
+                case .ramMB:
+                    let bytes = readInt("ramsize", 536870912, values)
+                    (control as? NSTextField)?.stringValue = "\(max(bytes / (1024 * 1024), 1))"
+                case .toggle:
+                    (control as? NSButton)?.state = readBool(row.key, row.fallback == "true", values) ? .on : .off
+                case .mouse:
+                    (control as? NSButton)?.state = readString("mouse", "absolute", values) == "relative" ? .on : .off
+                }
+            }
         }
-        guard let prefsPath else { return }
-        let values = PrefsFile.load(prefsPath)
-        disk = PrefsFile.string(values, "disk")
-        cdrom = PrefsFile.string(values, "cdrom")
-        extfs = PrefsFile.string(values, "extfs")
-        bootdrive = PrefsFile.int(values, "bootdrive")
-        bootdriver = PrefsFile.int(values, "bootdriver")
-        nocdrom = PrefsFile.bool(values, "nocdrom")
-        screen = PrefsFile.string(values, "screen", "win/1024/768")
-        windowmodes = PrefsFile.int(values, "windowmodes")
-        screenmodes = PrefsFile.int(values, "screenmodes")
-        frameskip = PrefsFile.int(values, "frameskip", 1)
-        gfxaccel = PrefsFile.bool(values, "gfxaccel", true)
-        sheepforce = PrefsFile.bool(values, "sheepforce", true)
-        qtcodec = PrefsFile.bool(values, "qtcodec", true)
-        hardcursor = PrefsFile.bool(values, "hardcursor")
-        scaleNearest = PrefsFile.bool(values, "scale_nearest")
-        scaleInteger = PrefsFile.bool(values, "scale_integer")
-        initGrab = PrefsFile.bool(values, "init_grab")
-        nosound = PrefsFile.bool(values, "nosound")
-        bootchime = PrefsFile.bool(values, "bootchime", true)
-        soundBuffer = PrefsFile.int(values, "sound_buffer")
-        dsp = PrefsFile.string(values, "dsp", "/dev/dsp")
-        mixer = PrefsFile.string(values, "mixer", "/dev/mixer")
-        ramMB = max(PrefsFile.int(values, "ramsize", 536870912) / (1024 * 1024), 1)
-        rom = PrefsFile.string(values, "rom")
-        jit = PrefsFile.bool(values, "jit", true)
-        jit68k = PrefsFile.bool(values, "jit68k")
-        ignoresegv = PrefsFile.bool(values, "ignoresegv", true)
-        ignoreillegal = PrefsFile.bool(values, "ignoreillegal", true)
-        cpuclock = PrefsFile.int(values, "cpuclock")
-        yearofs = PrefsFile.int(values, "yearofs")
-        dayofs = PrefsFile.int(values, "dayofs")
-        nogui = PrefsFile.bool(values, "nogui")
-        noclipconversion = PrefsFile.bool(values, "noclipconversion")
-        nonet = PrefsFile.bool(values, "nonet")
-        ether = PrefsFile.string(values, "ether")
-        idlewait = PrefsFile.bool(values, "idlewait", true)
-        nameEncoding = PrefsFile.int(values, "name_encoding")
-        seriala = PrefsFile.string(values, "seriala", "/dev/null")
-        serialb = PrefsFile.string(values, "serialb", "/dev/null")
-        keyboardtype = PrefsFile.int(values, "keyboardtype", 5)
-        hotkey = PrefsFile.int(values, "hotkey")
-        swapOptCmd = PrefsFile.bool(values, "swap_opt_cmd")
-        keycodes = PrefsFile.bool(values, "keycodes")
-        keycodefile = PrefsFile.string(values, "keycodefile")
-        mousewheelmode = PrefsFile.int(values, "mousewheelmode", 1)
-        mousewheellines = PrefsFile.int(values, "mousewheellines", 3)
-        edgegrab = PrefsFile.bool(values, "edgegrab", true)
     }
 
-    private func documentValues() -> [String: String] {
+    private func readString(_ key: String, _ fallback: String, _ values: [String: String]?) -> String {
+        if live { return PrefsBridge.string(key).isEmpty ? fallback : PrefsBridge.string(key) }
+        return PrefsFile.string(values ?? [:], key, fallback)
+    }
+
+    private func readInt(_ key: String, _ fallback: Int, _ values: [String: String]?) -> Int {
+        if live { return PrefsBridge.int(key) }
+        return PrefsFile.int(values ?? [:], key, fallback)
+    }
+
+    private func readBool(_ key: String, _ fallback: Bool, _ values: [String: String]?) -> Bool {
+        if live { return PrefsBridge.bool(key) }
+        return PrefsFile.bool(values ?? [:], key, fallback)
+    }
+
+    @objc private func cancelSheet() {
+        saved = false
+        onClose(false)
+    }
+
+    @objc private func saveSheet() {
+        var document: [String: String] = [:]
+        for page in pages {
+            for row in page.rows {
+                guard let control = controls[row.key] else { continue }
+                switch row.kind {
+                case .text:
+                    let value = (control as? NSTextField)?.stringValue ?? ""
+                    document[row.key] = value
+                    if live { PrefsBridge.setString(row.key, value) }
+                case .integer:
+                    let value = Int((control as? NSTextField)?.stringValue ?? "") ?? 0
+                    document[row.key] = "\(value)"
+                    if live { PrefsBridge.setInt(row.key, value) }
+                case .ramMB:
+                    let mb = Int((control as? NSTextField)?.stringValue ?? "") ?? 1
+                    let bytes = max(mb, 1) * 1024 * 1024
+                    document["ramsize"] = "\(bytes)"
+                    if live { PrefsBridge.setInt("ramsize", bytes) }
+                case .toggle:
+                    let on = (control as? NSButton)?.state == .on
+                    document[row.key] = on ? "true" : "false"
+                    if live { PrefsBridge.setBool(row.key, on) }
+                case .mouse:
+                    let relative = (control as? NSButton)?.state == .on
+                    document["mouse"] = relative ? "relative" : "absolute"
+                    if live { PrefsBridge.setString("mouse", relative ? "relative" : "absolute") }
+                }
+            }
+        }
+        if live { PrefsBridge.save() }
+        if let prefsPath { PrefsFile.save(prefsPath, document) }
+        saved = true
+        onClose(true)
+    }
+
+    private static func makePages() -> [(title: String, rows: [PrefRow])] {
         [
-            "disk": disk,
-            "cdrom": cdrom,
-            "extfs": extfs,
-            "bootdrive": "\(bootdrive)",
-            "bootdriver": "\(bootdriver)",
-            "nocdrom": nocdrom ? "true" : "false",
-            "screen": screen,
-            "windowmodes": "\(windowmodes)",
-            "screenmodes": "\(screenmodes)",
-            "frameskip": "\(frameskip)",
-            "gfxaccel": gfxaccel ? "true" : "false",
-            "sheepforce": sheepforce ? "true" : "false",
-            "qtcodec": qtcodec ? "true" : "false",
-            "hardcursor": hardcursor ? "true" : "false",
-            "scale_nearest": scaleNearest ? "true" : "false",
-            "scale_integer": scaleInteger ? "true" : "false",
-            "init_grab": initGrab ? "true" : "false",
-            "nosound": nosound ? "true" : "false",
-            "bootchime": bootchime ? "true" : "false",
-            "sound_buffer": "\(soundBuffer)",
-            "dsp": dsp,
-            "mixer": mixer,
-            "ramsize": "\(ramMB * 1024 * 1024)",
-            "rom": rom,
-            "jit": jit ? "true" : "false",
-            "jit68k": jit68k ? "true" : "false",
-            "ignoresegv": ignoresegv ? "true" : "false",
-            "ignoreillegal": ignoreillegal ? "true" : "false",
-            "cpuclock": "\(cpuclock)",
-            "yearofs": "\(yearofs)",
-            "dayofs": "\(dayofs)",
-            "nogui": nogui ? "true" : "false",
-            "noclipconversion": noclipconversion ? "true" : "false",
-            "nonet": nonet ? "true" : "false",
-            "ether": ether,
-            "idlewait": idlewait ? "true" : "false",
-            "name_encoding": "\(nameEncoding)",
-            "seriala": seriala,
-            "serialb": serialb,
-            "keyboardtype": "\(keyboardtype)",
-            "hotkey": "\(hotkey)",
-            "swap_opt_cmd": swapOptCmd ? "true" : "false",
-            "keycodes": keycodes ? "true" : "false",
-            "keycodefile": keycodefile,
-            "mousewheelmode": "\(mousewheelmode)",
-            "mousewheellines": "\(mousewheellines)",
-            "edgegrab": edgegrab ? "true" : "false"
+            ("Drives", [
+                PrefRow("disk", "disk", .text, ""),
+                PrefRow("cdrom", "cdrom", .text, ""),
+                PrefRow("extfs", "extfs", .text, ""),
+                PrefRow("bootdrive", "bootdrive", .integer, "0"),
+                PrefRow("bootdriver", "bootdriver", .integer, "0"),
+                PrefRow("nocdrom", "nocdrom", .toggle, "false")
+            ]),
+            ("Display", [
+                PrefRow("screen", "screen", .text, "win/1024/768"),
+                PrefRow("windowmodes", "windowmodes", .integer, "0"),
+                PrefRow("screenmodes", "screenmodes", .integer, "0"),
+                PrefRow("frameskip", "frameskip", .integer, "1"),
+                PrefRow("gfxaccel", "gfxaccel", .toggle, "true"),
+                PrefRow("sheepforce", "sheepforce", .toggle, "true"),
+                PrefRow("qtcodec", "qtcodec", .toggle, "true"),
+                PrefRow("hardcursor", "hardcursor", .toggle, "false"),
+                PrefRow("scale_nearest", "scale_nearest", .toggle, "false"),
+                PrefRow("scale_integer", "scale_integer", .toggle, "false"),
+                PrefRow("init_grab", "init_grab", .toggle, "false")
+            ]),
+            ("Sound", [
+                PrefRow("nosound", "nosound", .toggle, "false"),
+                PrefRow("bootchime", "bootchime", .toggle, "true"),
+                PrefRow("sound_buffer", "sound_buffer", .integer, "0"),
+                PrefRow("dsp", "dsp", .text, "/dev/dsp"),
+                PrefRow("mixer", "mixer", .text, "/dev/mixer")
+            ]),
+            ("System", [
+                PrefRow("ramsize", "ramsize (MB)", .ramMB, "512"),
+                PrefRow("rom", "rom", .text, ""),
+                PrefRow("jit", "jit", .toggle, "true"),
+                PrefRow("jit68k", "jit68k", .toggle, "false"),
+                PrefRow("ignoresegv", "ignoresegv", .toggle, "true"),
+                PrefRow("ignoreillegal", "ignoreillegal", .toggle, "true"),
+                PrefRow("cpuclock", "cpuclock", .integer, "0"),
+                PrefRow("yearofs", "yearofs", .integer, "0"),
+                PrefRow("dayofs", "dayofs", .integer, "0"),
+                PrefRow("nogui", "nogui", .toggle, "false"),
+                PrefRow("noclipconversion", "noclipconversion", .toggle, "false"),
+                PrefRow("nonet", "nonet", .toggle, "false"),
+                PrefRow("ether", "ether", .text, ""),
+                PrefRow("idlewait", "idlewait", .toggle, "true"),
+                PrefRow("name_encoding", "name_encoding", .integer, "0")
+            ]),
+            ("Input", [
+                PrefRow("seriala", "seriala", .text, "/dev/null"),
+                PrefRow("serialb", "serialb", .text, "/dev/null"),
+                PrefRow("keyboardtype", "keyboardtype", .integer, "5"),
+                PrefRow("hotkey", "hotkey", .integer, "0"),
+                PrefRow("swap_opt_cmd", "swap_opt_cmd", .toggle, "false"),
+                PrefRow("keycodes", "keycodes", .toggle, "false"),
+                PrefRow("keycodefile", "keycodefile", .text, ""),
+                PrefRow("mousewheelmode", "mousewheelmode", .integer, "1"),
+                PrefRow("mousewheellines", "mousewheellines", .integer, "3"),
+                PrefRow("mouse", "optimize mouse for games", .mouse, "absolute")
+            ])
         ]
     }
+}
 
-    private func save() {
-        if live {
-            PrefsBridge.setString("disk", disk)
-            PrefsBridge.setString("cdrom", cdrom)
-            PrefsBridge.setString("extfs", extfs)
-            PrefsBridge.setInt("bootdrive", bootdrive)
-            PrefsBridge.setInt("bootdriver", bootdriver)
-            PrefsBridge.setBool("nocdrom", nocdrom)
-            PrefsBridge.setString("screen", screen)
-            PrefsBridge.setInt("windowmodes", windowmodes)
-            PrefsBridge.setInt("screenmodes", screenmodes)
-            PrefsBridge.setInt("frameskip", frameskip)
-            PrefsBridge.setBool("gfxaccel", gfxaccel)
-            PrefsBridge.setBool("sheepforce", sheepforce)
-            PrefsBridge.setBool("qtcodec", qtcodec)
-            PrefsBridge.setBool("hardcursor", hardcursor)
-            PrefsBridge.setBool("scale_nearest", scaleNearest)
-            PrefsBridge.setBool("scale_integer", scaleInteger)
-            PrefsBridge.setBool("init_grab", initGrab)
-            PrefsBridge.setBool("nosound", nosound)
-            PrefsBridge.setBool("bootchime", bootchime)
-            PrefsBridge.setInt("sound_buffer", soundBuffer)
-            PrefsBridge.setString("dsp", dsp)
-            PrefsBridge.setString("mixer", mixer)
-            PrefsBridge.setInt("ramsize", ramMB * 1024 * 1024)
-            PrefsBridge.setString("rom", rom)
-            PrefsBridge.setBool("jit", jit)
-            PrefsBridge.setBool("jit68k", jit68k)
-            PrefsBridge.setBool("ignoresegv", ignoresegv)
-            PrefsBridge.setBool("ignoreillegal", ignoreillegal)
-            PrefsBridge.setInt("cpuclock", cpuclock)
-            PrefsBridge.setInt("yearofs", yearofs)
-            PrefsBridge.setInt("dayofs", dayofs)
-            PrefsBridge.setBool("nogui", nogui)
-            PrefsBridge.setBool("noclipconversion", noclipconversion)
-            PrefsBridge.setBool("nonet", nonet)
-            PrefsBridge.setString("ether", ether)
-            PrefsBridge.setBool("idlewait", idlewait)
-            PrefsBridge.setInt("name_encoding", nameEncoding)
-            PrefsBridge.setString("seriala", seriala)
-            PrefsBridge.setString("serialb", serialb)
-            PrefsBridge.setInt("keyboardtype", keyboardtype)
-            PrefsBridge.setInt("hotkey", hotkey)
-            PrefsBridge.setBool("swap_opt_cmd", swapOptCmd)
-            PrefsBridge.setBool("keycodes", keycodes)
-            PrefsBridge.setString("keycodefile", keycodefile)
-            PrefsBridge.setInt("mousewheelmode", mousewheelmode)
-            PrefsBridge.setInt("mousewheellines", mousewheellines)
-            PrefsBridge.setBool("edgegrab", edgegrab)
-            PrefsBridge.save()
-        }
-        if let prefsPath {
-            PrefsFile.save(prefsPath, documentValues())
-        }
-    }
-
-    private func icon(_ page: SettingsPage) -> String {
-        switch page {
-        case .drives: return "externaldrive"
-        case .display: return "display"
-        case .sound: return "speaker.wave.2"
-        case .system: return "cpu"
-        case .input: return "keyboard"
-        }
+private struct PrefRow {
+    enum Kind { case text, integer, toggle, ramMB, mouse }
+    let key: String
+    let label: String
+    let kind: Kind
+    let fallback: String
+    init(_ key: String, _ label: String, _ kind: Kind, _ fallback: String) {
+        self.key = key
+        self.label = label
+        self.kind = kind
+        self.fallback = fallback
     }
 }

@@ -8,17 +8,17 @@
 import AppKit
 import Foundation
 
-struct VirtualMachineDocument: Identifiable, Hashable, Sendable {
+struct VirtualMachineDocument: Hashable, Sendable {
     let id: String
     var name: String
     var prefsPath: String
 }
 
 @MainActor
-final class VirtualMachineStore: ObservableObject {
-    @Published var machines: [VirtualMachineDocument] = []
-    @Published var selection: String?
-    @Published var runningID: String?
+final class VirtualMachineStore {
+    var machines: [VirtualMachineDocument] = []
+    var selection: String?
+    var runningID: String?
 
     private static var root: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -72,7 +72,7 @@ final class VirtualMachineStore: ObservableObject {
         jit true
         sheepforce true
         qtcodec true
-        edgegrab true
+        mouse absolute
         gfxaccel true
         """
         try? body.write(to: prefs, atomically: true, encoding: .utf8)

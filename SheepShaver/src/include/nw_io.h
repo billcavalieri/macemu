@@ -172,6 +172,9 @@ void nw_fb_bind_host(uint8_t *base, uint32_t bytes);
 uint32_t nw_fb_phys(uint32_t *bytes);
 void nw_fb_commit(void);
 void nw_fb_fps_proxy_sample(const uint8_t *fb, uint32_t pitch, uint32_t w, uint32_t h);
+/* SheepForce presents without the SDL upload probe. have=0 leaves the
+ * counters alone; a changed hash counts one frame. */
+void nw_fb_fps_proxy_note(uint32_t hash, int have);
 void nw_fb_fps_proxy_tick(void);
 uint64_t nw_fb_fps_proxy_frames(void);
 unsigned nw_fb_fps_proxy_flat_max(void);

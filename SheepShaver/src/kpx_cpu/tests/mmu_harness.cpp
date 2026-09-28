@@ -4037,6 +4037,17 @@ int main()
 				CHECK(nw_jit_cache_get(0x2000u, 0x2700u, 0, 0, &cn, NULL, NULL, NULL, &gm) == cfn);
 				CHECK(gm == (1u << 3));
 				CHECK(nw_jit_op_gpr_mask(nw_ppc_addi(3, 3, 1)) == (1u << 3));
+				CHECK(nw_jit_op_gpr_mask(nw_ppc_addi(3, 0, 1)) == (1u << 3));
+				CHECK(nw_jit_op_gpr_mask(nw_ppc_mulli(4, 0, 6)) == ((1u << 4) | 1u));
+				CHECK(nw_jit_op_gpr_mask(nw_ppc_cmpi(0, 1)) == 1u);
+				CHECK(nw_jit_op_gpr_mask(nw_ppc_cmp(0, 3)) == (1u | (1u << 3)));
+				CHECK(nw_jit_op_gpr_mask(nw_ppc_add(3, 0, 4, 0)) ==
+				      ((1u << 3) | 1u | (1u << 4)));
+				CHECK(nw_jit_op_fpr_mask(nw_ppc_addi(3, 0, 1)) == 0);
+				CHECK(nw_jit_op_fpr_mask(nw_ppc_fmr(2, 1)) == ((1u << 2) | (1u << 1)));
+				CHECK(nw_jit_op_fpr_mask(nw_ppc_fmadds(1, 2, 3, 4)) ==
+				      ((1u << 1) | (1u << 2) | (1u << 3) | (1u << 4)));
+				CHECK(nw_jit_tail_max() == 4);
 			}
 			cops[0] = nw_ppc_b(16, 0);
 			cfn = nw_jit_compile(cops, 1, 0x2800u, 0x2000u, 0, 0);
@@ -4052,7 +4063,7 @@ int main()
 			int16_t cd = 0;
 			CHECK(nw_jit_cache_get(0x2000u, 0x2900u, 0, 0, &cn, NULL, NULL, &ch,
 					       NULL, &cd) == cfn);
-			CHECK(ch == 0);
+			CHECK(ch == 0x2904u);
 			CHECK(cd == 16);
 			cops[0] = nw_ppc_bclr(NW_PPC_BO_ALWAYS, 0);
 			cfn = nw_jit_compile(cops, 1, 0x2a00u, 0x2000u, 0, 0);

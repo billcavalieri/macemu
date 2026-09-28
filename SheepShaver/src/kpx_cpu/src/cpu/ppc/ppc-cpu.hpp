@@ -305,6 +305,10 @@ private:
 	int programint_kcall_fast(void);
 #endif
 	void tick_decrementer();
+	void catch_up_timebase();	/* apply the TB delta now; idle sleep bypasses the 256 divider */
+#ifdef SHEEPSHAVER
+	int guest_idle_wait();
+#endif
 	uint32 tau_read(int idx) const;	/* THRM1/THRM2 with the comparison result */
 	bool mfspr_oea(uint32 spr, uint32 *value) const;
 	bool mtspr_oea(uint32 spr, uint32 value);
@@ -364,6 +368,9 @@ public:
 			      int *via_bat = 0);
 #ifdef SHEEPSHAVER
 	int nw_jit_try(uint32 first_opcode);
+	/* One native handler. Does not hop bclr/bcctr. *landed is the PC
+	 * after the block returns. 0 means the caller runs execute(*landed). */
+	int nw_68k_jit_step(uint32 entry, uint32 *landed);
 	void nw_mm_queue_ppc(uint32 proc) { mm_ppc_pending_ = proc; }
 	uint32 nw_mm_take_ppc() { uint32 p = mm_ppc_pending_; mm_ppc_pending_ = 0; return p; }
 	virtual void nw_invoke_mm_ppc(uint32 entry);

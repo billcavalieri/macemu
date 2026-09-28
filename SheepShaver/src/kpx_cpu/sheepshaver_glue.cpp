@@ -37,6 +37,7 @@
 #include "nw_devices.h"
 #include "nw_io.h"
 #include "nw_script.h"
+#include "nw_68k_jit.h"
 #include "nw_jit.h"
 
 // Used for NativeOp trampolines
@@ -635,7 +636,10 @@ void sheepshaver_cpu::execute_68k(uint32 entry, M68kRegisters *r)
 	uint32 opcode = ReadMacInt16(gpr(24));
 	gpr(27) = (int32)(int16)ReadMacInt16(gpr(24) += 2);
 	gpr(29) += opcode * 8;
-	execute(gpr(29));
+	if (PrefsFindBool("jit68k_host"))
+		nw_68k_jit_execute(this, gpr(29));
+	else
+		execute(gpr(29));
 
 	// Save r25 (contains current 68k interrupt level)
 	WriteMacInt32(XLM_68K_R25, gpr(25));
@@ -1162,7 +1166,7 @@ void HandleInterrupt(powerpc_registers *r)
 		 * runs. The Sound control panel lists a component, and the
 		 * Component Manager throws away registrations made before it
 		 * finishes loading extensions. CurApName becomes "Finder"
-		 * when that scan is done and the desktop exists. */
+		 * as Finder starts. EmulOp registers one component per trap. */
 		if (HasMacStarted()) {
 			static int audio_tick;
 			static int audio_reg;

@@ -27,12 +27,14 @@
 #include "adb.h"
 #include "main.h"
 #include "nw_devices.h"
+#include "nw_io.h"
 #include "timer.h"
 
 #include <atomic>
 
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h>
+#include <string.h>
 #include <unistd.h>
 
 @interface SheepHost : NSObject
@@ -94,6 +96,11 @@ extern "C" void VideoHostKey(int code, int down)
 extern "C" void VideoHostMouseMove(int dx, int dy)
 {
 	nw_adb_mouse_move(dx, dy);
+}
+
+extern "C" void VideoHostSetRelMouse(int on)
+{
+	ADBSetRelMouseMode(on != 0);
 }
 
 extern "C" void VideoHostMouseAbs(int x, int y)
@@ -240,7 +247,8 @@ bool VideoInit(void)
 	SheepForceStartup((__bridge void *)display);
 	SheepForceAdoptHostFB(the_buffer, the_buffer_size);
 	SheepForceLoadPalette();
-	ADBSetRelMouseMode(false);
+	/* Stay absolute until a click grab. Ctrl-G is the release. */
+	VideoHostSetRelMouse(0);
 	video_activated = true;
 	printf("NW-BOOT video AppKit %dx%d fb %08x\n", width, height, (unsigned)screen_base);
 	fflush(stdout);
@@ -249,6 +257,7 @@ bool VideoInit(void)
 
 void VideoExit(void)
 {
+	CGAssociateMouseAndMouseCursorPosition(true);
 	SheepForceShutdown();
 	video_activated = false;
 }
@@ -278,6 +287,7 @@ void VideoHostPresent(void)
 			;
 		int have = 0;
 		const uint32 hash = SheepForcePresentedHash(&have);
+		nw_fb_fps_proxy_note(hash, have);
 		if (have) {
 			if (g_picture_have && hash != g_picture_hash)
 				g_picture_changes.fetch_add(1, std::memory_order_relaxed);

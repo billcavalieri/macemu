@@ -416,6 +416,8 @@ void nw_log_g1_patch_skip(int is_newworld);
 void nw_note_mtsdr1(void);
 void nw_log_msr_dr(uint32_t msr);
 void nw_log_msr_write(const char *how, uint32_t pc, uint32_t msr);
+/* CR at rfi back into the 68k emulator. bit 8 is what bra.s * waits on. */
+void nw_log_emu_rfi(uint32_t srr0, uint32_t srr1, uint32_t cr, uint32_t kdp);
 void nw_log_first_dsi(uint32_t srr0, uint32_t dar, int dr_on_hit);
 void nw_log_translator_off(void);
 

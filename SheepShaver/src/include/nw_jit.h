@@ -79,6 +79,11 @@ struct nw_jit_cpu {
 	void *jit_stw;
 	void *jit_lwz_pa;
 	void *jit_stw_pa;
+	/* Bits already valid in gpr[]/fpr[]. ~0 means every register.
+	 * gpr_live 0 means none (a branch-only block). The tail hook
+	 * updates these when it enters a successor. */
+	uint32_t gpr_live;
+	uint32_t fpr_live;
 };
 
 typedef void (*nw_jit_fn)(struct nw_jit_cpu *cpu);
@@ -111,6 +116,10 @@ int nw_jit_op_dispatch(uint32_t op);
 int nw_jit_op_ends_block(uint32_t op);
 /* GPRs the opcode reads or writes. Unrecognized ops return ~0u. */
 uint32_t nw_jit_op_gpr_mask(uint32_t op);
+/* FPRs the opcode reads or writes. 0 if the op is not FP.
+ * Unrecognized FP ops return ~0u. */
+uint32_t nw_jit_op_fpr_mask(uint32_t op);
+int nw_jit_tail_max(void);
 
 enum {
 	NW_JIT_FAULT_DSI = 1,
@@ -157,12 +166,13 @@ nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 			  uint32_t msr_ir, uint32_t endian, int *n_out,
 			  int *uses_fpr = 0, int *uses_vr = 0,
 			  uint32_t *chain_pc = 0, uint32_t *gpr_mask = 0,
-			  int16_t *chain_disp = 0);
+			  int16_t *chain_disp = 0, uint32_t *fpr_mask = 0);
 void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 		      uint32_t endian, nw_jit_fn fn, int n,
 		      uint32_t first_opcode = 0, int uses_fpr = 0, int uses_vr = 0,
 		      uint32_t chain_pc = 0, uint32_t gpr_mask = 0xffffffffu,
-		      int16_t chain_disp = 0, uint32_t code_bytes = 0);
+		      int16_t chain_disp = 0, uint32_t code_bytes = 0,
+		      uint32_t fpr_mask = 0xffffffffu);
 uint64_t nw_jit_chain_hops(void);
 void nw_jit_note_chain(int hops);
 void nw_jit_tail_begin(void);

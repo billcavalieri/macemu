@@ -1148,6 +1148,76 @@ void nw_log_msr_dr(uint32_t msr)
 	nw_boot_log("G2: MSR[DR] on");
 }
 
+void nw_log_emu_rfi(uint32_t srr0, uint32_t srr1, uint32_t cr, uint32_t kdp)
+{
+#if NW_BOOT_LOG
+	/* 680b07f0 is the 60FE (bra.s *) stub. bit 8 is the NK wake
+	 * (or r13,r13,KDP+0x674 then mtcrf). A nonzero word at KDP-0x408
+	 * sends an external return around that or. Flags bit 10 selects
+	 * the live or versus a deferred CR slot. */
+	const int emu = srr0 >= 0x68060000u && srr0 < 0x68100000u;
+	const int halt = srr0 == 0x680b07f0u || srr0 == 0x680b07f4u;
+	const int bit8 = (cr & 0x00800000u) != 0;
+	uint32_t defer = 0, mask = 0, flags = 0;
+	if (kdp > 0x408u) {
+		defer = vm_read_memory_4(kdp - 0x408u);
+		flags = vm_read_memory_4(kdp - 0x10u);
+		mask = vm_read_memory_4(kdp + 0x674u);
+	}
+	static uint32_t prev_defer, prev_flags;
+	static int have_prev;
+	static unsigned nhalt, ndefer, nflag;
+	const int defer_chg = have_prev && defer != prev_defer;
+	const int flag_chg = have_prev && flags != prev_flags &&
+			     ((flags ^ prev_flags) & 0x00200000u);
+	if (!have_prev) {
+		prev_defer = defer;
+		prev_flags = flags;
+		have_prev = 1;
+	}
+	if (halt)
+		nhalt++;
+	if (defer_chg)
+		ndefer++;
+	if (flag_chg)
+		nflag++;
+	/* A VBL is still in service and this rfi resumes the 68k emulator
+	 * without CR bit 8. That is the return that leaves bra.s * spinning
+	 * and never executes the trap that stores the OpenPIC EOI. */
+	static unsigned nstuck, next;
+	const int trap = (srr1 & 0x00020000u) != 0;
+	const int wake_miss = emu && !bit8 && nw_pic_vbl_servicing();
+	if (wake_miss)
+		nstuck++;
+	/* External (not trap) return into the 68k emulator while a VBL is
+	 * still in service. bra.s * leaves only when this rfi's CR has bit 8. */
+	const int ext_emu = emu && !trap && nw_pic_vbl_servicing();
+	if (ext_emu)
+		next++;
+	const int interesting = (halt && nhalt <= 12u) ||
+				(defer_chg && ndefer <= 12u) ||
+				(flag_chg && nflag <= 8u) ||
+				(emu && !bit8 && halt) ||
+				(wake_miss && nstuck <= 4u) ||
+				(ext_emu && next <= 12u);
+	if (defer_chg || flag_chg || !have_prev) {
+		prev_defer = defer;
+		prev_flags = flags;
+	}
+	if (!interesting)
+		return;
+	printf("NW-BOOT G1: emu-rfi bit8=%d halt=%u serv=%d srr0=%08x srr1=%08x cr=%08x defer=%08x flags=%08x mask=%08x\n",
+	       bit8, nhalt, nw_pic_vbl_servicing(), (unsigned)srr0, (unsigned)srr1,
+	       (unsigned)cr, (unsigned)defer, (unsigned)flags, (unsigned)mask);
+	fflush(stdout);
+#else
+	(void)srr0;
+	(void)srr1;
+	(void)cr;
+	(void)kdp;
+#endif
+}
+
 void nw_log_msr_write(const char *how, uint32_t pc, uint32_t msr)
 {
 #if NW_BOOT_LOG

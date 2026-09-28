@@ -20,6 +20,7 @@
  */
 
 #include "nw_jit.h"
+#include "nw_68k_jit.h"
 #include "nw_io.h"
 #include "nw_boot_contract.h"
 
@@ -189,9 +190,10 @@ struct nw_jit_entry {
 	uint16_t hits;
 	int16_t chain_disp;	/* bc taken displacement; 0 if last is not bc */
 	uint32_t gpr_mask;	/* GPRs this block reads or writes; 0xffffffff = all */
+	uint32_t fpr_mask;	/* FPRs this block reads or writes; 0 = none, ~0 = all */
 	uint32_t code_bytes;	/* host bytes at fn; 0 if this entry is not movable */
 };
-static_assert(sizeof(struct nw_jit_entry) == 48, "nw_jit_entry stays 48 bytes");
+static_assert(sizeof(struct nw_jit_entry) == 56, "nw_jit_entry stays 56 bytes");
 
 static uint8_t *g_code;
 static uint8_t *g_code_spare;
@@ -209,7 +211,7 @@ static uint64_t g_exec_blocks, g_exec_insns;
 static uint64_t g_chain_hops;
 static int g_tail_hops, g_tail_n, g_tail_dsi_n, g_tail_fpr, g_tail_vr;
 static uint32_t g_tail_dsi_pc;
-enum { NW_JIT_TAIL_MAX = 1 };
+enum { NW_JIT_TAIL_MAX = 4 };
 static uint64_t g_code_emitted, g_compiles_at_wrap, g_wraps;
 #ifdef __APPLE__
 static uint64_t g_wx_ns, g_icache_ns, g_wx_n;
@@ -432,6 +434,23 @@ static nw_pull_sk g_pull_sk[4];
 static uint64_t g_codec_insns, g_other_insns;
 static uint64_t g_codec_insns_tick, g_other_insns_tick;
 static uint64_t g_kcall_fast;
+enum {
+	NW_HELP_FMADDS = 0, NW_HELP_FMULS, NW_HELP_FADDS, NW_HELP_FSUBS,
+	NW_HELP_FMR, NW_HELP_VSLO, NW_HELP_VSRO, NW_HELP_VMRGHB, NW_HELP_N
+};
+static uint64_t g_help_n[NW_HELP_N];
+static uint64_t g_vxo_n[2048];
+
+void nw_vxo_note(uint32_t vxo)
+{
+	if (vxo < 2048u)
+		g_vxo_n[vxo]++;
+}
+static void nw_help_note(int id)
+{
+	if (id >= 0 && id < NW_HELP_N)
+		g_help_n[id]++;
+}
 enum { NW_JIT_DTLBH = 16, NW_JIT_IOH = 16 };
 static struct {
 	uint32_t page;
@@ -799,6 +818,7 @@ void nw_jit_helper_stfs(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ea)
 
 void nw_jit_helper_fadds(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
 {
+	nw_help_note(NW_HELP_FADDS);
 	double a, b;
 	memcpy(&a, &cpu->fpr[fa & 31u], 8);
 	memcpy(&b, &cpu->fpr[fb & 31u], 8);
@@ -809,6 +829,7 @@ void nw_jit_helper_fadds(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint3
 
 void nw_jit_helper_fsubs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
 {
+	nw_help_note(NW_HELP_FSUBS);
 	double a, b;
 	memcpy(&a, &cpu->fpr[fa & 31u], 8);
 	memcpy(&b, &cpu->fpr[fb & 31u], 8);
@@ -829,6 +850,7 @@ void nw_jit_helper_fdivs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint3
 
 void nw_jit_helper_fmuls(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc)
 {
+	nw_help_note(NW_HELP_FMULS);
 	double a, c;
 	memcpy(&a, &cpu->fpr[fa & 31u], 8);
 	memcpy(&c, &cpu->fpr[fc & 31u], 8);
@@ -839,6 +861,7 @@ void nw_jit_helper_fmuls(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint3
 
 void nw_jit_helper_fmadds(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc, uint32_t fb)
 {
+	nw_help_note(NW_HELP_FMADDS);
 	double a, c, b;
 	memcpy(&a, &cpu->fpr[fa & 31u], 8);
 	memcpy(&c, &cpu->fpr[fc & 31u], 8);
@@ -880,6 +903,7 @@ void nw_jit_helper_mcrf(struct nw_jit_cpu *cpu, uint32_t crfd, uint32_t crfs)
 
 void nw_jit_helper_vadduwm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(128);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++)
 		cpu->vr[vd][w] = cpu->vr[va][w] + cpu->vr[vb][w];
@@ -887,6 +911,7 @@ void nw_jit_helper_vadduwm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uin
 
 void nw_jit_helper_vaddubm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(0);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
@@ -903,6 +928,7 @@ void nw_jit_helper_vaddubm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uin
 
 void nw_jit_helper_vsraw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(900);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++) {
 		const int sh = (int)(cpu->vr[vb][w] & 31u);
@@ -912,6 +938,7 @@ void nw_jit_helper_vsraw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint3
 
 void nw_jit_helper_vsrw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(644);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++) {
 		const unsigned sh = cpu->vr[vb][w] & 31u;
@@ -921,6 +948,7 @@ void nw_jit_helper_vsrw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 
 void nw_jit_helper_vspltisw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm)
 {
+	nw_vxo_note(908);
 	const int32_t s = (int32_t)(uimm & 31u) << 27 >> 27;
 	vd &= 31u;
 	cpu->vr[vd][0] = cpu->vr[vd][1] = cpu->vr[vd][2] = cpu->vr[vd][3] = (uint32_t)s;
@@ -928,6 +956,7 @@ void nw_jit_helper_vspltisw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm)
 
 void nw_jit_helper_vpkswss(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(462);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	uint16_t h[8];
 	for (int i = 0; i < 4; i++) {
@@ -957,6 +986,7 @@ void nw_jit_helper_fneg(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb)
 
 void nw_jit_helper_fmr(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb)
 {
+	nw_help_note(NW_HELP_FMR);
 	cpu->fpr[fd & 31u] = cpu->fpr[fb & 31u];
 }
 
@@ -1095,6 +1125,7 @@ void nw_jit_helper_lvsl(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t ea, int sl
 
 void nw_jit_helper_vor(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1156);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int i = 0; i < 4; i++)
 		cpu->vr[vd][i] = cpu->vr[va][i] | cpu->vr[vb][i];
@@ -1102,6 +1133,7 @@ void nw_jit_helper_vor(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_
 
 void nw_jit_helper_vand(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1028);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int i = 0; i < 4; i++)
 		cpu->vr[vd][i] = cpu->vr[va][i] & cpu->vr[vb][i];
@@ -1109,6 +1141,7 @@ void nw_jit_helper_vand(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 
 void nw_jit_helper_vandc(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1092);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int i = 0; i < 4; i++)
 		cpu->vr[vd][i] = cpu->vr[va][i] & ~cpu->vr[vb][i];
@@ -1116,6 +1149,7 @@ void nw_jit_helper_vandc(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint3
 
 void nw_jit_helper_vxor(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1220);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int i = 0; i < 4; i++)
 		cpu->vr[vd][i] = cpu->vr[va][i] ^ cpu->vr[vb][i];
@@ -1123,6 +1157,7 @@ void nw_jit_helper_vxor(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 
 void nw_jit_helper_vsububm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1024);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
@@ -1139,6 +1174,7 @@ void nw_jit_helper_vsububm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uin
 
 void nw_jit_helper_vslh(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(324);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
@@ -1166,6 +1202,7 @@ static void record_cr6_cmp(struct nw_jit_cpu *cpu, int all1, int all0, uint32_t 
  * all-true=8 (LT), all-false=2 (EQ), mixed=0. kpx C1=1. */
 void nw_jit_helper_vcmpequw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t rc)
 {
+	nw_vxo_note(rc ? 1158u : 134u);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	int all1 = 1, all0 = 1;
 	for (int i = 0; i < 4; i++) {
@@ -1181,6 +1218,7 @@ void nw_jit_helper_vcmpequw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, ui
 
 void nw_jit_helper_vcmpequb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t rc)
 {
+	nw_vxo_note(rc ? 1030u : 6u);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	int all1 = 1, all0 = 1;
 	for (int w = 0; w < 4; w++) {
@@ -1204,6 +1242,7 @@ void nw_jit_helper_vcmpequb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, ui
 
 void nw_jit_helper_vminsb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(770);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w], b = cpu->vr[vb][w];
@@ -1221,6 +1260,8 @@ void nw_jit_helper_vminsb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint
 
 void nw_jit_helper_vsro(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1100);
+	nw_help_note(NW_HELP_VSRO);
 	uint8_t a[16], d[16];
 	vd &= 31u; va &= 31u; vb &= 31u;
 	const unsigned sh = (cpu->vr[vb][3] >> 3) & 15u;
@@ -1240,6 +1281,8 @@ void nw_jit_helper_vsro(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 
 void nw_jit_helper_vslo(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1036);
+	nw_help_note(NW_HELP_VSLO);
 	uint8_t a[16], d[16];
 	vd &= 31u; va &= 31u; vb &= 31u;
 	const unsigned sh = (cpu->vr[vb][3] >> 3) & 15u;
@@ -1259,6 +1302,7 @@ void nw_jit_helper_vslo(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 
 void nw_jit_helper_vsr(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(708);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	const int sh = (int)(cpu->vr[vb][3] & 7u);
 	if (sh == 0) {
@@ -1277,6 +1321,7 @@ void nw_jit_helper_vsr(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_
 
 void nw_jit_helper_vsl(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(452);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	const int sh = (int)(cpu->vr[vb][3] & 7u);
 	if (sh == 0) {
@@ -1295,6 +1340,7 @@ void nw_jit_helper_vsl(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_
 
 void nw_jit_helper_vspltisb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm)
 {
+	nw_vxo_note(780);
 	uint32_t v = uimm & 31u;
 	if (v & 0x10u)
 		v -= 0x20u;
@@ -1306,6 +1352,7 @@ void nw_jit_helper_vspltisb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm)
 
 void nw_jit_helper_mtvscr(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1604);
 	(void)vd;
 	(void)va;
 	cpu->vscr = cpu->vr[vb & 31u][3];
@@ -1313,6 +1360,7 @@ void nw_jit_helper_mtvscr(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint
 
 void nw_jit_helper_mfvscr(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1540);
 	(void)va;
 	(void)vb;
 	vd &= 31u;
@@ -1333,6 +1381,7 @@ void nw_jit_helper_lwbrx(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ea)
 
 void nw_jit_helper_vsrb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(516);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
@@ -1350,6 +1399,7 @@ void nw_jit_helper_vsrb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 
 void nw_jit_helper_vslb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(260);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
@@ -1378,6 +1428,7 @@ void nw_jit_fprf_fd(struct nw_jit_cpu *cpu, uint32_t fd)
 
 void nw_jit_helper_vsel(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc)
 {
+	nw_vxo_note(42u | ((vc & 31u) << 6));
 	vd &= 31u; va &= 31u; vb &= 31u; vc &= 31u;
 	for (int i = 0; i < 4; i++)
 		cpu->vr[vd][i] = (cpu->vr[va][i] & ~cpu->vr[vc][i]) |
@@ -1386,6 +1437,7 @@ void nw_jit_helper_vsel(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32
 
 void nw_jit_helper_vperm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc)
 {
+	nw_vxo_note(43u | ((vc & 31u) << 6));
 	uint8_t src[32], c[16], d[16];
 	vd &= 31u; va &= 31u; vb &= 31u; vc &= 31u;
 	for (int w = 0; w < 4; w++) {
@@ -1413,6 +1465,7 @@ void nw_jit_helper_vperm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint3
 
 void nw_jit_helper_vsldoi(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t shb)
 {
+	nw_vxo_note(44u | ((shb & 31u) << 6));
 	uint8_t src[32], d[16];
 	vd &= 31u; va &= 31u; vb &= 31u;
 	shb &= 15u;
@@ -1436,6 +1489,7 @@ void nw_jit_helper_vsldoi(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint
 
 void nw_jit_helper_vspltish(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm)
 {
+	nw_vxo_note(844);
 	const int16_t s = (int16_t)((int32_t)(uimm & 31u) << 27 >> 27);
 	const uint32_t hw = (uint16_t)s;
 	const uint32_t w = (hw << 16) | hw;
@@ -1445,6 +1499,7 @@ void nw_jit_helper_vspltish(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm)
 
 void nw_jit_helper_vspltw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm, uint32_t vb)
 {
+	nw_vxo_note(652);
 	vd &= 31u;
 	vb &= 31u;
 	const uint32_t w = cpu->vr[vb][uimm & 3u];
@@ -1453,6 +1508,7 @@ void nw_jit_helper_vspltw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm, ui
 
 void nw_jit_helper_vspltb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm, uint32_t vb)
 {
+	nw_vxo_note(524);
 	vd &= 31u;
 	vb &= 31u;
 	const unsigned idx = uimm & 15u;
@@ -1465,6 +1521,8 @@ void nw_jit_helper_vspltb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t uimm, ui
 
 void nw_jit_helper_vmrghb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(12);
+	nw_help_note(NW_HELP_VMRGHB);
 	uint8_t a[16], b[16], d[16];
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++) {
@@ -1489,6 +1547,7 @@ void nw_jit_helper_vmrghb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint
 
 void nw_jit_helper_vmrglb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(268);
 	uint8_t a[16], b[16], d[16];
 	vd &= 31u; va &= 31u; vb &= 31u;
 	for (int w = 0; w < 4; w++) {
@@ -1513,6 +1572,7 @@ void nw_jit_helper_vmrglb(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint
 
 void nw_jit_helper_vmrghw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(140);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	const uint32_t a0 = cpu->vr[va][0], a1 = cpu->vr[va][1];
 	const uint32_t b0 = cpu->vr[vb][0], b1 = cpu->vr[vb][1];
@@ -1524,6 +1584,7 @@ void nw_jit_helper_vmrghw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint
 
 void nw_jit_helper_vmrglw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(396);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	const uint32_t a2 = cpu->vr[va][2], a3 = cpu->vr[va][3];
 	const uint32_t b2 = cpu->vr[vb][2], b3 = cpu->vr[vb][3];
@@ -1535,6 +1596,7 @@ void nw_jit_helper_vmrglw(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint
 
 void nw_jit_helper_vsumsws(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1928);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	int64_t s = (int32_t)cpu->vr[vb][3];
 	for (int i = 0; i < 4; i++)
@@ -1549,6 +1611,7 @@ void nw_jit_helper_vsumsws(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uin
 
 void nw_jit_helper_vmx(struct nw_jit_cpu *cpu, uint32_t op)
 {
+	nw_vxo_note(op & 0x7ffu);
 	if (g_host_vmx && cpu->host)
 		g_host_vmx(cpu->host, op, cpu);
 }
@@ -1699,6 +1762,7 @@ void nw_jit_helper_stswx(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t ea, uint3
 
 void nw_jit_helper_vmsumshm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc, int sat)
 {
+	nw_vxo_note((sat ? 41u : 40u) | ((vc & 31u) << 6));
 	vd &= 31u; va &= 31u; vb &= 31u; vc &= 31u;
 	for (int w = 0; w < 4; w++) {
 		const int16_t a0 = (int16_t)(cpu->vr[va][w] >> 16);
@@ -1719,6 +1783,7 @@ void nw_jit_helper_vmsumshm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, ui
 
 void nw_jit_helper_vmladduhm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc)
 {
+	nw_vxo_note(34u | ((vc & 31u) << 6));
 	vd &= 31u; va &= 31u; vb &= 31u; vc &= 31u;
 	for (int w = 0; w < 4; w++) {
 		const uint32_t a = cpu->vr[va][w];
@@ -1732,6 +1797,7 @@ void nw_jit_helper_vmladduhm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, u
 
 void nw_jit_helper_vsubshs(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb)
 {
+	nw_vxo_note(1856);
 	vd &= 31u; va &= 31u; vb &= 31u;
 	int sat = 0;
 	for (int w = 0; w < 4; w++) {
@@ -1898,6 +1964,8 @@ void nw_jit_reset(void)
 	g_skip_raw_nm[0] = 0;
 	g_codec_insns = g_other_insns = 0;
 	g_kcall_fast = 0;
+	memset(g_help_n, 0, sizeof(g_help_n));
+	memset(g_vxo_n, 0, sizeof(g_vxo_n));
 	g_chain_hops = 0;
 	g_tail_hops = g_tail_n = g_tail_dsi_n = g_tail_fpr = g_tail_vr = 0;
 	g_tail_dsi_pc = 0;
@@ -2079,9 +2147,17 @@ int nw_jit_mode(void)
 	return g_mode;
 }
 
+#if defined(__aarch64__)
+static int nw_av_inline_on(void);
+#endif
+
 void nw_jit_set_mode(int mode)
 {
 	g_mode = mode;
+#if defined(__aarch64__)
+	if (mode == NW_JIT_ON || mode == NW_JIT_VERIFY)
+		(void)nw_av_inline_on();
+#endif
 }
 
 const char *nw_jit_mode_name(void)
@@ -2095,6 +2171,108 @@ const char *nw_jit_mode_name(void)
 }
 
 static void nw_jit_summary_write_file(void);
+
+static const char *vxo_name(unsigned v)
+{
+	switch (v) {
+	case 0: return "vaddubm";
+	case 6: return "vcmpequb";
+	case 12: return "vmrghb";
+	case 128: return "vadduwm";
+	case 134: return "vcmpequw";
+	case 140: return "vmrghw";
+	case 260: return "vslb";
+	case 268: return "vmrglb";
+	case 324: return "vslh";
+	case 396: return "vmrglw";
+	case 452: return "vsl";
+	case 462: return "vpkswss";
+	case 516: return "vsrb";
+	case 524: return "vspltb";
+	case 644: return "vsrw";
+	case 652: return "vspltw";
+	case 708: return "vsr";
+	case 770: return "vminsb";
+	case 780: return "vspltisb";
+	case 844: return "vspltish";
+	case 900: return "vsraw";
+	case 908: return "vspltisw";
+	case 1024: return "vsububm";
+	case 1028: return "vand";
+	case 1030: return "vcmpequb.";
+	case 1036: return "vslo";
+	case 1092: return "vandc";
+	case 1100: return "vsro";
+	case 1156: return "vor";
+	case 1158: return "vcmpequw.";
+	case 1220: return "vxor";
+	case 1540: return "mfvscr";
+	case 1604: return "mtvscr";
+	case 1856: return "vsubshs";
+	case 1928: return "vsumsws";
+	default: break;
+	}
+	switch (v & 63u) {
+	case 34: return "vmladduhm";
+	case 40: return "vmsumshm";
+	case 41: return "vmsumshs";
+	case 42: return "vsel";
+	case 43: return "vperm";
+	case 44: return "vsldoi";
+	default: return NULL;
+	}
+}
+
+static void vxo_top(int idx[12], int *n_out)
+{
+	int n = 0;
+	for (int v = 0; v < 2048; v++) {
+		if (!g_vxo_n[v])
+			continue;
+		int k = n;
+		while (k > 0 && g_vxo_n[v] > g_vxo_n[idx[k - 1]])
+			k--;
+		if (k >= 12)
+			continue;
+		int m = n < 12 ? n : 11;
+		for (int j = m; j > k; j--)
+			idx[j] = idx[j - 1];
+		idx[k] = v;
+		if (n < 12)
+			n++;
+	}
+	*n_out = n;
+}
+
+static void nw_vxo_summary_print(void)
+{
+	int idx[12], n = 0;
+	vxo_top(idx, &n);
+	if (!n)
+		return;
+	printf("NW-BOOT G1: jit vxo");
+	for (int i = 0; i < n; i++) {
+		const char *nm = vxo_name((unsigned)idx[i]);
+		if (nm)
+			printf(" %03x %s=%llu", idx[i], nm, (unsigned long long)g_vxo_n[idx[i]]);
+		else
+			printf(" %03x=%llu", idx[i], (unsigned long long)g_vxo_n[idx[i]]);
+	}
+	printf("\n");
+}
+
+static void nw_vxo_summary_write(FILE *f)
+{
+	int idx[12], n = 0;
+	if (!f)
+		return;
+	vxo_top(idx, &n);
+	for (int i = 0; i < n; i++) {
+		const char *nm = vxo_name((unsigned)idx[i]);
+		fprintf(f, "vxo %03x %s n=%llu\n", idx[i], nm ? nm : "?",
+			(unsigned long long)g_vxo_n[idx[i]]);
+	}
+}
 
 void nw_jit_stats_print(const char *why)
 {
@@ -2551,6 +2729,8 @@ void nw_jit_summary_print(const char *why)
 			printf(" %s=%llu", hop_name[i], (unsigned long long)g_hop_stop[i]);
 		printf("\n");
 	}
+	nw_vxo_summary_print();
+	nw_68k_op_summary();
 	{
 		const uint64_t it = g_itlb_hit + g_itlb_miss;
 		const unsigned im = it ? (unsigned)((g_itlb_miss * 1000ull) / it) : 0;
@@ -2567,6 +2747,8 @@ void nw_jit_summary_print(const char *why)
 	       (unsigned long long)nw_fb_fps_proxy_frames(),
 	       nw_fb_fps_proxy_flat_max(),
 	       (unsigned long long)nw_fb_damage_upload_bytes());
+	printf("NW-BOOT G1: jit68k_host fallback=%llu\n",
+	       (unsigned long long)nw_68k_fallback_count());
 	{
 		int top[8];
 		int ntop = 0;
@@ -2632,7 +2814,7 @@ static void nw_jit_summary_write_file(void)
 		if (!home || !home[0])
 			return;
 		snprintf(path, sizeof(path), "%s/Library/Logs/SheepShaver", home);
-		(void)mkdir(path, 0755);
+		nw_log_mkdir(path);
 		snprintf(path, sizeof(path), "%s/Library/Logs/SheepShaver/jit-summary.txt", home);
 	}
 	FILE *f = fopen(path, "w");
@@ -2640,6 +2822,40 @@ static void nw_jit_summary_write_file(void)
 		return;
 	const uint64_t tot = g_dtlb_hit + g_dtlb_miss;
 	const unsigned miss_pct = tot ? (unsigned)((g_dtlb_miss * 1000ull) / tot) : 0;
+	const uint64_t ib = g_exec_blocks ? g_exec_insns / g_exec_blocks : 0;
+	fprintf(f, "blocks %llu insns %llu insns/block %llu chain %llu\n",
+		(unsigned long long)g_exec_blocks,
+		(unsigned long long)g_exec_insns,
+		(unsigned long long)ib,
+		(unsigned long long)g_chain_hops);
+	{
+		static const char *const hop_name[NW_JIT_HOP_N] = {
+			"cap", "no_chain_pc", "pc_mismatch", "itlb_miss", "aline",
+			"cache_miss", "vec_gate", "fp_gate", "compile_null"
+		};
+		fprintf(f, "hop_stop");
+		for (int i = 0; i < NW_JIT_HOP_N; i++)
+			fprintf(f, " %s=%llu", hop_name[i], (unsigned long long)g_hop_stop[i]);
+		fprintf(f, "\n");
+	}
+	{
+		static const char *const help_name[NW_HELP_N] = {
+			"fmadds", "fmuls", "fadds", "fsubs", "fmr", "vslo", "vsro", "vmrghb"
+		};
+		static const char *const help_class[NW_HELP_N] = {
+			"INLINE_READY", "INLINE_READY", "INLINE_READY", "INLINE_READY",
+			"INLINE_READY", "BLOCKED", "BLOCKED", "NEEDS_NEON"
+		};
+		for (int i = 0; i < NW_HELP_N; i++)
+			fprintf(f, "helper %s %s n=%llu\n", help_name[i], help_class[i],
+				(unsigned long long)g_help_n[i]);
+		fprintf(f, "helper lwarx KEEP_HELPER emitted\n");
+		fprintf(f, "helper stwcx KEEP_HELPER emitted\n");
+		fprintf(f, "helper rfi KEEP_HELPER emitted\n");
+	}
+	nw_vxo_summary_write(f);
+	fprintf(f, "jit68k_host fallback %llu\n",
+		(unsigned long long)nw_68k_fallback_count());
 	fprintf(f, "skip_unsup %llu skip_io %llu dtlb_miss %u/1000 wrap %llu occ_max %d codec %llu other %llu\n",
 		(unsigned long long)g_v_skip_unsup,
 		(unsigned long long)g_v_skip_io,
@@ -2653,6 +2869,7 @@ static void nw_jit_summary_write_file(void)
 
 static void nw_jit_atexit_stats(void)
 {
+	nw_jit_summary_write_file();
 	nw_jit_stats_print("exit");
 	nw_jit_verify_dump("exit");
 	nw_atrap_hist_dump("exit");
@@ -4140,10 +4357,13 @@ uint32_t nw_jit_op_gpr_mask(uint32_t op)
 	case 18:
 	case 19:
 		return 0;
-	case 7: case 8: case 12: case 13: case 14: case 15:
-		return rd_b | ra_b;
+	/* mulli/subfic/addic read rA even when it is r0. addi/addis do not. */
+	case 7: case 8: case 12: case 13:
+		return rd_b | (1u << ra);
 	case 10: case 11:
-		return ra_b;
+		return 1u << ra;
+	case 14: case 15:
+		return rd_b | ra_b;
 	case 20: case 21:
 		return (1u << ra) | rd_b;
 	case 23:
@@ -4193,19 +4413,74 @@ uint32_t nw_jit_op_gpr_mask(uint32_t op)
 			return rd_b;
 		if (xo == 144)
 			return rd_b;
+		/* cmp/cmpl read rA even when it is r0. */
 		if (xo == 0 || xo == 32)
+			return (1u << ra) | rb_b;
+		/* lswx/stswx touch a run of GPRs counted by XER. */
+		if (xo == 533 || xo == 661)
+			return 0xffffffffu;
+		/* Indexed FP: rd is an FPR. rA==0 means zero, not gpr0. */
+		if (xo == 535 || xo == 567 || xo == 599 || xo == 631 ||
+		    xo == 663 || xo == 695 || xo == 727 || xo == 759 || xo == 983)
 			return ra_b | rb_b;
-		return 0xffffffffu;
+		/* rA is a real GPR here, including r0 (not the addi zero form). */
+		return rd_b | (1u << ra) | (1u << rb);
 	}
 	default:
 		return 0xffffffffu;
 	}
 }
 
+uint32_t nw_jit_op_fpr_mask(uint32_t op)
+{
+	const int prim = (int)(op >> 26);
+	const int rd = (int)((op >> 21) & 0x1f);
+	const int ra = (int)((op >> 16) & 0x1f);
+	const int rb = (int)((op >> 11) & 0x1f);
+	const int fc = (int)((op >> 6) & 0x1f);
+	const int xo = (int)((op >> 1) & 0x3ff);
+	const int axo = (int)((op >> 1) & 0x1f);
+	const uint32_t rd_b = 1u << rd;
+	const uint32_t ra_b = 1u << ra;
+	const uint32_t rb_b = 1u << rb;
+	const uint32_t fc_b = 1u << fc;
+	if (prim >= 48 && prim <= 55)
+		return rd_b;
+	if (prim == 31) {
+		if (xo == 535 || xo == 567 || xo == 599 || xo == 631 ||
+		    xo == 663 || xo == 695 || xo == 727 || xo == 759 || xo == 983)
+			return rd_b;
+		return 0;
+	}
+	if (prim != 59 && prim != 63)
+		return 0;
+	if (prim == 63) {
+		if (xo == 0 || xo == 32)
+			return ra_b | rb_b;			/* fcmpu / fcmpo */
+		if (xo == 12 || xo == 40 || xo == 72 || xo == 136 || xo == 264)
+			return rd_b | rb_b;			/* frsp fneg fmr fnabs fabs */
+	}
+	if (axo == 25)
+		return rd_b | ra_b | fc_b;			/* fmuls / fmul */
+	if (axo == 18 || axo == 20 || axo == 21)
+		return rd_b | ra_b | rb_b;			/* fdiv fsub fadd */
+	if (axo == 22 || axo == 24 || axo == 26)
+		return rd_b | rb_b;				/* fsqrt fres frsqrte */
+	if (axo >= 28 && axo <= 31)
+		return rd_b | ra_b | rb_b | fc_b;		/* fmsub fmadd fnmsub fnmadd */
+	return 0xffffffffu;
+}
+
+int nw_jit_tail_max(void)
+{
+	return NW_JIT_TAIL_MAX;
+}
+
 nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 			  uint32_t msr_ir, uint32_t endian, int *n_out,
 			  int *uses_fpr, int *uses_vr, uint32_t *chain_pc,
-			  uint32_t *gpr_mask, int16_t *chain_disp)
+			  uint32_t *gpr_mask, int16_t *chain_disp,
+			  uint32_t *fpr_mask)
 {
 	int i = cache_slot(phys_page, guest_pc, msr_ir, endian);
 	static uint32_t hit_sample;
@@ -4231,6 +4506,8 @@ nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 				*gpr_mask = g_cache[j].gpr_mask;
 			if (chain_disp)
 				*chain_disp = g_cache[j].chain_disp;
+			if (fpr_mask)
+				*fpr_mask = g_cache[j].fpr_mask;
 			return g_cache[j].fn;
 		}
 	}
@@ -4241,7 +4518,7 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 		      uint32_t endian, nw_jit_fn fn, int n,
 		      uint32_t first_opcode, int uses_fpr, int uses_vr,
 		      uint32_t chain_pc, uint32_t gpr_mask, int16_t chain_disp,
-		      uint32_t code_bytes)
+		      uint32_t code_bytes, uint32_t fpr_mask)
 {
 	int i = cache_slot(phys_page, guest_pc, msr_ir, endian);
 	int slot = -1, reuse = -1;
@@ -4297,6 +4574,7 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 	g_cache[slot].chain_pc = chain_pc;
 	g_cache[slot].chain_disp = chain_disp;
 	g_cache[slot].gpr_mask = gpr_mask;
+	g_cache[slot].fpr_mask = fpr_mask;
 	g_cache[slot].code_bytes = code_bytes;
 	g_cache[slot].used = NW_JIT_USED_LIVE;
 	g_cache[slot].n = (uint8_t)(n < 0 ? 0 : n > 255 ? 255 : n);
@@ -5670,6 +5948,21 @@ void nw_jit_helper_bclr(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc)
 		cpu->pc = t & ~3u;
 	else
 		cpu->pc = pc + 4;
+#if NW_BOOT_LOG
+	/* 6806d264 returns without the twi when the 68k mask blocks the
+	 * level. bra.s * at ffc046ee only leaves on that twi. */
+	if (pc == 0x6806d264u || pc == 0x6806d268u) {
+		const uint32_t r24 = cpu->gpr[24];
+		static int n;
+		if (r24 >= 0xffc04600u && r24 <= 0xffc04800u && n < 16) {
+			n++;
+			printf("NW-BOOT G1: emu-lvl pc=%08x npc=%08x cr=%08x r6=%08x r7=%08x r24=%08x r25=%08x\n",
+			       pc, cpu->pc, cpu->cr, cpu->gpr[6], cpu->gpr[7],
+			       r24, cpu->gpr[25]);
+			fflush(stdout);
+		}
+	}
+#endif
 }
 
 void nw_jit_helper_fmsub(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc, uint32_t fb)
@@ -9207,15 +9500,28 @@ static uint32_t fpr_off(int r)
 
 /* Single-precision ops as ARM instructions. If FPSCR exception enables
  * are set, the existing helper runs instead. */
+static int nw_fp_inline_on(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		const char *e = getenv("NW_JIT_FP_INLINE");
+		on = (e && (strcmp(e, "1") == 0 || strcmp(e, "on") == 0)) ? 1 : 0;
+	}
+	return on;
+}
+
 static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int fc, uint32_t op)
 {
 	const int unary = (kind >= 101 && kind <= 103);
 	const int is_cmp = (kind == 104);
 	const int src0 = (is_cmp || !(unary || kind == 100)) ? ra : rb;
-	/* ARM inline of these ops, mixed integer/FP blocks, and the
-	 * taken-branch hop each shipped once and iTunes lost its text
-	 * and its audio. Every op stays on the helper. */
-	const int fast = 0;
+	/* Inferred, not measured here: 602dfef8 landed this sequence
+	 * already forced off. The commit says a previous ship of the
+	 * ARM ops, mixed integer/FP blocks, and the taken-branch hop
+	 * made iTunes lose text and audio. It does not name a dest
+	 * alias or an FPSCR mismatch. NW_JIT_FP_INLINE=1 turns the
+	 * sequence back on; unset stays on the helper. */
+	const int fast = nw_fp_inline_on();
 	(void)is_cmp;
 	uint32_t *slow = NULL;
 	if (fast && !unary) {
@@ -9418,6 +9724,271 @@ static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int 
 			*over = a64_b((int)(e->p - over));
 	}
 	return emit_maybe_cr1(e, op);
+}
+
+static uint32_t a64_ldr_q(int rt, int rn, uint32_t off)
+{
+	return 0x3dc00000u | ((off >> 4) << 10) | ((uint32_t)rn << 5) | (uint32_t)rt;
+}
+
+static uint32_t a64_str_q(int rt, int rn, uint32_t off)
+{
+	return 0x3d800000u | ((off >> 4) << 10) | ((uint32_t)rn << 5) | (uint32_t)rt;
+}
+
+static uint32_t a64_simd3(uint32_t base, int rd, int rn, int rm)
+{
+	return base | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | (uint32_t)rd;
+}
+
+static uint32_t vr_off(int r)
+{
+	return (uint32_t)offsetof(struct nw_jit_cpu, vr) + (uint32_t)(r & 31) * 16u;
+}
+
+/* NEON for the bitwise and per-lane arithmetic ops. vslo/vsro stay
+ * helpers: a multi-op block of those locked Starting Up. vperm and
+ * vmrghb stay helpers until a count says they are hot. */
+static int emit_av_body(struct emit *e, int vxo, int vd, int va, int vb)
+{
+	uint32_t opw = 0;
+	int shift = 0;		/* 0 none, 1 byte L, 2 byte R, 3 half L, 4 word UR, 5 word SR */
+	/* vperm: words are stored big-endian, so rev32 makes lane i the
+	 * logical byte i. tbl then matches the helper's 32-byte select. */
+	if ((vxo & 63) == 43) {
+		const int vc = (vxo >> 6) & 31;
+		if (!emit_w(e, a64_ldr_q(0, 19, vr_off(va))))
+			return 0;
+		if (!emit_w(e, a64_ldr_q(1, 19, vr_off(vb))))
+			return 0;
+		if (!emit_w(e, a64_ldr_q(2, 19, vr_off(vc))))
+			return 0;
+		if (!emit_w(e, 0x6e200800u | (0u << 5) | 0u))
+			return 0;
+		if (!emit_w(e, 0x6e200800u | (1u << 5) | 1u))
+			return 0;
+		if (!emit_w(e, 0x6e200800u | (2u << 5) | 2u))
+			return 0;
+		if (!emit_w(e, 0x4f00e7e3u))
+			return 0;
+		if (!emit_w(e, a64_simd3(0x4e201c00u, 2, 2, 3)))
+			return 0;
+		if (!emit_w(e, 0x4e002000u | (2u << 16) | (0u << 5) | 4u))
+			return 0;
+		if (!emit_w(e, 0x6e200800u | (4u << 5) | 4u))
+			return 0;
+		return emit_w(e, a64_str_q(4, 19, vr_off(vd)));
+	}
+	if (vxo == 1156)
+		opw = 0x4ea01c00u;		/* orr.16b, Rm filled by a64_simd3 */
+	else if (vxo == 1028)
+		opw = 0x4e201c00u;		/* and.16b */
+	else if (vxo == 1092)
+		opw = 0x4e601c00u;		/* bic.16b vandc */
+	else if (vxo == 1220)
+		opw = 0x6e201c00u;		/* eor.16b */
+	else if (vxo == 0)
+		opw = 0x4e208400u;		/* add.16b vaddubm */
+	else if (vxo == 1024)
+		opw = 0x6e208400u;		/* sub.16b vsububm */
+	else if (vxo == 128)
+		opw = 0x4ea08400u;		/* add.4s vadduwm */
+	else if (vxo == 260)
+		shift = 1;
+	else if (vxo == 516)
+		shift = 2;
+	else if (vxo == 324)
+		shift = 3;
+	else if (vxo == 644)
+		shift = 4;
+	else if (vxo == 900)
+		shift = 5;
+	else
+		return 0;
+	if (!emit_w(e, a64_ldr_q(0, 19, vr_off(va))))
+		return 0;
+	if (!emit_w(e, a64_ldr_q(1, 19, vr_off(vb))))
+		return 0;
+	if (!shift) {
+		if (!emit_w(e, a64_simd3(opw, 0, 0, 1)))
+			return 0;
+	} else {
+		uint32_t movi = shift <= 2 ? 0x4f00e4e3u : (shift == 3 ? 0x4f0085e3u : 0x4f0007e3u);
+		uint32_t ushl = shift <= 2 ? 0x6e204400u : (shift == 3 ? 0x6e604400u : 0x6ea04400u);
+		if (shift == 5)
+			ushl = 0x4ea04400u;	/* sshl.4s */
+		if (!emit_w(e, movi))
+			return 0;
+		if (!emit_w(e, a64_simd3(0x4e201c00u, 1, 1, 3)))
+			return 0;
+		if (shift == 2 || shift == 4 || shift == 5) {
+			uint32_t neg = shift == 2 ? 0x6e20b800u : 0x6ea0b800u;
+			if (!emit_w(e, neg | (1u << 5) | 1u))
+				return 0;
+		}
+		if (!emit_w(e, a64_simd3(ushl, 0, 0, 1)))
+			return 0;
+	}
+	return emit_w(e, a64_str_q(0, 19, vr_off(vd)));
+}
+
+static int nw_av_inline_check(void)
+{
+	uint32_t buf[32];
+	struct emit em;
+	void *mem;
+	typedef void (*fn_t)(struct nw_jit_cpu *);
+	static const int ops[] = { 1156, 1028, 1092, 1220, 0, 1024, 128, 260, 516, 324, 644, 900 };
+	const uint32_t A[4] = { 0x01020304u, 0x80ff7f00u, 0xffffffffu, 0x7f800001u };
+	const uint32_t B[4] = { 0x00010207u, 0xff01081fu, 0x05060708u, 0x0000001fu };
+	mem = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+		   MAP_ANON | MAP_PRIVATE
+#ifdef MAP_JIT
+		   | MAP_JIT
+#endif
+		   , -1, 0);
+	if (mem == MAP_FAILED)
+		return 0;
+#ifdef __APPLE__
+	pthread_jit_write_protect_np(0);
+#endif
+	for (unsigned i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
+		for (int alias = 0; alias < 3; alias++) {
+			int vd = alias == 0 ? 5 : (alias == 1 ? 1 : 2);
+			int va = 1, vb = 2;
+			struct nw_jit_cpu cpu, gold;
+			fn_t fn;
+			memset(&em, 0, sizeof(em));
+			em.p = (uint32_t *)mem;
+			em.end = em.p + 32;
+			em.last_st_r = -1;
+			if (!emit_w(&em, 0xaa0003f3u))
+				return 0;
+			if (!emit_av_body(&em, ops[i], vd, va, vb))
+				return 0;
+			if (!emit_w(&em, 0xd65f03c0u))
+				return 0;
+#ifdef __APPLE__
+			pthread_jit_write_protect_np(1);
+#endif
+			__builtin___clear_cache((char *)mem, (char *)em.p);
+			memset(&cpu, 0, sizeof(cpu));
+			memcpy(cpu.vr[va], A, sizeof(A));
+			memcpy(cpu.vr[vb], B, sizeof(B));
+			if (vd != va && vd != vb)
+				memset(cpu.vr[vd], 0x5a, sizeof(cpu.vr[vd]));
+			gold = cpu;
+			switch (ops[i]) {
+			case 1156: nw_jit_helper_vor(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 1028: nw_jit_helper_vand(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 1092: nw_jit_helper_vandc(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 1220: nw_jit_helper_vxor(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 0: nw_jit_helper_vaddubm(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 1024: nw_jit_helper_vsububm(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 128: nw_jit_helper_vadduwm(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 260: nw_jit_helper_vslb(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 516: nw_jit_helper_vsrb(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 324: nw_jit_helper_vslh(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 644: nw_jit_helper_vsrw(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			case 900: nw_jit_helper_vsraw(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb); break;
+			default: break;
+			}
+			fn = (fn_t)mem;
+#ifdef __APPLE__
+			pthread_jit_write_protect_np(1);
+#endif
+			fn(&cpu);
+			if (memcmp(cpu.vr[vd], gold.vr[vd], 16) != 0) {
+				printf("NW-BOOT G1: av inline mismatch vxo=%d vd=%d\n", ops[i], vd);
+				fflush(stdout);
+				munmap(mem, 4096);
+				return 0;
+			}
+#ifdef __APPLE__
+			pthread_jit_write_protect_np(0);
+#endif
+		}
+	}
+	{
+		const uint32_t C[4] = { 0x00112203u, 0x1f100418u, 0x07080e15u, 0xff20ab01u };
+		const int vxo = 43 | (3 << 6);
+		for (int alias = 0; alias < 4; alias++) {
+			int vd = alias == 0 ? 5 : alias;
+			int va = 1, vb = 2, vc = 3;
+			struct nw_jit_cpu cpu, gold;
+			fn_t fn;
+			memset(&em, 0, sizeof(em));
+			em.p = (uint32_t *)mem;
+			em.end = em.p + 32;
+			em.last_st_r = -1;
+			if (!emit_w(&em, 0xaa0003f3u))
+				return 0;
+			if (!emit_av_body(&em, vxo, vd, va, vb))
+				return 0;
+			if (!emit_w(&em, 0xd65f03c0u))
+				return 0;
+#ifdef __APPLE__
+			pthread_jit_write_protect_np(1);
+#endif
+			__builtin___clear_cache((char *)mem, (char *)em.p);
+			memset(&cpu, 0, sizeof(cpu));
+			memcpy(cpu.vr[va], A, sizeof(A));
+			memcpy(cpu.vr[vb], B, sizeof(B));
+			memcpy(cpu.vr[vc], C, sizeof(C));
+			gold = cpu;
+			nw_jit_helper_vperm(&gold, (uint32_t)vd, (uint32_t)va, (uint32_t)vb, (uint32_t)vc);
+			fn = (fn_t)mem;
+			fn(&cpu);
+			if (memcmp(cpu.vr[vd], gold.vr[vd], 16) != 0) {
+				printf("NW-BOOT G1: av inline mismatch vxo=%d vd=%d\n", vxo, vd);
+				fflush(stdout);
+				munmap(mem, 4096);
+				return 0;
+			}
+#ifdef __APPLE__
+			pthread_jit_write_protect_np(0);
+#endif
+		}
+	}
+	munmap(mem, 4096);
+	return 1;
+}
+
+static int nw_av_inline_on(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		const char *env = getenv("NW_JIT_AV_INLINE");
+		on = (env && (strcmp(env, "1") == 0 || strcmp(env, "on") == 0)) ? 1 : 0;
+		if (on && !nw_av_inline_check()) {
+			printf("NW-BOOT G1: av inline check failed\n");
+			fflush(stdout);
+			on = 0;
+		}
+	}
+	return on;
+}
+
+static int emit_av_inline(struct emit *e, int vxo, int vd, int va, int vb)
+{
+	if (!nw_av_inline_on())
+		return 0;
+	if ((vxo & 63) != 43 &&
+	    vxo != 1156 && vxo != 1028 && vxo != 1092 && vxo != 1220 &&
+	    vxo != 0 && vxo != 1024 && vxo != 128 && vxo != 260 &&
+	    vxo != 516 && vxo != 324 && vxo != 644 && vxo != 900)
+		return 0;
+	if (!emit_imm32(e, 1, (uint32_t)vxo))
+		return 0;
+	if (!emit_w(e, 0xaa1303e0u))
+		return 0;
+	if (!emit_imm64(e, 9, (uint64_t)(uintptr_t)nw_vxo_note))
+		return 0;
+	if (!emit_w(e, 0xd63f0120u))
+		return 0;
+	if (!emit_w(e, 0xaa1303e0u))
+		return 0;
+	return emit_av_body(e, vxo, vd, va, vb);
 }
 
 static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
@@ -11233,6 +11804,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		const int vxo = (int)(op & 0x7ff);
 		const int vaxo = (int)(op & 0x3f);
 		const int vc = (int)((op >> 6) & 0x1f);
+		if (emit_av_inline(e, vxo, rd, ra, rb))
+			return 1;
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
 		if (!emit_imm32(e, W2, (uint32_t)ra))
@@ -11801,6 +12374,10 @@ static uint32_t block_chain_pc(const uint32_t *ops, int n, uint32_t guest_pc)
 			return disp;
 		return last_pc + disp;
 	}
+	/* Not-taken bc falls through. The taken target and bclr/bcctr
+	 * stay unchained: those hops smeared glyphs or blacked the screen. */
+	if (prim == 16)
+		return last_pc + 4u;
 	if (is_term(last) || nw_jit_op_ends_block(last))
 		return 0;
 	return guest_pc + (uint32_t)n * 4u;
@@ -12220,11 +12797,14 @@ nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
 		}
 	}
 	uint32_t gpr_mask = 0;
-	for (int i = 0; i < n; i++)
+	uint32_t fpr_mask = 0;
+	for (int i = 0; i < n; i++) {
 		gpr_mask |= nw_jit_op_gpr_mask(ops[i]);
+		fpr_mask |= nw_jit_op_fpr_mask(ops[i]);
+	}
 	nw_jit_cache_put(phys_page, guest_pc, msr_ir, endian, fn, n, op0, uses_fpr, uses_vr,
 			 block_chain_pc(ops, n, guest_pc), gpr_mask,
-			 block_chain_disp(ops, n), (uint32_t)code_bytes);
+			 block_chain_disp(ops, n), (uint32_t)code_bytes, fpr_mask);
 	return fn;
 }
 

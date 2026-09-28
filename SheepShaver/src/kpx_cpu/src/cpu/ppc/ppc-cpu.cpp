@@ -46,6 +46,9 @@
 #include "nw_devices.h"
 #include "nw_script.h"
 #include "nw_jit.h"
+#include "nw_68k_jit.h"
+#include "prefs.h"
+#include "timer.h"
 #endif
 
 #define DEBUG 0
@@ -1264,6 +1267,11 @@ void powerpc_cpu::tick_decrementer()
 	if (++div < 256u)
 		return;
 	div = 0;
+	catch_up_timebase();
+}
+
+void powerpc_cpu::catch_up_timebase()
+{
 	const uint64 now = tb_ticks();
 	const uint32 elapsed = (uint32)(now - dec_tb_base_);
 	dec_tb_base_ = now;
@@ -1278,7 +1286,6 @@ void powerpc_cpu::tick_decrementer()
 	if (dec_ & 0x80000000u)
 		dec_pending_ = true;
 #ifdef SHEEPSHAVER
-	nw_devices_note_pc(pc());
 	nw_devices_tick();
 	nw_host_tick();
 	nw_script_tick();
@@ -1330,6 +1337,48 @@ void powerpc_cpu::tick_decrementer()
 #endif
 #endif
 }
+
+#ifdef SHEEPSHAVER
+/* New World never hits the SynchIdleTime EMUL_OP (the 68k pattern is not
+ * in this ROM). The guest sits in this isync/b loop — measured at
+ * 0x0027bae0 / 0x0027bae4 — and the JIT runs it at full rate. Sleep until
+ * the next host interrupt when EE is on and nothing is already pending.
+ * The opcode check refuses the address if a different guest lands there. */
+int powerpc_cpu::guest_idle_wait()
+{
+	static int on = -1;
+	if (on < 0)
+		on = PrefsFindBool("idlewait") ? 1 : 0;
+	if (!on || execute_depth != 1)
+		return 0;
+	const uint32 p = pc();
+	if (p != 0x0027bae0u && p != 0x0027bae4u)
+		return 0;
+	if (nw_la_ram_size <= p + 4u)
+		return 0;
+	const uint32 op = ReadMacInt32(p);
+	if (p == 0x0027bae0u && op != 0x4c00012cu)
+		return 0;
+	if (p == 0x0027bae4u && op != 0x4bffffe8u)
+		return 0;
+	if ((ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE) == 0)
+		return 0;
+	if (async_exception_pending())
+		return 0;
+	idle_wait();
+#if NW_BOOT_LOG
+	{
+		static int logged;
+		if (!logged) {
+			logged = 1;
+			printf("NW-BOOT G1: idle sleep pc=%08x\n", (unsigned)p);
+			fflush(stdout);
+		}
+	}
+#endif
+	return 1;
+}
+#endif
 
 bool powerpc_cpu::async_exception_pending() const
 {
@@ -2255,6 +2304,7 @@ void powerpc_cpu::jit_host_rfi(void *host, struct nw_jit_cpu *cpu)
 		ppc32_guest_mmu().set_msr(ppc->srr1_);
 		nw_log_msr_dr(ppc->srr1_);
 		nw_log_msr_write("rfi", ppc->srr0_, ppc->srr1_);
+		nw_log_emu_rfi(ppc->srr0_, ppc->srr1_, cpu->cr, ppc->sprg(0));
 		nw_jit_dtlb_flush_if_pr(old, ppc->srr1_, NW_JIT_DTLB_FL_RFI);
 		nw_jit_itlb_note_msr(old, ppc->srr1_);
 		cpu->pc = ppc->srr0_;
@@ -2262,6 +2312,79 @@ void powerpc_cpu::jit_host_rfi(void *host, struct nw_jit_cpu *cpu)
 		return;
 	}
 	cpu->pc += 4;
+}
+
+static void nw_commit_gpr(struct nw_jit_cpu *jc, powerpc_cpu *ppc)
+{
+	const uint32_t mask = jc->gpr_live;
+	if (mask == 0xffffffffu) {
+		for (int i = 0; i < 32; i++)
+			ppc->gpr(i) = jc->gpr[i];
+		return;
+	}
+	for (int i = 0; i < 32; i++)
+		if (mask & (1u << i))
+			ppc->gpr(i) = jc->gpr[i];
+}
+
+static void nw_pull_gpr(struct nw_jit_cpu *jc, powerpc_cpu *ppc, uint32_t mask)
+{
+	if (mask == 0)
+		return;
+	if (jc->gpr_live == 0xffffffffu)
+		return;
+	if (mask == 0xffffffffu) {
+		for (int i = 0; i < 32; i++)
+			if ((jc->gpr_live & (1u << i)) == 0)
+				jc->gpr[i] = ppc->gpr(i);
+		jc->gpr_live = 0xffffffffu;
+		return;
+	}
+	for (int i = 0; i < 32; i++) {
+		const uint32_t b = 1u << i;
+		if ((mask & b) && (jc->gpr_live & b) == 0)
+			jc->gpr[i] = ppc->gpr(i);
+	}
+	jc->gpr_live |= mask;
+}
+
+static void nw_commit_fpr(struct nw_jit_cpu *jc, powerpc_cpu *ppc, uint32_t &fpscr)
+{
+	const uint32_t mask = jc->fpr_live;
+	if (mask == 0)
+		return;
+	if (mask == 0xffffffffu) {
+		for (int i = 0; i < 32; i++)
+			ppc->fpr_dw(i) = jc->fpr[i];
+	} else {
+		for (int i = 0; i < 32; i++)
+			if (mask & (1u << i))
+				ppc->fpr_dw(i) = jc->fpr[i];
+	}
+	fpscr = jc->fpscr;
+}
+
+static void nw_pull_fpr(struct nw_jit_cpu *jc, powerpc_cpu *ppc, uint32_t mask,
+			uint32_t fpscr)
+{
+	if (mask == 0 || jc->fpr_live == 0xffffffffu)
+		return;
+	const int had = jc->fpr_live != 0;
+	if (mask == 0xffffffffu) {
+		for (int i = 0; i < 32; i++)
+			if ((jc->fpr_live & (1u << i)) == 0)
+				jc->fpr[i] = ppc->fpr_dw(i);
+		jc->fpr_live = 0xffffffffu;
+	} else {
+		for (int i = 0; i < 32; i++) {
+			const uint32_t b = 1u << i;
+			if ((mask & b) && (jc->fpr_live & b) == 0)
+				jc->fpr[i] = ppc->fpr_dw(i);
+		}
+		jc->fpr_live |= mask;
+	}
+	if (!had)
+		jc->fpscr = fpscr;
 }
 
 void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
@@ -2288,9 +2411,9 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 	if (nw_aline_dispatch_pa(npa))
 		return NULL;
 	int nn = 0, f2 = 0, v2 = 0;
-	uint32_t ch2 = 0;
+	uint32_t ch2 = 0, sg = 0, sf = 0;
 	nw_jit_fn next = nw_jit_cache_get(npa & ~0xfffu, cpu->pc, hmsr_ir, 0,
-					  &nn, &f2, &v2, &ch2);
+					  &nn, &f2, &v2, &ch2, &sg, NULL, &sf);
 	if (!next || next == NW_JIT_INTERPRET ||
 	    nn <= 0 || nn > NW_JIT_MAX_BLOCK)
 		return NULL;
@@ -2298,8 +2421,8 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 		return NULL;
 	if (f2 && !(hmsr & ppc32_mmu::MSR_FP))
 		return NULL;
-	for (int i = 0; i < 32; i++)
-		ppc->gpr(i) = cpu->gpr[i];
+	nw_commit_gpr(cpu, ppc);
+	nw_pull_gpr(cpu, ppc, sg);
 	ppc->cr().set(cpu->cr);
 	ppc->xer().set(cpu->xer);
 	ppc->lr() = cpu->lr;
@@ -2318,11 +2441,8 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 	 * block did not already have that class in jc. Copy-in on a live
 	 * VMX block overwrote glyph VRs with pre-block ppc and smeared
 	 * Finder/menu text. */
-	if (cur_fpr) {
-		for (int i = 0; i < 32; i++)
-			ppc->fpr_dw(i) = cpu->fpr[i];
-		ppc->fpscr() = cpu->fpscr;
-	}
+	if (cur_fpr)
+		nw_commit_fpr(cpu, ppc, ppc->fpscr());
 	if (cur_vr) {
 		for (int i = 0; i < 32; i++) {
 			ppc->vr(i).w[0] = cpu->vr[i][0];
@@ -2332,11 +2452,8 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 		}
 		ppc->vscr().set(cpu->vscr);
 	}
-	if (f2 && !cur_fpr) {
-		for (int i = 0; i < 32; i++)
-			cpu->fpr[i] = ppc->fpr_dw(i);
-		cpu->fpscr = ppc->fpscr();
-	}
+	if (f2)
+		nw_pull_fpr(cpu, ppc, sf ? sf : 0xffffffffu, ppc->fpscr());
 	if (v2 && !cur_vr) {
 		for (int i = 0; i < 32; i++) {
 			cpu->vr[i][0] = ppc->vr(i).w[0];
@@ -2958,10 +3075,11 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	int uses_fpr = 0, uses_vr = 0;
 	uint32_t chain_pc = 0;
 	uint32_t gpr_mask = 0xffffffffu;
+	uint32_t fpr_mask = 0xffffffffu;
 	int16_t chain_disp = 0;
 	nw_jit_fn fn = nw_jit_cache_get(phys_page, guest_pc, msr_ir, 0, &n,
 					&uses_fpr, &uses_vr, &chain_pc, &gpr_mask,
-					&chain_disp);
+					&chain_disp, &fpr_mask);
 	if (fn == NW_JIT_INTERPRET)
 		return 0;
 	if (fn && n > 0 && n <= NW_JIT_MAX_BLOCK) {
@@ -3105,7 +3223,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		fn = nw_jit_compile(ops, n, guest_pc, phys_page, msr_ir, 0);
 		(void)nw_jit_cache_get(phys_page, guest_pc, msr_ir, 0, &n,
 				       &uses_fpr, &uses_vr, &chain_pc, &gpr_mask,
-				       &chain_disp);
+				       &chain_disp, &fpr_mask);
 	}
 	if (!fn) {
 		nw_jit_note_hop_stop(NW_JIT_HOP_COMPILE_NULL);
@@ -3135,10 +3253,38 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		}
 		uses_vr = is_altivec_insn(first_opcode);
 		gpr_mask = 0;
-		for (int i = 0; i < n; i++)
+		fpr_mask = 0;
+		for (int i = 0; i < n; i++) {
 			gpr_mask |= nw_jit_op_gpr_mask(ops[i]);
+			fpr_mask |= nw_jit_op_fpr_mask(ops[i]);
+		}
 	}
-	(void)gpr_mask;
+	if (full) {
+		gpr_mask = 0xffffffffu;
+		fpr_mask = 0xffffffffu;
+	} else {
+		uint32_t wpc = chain_pc;
+		for (int t = 0; t < nw_jit_tail_max() && wpc; t++) {
+			uint32_t npa = 0;
+			if (!nw_jit_itlb_lookup(wpc, &npa)) {
+				gpr_mask = 0xffffffffu;
+				fpr_mask = 0xffffffffu;
+				break;
+			}
+			uint32_t sg = 0, sf = 0, ch = 0;
+			int n2 = 0, f2 = 0, v2 = 0;
+			nw_jit_fn nx = nw_jit_cache_get(npa & ~0xfffu, wpc, msr_ir, 0,
+						       &n2, &f2, &v2, &ch, &sg, NULL, &sf);
+			if (!nx || nx == NW_JIT_INTERPRET || n2 <= 0) {
+				gpr_mask = 0xffffffffu;
+				fpr_mask = 0xffffffffu;
+				break;
+			}
+			gpr_mask |= sg;
+			fpr_mask |= sf;
+			wpc = ch;
+		}
+	}
 	/* A mixed block can start with an integer op, so execute() did not
 	 * see an FP opcode. MSR[FP] still has to be on or the NK never
 	 * saves the FPRs across a switch. */
@@ -3153,8 +3299,18 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	jc.nstore = 0;
 	jc.reserve_valid = 0;
 	jc.reserve_ea = 0;
-	for (int i = 0; i < 32; i++)
-		jc.gpr[i] = gpr(i);
+	jc.gpr_live = 0;
+	jc.fpr_live = 0;
+	if (gpr_mask == 0xffffffffu) {
+		for (int i = 0; i < 32; i++)
+			jc.gpr[i] = gpr(i);
+		jc.gpr_live = 0xffffffffu;
+	} else {
+		for (int i = 0; i < 32; i++)
+			if (gpr_mask & (1u << i))
+				jc.gpr[i] = gpr(i);
+		jc.gpr_live = gpr_mask;
+	}
 	if (full || uses_vr) {
 		for (int i = 0; i < 32; i++) {
 			jc.vr[i][0] = vr(i).w[0];
@@ -3164,10 +3320,19 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		}
 		jc.vscr = vscr().get();
 	}
-	if (full || uses_fpr) {
+	if (full || fpr_mask == 0xffffffffu) {
+		if (full || uses_fpr || fpr_mask) {
+			for (int i = 0; i < 32; i++)
+				jc.fpr[i] = fpr_dw(i);
+			jc.fpscr = fpscr();
+			jc.fpr_live = 0xffffffffu;
+		}
+	} else if (fpr_mask) {
 		for (int i = 0; i < 32; i++)
-			jc.fpr[i] = fpr_dw(i);
+			if (fpr_mask & (1u << i))
+				jc.fpr[i] = fpr_dw(i);
 		jc.fpscr = fpscr();
+		jc.fpr_live = fpr_mask;
 	}
 	jc.cr = cr().get();
 	jc.xer = xer().get();
@@ -3180,8 +3345,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	nw_jit_cpu_bind(&jc);
 
 	auto commit = [&]() {
-		for (int i = 0; i < 32; i++)
-			gpr(i) = jc.gpr[i];
+		nw_commit_gpr(&jc, this);
 		if (full || uses_vr) {
 			for (int i = 0; i < 32; i++) {
 				vr(i).w[0] = jc.vr[i][0];
@@ -3191,11 +3355,12 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			}
 			vscr().set(jc.vscr);
 		}
-		if (full || uses_fpr) {
+		if (full && jc.fpr_live == 0) {
 			for (int i = 0; i < 32; i++)
 				fpr_dw(i) = jc.fpr[i];
 			fpscr() = jc.fpscr;
-		}
+		} else
+			nw_commit_fpr(&jc, this, fpscr());
 		cr().set(jc.cr);
 		xer().set(jc.xer);
 		lr() = jc.lr;
@@ -3310,10 +3475,10 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 				break;
 			}
 			int n2 = 0, f2 = 0, v2 = 0;
-			uint32_t chain2 = 0;
+			uint32_t chain2 = 0, sg = 0, sf = 0;
 			int16_t disp2 = 0;
 			nw_jit_fn next = nw_jit_cache_get(npa & ~0xfffu, jc.pc, hmsr_ir, 0,
-							 &n2, &f2, &v2, &chain2, NULL, &disp2);
+							 &n2, &f2, &v2, &chain2, &sg, &disp2, &sf);
 			if (!next || next == NW_JIT_INTERPRET ||
 			    n2 <= 0 || n2 > NW_JIT_MAX_BLOCK) {
 				nw_jit_note_hop_stop(NW_JIT_HOP_CACHE_MISS);
@@ -3335,10 +3500,9 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			jc.dec_wr = 0;
 			jc.dec = dec_;
 			pc() = jc.pc;
-			if (f2 && !uses_fpr) {
-				for (int i = 0; i < 32; i++)
-					jc.fpr[i] = fpr_dw(i);
-				jc.fpscr = fpscr();
+			nw_pull_gpr(&jc, this, sg);
+			if (f2) {
+				nw_pull_fpr(&jc, this, sf ? sf : 0xffffffffu, fpscr());
 				uses_fpr = 1;
 			}
 			if (v2 && !uses_vr) {
@@ -3624,6 +3788,40 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 }
 #endif
 
+int powerpc_cpu::nw_68k_jit_step(uint32 entry, uint32 *landed)
+{
+	pc() = entry;
+	if (landed)
+		*landed = entry;
+	if (ppc32_guest_mmu_enabled()) {
+		tick_decrementer();
+		if (async_exception_pending() &&
+		    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE)) {
+			take_async_exception();
+			if (landed)
+				*landed = pc();
+			return 0;
+		}
+	}
+	uint32 opcode;
+	if (!guest_fetch(&opcode)) {
+		if (landed)
+			*landed = pc();
+		return 0;
+	}
+	/* The compiled handler runs through its bclr. chain_pc stays 0 for
+	 * bclr and bcctr, so the hop loop returns here instead of following
+	 * LR or CTR. */
+	if (!nw_jit_try(opcode)) {
+		if (landed)
+			*landed = pc();
+		return 0;
+	}
+	if (landed)
+		*landed = pc();
+	return 1;
+}
+
 void powerpc_cpu::execute(uint32 entry)
 {
 	bool invalidated_cache = false;
@@ -3771,8 +3969,13 @@ void powerpc_cpu::execute(uint32 entry)
 #endif
 	}
 #endif
-  do_interpret:
+	do_interpret:
 	for (;;) {
+#ifdef SHEEPSHAVER
+		if (nw_68k_stop_one(pc(), execute_depth))
+			goto return_site;
+		nw_68k_hist_note(pc(), gpr(24));
+#endif
 		uint32 opcode;
 		if (ppc32_guest_mmu_enabled()) {
 			tick_decrementer();
@@ -3780,6 +3983,17 @@ void powerpc_cpu::execute(uint32 entry)
 				take_async_exception();
 				continue;
 			}
+#ifdef SHEEPSHAVER
+			/* After the sleep, apply the TB delta the 256-instruction
+			 * divider would have skipped so DEC and the OpenPIC keep
+			 * wall time. */
+			if (guest_idle_wait()) {
+				catch_up_timebase();
+				if (!spcflags().empty() && !check_spcflags())
+					goto return_site;
+				continue;
+			}
+#endif
 		}
 		if (!guest_fetch(&opcode)) {
 			if (!spcflags().empty() && !check_spcflags())
