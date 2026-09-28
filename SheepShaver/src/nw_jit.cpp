@@ -5949,6 +5949,52 @@ void nw_jit_helper_bclr(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc)
 	else
 		cpu->pc = pc + 4;
 #if NW_BOOT_LOG
+	/* r25 low 3 bits are the 68k IPL (0x20|level). Level 0 takes the
+	 * VBL twi; level 5 at ffc046f0 returns here and the source stays
+	 * in service. The PC is the instruction after the one that wrote it. */
+	if (cpu->gpr[24] >= 0xffc00000u) {
+		static int nslot, ninit, tracing, npath;
+		const uint32_t r24 = cpu->gpr[24];
+		/* r24 at a dispatch bclr is the prefetched halfword, so the
+		 * .BCScreen init (ffc00c24) never matches the opcode address.
+		 * _SlotManager is opcode A06E, stub 680d0370. d0 is the selector
+		 * on the way in. */
+		if (cpu->lr == 0x680d0370u && nslot < 24) {
+			nslot++;
+			printf("NW-BOOT G1: slot r24=%08x d0=%08x a0=%08x cr=%08x ppc=%08x\n",
+			       r24, cpu->gpr[8], cpu->gpr[16], cpu->cr, pc);
+			fflush(stdout);
+		}
+		if (r24 >= 0xffc00c20u && r24 < 0xffc00d20u && ninit < 32) {
+			static uint32_t initpc[32];
+			int dup = 0;
+			for (int i = 0; i < ninit; i++)
+				if (initpc[i] == r24)
+					dup = 1;
+			if (!dup) {
+				initpc[ninit++] = r24;
+				printf("NW-BOOT G1: bcinit r24=%08x d0=%08x a0=%08x a1=%08x lr=%08x ppc=%08x\n",
+				       r24, cpu->gpr[8], cpu->gpr[16], cpu->gpr[17], cpu->lr, pc);
+				fflush(stdout);
+			}
+		}
+		/* First IPL-5 68k PCs after move #$2500,sr. */
+		if (r24 == 0xffc049d8u || r24 == 0xffc049deu || r24 == 0xffc049e0u)
+			tracing = 1;
+		if (tracing && npath < 16 && r24 >= 0xffc04000u && r24 < 0xffc05000u) {
+			static uint32_t path[16];
+			int dup = 0;
+			for (int i = 0; i < npath; i++)
+				if (path[i] == r24)
+					dup = 1;
+			if (!dup) {
+				path[npath++] = r24;
+				printf("NW-BOOT G1: ipl5 r24=%08x d0=%08x cr=%08x lr=%08x ppc=%08x r27=%08x\n",
+				       r24, cpu->gpr[8], cpu->cr, cpu->lr, pc, cpu->gpr[27]);
+				fflush(stdout);
+			}
+		}
+	}
 	/* 6806d264 returns without the twi when the 68k mask blocks the
 	 * level. bra.s * at ffc046ee only leaves on that twi. */
 	if (pc == 0x6806d264u || pc == 0x6806d268u) {
@@ -7894,17 +7940,21 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 				return -1;
 			const uint8_t *p = cpu->mem + (ea - cpu->mem_base);
 			h = (uint16_t)(((uint32_t)p[0] << 8) | p[1]);
-		} else if (prim == 41) {
+		} else {
 			cpu->pc = pc;
 			uint32_t v = nw_jit_helper_lh(cpu, ea);
 			if (cpu->fault && cpu->fault != 3u)
 				return 0;
-			cpu->gpr[rd] = v & 0xffffu;
-			cpu->gpr[ra] = ea;
+			if (prim == 42 || prim == 43)
+				v = (uint32_t)(int16_t)(uint16_t)v;
+			else
+				v &= 0xffffu;
+			cpu->gpr[rd] = v;
+			if ((prim == 41 || prim == 43) && ra)
+				cpu->gpr[ra] = ea;
 			cpu->pc = pc + 4;
 			return 0;
-		} else
-			return -1;
+		}
 		uint32_t v = (prim == 40 || prim == 41) ? h : (uint32_t)(int16_t)h;
 		cpu->gpr[rd] = v;
 		if ((prim == 41 || prim == 43) && ra)
@@ -9991,8 +10041,114 @@ static int emit_av_inline(struct emit *e, int vxo, int vd, int va, int vb)
 	return emit_av_body(e, vxo, vd, va, vb);
 }
 
+struct nw_wake_ring {
+	uint32_t pc, cr, r13, r24, r25, ctr, lr;
+};
+static struct nw_wake_ring g_wake_ring[32];
+static unsigned g_wake_ring_n;
+
+void nw_jit_dump_wake_ring(void)
+{
+	unsigned n = g_wake_ring_n < 32u ? g_wake_ring_n : 32u;
+	unsigned start = g_wake_ring_n > 32u ? g_wake_ring_n - 32u : 0u;
+	for (unsigned i = 0; i < n; i++) {
+		const struct nw_wake_ring *e = &g_wake_ring[(start + i) & 31u];
+		printf("NW-BOOT G1: wake-ring pc=%08x cr=%08x r13=%08x r24=%08x r25=%08x ctr=%08x lr=%08x\n",
+		       e->pc, e->cr, e->r13, e->r24, e->r25, e->ctr, e->lr);
+	}
+	fflush(stdout);
+}
+
+static void nw_jit_log_wake(struct nw_jit_cpu *cpu, uint32_t pc)
+{
+#if NW_BOOT_LOG
+	if ((pc == 0x5032364cu && cpu->gpr[24] == 0xffc046f0u) ||
+	    pc == 0x6806d114u || pc == 0x6806d120u || pc == 0x6806d124u ||
+	    pc == 0x6806d128u || pc == 0x6806d12cu || pc == 0x6806d144u || pc == 0x6806d148u ||
+	    pc == 0x6806d14cu || pc == 0x6806d248u || pc == 0x6806d264u) {
+		struct nw_wake_ring *e = &g_wake_ring[g_wake_ring_n & 31u];
+		e->pc = pc;
+		e->cr = cpu->cr;
+		e->r13 = cpu->gpr[13];
+		e->r24 = cpu->gpr[24];
+		e->r25 = cpu->gpr[25];
+		e->ctr = cpu->ctr;
+		e->lr = cpu->lr;
+		g_wake_ring_n++;
+	}
+	const uint32_t r13 = cpu->gpr[13];
+	const uint32_t r28 = cpu->gpr[28];
+	const uint32_t r31 = cpu->gpr[31];
+	int odd = 0;
+	/* r28<0 skips the OR. r28==0 ORs a zero mask then ANDs the CR
+	 * image. A mask or result without CR bit 8 leaves bra.s * spinning
+	 * and the OpenPIC source in service. */
+	if (pc == 0x50324634u && (int32_t)r28 < 0)
+		odd = 1;
+	if (pc == 0x50324638u && r28 == 0)
+		odd = 1;
+	if (pc == 0x50324664u && (r31 & 0x00800000u) == 0)
+		odd = 1;
+	if (pc == 0x50324668u && (r13 & 0x00800000u) == 0)
+		odd = 1;
+	if (pc == 0x5032466cu)
+		odd = 1;
+	/* mtcrf r13 in the rfi epilogue. r28<=0 reloads a CR image from
+	 * before the wake OR and drops bit 8 on the way back to bra.s *. */
+	if ((pc == 0x503141f0u || pc == 0x5031423cu || pc == 0x50314280u ||
+	     pc == 0x5032364cu) &&
+	    ((int32_t)r28 <= 0 || (r13 & 0x00800000u) == 0))
+		odd = 1;
+	const int epilogue = pc == 0x503141f0u || pc == 0x5031423cu ||
+			     pc == 0x50314280u || pc == 0x5032364cu;
+	static unsigned n, nanom, nepi;
+	if (epilogue) {
+		if (nepi >= 12u)
+			return;
+		nepi++;
+	} else if (odd) {
+		if (nanom >= 12u)
+			return;
+		nanom++;
+	} else if (n >= 6u)
+		return;
+	else
+		n++;
+	printf("NW-BOOT G1: wake%s pc=%08x r7=%08x r13=%08x r27=%08x r28=%08x r29=%08x r31=%08x cr=%08x\n",
+	       odd ? "-odd" : "", pc, cpu->gpr[7], r13, cpu->gpr[27], r28,
+	       cpu->gpr[29], r31, cpu->cr);
+	fflush(stdout);
+#else
+	(void)cpu;
+	(void)pc;
+#endif
+}
+
+static int emit_wake_log(struct emit *e, uint32_t pc)
+{
+	if (pc != 0x50324634u && pc != 0x50324638u && pc != 0x50324664u &&
+	    pc != 0x50324668u && pc != 0x5032466cu &&
+	    pc != 0x503141f0u && pc != 0x5031423cu && pc != 0x50314280u &&
+	    pc != 0x5032364cu && pc != 0x50313d40u &&
+	    pc != 0x6806d114u && pc != 0x6806d120u && pc != 0x6806d124u &&
+	    pc != 0x6806d128u && pc != 0x6806d12cu && pc != 0x6806d144u && pc != 0x6806d148u &&
+	    pc != 0x6806d14cu && pc != 0x6806d248u && pc != 0x6806d264u)
+		return 1;
+	if (!emit_w(e, 0xaa1303e0u))
+		return 0;
+	if (!emit_imm32(e, W1, pc))
+		return 0;
+	if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_log_wake))
+		return 0;
+	if (!emit_w(e, 0xd63f0120u))
+		return 0;
+	return emit_w(e, 0xaa1303e0u);
+}
+
 static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 {
+	if (!emit_wake_log(e, pc))
+		return 0;
 	const int prim = (int)(op >> 26);
 	const int rd = (int)((op >> 21) & 0x1f);
 	const int ra = (int)((op >> 16) & 0x1f);

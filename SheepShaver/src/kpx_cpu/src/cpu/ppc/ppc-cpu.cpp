@@ -2305,6 +2305,20 @@ void powerpc_cpu::jit_host_rfi(void *host, struct nw_jit_cpu *cpu)
 		nw_log_msr_dr(ppc->srr1_);
 		nw_log_msr_write("rfi", ppc->srr0_, ppc->srr1_);
 		nw_log_emu_rfi(ppc->srr0_, ppc->srr1_, cpu->cr, ppc->sprg(0));
+#if NW_BOOT_LOG
+		if (ppc->srr0_ == 0x680b07f0u || ppc->srr0_ == 0x680b07f4u) {
+			static unsigned nh;
+			if (nh < 6u) {
+				nh++;
+				printf("NW-BOOT G1: halt-rfi pc=%08x cpu_pc=%08x lr=%08x r13=%08x r28=%08x r31=%08x cr=%08x\n",
+				       (unsigned)ppc->pc(), (unsigned)cpu->pc, (unsigned)cpu->lr,
+				       cpu->gpr[13], cpu->gpr[28], cpu->gpr[31], cpu->cr);
+				fflush(stdout);
+				if ((cpu->cr & 0x00800000u) == 0)
+					nw_jit_dump_wake_ring();
+			}
+		}
+#endif
 		nw_jit_dtlb_flush_if_pr(old, ppc->srr1_, NW_JIT_DTLB_FL_RFI);
 		nw_jit_itlb_note_msr(old, ppc->srr1_);
 		cpu->pc = ppc->srr0_;

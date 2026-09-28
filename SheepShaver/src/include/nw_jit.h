@@ -358,6 +358,7 @@ typedef void (*nw_jit_host_vmx)(void *host, uint32_t op, struct nw_jit_cpu *cpu)
 void nw_jit_set_host_vmx(nw_jit_host_vmx fn);
 typedef void (*nw_jit_host_rfi)(void *host, struct nw_jit_cpu *cpu);
 void nw_jit_set_host_rfi(nw_jit_host_rfi fn);
+void nw_jit_dump_wake_ring(void);
 typedef void *(*nw_jit_host_chain)(void *host, struct nw_jit_cpu *cpu,
 				   uint32_t chain_pc, int *n2,
 				   int *uses_fpr, int *uses_vr,
