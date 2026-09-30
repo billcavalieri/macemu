@@ -76,6 +76,7 @@ struct pic_src {
 	uint32_t ivpr, idr;
 	int pending;			/* input asserted (level) or latched (edge) */
 	int servicing;			/* acknowledged, EOI not yet written */
+	uint64_t ack_serial, ack_time;	/* read-only return-path diagnostics */
 };
 
 struct pic_timer {
@@ -91,6 +92,11 @@ static struct {
 	struct pic_src src[NW_OPENPIC_NIRQ];
 	struct pic_timer tmr[NW_OPENPIC_NTMR];
 } pic;
+
+/* Read-only diagnostics for an acknowledgement that never reaches EOI.
+ * Keep the serial monotonic across device resets so return-path traces cannot
+ * accidentally combine acknowledgements from different guest sessions. */
+static uint64_t pic_ack_serial;
 
 static inline int prio(uint32_t ivpr)
 {
@@ -213,6 +219,8 @@ static uint32_t pic_iack(void)
 	if (r >= 0 && prio(pic.src[r].ivpr) > (int)pic.ctpr) {
 		struct pic_src *s = &pic.src[r];
 		s->servicing = 1;
+		s->ack_serial = ++pic_ack_serial;
+		s->ack_time = tb_now();
 		if (!is_level(r) || r == NW_VBL_IRQ)
 			s->pending = 0;
 		pic_update();
@@ -314,6 +322,20 @@ void nw_display_vbl_clear(void)
 int nw_pic_vbl_servicing(void)
 {
 	return pic.src[NW_VBL_IRQ].servicing;
+}
+
+int nw_pic_service_snapshot(struct nw_pic_service *out)
+{
+	int source = -1;
+	if (!out || servicing_priority(&source) < 0)
+		return 0;
+	const struct pic_src &s = pic.src[source];
+	const uint64_t now = tb_now();
+	out->source = source;
+	out->vector = s.ivpr & NW_OPENPIC_IVPR_VECTOR;
+	out->acknowledgement = s.ack_serial;
+	out->age_usec = now >= s.ack_time ? tb_to_hz(now - s.ack_time, 1000000) : 0;
+	return 1;
 }
 
 static void vbl_tick(void)
@@ -830,6 +852,7 @@ static struct {
 	uint8_t intbits, intmask;
 	uint32_t tick_offset;		/* RTC seconds since 1904 at timebase 0 */
 	uint64_t next_sec;		/* timebase of the next one-second tick */
+	uint64_t busy_tb;		/* timebase when a command left idle; 0 if idle */
 } via;
 
 /* Argument and response byte counts per command (-1 = length byte first),
@@ -999,9 +1022,18 @@ static struct {
 	uint16_t autopoll_mask;
 	int poll_index;				/* device to poll next: 0 keyboard, 1 mouse */
 	uint64_t next_poll;			/* timebase */
+	uint64_t irq_tb;			/* timebase when INT_ADB rose; 0 = line idle */
+	int edge_wait;				/* pin was released; assert on the next tick */
+	uint8_t edge_kept;			/* non-ADB intbits to raise with that edge */
+	std::atomic<uint64_t> move_us;		/* host usec of the last move or click */
 	uint8_t reply[32];			/* pending reply / autopoll data for INT_ACK */
 	int reply_sz;
 } adb;
+
+/* The app's timer thread defines this. The device harness does not link
+ * that thread, so it supplies an empty one. A signal with nobody waiting
+ * is discarded; the next key or motion signals again. */
+extern void idle_resume(void);
 
 /* Register 3 high byte as a real device answers it: bit 6 set (no
  * exceptional event), bit 5 service-request enable, low nibble the
@@ -1036,12 +1068,32 @@ void nw_adb_key(uint8_t code, int down)
 		return;					/* full: drop */
 	adb.keys[wr % ADB_KEY_RING] = (uint8_t)((code & 0x7f) | (down ? 0 : 0x80));
 	adb.key_wr.store(wr + 1, std::memory_order_release);
+	idle_resume();
 }
 
 void nw_adb_mouse_move(int dx, int dy)
 {
+	if (dx == 0 && dy == 0)
+		return;
 	adb.dx.fetch_add(dx);
 	adb.dy.fetch_add(dy);
+	adb.move_us.store(GetTicks_usec(), std::memory_order_release);
+	idle_resume();
+}
+
+int nw_adb_mouse_busy(void)
+{
+	return adb.dx.load(std::memory_order_acquire) != 0
+		|| adb.dy.load(std::memory_order_acquire) != 0;
+}
+
+int nw_adb_mouse_recent(void)
+{
+	const uint64_t t = adb.move_us.load(std::memory_order_acquire);
+	if (t == 0)
+		return 0;
+	const uint64_t now = GetTicks_usec();
+	return now >= t && now - t < 50000ull;
 }
 
 void nw_adb_mouse_button(int button, int down)
@@ -1053,10 +1105,12 @@ void nw_adb_mouse_button(int button, int down)
 	else
 		adb.buttons.fetch_and(~(1u << button));
 	const unsigned wr = adb.btn_wr.load(std::memory_order_relaxed);
-	if (wr - adb.btn_rd.load(std::memory_order_acquire) >= ADB_BTN_RING)
-		return;
-	adb.btn[wr % ADB_BTN_RING] = (uint8_t)((button & 0x3) | (down ? 0 : 0x80));
-	adb.btn_wr.store(wr + 1, std::memory_order_release);
+	if (wr - adb.btn_rd.load(std::memory_order_acquire) < ADB_BTN_RING) {
+		adb.btn[wr % ADB_BTN_RING] = (uint8_t)((button & 0x3) | (down ? 0 : 0x80));
+		adb.btn_wr.store(wr + 1, std::memory_order_release);
+	}
+	adb.move_us.store(GetTicks_usec(), std::memory_order_release);
+	idle_resume();
 }
 
 static int adb_kbd_poll(uint8_t *obuf)
@@ -1124,7 +1178,10 @@ static int adb_mouse_poll(uint8_t *obuf)
 		if (dy < -63) dy = -63; else if (dy > 63) dy = 63;
 		adb.dx.fetch_sub(dx);
 		adb.dy.fetch_sub(dy);
-		const unsigned buttons = adb.last_buttons;
+		/* The button bit is the button now, not the last packet. A click
+		 * during a move has to land in this packet; the ring still
+		 * reports the edge once the move has drained. */
+		const unsigned buttons = adb.buttons.load();
 		obuf[0] = (uint8_t)((dy & 0x7f) | ((buttons & 1) ? 0 : 0x80));
 		obuf[1] = (uint8_t)((dx & 0x7f) | ((buttons & 2) ? 0 : 0x80));
 		return 2;
@@ -1271,25 +1328,136 @@ static void pmu_cmd_adb(const uint8_t *in, int in_len)
 		adb.reply_sz = 1;
 		adb.reply[0] = 0x00;
 	}
+	if ((via.intbits & NW_PMU_INT_ADB) == 0)
+		adb.irq_tb = tb_now();
 	via.intbits |= NW_PMU_INT_ADB;
 	pmu_update_extirq();
 }
 
-/* Autopoll from the device tick: not while a PMU command is in flight
- * (QEMU blocks the timer between the command byte and the last reply
- * byte) and not while a previous ADB interrupt is unacknowledged. */
+/* GPIO1 is level, active low. The guest takes one falling edge and then
+ * waits for the pin to go high. A same-tick pulse never leaves the pin
+ * high across a guest instruction, so the next packet is invisible and
+ * the arrow stops after the machine has been idle. Release on this tick.
+ * Assert on the next one. */
+static int pmu_adb_stale(uint64_t now)
+{
+	if ((via.intbits & NW_PMU_INT_ADB) == 0)
+		return 0;
+	if (adb.irq_tb == 0)
+		adb.irq_tb = now;
+	const uint64_t limit = g_tb.hz ? (uint64_t)g_tb.hz * 200 / 1000 : 0;
+	if (adb.irq_tb == 0 || limit == 0 || now < adb.irq_tb)
+		return 0;
+	return now - adb.irq_tb >= limit;
+}
+
+static int pmu_line_low(void)
+{
+	return (via.intbits & via.intmask) != 0;
+}
+
+static int adb_host_pending(void)
+{
+	if (adb.dx.load() != 0 || adb.dy.load() != 0)
+		return 1;
+	if (adb.key_rd.load() != adb.key_wr.load())
+		return 1;
+	if (adb.btn_rd.load() != adb.btn_wr.load())
+		return 1;
+	return adb.buttons.load() != adb.last_buttons;
+}
+
+static void pmu_adb_arm(uint64_t now, int with_data)
+{
+	const uint8_t extra = adb.edge_kept;
+	adb.edge_kept = 0;
+	if (with_data) {
+		if ((via.intbits & NW_PMU_INT_ADB) == 0)
+			adb.irq_tb = now;
+		via.intbits |= extra | NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO;
+	} else if (extra || adb_host_pending()) {
+		if (adb_host_pending() && (via.intbits & NW_PMU_INT_ADB) == 0)
+			adb.irq_tb = now;
+		via.intbits |= extra;
+		if (adb_host_pending())
+			via.intbits |= NW_PMU_INT_ADB;
+	}
+	pmu_update_extirq();
+}
+
+static void pmu_adb_schedule(uint64_t now)
+{
+	if (adb.dx.load() != 0 || adb.dy.load() != 0)
+		adb.next_poll = now;
+	else
+		adb.next_poll = now + (uint64_t)g_tb.hz * NW_ADB_POLL_MS / 1000;
+}
+
+/* Autopoll from the device tick. A command in flight blocks it, unless
+ * that command has sat for 200 ms (the handshake is a few VIA accesses).
+ * A fresh unacknowledged packet waits. A line that is already low is
+ * released and the packet is raised on the following tick. */
 static void pmu_adb_poll(uint64_t now)
 {
-	if (!adb.autopoll || via.state != pmu_idle || now < adb.next_poll)
+	if (via.state != pmu_idle) {
+		if (via.busy_tb == 0)
+			via.busy_tb = now;
+		const uint64_t limit = g_tb.hz ? (uint64_t)g_tb.hz * 200 / 1000 : 0;
+		if (limit == 0 || now < via.busy_tb || now - via.busy_tb < limit)
+			return;
+		via.state = pmu_idle;
+		via.busy_tb = 0;
+	} else {
+		via.busy_tb = 0;
+	}
+
+	if (adb.edge_wait) {
+		adb.edge_wait = 0;
+		if (adb.autopoll) {
+			const int olen = adb_poll(adb.reply, adb.autopoll_mask);
+			if (olen > 0)
+				adb.reply_sz = olen;
+			pmu_adb_arm(now, olen > 0);
+			pmu_adb_schedule(now);
+		} else {
+			adb.reply_sz = 0;
+			pmu_adb_arm(now, 0);
+		}
 		return;
-	adb.next_poll = now + (uint64_t)g_tb.hz * NW_ADB_POLL_MS / 1000;
-	if (via.intbits & NW_PMU_INT_ADB)
+	}
+
+	if (pmu_line_low()) {
+		const int adb_bit = (via.intbits & NW_PMU_INT_ADB) != 0;
+		if (adb_bit && !pmu_adb_stale(now))
+			return;
+		if (!adb_bit && !adb_host_pending())
+			return;
+		adb.edge_kept = (uint8_t)(via.intbits & (uint8_t)~(NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO));
+		via.intbits = 0;
+		adb.reply_sz = 0;
+		adb.irq_tb = 0;
+		pmu_update_extirq();
+		adb.edge_wait = 1;
 		return;
+	}
+
+	if (!adb.autopoll) {
+		if (!adb_host_pending())
+			return;
+		adb.reply_sz = 0;
+		pmu_adb_arm(now, 0);
+		return;
+	}
+	if (now < adb.next_poll)
+		return;
+
 	const int olen = adb_poll(adb.reply, adb.autopoll_mask);
 	if (olen > 0) {
 		adb.reply_sz = olen;
-		via.intbits |= NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO;
-		pmu_update_extirq();
+		pmu_adb_arm(now, 1);
+		pmu_adb_schedule(now);
+	} else {
+		adb.next_poll = now + (uint64_t)g_tb.hz * NW_ADB_POLL_MS / 1000;
 	}
 }
 
@@ -1311,9 +1479,11 @@ static void pmu_dispatch(void)
 			via.rsp_sz = adb.reply_sz + 1;
 			via.intbits &= (uint8_t)~(NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO);
 			adb.reply_sz = 0;
+			adb.irq_tb = 0;
 		} else {
 			out[0] = via.intbits;
 			via.intbits = 0;
+			adb.irq_tb = 0;
 			via.rsp_sz = 1;
 		}
 		pmu_update_extirq();
@@ -1494,6 +1664,7 @@ static void via_reset(void)
 	adb.autopoll_mask = 0;
 	adb.poll_index = 0;
 	adb.next_poll = now;
+	adb.irq_tb = 0;
 	adb.reply_sz = 0;
 }
 
@@ -1634,8 +1805,15 @@ static void via_tick(void)
 	via_check_timers(now, 1);
 	pmu_adb_poll(now);
 	if (g_tb.hz && now >= via.next_sec) {
-		via.intbits |= NW_PMU_INT_TICK;
-		pmu_update_extirq();
+		/* A release in this same call has to stay high until the guest
+		 * runs. Folding the one-second tick back onto the pin here
+		 * erases that edge. */
+		if (adb.edge_wait)
+			adb.edge_kept = (uint8_t)(adb.edge_kept | NW_PMU_INT_TICK);
+		else {
+			via.intbits |= NW_PMU_INT_TICK;
+			pmu_update_extirq();
+		}
 		/* one tick per second of wall time, however long the host paused */
 		via.next_sec += ((now - via.next_sec) / g_tb.hz + 1) * g_tb.hz;
 	}

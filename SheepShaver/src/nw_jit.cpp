@@ -9988,9 +9988,28 @@ static int emit_av_body(struct emit *e, int vxo, int vd, int va, int vb)
 	return emit_w(e, a64_str_q(0, 19, vr_off(vd)));
 }
 
+/* Release inlines this into nw_av_inline_on and lowers
+ * __builtin___clear_cache to sys_icache_invalidate with a stack address
+ * and a wrapped length. That walks off the emul thread stack. Flush the
+ * mapped page with an explicit length, and do not inline the check. */
+static int nw_av_flush(void *mem, void *end)
+{
+	uintptr_t b = (uintptr_t)mem;
+	uintptr_t e = (uintptr_t)end;
+	if (!mem || e < b || e - b > 4096u)
+		return 0;
+#ifdef __APPLE__
+	sys_icache_invalidate(mem, (size_t)(e - b));
+#else
+	__builtin___clear_cache((char *)mem, (char *)end);
+#endif
+	return 1;
+}
+
+static int nw_av_inline_check(void) __attribute__((noinline));
+
 static int nw_av_inline_check(void)
 {
-	uint32_t buf[32];
 	struct emit em;
 	void *mem;
 	typedef void (*fn_t)(struct nw_jit_cpu *);
@@ -10027,7 +10046,10 @@ static int nw_av_inline_check(void)
 #ifdef __APPLE__
 			pthread_jit_write_protect_np(1);
 #endif
-			__builtin___clear_cache((char *)mem, (char *)em.p);
+			if (!nw_av_flush(mem, em.p)) {
+				munmap(mem, 4096);
+				return 0;
+			}
 			memset(&cpu, 0, sizeof(cpu));
 			memcpy(cpu.vr[va], A, sizeof(A));
 			memcpy(cpu.vr[vb], B, sizeof(B));
@@ -10086,7 +10108,10 @@ static int nw_av_inline_check(void)
 #ifdef __APPLE__
 			pthread_jit_write_protect_np(1);
 #endif
-			__builtin___clear_cache((char *)mem, (char *)em.p);
+			if (!nw_av_flush(mem, em.p)) {
+				munmap(mem, 4096);
+				return 0;
+			}
 			memset(&cpu, 0, sizeof(cpu));
 			memcpy(cpu.vr[va], A, sizeof(A));
 			memcpy(cpu.vr[vb], B, sizeof(B));
@@ -10115,7 +10140,7 @@ static int nw_av_inline_on(void)
 	static int on = -1;
 	if (on < 0) {
 		const char *env = getenv("NW_JIT_AV_INLINE");
-		on = (env && (strcmp(env, "1") == 0 || strcmp(env, "on") == 0)) ? 1 : 0;
+		on = (env && (strcmp(env, "0") == 0 || strcmp(env, "off") == 0)) ? 0 : 1;
 		if (on && !nw_av_inline_check()) {
 			printf("NW-BOOT G1: av inline check failed\n");
 			fflush(stdout);

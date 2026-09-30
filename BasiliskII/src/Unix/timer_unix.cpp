@@ -341,6 +341,7 @@ void Delay_usec(uint64 usec)
 #define IDLE_USES_COND_WAIT 1
 static pthread_mutex_t idle_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t idle_cond = PTHREAD_COND_INITIALIZER;
+static int idle_pending;
 #elif defined(HAVE_SEM_INIT)
 #define IDLE_USES_SEMAPHORE 1
 #include <semaphore.h>
@@ -361,8 +362,19 @@ static int idle_sem_ok = -1;
 void idle_wait(void)
 {
 #ifdef IDLE_USES_COND_WAIT
+	/* A signal with nobody waiting is lost, and a wait with no timeout
+	 * never ticks the vertical blank or the PMU. One frame is enough. */
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	ts.tv_nsec += 16666667L;
+	if (ts.tv_nsec >= 1000000000L) {
+		ts.tv_sec += 1;
+		ts.tv_nsec -= 1000000000L;
+	}
 	pthread_mutex_lock(&idle_lock);
-	pthread_cond_wait(&idle_cond, &idle_lock);
+	if (!idle_pending)
+		pthread_cond_timedwait(&idle_cond, &idle_lock, &ts);
+	idle_pending = 0;
 	pthread_mutex_unlock(&idle_lock);
 #else
 #ifdef IDLE_USES_SEMAPHORE
@@ -391,7 +403,10 @@ void idle_wait(void)
 void idle_resume(void)
 {
 #ifdef IDLE_USES_COND_WAIT
+	pthread_mutex_lock(&idle_lock);
+	idle_pending = 1;
 	pthread_cond_signal(&idle_cond);
+	pthread_mutex_unlock(&idle_lock);
 #else
 #ifdef IDLE_USES_SEMAPHORE
 	LOCK_IDLE;

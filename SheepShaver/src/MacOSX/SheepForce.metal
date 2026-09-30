@@ -78,12 +78,14 @@ kernel void sf_inv(device uchar *pix [[buffer(0)]], constant FillU &u [[buffer(1
 	device uchar *d = pix + (u.y + gid.y) * u.row + (u.x + gid.x) * u.bpp;
 	for (uint i = 0; i < u.bpp; i++) d[i] = ~d[i];
 }
-struct BlitU { uint w, h, dst_row, src_row, bpp; };
+struct BlitU { uint w, h, dst_row, src_row, bpp, dst_off, src_off; };
 kernel void sf_blit(device uchar *dst [[buffer(0)]], device const uchar *src [[buffer(1)]],
 		constant BlitU &u [[buffer(2)]], uint2 gid [[thread_position_in_grid]]) {
 	if (gid.x >= u.w || gid.y >= u.h) return;
-	device uchar *d = dst + gid.y * u.dst_row + gid.x * u.bpp;
-	device const uchar *s = src + gid.y * u.src_row + gid.x * u.bpp;
+	/* Buffer bindings stay at 0. A CopyBits rect is not 16-byte aligned,
+	 * and setBuffer:offset: drops that blit. */
+	device uchar *d = dst + u.dst_off + gid.y * u.dst_row + gid.x * u.bpp;
+	device const uchar *s = src + u.src_off + gid.y * u.src_row + gid.x * u.bpp;
 	for (uint i = 0; i < u.bpp; i++) d[i] = s[i];
 }
 struct TriV { float4 p [[position]]; float4 color; };

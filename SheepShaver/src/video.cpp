@@ -38,6 +38,7 @@
 #include "nw_devices.h"
 #include "nw_io.h"
 #include "sheepforce.h"
+#include "adb.h"
 
 #define DEBUG 0
 #include "debug.h"
@@ -247,11 +248,13 @@ bool VideoSnapshot(int xsize, int ysize, uint8 *p)
 
 
 /*
- *  Hardware vs software cursor. New World reports a software cursor: the
- *  host pointer is not the Mac cursor there (see video_can_change_cursor),
- *  so QuickDraw draws it into the frame buffer. Old World follows the
- *  hardcursor preference.
+ *  Hardware vs software cursor. The Mac window accepts a hardware cursor,
+ *  so QuickDraw asks the driver where to draw the arrow and the window
+ *  paints it above the picture. A software cursor is pixels in the frame
+ *  buffer, and a movie paints over it. Old World follows hardcursor.
  */
+
+void (*video_cursor_moved)(int x, int y, int visible) = NULL;
 
 static bool UseHardwareCursor(void)
 {
@@ -664,6 +667,10 @@ static int16 VideoControl(uint32 pb, VidLocals *csSave)
 			csSave->cursorY = ReadMacInt32(param + csCursorY);
 			csSave->cursorVisible = ReadMacInt32(param + csCursorVisible);
 			bool changed = (csSave->cursorVisible != oldVisible);
+			ADBNoteGuestMouse(csSave->cursorX, csSave->cursorY);
+			if (video_cursor_moved)
+				video_cursor_moved(csSave->cursorX, csSave->cursorY,
+						   csSave->cursorVisible ? 1 : 0);
 
 			// If this is the first DrawHardwareCursor call since the cursor was last set (via SetHardwareCursor),
 			// attempt to set an appropriate cursor hotspot.  SetHardwareCursor itself does not know what the

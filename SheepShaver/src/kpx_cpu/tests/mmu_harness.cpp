@@ -27,6 +27,9 @@
 static int g_pass;
 static int g_fail;
 
+/* nw_devices wakes the CPU on ADB input. The timer thread is not linked. */
+void idle_resume(void) {}
+
 static uint64_t g_fake_tb;
 static uint64_t fake_tb_ticks(void *)
 {
@@ -1546,6 +1549,28 @@ int main()
 		CHECK(pmu_recv() == 0xff);
 		CHECK(nw_pmu_state() == 0);
 		CHECK(pmu_xfer_ok);
+		/* One unacked packet used to block every later delta. After 200 ms
+		 * the stuck reply is dropped and the next move is delivered. */
+		pmu_send(NW_PMU_ADB_CMD); pmu_send(4); pmu_send(0x00); pmu_send(0x86); pmu_send(0x00); pmu_send(0x84);
+		CHECK(nw_pmu_state() == 0);
+		nw_adb_mouse_move(10, 0);
+		g_fake_tb += 25000000u / 40;
+		nw_devices_tick();
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == 0);
+		g_fake_tb += 25000000u / 5;
+		nw_adb_mouse_move(4, 0);
+		nw_devices_tick();
+		/* Stuck line goes high for a tick so the guest can see the edge. */
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);
+		nw_devices_tick();
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == 0);
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 4);
+		CHECK(pmu_recv() == (NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO));
+		CHECK(pmu_recv() == 0x7c);
+		(void)pmu_recv();
+		CHECK((pmu_recv() & 0x7f) == 4);
+		CHECK(nw_pmu_state() == 0);
 	}
 
 	/* S4 step 6: the Trampoline's OpenPIC programming, then the 68k

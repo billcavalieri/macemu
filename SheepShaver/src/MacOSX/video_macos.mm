@@ -41,8 +41,14 @@
 + (NSView *)showWithWidth:(int)width height:(int)height;
 + (void)setGuestWidth:(int)width height:(int)height;
 + (void)applyMacCursor;
++ (void)moveMacCursorX:(int)x y:(int)y visible:(int)visible;
 + (const char *)waitForConfig;
 @end
+
+static void host_cursor_moved(int x, int y, int visible)
+{
+	[SheepHost moveMacCursorX:x y:y visible:visible];
+}
 
 extern "C" const uint8 *VideoHostCursorBytes(void)
 {
@@ -185,6 +191,7 @@ extern "C" void VideoHostRun(void)
 
 bool VideoInit(void)
 {
+	video_cursor_moved = host_cursor_moved;
 	int width = 1024;
 	int height = 768;
 	const char *mode_str = PrefsFindString("screen");
@@ -325,7 +332,8 @@ void video_set_cursor(void)
 
 bool video_can_change_cursor(void)
 {
-	return PrefsFindBool("hardcursor");
+	/* Always. The arrow is drawn above the picture, so a movie cannot cover it. */
+	return true;
 }
 
 void video_set_dirty_area(int, int, int, int)

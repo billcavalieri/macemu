@@ -86,7 +86,7 @@ final class SheepHost: NSObject {
         return wc.display
     }
 
-    @objc class func setGuestWidth(_ width: Int32, height: Int32) {
+    @objc nonisolated class func setGuestWidth(_ width: Int32, height: Int32) {
         hop {
             guard let controller else { return }
             controller.display.setGuestSize(width: Int(width), height: Int(height))
@@ -94,13 +94,19 @@ final class SheepHost: NSObject {
         }
     }
 
-    @objc class func applyMacCursor() {
+    @objc nonisolated class func applyMacCursor() {
         hop {
             controller?.display.applyMacCursor()
         }
     }
 
-    @objc class func reloadEdgeGrab() {
+    @objc nonisolated class func moveMacCursorX(_ x: Int32, y: Int32, visible: Int32) {
+        hop {
+            controller?.display.setGuestArrow(x: Int(x), y: Int(y), visible: visible != 0)
+        }
+    }
+
+    @objc nonisolated class func reloadEdgeGrab() {
         hop {
             controller?.display.applyMousePrefs()
         }
@@ -115,7 +121,7 @@ final class SheepHost: NSObject {
         return wc
     }
 
-    private static func hop(_ body: @escaping @MainActor () -> Void) {
+    nonisolated private static func hop(_ body: @escaping @MainActor () -> Void) {
         if Thread.isMainThread {
             MainActor.assumeIsolated(body)
         } else {

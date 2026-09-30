@@ -41,4 +41,8 @@ extern void ADBSetRelMouseMode(bool relative);
 extern void ADBSetAbsMouse(int x, int y);
 #endif
 
+/* The guest drew its arrow at (x, y). Adopt that when no move is queued,
+ * so the next delta starts from the arrow Mac OS actually has. */
+extern void ADBNoteGuestMouse(int x, int y);
+
 #endif

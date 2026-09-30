@@ -79,8 +79,7 @@ prefs_desc common_prefs_items[] = {
 	{"sound_buffer", TYPE_INT32, false,	"sound buffer length"},
 	{"name_encoding", TYPE_INT32, false,	"file name encoding"},
 	{"init_grab", TYPE_BOOLEAN, false,	"initially grabbing mouse"},
-	{"mouse", TYPE_STRING, false,		"absolute (default): pointer tracks the picture. relative: click the picture to grab, release at the picture edge or with ctrl-g"},
-	{"edgegrab", TYPE_BOOLEAN, false,	"grab the pointer on enter. absolute releases at the left, right, or bottom; leaving the top leaves the guest cursor where it was. relative releases at any edge"},
+	{"mouse", TYPE_STRING, false,		"absolute (default): pointer tracks the picture. relative: click the picture to grab, ctrl-g releases"},
 	{NULL, TYPE_END, false, NULL} // End of list
 };
 
@@ -120,7 +119,6 @@ void AddPrefsDefaults(void)
 
 	PrefsAddInt32("keyboardtype", 5);
 	PrefsAddString("mouse", "absolute");
-	PrefsAddBool("edgegrab", true);
 
 #ifdef __APPLE__
 	PrefsAddBool("swap_opt_cmd", false);

@@ -50,7 +50,7 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
             backing: .buffered,
             defer: false
         )
-        window.title = "SheepShaver"
+        window.title = "SheepShaver — ctrl-g to release"
         window.titleVisibility = .visible
         window.titlebarAppearsTransparent = false
         window.titlebarSeparatorStyle = .none

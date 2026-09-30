@@ -120,6 +120,13 @@ void nw_pmu_set_power_hook(void (*hook)(int event, void *ctx), void *ctx);
 void nw_display_vbl_enable(int on);
 void nw_display_vbl_clear(void);
 int nw_pic_vbl_servicing(void);
+/* Read-only snapshot of the highest-priority source awaiting EOI. */
+struct nw_pic_service {
+	int source;
+	uint32_t vector;
+	uint64_t acknowledgement, age_usec;
+};
+int nw_pic_service_snapshot(struct nw_pic_service *out);
 
 /* OpenPIC external source n (0..63): level 1 asserts, 0 deasserts. Edge
  * sources (IVPR sense = 0) latch on the rising edge. */
@@ -147,6 +154,11 @@ int nw_pmu_state(void);
  * (= ADB raw) key code 0..0x7f; `button` 0 is the primary button. */
 void nw_adb_key(uint8_t code, int down);
 void nw_adb_mouse_move(int dx, int dy);
+/* Nonzero while a move is still queued. The guest arrow has not caught up. */
+int nw_adb_mouse_busy(void);
+/* Nonzero for a short time after a host move or click. The guest's last
+ * drawn position is behind that move, so adopting it would rewind the base. */
+int nw_adb_mouse_recent(void);
 void nw_adb_mouse_button(int button, int down);
 /* Keylargo GPIO pin register n (0..35) and pin input drive. */
 uint32_t nw_gpio_read(uint32_t n);
@@ -205,7 +217,9 @@ enum {
 	NW_ADB_KBD_ADDR = 2, NW_ADB_MOUSE_ADDR = 3,
 	/* 63 pixels per poll is the ADB packet limit. 20 ms left the boot
 	 * arrow behind a fast move, so the hidden host pointer reached the
-	 * picture edge before the arrow reached Disk First Aid's Done. */
+	 * picture edge before the arrow reached Disk First Aid's Done.
+	 * A queued remainder does not wait this long: the next packet is
+	 * sent as soon as the guest acks. */
 	NW_ADB_POLL_MS = 8,
 	NW_PMU_INT_ACK = 0x78, NW_PMU_SET_INTR_MASK = 0x70, NW_PMU_ADB_CMD = 0x20,
 	NW_PMU_ADB_POLL_OFF = 0x21, NW_PMU_RESET = 0xd0, NW_PMU_SHUTDOWN = 0x7e,

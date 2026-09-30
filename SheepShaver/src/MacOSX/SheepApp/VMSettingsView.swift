@@ -144,7 +144,7 @@ final class SettingsSheet: NSWindowController, NSTableViewDataSource, NSTableVie
             wrap.orientation = .vertical
             wrap.alignment = .leading
             wrap.addArrangedSubview(line)
-            let note = NSTextField(wrappingLabelWithString: "Relative grabs when you click the picture. The picture edge releases the pointer. ctrl-g releases it too.")
+            let note = NSTextField(wrappingLabelWithString: "Click the picture to grab. ctrl-g releases.")
             note.textColor = .secondaryLabelColor
             note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             note.preferredMaxLayoutWidth = 360

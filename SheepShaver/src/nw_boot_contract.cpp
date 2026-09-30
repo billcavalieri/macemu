@@ -1164,6 +1164,59 @@ void nw_log_emu_rfi(uint32_t srr0, uint32_t srr1, uint32_t cr, uint32_t kdp)
 		flags = vm_read_memory_4(kdp - 0x10u);
 		mask = vm_read_memory_4(kdp + 0x674u);
 	}
+	/* Preserve the first returns of EVERY interrupt, not just the first returns of
+	 * the process. Normal returns emit nothing; a delayed EOI dumps the origin
+	 * once, before later decrementer returns can overwrite the evidence. */
+	struct nw_pic_service service;
+	if (nw_pic_service_snapshot(&service)) {
+		struct irq_return {
+			uint32_t pc, msr, cr, kdp, defer, flags, mask, pending, stack;
+			uint64_t age;
+		};
+		struct irq_trace {
+			irq_return first[16];
+			uint64_t serial;
+			unsigned count;
+			int dumped;
+		};
+		/* Separate histories retain the original returns of an outer source
+		 * when a higher-priority source nests inside it. */
+		static irq_trace traces[NW_OPENPIC_NIRQ];
+		irq_trace &trace = traces[service.source];
+		if (trace.serial != service.acknowledgement) {
+			trace.serial = service.acknowledgement;
+			trace.count = 0;
+			trace.dumped = 0;
+		}
+		if (!trace.dumped) {
+			irq_return ret = {srr0, srr1, cr, kdp, defer, flags, mask, 0, 0,
+					 service.age_usec};
+			if (kdp > 0x408u) {
+				const uint32_t ci = vm_read_memory_4(kdp - 0x20u);
+				if (ci)
+					ret.pending = vm_read_memory_4(ci + 0xf28u + ((service.vector & 32u) >> 3));
+				ret.stack = vm_read_memory_4(kdp + 0x910u);
+			}
+			if (trace.count < sizeof(trace.first) / sizeof(trace.first[0]))
+				trace.first[trace.count++] = ret;
+			if (ret.age >= 250000) {
+				printf("NW-BOOT G1: irq-stall src=%d vec=%02x ack=%llu age_us=%llu saved_returns=%u\n",
+				       service.source, (unsigned)service.vector,
+				       (unsigned long long)trace.serial, (unsigned long long)ret.age, trace.count);
+				for (unsigned i = 0; i <= trace.count; i++) {
+					const irq_return &r = i < trace.count ? trace.first[i] : ret;
+					printf("NW-BOOT G1: irq-rfi src=%d vec=%02x ack=%llu slot=%u age_us=%llu srr0=%08x srr1=%08x cr=%08x kdp=%08x defer=%08x flags=%08x mask=%08x pending=%08x stack=%08x\n",
+					       service.source, (unsigned)service.vector,
+					       (unsigned long long)trace.serial, i, (unsigned long long)r.age,
+					       (unsigned)r.pc, (unsigned)r.msr, (unsigned)r.cr,
+					       (unsigned)r.kdp, (unsigned)r.defer, (unsigned)r.flags,
+					       (unsigned)r.mask, (unsigned)r.pending, (unsigned)r.stack);
+				}
+				fflush(stdout);
+				trace.dumped = 1;
+			}
+		}
+	}
 	static uint32_t prev_defer, prev_flags;
 	static int have_prev;
 	static unsigned nhalt, ndefer, nflag;

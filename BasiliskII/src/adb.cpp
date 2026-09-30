@@ -353,6 +353,18 @@ void ADBSetAbsMouse(int x, int y)
 }
 #endif
 
+void ADBNoteGuestMouse(int x, int y)
+{
+#ifdef POWERPC_ROM
+	if (nw_adb_mouse_busy() || nw_adb_mouse_recent())
+		return;
+#endif
+	B2_lock_mutex(mouse_lock);
+	mouse_x = x;
+	mouse_y = y;
+	B2_unlock_mutex(mouse_lock);
+}
+
 
 /*
  *  Key pressed ("code" is the Mac key code)

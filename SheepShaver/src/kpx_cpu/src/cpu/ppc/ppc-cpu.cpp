@@ -41,6 +41,7 @@
 
 #ifdef SHEEPSHAVER
 #include "cpu_emulation.h"
+#include "emul_op.h"
 #include "nw_boot_contract.h"
 #include "nw_io.h"
 #include "nw_devices.h"
@@ -4015,6 +4016,35 @@ void powerpc_cpu::execute(uint32 entry)
 			continue;
 		}
 #if defined(SHEEPSHAVER) && NW_BOOT_LOG
+		/* Regression runner: deliver a real display interrupt immediately
+		 * before a shared-folder host callback. Never force an EOI. Disabled
+		 * unless explicitly requested in a diagnostic build's environment. */
+		if (ppc32_guest_mmu_enabled() &&
+		    opcode == (POWERPC_EMUL_OP | (OP_EXTFS_HFS + 3u))) {
+			static unsigned requested = []() -> unsigned {
+				const char *s = getenv("NW_TEST_EXTFS_IRQS");
+				return s ? (unsigned)strtoul(s, NULL, 10) : 0u;
+			}();
+			static unsigned injected;
+			static uint64_t last;
+			const uint64_t now = requested ? GetTicks_usec() : 0;
+			struct nw_pic_service service;
+			if (injected < requested && now - last >= 1000000 &&
+			    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE) &&
+			    ReadMacInt8(0x910) == 6 && ReadMacInt32(0x911) == 0x46696e64u &&
+			    !nw_pic_service_snapshot(&service) &&
+			    !(nw_openpic_read(NW_OPENPIC_SRC0 + NW_VBL_IRQ * 0x20) & NW_OPENPIC_IVPR_MASK)) {
+				nw_openpic_set_irq(NW_VBL_IRQ, 1);
+				if (nw_io_ext_irq) {
+					last = now;
+					printf("NW-BOOT G1: irq-test extfs injection=%u pc=%08x cr=%08x\n",
+					       ++injected, (unsigned)pc(), (unsigned)cr().get());
+					fflush(stdout);
+					take_external();
+					continue;
+				}
+			}
+		}
 		if (ppc32_guest_mmu_enabled())
 			nw_trace_pc(*this, pc());
 #endif

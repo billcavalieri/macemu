@@ -118,12 +118,12 @@ static NSString *SheepForceShaderSource(void)
 	"  device uchar *d = pix + (u.y + gid.y) * u.row + (u.x + gid.x) * u.bpp;\n"
 	"  for (uint i = 0; i < u.bpp; i++) d[i] = ~d[i];\n"
 	"}\n"
-	"struct BlitU { uint w, h, dst_row, src_row, bpp; };\n"
+	"struct BlitU { uint w, h, dst_row, src_row, bpp, dst_off, src_off; };\n"
 	"kernel void sf_blit(device uchar *dst [[buffer(0)]], device const uchar *src [[buffer(1)]],\n"
 	"    constant BlitU &u [[buffer(2)]], uint2 gid [[thread_position_in_grid]]) {\n"
 	"  if (gid.x >= u.w || gid.y >= u.h) return;\n"
-	"  device uchar *d = dst + gid.y * u.dst_row + gid.x * u.bpp;\n"
-	"  device const uchar *s = src + gid.y * u.src_row + gid.x * u.bpp;\n"
+	"  device uchar *d = dst + u.dst_off + gid.y * u.dst_row + gid.x * u.bpp;\n"
+	"  device const uchar *s = src + u.src_off + gid.y * u.src_row + gid.x * u.bpp;\n"
 	"  for (uint i = 0; i < u.bpp; i++) d[i] = s[i];\n"
 	"}\n"
 	"struct TriV { float4 p [[position]]; float4 color; };\n"
@@ -481,17 +481,23 @@ bool SheepForceTryBlit(uint8 *dest, const uint8 *src, int bpp, int dst_row, int 
 		if (s0 < d0 + dbytes && d0 < s0 + sbytes)
 			return false;
 	}
-	struct { uint w, h, dst_row, src_row, bpp; } u;
+	struct { uint w, h, dst_row, src_row, bpp, dst_off, src_off; } u;
 	u.w = (uint)(width_bytes / bpp);
 	u.h = (uint)height;
 	u.dst_row = (uint)dst_row;
 	u.bpp = (uint)bpp;
+	u.dst_off = (uint)(dest - base);
 	id<MTLBuffer> src_buf = g_fb;
-	uint32 soff = 0;
 	if (src_in) {
-		soff = (uint32)(src - base);
+		u.src_off = (uint)(src - base);
 		u.src_row = (uint)src_row;
 	} else {
+		/* One staging buffer. The previous icon is still reading it. */
+		if (g_pending) {
+			[g_pending waitUntilCompleted];
+			g_pending = nil;
+			g_flight_on = false;
+		}
 		size_t need = (size_t)width_bytes * (size_t)height;
 		if (!g_src || g_src.length < need) {
 			g_src = [g_dev newBufferWithLength:need options:MTLResourceStorageModeShared];
@@ -503,15 +509,15 @@ bool SheepForceTryBlit(uint8 *dest, const uint8 *src, int bpp, int dst_row, int 
 			memcpy(packed + (size_t)y * (size_t)width_bytes,
 			       src + (size_t)y * (size_t)src_row, (size_t)width_bytes);
 		src_buf = g_src;
+		u.src_off = 0;
 		u.src_row = (uint)width_bytes;
 	}
-	uint32 doff = (uint32)(dest - base);
 	note_flight(dest, dst_row, width_bytes, height);
 	id<MTLCommandBuffer> cb = [g_queue commandBuffer];
 	id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 	[enc setComputePipelineState:g_blit_pipe];
-	[enc setBuffer:g_fb offset:doff atIndex:0];
-	[enc setBuffer:src_buf offset:soff atIndex:1];
+	[enc setBuffer:g_fb offset:0 atIndex:0];
+	[enc setBuffer:src_buf offset:0 atIndex:1];
 	[enc setBytes:&u length:sizeof u atIndex:2];
 	NSUInteger tw = g_blit_pipe.threadExecutionWidth > 0 ? g_blit_pipe.threadExecutionWidth : 16;
 	[enc dispatchThreads:MTLSizeMake(u.w, u.h, 1) threadsPerThreadgroup:MTLSizeMake(tw, 1, 1)];

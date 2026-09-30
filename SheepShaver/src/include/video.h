@@ -149,6 +149,8 @@ extern void video_set_palette(void);
 extern void video_set_gamma(int n_colors);
 extern void video_set_cursor(void);
 extern bool video_can_change_cursor(void);
+/* Mac window: the arrow is drawn above the picture. NULL elsewhere. */
+extern void (*video_cursor_moved)(int x, int y, int visible);
 extern int16 video_mode_change(VidLocals *csSave, uint32 ParamPtr);
 extern void video_set_dirty_area(int x, int y, int w, int h);
 
