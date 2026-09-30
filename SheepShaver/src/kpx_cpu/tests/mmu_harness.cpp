@@ -4671,6 +4671,37 @@ int main()
 		CHECK(a.fpr[3] == 0xc000000000000000ull && b.fpr[3] == a.fpr[3]);
 		CHECK((a.fpscr & 0x1f000u) == 0x8000u && b.fpscr == a.fpscr);
 
+		/* A failed halfword prefetch must not consume the 68k operand.
+		 * Exercise a mid-block fault, then map the page and retry. */
+		for (int kind = 0; kind < 3; kind++) {
+			const uint32_t pc = 0x91df0u + kind * 0x10u;
+			uint8_t ram[66] = {};
+			ram[64] = 0x80; ram[65] = 0x01;
+			memset(&b, 0, sizeof(b));
+			b.mem = ram;
+			b.mem_size = 64; // the next page is initially unavailable
+			b.lr = 0x2000u;
+			b.gpr[24] = 62;
+			b.gpr[27] = 0xdeadbeefu;
+			ops[0] = nw_ppc_addi(5, 0, 7);
+			ops[1] = kind == 2 ? (nw_ppc_lhzu(27, 24, 2) ^ (1u << 26)) : nw_ppc_lha(27, 24, 2);
+			if (kind == 1) ops[1] |= 1u << 26; // lhau
+			ops[2] = nw_ppc_addi(6, 0, 9);
+			ops[3] = nw_ppc_blr();
+			fn = nw_jit_compile(ops, 4, pc, 0x1000u, 0, 0);
+			CHECK(fn != NULL);
+			fn(&b);
+			CHECK(b.fault == 1 && b.fault_ea == 64 && b.pc == pc + 4);
+			CHECK(b.gpr[24] == 62 && b.gpr[27] == 0xdeadbeefu);
+			CHECK(b.gpr[5] == 7 && b.gpr[6] == 0);
+			b.mem_size = sizeof(ram);
+			b.fault = 0;
+			fn(&b);
+			CHECK(b.fault == 0 && b.pc == 0x2000u);
+			CHECK(b.gpr[27] == (kind == 2 ? 0x8001u : 0xffff8001u));
+			CHECK(b.gpr[24] == (kind == 1 ? 64u : 62u) && b.gpr[6] == 9);
+		}
+
 		/* stfdu / lfsu / lfdu / lhzu: RA≠0, fault before RA write */
 		{
 			uint8_t ram[64];

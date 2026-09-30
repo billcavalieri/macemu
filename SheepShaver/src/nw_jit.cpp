@@ -9433,6 +9433,8 @@ static int emit_call_lh(struct emit *e, uint32_t pc, int rd, int ra, int simm, i
 		return 0;
 	if (!emit_helper_ea(e, ra, simm))
 		return 0;
+	if (upd && ra && !emit_w(e, 0xb9001be8u)) /* str w8, [sp, #24] saved EA */
+		return 0;
 	if (!emit_w(e, a64_orr_reg(W1, 31, W8)))
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))
@@ -9441,21 +9443,25 @@ static int emit_call_lh(struct emit *e, uint32_t pc, int rd, int ra, int simm, i
 		return 0;
 	if (!emit_w(e, 0xd63f0120u))
 		return 0;
-	if (!emit_w(e, a64_orr_reg(W8, 31, W0)))
+	if (!emit_w(e, a64_orr_reg(W9, 31, W0)))
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
-	if (sext && !emit_w(e, a64_sxth(W8, W8)))
+	/* A data fault retries this instruction. Preserve both guest registers
+	 * until the load succeeds; advancing RA would skip the 68k prefetch. */
+	if (!emit_fault_check(e))
 		return 0;
-	if (!emit_store_gpr(e, W8, rd))
+	if (sext && !emit_w(e, a64_sxth(W9, W9)))
+		return 0;
+	if (!emit_store_gpr(e, W9, rd))
 		return 0;
 	if (upd && ra) {
-		if (!emit_helper_ea(e, ra, simm))
+		if (!emit_w(e, 0xb9401be8u)) /* ldr w8, [sp, #24] saved EA */
 			return 0;
 		if (!emit_store_gpr(e, W8, ra))
 			return 0;
 	}
-	return emit_fault_check(e);
+	return 1;
 }
 
 static int emit_call_sth(struct emit *e, uint32_t pc, int rs, int ra, int simm, int upd)
