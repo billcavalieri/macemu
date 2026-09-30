@@ -3,12 +3,13 @@
  *
  *  Pointer events are converted into this view's bounds. The sidebar is a
  *  sibling, so its width is not part of the guest position. Hidden, this
- *  view is the full content width. The picture edge is this view's current
+ *  view is the full content width. The picture is this view's current
  *  bounds, and it moves when the window resizes or the sidebar toggles.
- *  edgegrab grabs on enter. Absolute releases at the left, right, or bottom.
- *  The menu bar is the top of the picture. Once the pointer leaves through
- *  that edge, the guest cursor stays put until the pointer comes back.
- *  mouse relative grabs on a click and releases at any edge or with ctrl-g.
+ *  A click in the picture grabs. The host pointer stays put until ctrl-g.
+ *  Movement is the physical delta, delivered to the guest. The guest
+ *  clamps its arrow to the screen. This window does not keep a second
+ *  position, and the picture edge does not release. mouse relative grabs
+ *  on a click and releases the same way.
  *
  *  (C) 2026 Bill Cavalieri
  *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
@@ -38,6 +39,10 @@ private func VideoHostCursorBytes() -> UnsafePointer<UInt8>?
 @_silgen_name("VideoGuestCursorHidesHost")
 private func VideoGuestCursorHidesHost() -> Int32
 
+private final class GuestArrowView: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 @MainActor
 final class GuestDisplayView: NSView {
     var inputEnabled = false
@@ -48,19 +53,37 @@ final class GuestDisplayView: NSView {
     private var guestW: CGFloat = 1024
     private var guestH: CGFloat = 768
     private var macCursor: NSCursor?
-    private var lastGX: Int32 = -1
-    private var lastGY: Int32 = -1
     private var hidHost = false
     private var cursorHidden = false
     private var disassociated = false
     private var fracX: CGFloat = 0
     private var fracY: CGFloat = 0
-    private var skipWarpDelta = false
-    private var trackX: CGFloat = 0
-    private var trackY: CGFloat = 0
     private var appliedGames: Bool?
     private var trackingClick = false
     private let hint = NSTextField(labelWithString: "ctrl-g to release")
+    private let guestArrow = GuestArrowView()
+    private var arrowHotX: CGFloat = 1
+    private var arrowHotY: CGFloat = 1
+    private var arrowX = 0
+    private var arrowY = 0
+    private var arrowVisible = false
+    private var arrowHasPosition = false
+    private var grabHold: Timer?
+    private var moveMonitor: Any?
+    /// Cursor position in the space `CGWarpMouseCursorPosition` uses.
+    /// Sampled at the grab, and again when the window is key in front.
+    /// A later read that disagrees means macOS reconnected the pointer.
+    /// The warp puts it back. That call posts no mouse event, so the
+    /// move that exposed the drift is delivered. The difference itself
+    /// is not sent: a steady error flooded the guest.
+    private var lockPoint: CGPoint?
+    private var stuckDx: CGFloat = 0
+    private var stuckDy: CGFloat = 0
+    /// Host pointer is usable again while this window is not the foreground
+    /// key window. The grab stays attached; ctrl-g is still the release.
+    private var pausingCapture = false
+    private var loggedWarpError: Int32?
+    private var loggedAssociateError: Int32?
 
     override var isOpaque: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -81,6 +104,10 @@ final class GuestDisplayView: NSView {
         hint.font = .systemFont(ofSize: 13, weight: .medium)
         hint.isHidden = true
         addSubview(hint)
+        guestArrow.imageScaling = .scaleAxesIndependently
+        guestArrow.imageFrameStyle = .none
+        guestArrow.isHidden = true
+        addSubview(guestArrow)
     }
 
     required init?(coder: NSCoder) {
@@ -92,20 +119,16 @@ final class GuestDisplayView: NSView {
     func setGuestSize(width: Int, height: Int) {
         guestW = CGFloat(max(width, 1))
         guestH = CGFloat(max(height, 1))
-        lastGX = -1
-        lastGY = -1
+        layoutGuestArrow()
     }
 
-    /// Absolute tracks this picture. `edgegrab` releases at its edge.
-    /// `mouse relative` grabs on a click until that edge or ctrl-g.
+    /// A click in the picture grabs. ctrl-g releases it.
+    /// `mouse relative` grabs on a click and releases the same way.
     func applyMousePrefs() {
         let games = PrefsBridge.string("mouse") == "relative"
         if appliedGames != games {
             appliedGames = games
             setGaming(games)
-        }
-        if !games {
-            noteEdgeGrab()
         }
         setHostCursor()
     }
@@ -118,7 +141,9 @@ final class GuestDisplayView: NSView {
         showHostCursor()
         VideoHostSetRelMouse(0)
         hint.isHidden = true
+        stopGrabHold()
         gaming = on
+        layoutGuestArrow()
         logMouse("NW-BOOT mouse mode=\(on ? "relative" : "absolute")")
     }
 
@@ -131,22 +156,64 @@ final class GuestDisplayView: NSView {
             width: size.width + 16,
             height: size.height + 8
         )
+        layoutGuestArrow()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
+        let center = NotificationCenter.default
+        center.removeObserver(self, name: NSApplication.willResignActiveNotification, object: nil)
+        center.removeObserver(self, name: NSApplication.didBecomeActiveNotification, object: nil)
+        center.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+        center.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
+        guard let window else { return }
+        center.addObserver(self, selector: #selector(focusChanged(_:)), name: NSApplication.willResignActiveNotification, object: NSApp)
+        center.addObserver(self, selector: #selector(focusChanged(_:)), name: NSApplication.didBecomeActiveNotification, object: NSApp)
+        center.addObserver(self, selector: #selector(focusChanged(_:)), name: NSWindow.didResignKeyNotification, object: window)
+        center.addObserver(self, selector: #selector(focusChanged(_:)), name: NSWindow.didBecomeKeyNotification, object: window)
+    }
+
+    deinit {
+        let center = NotificationCenter.default
+        center.removeObserver(self, name: NSApplication.willResignActiveNotification, object: nil)
+        center.removeObserver(self, name: NSApplication.didBecomeActiveNotification, object: nil)
+        center.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+        center.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
+    }
+
+    /// Losing key or the app does not release the grab. It does stop
+    /// warping, which would pull the pointer out of the other window.
+    /// Reconnect runs from will-resign-active, while this app is still
+    /// allowed to call `CGAssociateMouseAndMouseCursorPosition`. A sheet
+    /// only resigns key; the app is still in front, so that reconnect
+    /// works from did-resign-key.
+    @objc private func focusChanged(_ notification: Notification) {
+        guard attached else { return }
+        switch notification.name {
+        case NSApplication.willResignActiveNotification, NSWindow.didResignKeyNotification:
+            pauseCapture()
+        case NSApplication.didBecomeActiveNotification, NSWindow.didBecomeKeyNotification:
+            guard captureIsForeground else { return }
+            resumeCapture()
+        default:
+            break
+        }
     }
 
     override func resetCursorRects() {
-        if PrefsBridge.bool("hardcursor") && !(gaming && attached) {
+        // The guest arrow stays put until the click that grabs. The host
+        // arrow has to remain visible so that click can land, including
+        // on the menu bar. Once grabbed, the guest draws the only arrow.
+        if attached && !PrefsBridge.bool("hardcursor") {
+            addCursorRect(bounds, cursor: Self.blankCursor)
+            return
+        }
+        if PrefsBridge.bool("hardcursor") {
             addCursorRect(bounds, cursor: macCursor ?? .arrow)
             return
         }
-        // The guest draws the arrow into the picture, including during
-        // boot before the video interrupt is live. A second host arrow
-        // on top of it is the other cursor in that window.
-        addCursorRect(bounds, cursor: Self.blankCursor)
+        addCursorRect(bounds, cursor: .arrow)
     }
 
     override func updateTrackingAreas() {
@@ -167,29 +234,20 @@ final class GuestDisplayView: NSView {
     }
 
     /// The picture moved: the window resized, or the sidebar was shown or hidden.
-    /// Absolute mode remaps the pointer onto the new bounds. A pointer that
-    /// landed in the sidebar releases. Relative mode recenters only when the
-    /// sidebar toggle changed which edges exist.
+    /// A grab stays grabbed. Absolute mode, while released, remaps the pointer
+    /// onto the new bounds. Relative mode recenters when the sidebar toggle
+    /// changed the picture.
     func syncPointerToPicture(recenterRelative: Bool = false) {
         updateTrackingAreas()
         guard inputEnabled, bounds.width > 1, bounds.height > 1 else { return }
         if gaming {
             guard attached else { return }
             if recenterRelative {
-                trackX = bounds.midX
-                trackY = bounds.midY
                 warpToCenter()
-                return
-            }
-            if trackX < bounds.minX || trackY < bounds.minY || trackX >= bounds.maxX || trackY >= bounds.maxY {
-                ungrab("windowEdge")
             }
             return
         }
         place(nil)
-        if wantsEdgeRelease() && !attached {
-            noteEdgeGrab()
-        }
     }
 
     /// Clicks in the picture, including the menu bar along the top edge.
@@ -248,48 +306,38 @@ final class GuestDisplayView: NSView {
             setHostCursor()
             return
         }
-        if wantsEdgeRelease() && !attached {
-            grabAtPicture()
-        }
         place(event)
         setHostCursor()
     }
 
-    override func mouseExited(with event: NSEvent) {
-        guard inputEnabled, !gaming else { return }
-        let p = convert(event.locationInWindow, from: nil)
-        if abovePicture(p) {
-            showHostCursor()
-            return
-        }
-        // A stale tracking rect exits while the pointer is still over the picture.
-        if containsPicture(p) { return }
-        if edgeReleases() {
-            ungrab("windowEdge")
-        } else {
-            showHostCursor()
-        }
-    }
-
     override func mouseMoved(with event: NSEvent) {
+        if moveMonitor != nil { return }
         move(event)
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if moveMonitor != nil { return }
         move(event)
     }
 
     override func rightMouseDragged(with event: NSEvent) {
+        if moveMonitor != nil { return }
         move(event)
     }
 
     override func otherMouseDragged(with event: NSEvent) {
+        if moveMonitor != nil { return }
         move(event)
     }
 
     override func mouseDown(with event: NSEvent) {
         guard inputEnabled else { return }
-        captureForClick()
+        if gaming {
+            captureForClick()
+            press(event)
+            return
+        }
+        grabAbsolute(event)
         press(event)
     }
 
@@ -299,7 +347,12 @@ final class GuestDisplayView: NSView {
 
     override func rightMouseDown(with event: NSEvent) {
         guard inputEnabled else { return }
-        captureForClick()
+        if gaming {
+            captureForClick()
+            press(event)
+            return
+        }
+        grabAbsolute(event)
         press(event)
     }
 
@@ -309,7 +362,12 @@ final class GuestDisplayView: NSView {
 
     override func otherMouseDown(with event: NSEvent) {
         guard inputEnabled else { return }
-        captureForClick()
+        if gaming {
+            captureForClick()
+            press(event)
+            return
+        }
+        grabAbsolute(event)
         press(event)
     }
 
@@ -341,14 +399,47 @@ final class GuestDisplayView: NSView {
 
     func applyMacCursor() {
         macCursor = Self.makeMacCursor()
+        if let macCursor {
+            guestArrow.image = macCursor.image
+            arrowHotX = macCursor.hotSpot.x
+            arrowHotY = macCursor.hotSpot.y
+        }
+        layoutGuestArrow()
         setHostCursor()
+    }
+
+    /// Mac OS reports where it drew the arrow. While the pointer is grabbed
+    /// the arrow is this view, above the picture, so a movie cannot cover it.
+    func setGuestArrow(x: Int, y: Int, visible: Bool) {
+        arrowX = x
+        arrowY = y
+        arrowVisible = visible
+        arrowHasPosition = true
+        layoutGuestArrow()
+    }
+
+    private func layoutGuestArrow() {
+        let show = attached && arrowHasPosition && (!gaming || arrowVisible)
+        guestArrow.isHidden = !show
+        guard show, guestW > 1, guestH > 1, bounds.width > 1, bounds.height > 1 else { return }
+        let scaleX = bounds.width / guestW
+        let scaleY = bounds.height / guestH
+        let px = CGFloat(arrowX) * scaleX
+        let py = bounds.height - CGFloat(arrowY) * scaleY
+        let w = 16 * scaleX
+        let h = 16 * scaleY
+        guestArrow.frame = NSRect(
+            x: px - arrowHotX * scaleX,
+            y: py - (16 - arrowHotY) * scaleY,
+            width: w,
+            height: h
+        )
     }
 
     func releaseByHotkey(_ event: NSEvent) -> Bool {
         let hotkey = event.keyCode == 5 && event.modifierFlags.contains(.control)
         guard hotkey else { return false }
-        guard gaming else { return false }
-        if !attached { return event.isARepeat }
+        if !attached { return gaming && event.isARepeat }
         if modifiers.contains(.control) {
             VideoHostKey(0x3b, 0)
         }
@@ -364,37 +455,8 @@ final class GuestDisplayView: NSView {
         }
     }
 
-    private func wantsEdgeRelease() -> Bool {
-        PrefsBridge.bool("edgegrab")
-    }
-
-    private func edgeReleases() -> Bool {
-        wantsEdgeRelease()
-    }
-
-    /// Absolute grab. The host cursor stays associated; the picture edge releases it.
-    private func grabAtPicture() {
-        attached = true
-        VideoHostSetRelMouse(0)
-        logMouse("NW-BOOT mouse grab")
-    }
-
-    private func noteEdgeGrab() {
-        guard inputEnabled, !gaming, wantsEdgeRelease(), !attached, let window else { return }
-        guard bounds.width > 1, bounds.height > 1 else { return }
-        let p = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        guard containsPicture(p) else { return }
-        grabAtPicture()
-    }
-
     private func containsPicture(_ p: NSPoint) -> Bool {
         p.x >= bounds.minX && p.y >= bounds.minY && p.x < bounds.maxX && p.y < bounds.maxY
-    }
-
-    /// Over the picture's width, but above it: the toolbar and title bar.
-    /// The guest cursor stays where it was. Clicks there belong to the window.
-    private func abovePicture(_ p: NSPoint) -> Bool {
-        bounds.width > 1 && p.x >= bounds.minX && p.x < bounds.maxX && p.y >= bounds.maxY
     }
 
     /// Guest pixel for an absolute pointer that is inside the picture.
@@ -417,8 +479,6 @@ final class GuestDisplayView: NSView {
 
     private func grabGaming() {
         attached = true
-        trackX = bounds.midX
-        trackY = bounds.midY
         logMouse("NW-BOOT mouse grab")
         VideoHostSetRelMouse(1)
         disassociateCursor()
@@ -429,17 +489,20 @@ final class GuestDisplayView: NSView {
         fracY = 0
         window?.makeFirstResponder(self)
         setHostCursor()
+        startGrabHold()
     }
 
     private func ungrab(_ reason: String) {
         guard attached else { return }
         attached = false
+        stopGrabHold()
         VideoHostMouseButton(0, 0)
         VideoHostMouseButton(1, 0)
         VideoHostSetRelMouse(0)
         associateCursor()
         showHostCursor()
         hint.isHidden = true
+        layoutGuestArrow()
         setHostCursor()
         logMouse("NW-BOOT mouse ungrab reason=\(reason)")
     }
@@ -457,27 +520,183 @@ final class GuestDisplayView: NSView {
     }
 
     private func disassociateCursor() {
-        if disassociated { return }
-        CGAssociateMouseAndMouseCursorPosition(boolean_t(0))
-        disassociated = true
+        captureCursor()
+    }
+
+    /// macOS reconnects a disconnected cursor after the pointer sits still.
+    /// The next physical move then leaves the picture and the view stops
+    /// hearing deltas. Keep the disconnect, put the pointer back on the
+    /// grab point, and take moves from a monitor so a tracking rect is
+    /// not required.
+    private func startGrabHold() {
+        stopGrabHold()
+        lockPoint = cursorInWarpSpace()
+        stuckDx = 0
+        stuckDy = 0
+        holdGrab()
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.holdGrab()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        grabHold = timer
+        moveMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+        ) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, self.attached, !self.pausingCapture else { return }
+                self.move(event)
+                self.holdGrab()
+            }
+            return event
+        }
+    }
+
+    private func stopGrabHold() {
+        grabHold?.invalidate()
+        grabHold = nil
+        lockPoint = nil
+        stuckDx = 0
+        stuckDy = 0
+        pausingCapture = false
+        if let moveMonitor {
+            NSEvent.removeMonitor(moveMonitor)
+            self.moveMonitor = nil
+        }
+    }
+
+    /// The screen whose frame origin is Cocoa's global origin. Its height
+    /// is the flip into `CGWarpMouseCursorPosition`, including when this
+    /// window is on another display.
+    private func primaryScreen() -> NSScreen? {
+        NSScreen.screens.first { $0.frame.origin == .zero } ?? NSScreen.screens.first
+    }
+
+    /// Cocoa mouse location, flipped into the top-left space the warp uses.
+    private func cursorInWarpSpace() -> CGPoint? {
+        guard let primary = primaryScreen() else { return nil }
+        let cocoa = NSEvent.mouseLocation
+        return CGPoint(x: cocoa.x, y: primary.frame.height - cocoa.y)
+    }
+
+    private var captureIsForeground: Bool {
+        NSApp.isActive && window?.isKeyWindow == true
+    }
+
+    private func holdGrab() {
+        guard attached else { return }
+        if !captureIsForeground {
+            pauseCapture()
+            return
+        }
+        if pausingCapture {
+            resumeCapture()
+        }
+        if let lock = lockPoint, let now = cursorInWarpSpace() {
+            let dx = now.x - lock.x
+            let dy = now.y - lock.y
+            if abs(dx) > 0.5 || abs(dy) > 0.5 {
+                let repeated = abs(dx - stuckDx) < 1 && abs(dy - stuckDy) < 1
+                if repeated && (abs(dx) > 200 || abs(dy) > 200) {
+                    lockPoint = nil
+                    logMouse("NW-BOOT mouse lock dropped dx=\(Int(dx)) dy=\(Int(dy))")
+                } else {
+                    stuckDx = dx
+                    stuckDy = dy
+                    // The warp posts no mouse event. Do not drop the next
+                    // move: this method runs again on that move, and a
+                    // sticky skip then discards every one of them.
+                    let err = CGWarpMouseCursorPosition(lock)
+                    if err != .success {
+                        noteCaptureError("warp", err)
+                    }
+                }
+            } else {
+                stuckDx = 0
+                stuckDy = 0
+            }
+        }
+        captureCursor()
+    }
+
+    private func pauseCapture() {
+        guard attached, !pausingCapture else { return }
+        pausingCapture = true
+        associateCursor()
+        showHostCursor()
+        logMouse("NW-BOOT mouse capture paused active=\(NSApp.isActive) key=\(window?.isKeyWindow == true)")
+    }
+
+    private func resumeCapture() {
+        guard attached, pausingCapture else { return }
+        pausingCapture = false
+        lockPoint = cursorInWarpSpace()
+        stuckDx = 0
+        stuckDy = 0
+        hideHostCursor()
+        captureCursor()
+        logMouse("NW-BOOT mouse capture resumed captured=\(disassociated)")
+    }
+
+    private func captureCursor() {
+        guard captureIsForeground else { return }
+        // A successful earlier call does not prove the system is still
+        // disconnected. Reassert capture from holdGrab after focus changes
+        // or pointer drift; otherwise only Ctrl-G and a new click repair it.
+        let err = CGAssociateMouseAndMouseCursorPosition(boolean_t(0))
+        if err == .success {
+            disassociated = true
+            loggedAssociateError = nil
+        } else {
+            noteCaptureError("disassociate", err)
+        }
     }
 
     private func associateCursor() {
         if !disassociated { return }
-        CGAssociateMouseAndMouseCursorPosition(boolean_t(1))
-        disassociated = false
+        let err = CGAssociateMouseAndMouseCursorPosition(boolean_t(1))
+        if err == .success {
+            disassociated = false
+            loggedAssociateError = nil
+        } else {
+            noteCaptureError("associate", err)
+        }
+    }
+
+    private func noteCaptureError(_ what: String, _ err: CGError) {
+        let code = err.rawValue
+        if what == "warp" {
+            if loggedWarpError == code { return }
+            loggedWarpError = code
+        } else if loggedAssociateError == code {
+            return
+        } else {
+            loggedAssociateError = code
+        }
+        logMouse("NW-BOOT mouse \(what) failed \(code)")
     }
 
     private func warpToCenter() {
-        guard let window, let primary = NSScreen.screens.first else { return }
+        guard let window, let primary = primaryScreen() else { return }
         let inWindow = convert(NSPoint(x: bounds.midX, y: bounds.midY), to: nil)
         let cocoa = window.convertToScreen(NSRect(origin: inWindow, size: .zero))
         let cg = CGPoint(x: cocoa.minX, y: primary.frame.height - cocoa.minY)
-        CGWarpMouseCursorPosition(cg)
-        CGAssociateMouseAndMouseCursorPosition(boolean_t(1))
-        CGAssociateMouseAndMouseCursorPosition(boolean_t(0))
-        disassociated = true
-        skipWarpDelta = true
+        let warpErr = CGWarpMouseCursorPosition(cg)
+        if warpErr != .success {
+            noteCaptureError("warp", warpErr)
+        }
+        let onErr = CGAssociateMouseAndMouseCursorPosition(boolean_t(1))
+        let offErr = CGAssociateMouseAndMouseCursorPosition(boolean_t(0))
+        if offErr == .success {
+            disassociated = true
+            loggedAssociateError = nil
+        } else if onErr == .success {
+            disassociated = false
+            noteCaptureError("disassociate", offErr)
+        } else {
+            noteCaptureError("disassociate", offErr)
+        }
     }
 
     private func setHostCursor() {
@@ -508,41 +727,52 @@ final class GuestDisplayView: NSView {
             }
             return
         }
-        guard bounds.width > 1, bounds.height > 1 else { return }
-        let winP: NSPoint
-        if let event {
-            winP = event.locationInWindow
-        } else if let window {
-            winP = window.mouseLocationOutsideOfEventStream
-        } else {
-            return
+        if attached, let event {
+            sendAbsDelta(event)
         }
-        let p = convert(winP, from: nil)
-        if abovePicture(p) {
-            showHostCursor()
-            return
+    }
+
+    /// Host pointer stays where the click happened. Later motion is that
+    /// physical delta, not a new absolute position minus a stored one.
+    /// A disconnected pointer reports up as down, so delta Y is not negated.
+    /// The guest clamps the arrow; stopping at this window's edge dropped
+    /// movement whenever the stored position and the arrow had split.
+    private func sendAbsDelta(_ event: NSEvent) {
+        fracX += event.deltaX
+        fracY += event.deltaY
+        let dx = Int32(fracX.rounded(.towardZero))
+        let dy = Int32(fracY.rounded(.towardZero))
+        fracX -= CGFloat(dx)
+        fracY -= CGFloat(dy)
+        if dx != 0 || dy != 0 {
+            VideoHostMouseMove(dx, dy)
         }
-        guard let mapped = absolutePoint(p) else {
-            if edgeReleases() {
-                ungrab("windowEdge")
-            }
-            showHostCursor()
-            return
+    }
+
+    private func grabAbsolute(_ event: NSEvent) {
+        guard !attached, !gaming else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        if let mapped = absolutePoint(p) {
+            let gx = Int32(min(max(mapped.x, 0), Int(guestW) - 1))
+            let gy = Int32(min(max(mapped.y, 0), Int(guestH) - 1))
+            VideoHostSetRelMouse(0)
+            VideoHostMouseAbs(gx, gy)
         }
+        attached = true
+        VideoHostSetRelMouse(0)
+        disassociateCursor()
         hideHostCursor()
-        let gx = Int32(min(max(mapped.x, 0), Int(guestW) - 1))
-        let gy = Int32(min(max(mapped.y, 0), Int(guestH) - 1))
-        if gx == lastGX && gy == lastGY { return }
-        lastGX = gx
-        lastGY = gy
-        VideoHostMouseAbs(gx, gy)
+        hint.isHidden = false
+        layoutGuestArrow()
+        fracX = 0
+        fracY = 0
+        window?.makeFirstResponder(self)
+        setHostCursor()
+        startGrabHold()
+        logMouse("NW-BOOT mouse grab captured=\(disassociated) active=\(NSApp.isActive) key=\(window?.isKeyWindow == true)")
     }
 
     private func sendRel(_ event: NSEvent) {
-        if skipWarpDelta {
-            skipWarpDelta = false
-            return
-        }
         fracX += event.deltaX
         fracY += -event.deltaY
         let dx = Int32(fracX.rounded(.towardZero))
@@ -552,35 +782,6 @@ final class GuestDisplayView: NSView {
         if dx != 0 || dy != 0 {
             VideoHostMouseMove(dx, dy)
         }
-        guard wantsEdgeRelease(), bounds.width > 1, bounds.height > 1 else { return }
-        trackX += event.deltaX
-        trackY += event.deltaY
-        guard trackX < bounds.minX || trackY < bounds.minY || trackX >= bounds.maxX || trackY >= bounds.maxY else { return }
-        var exit = NSPoint(
-            x: min(max(trackX, bounds.minX), bounds.maxX - 1),
-            y: min(max(trackY, bounds.minY), bounds.maxY - 1)
-        )
-        if trackX < bounds.minX {
-            exit.x = bounds.minX - 2
-        } else if trackX >= bounds.maxX {
-            exit.x = bounds.maxX + 2
-        }
-        if trackY < bounds.minY {
-            exit.y = bounds.minY - 2
-        } else if trackY >= bounds.maxY {
-            exit.y = bounds.maxY + 2
-        }
-        ungrab("windowEdge")
-        placeHostCursor(exit)
-    }
-
-    /// Warp after the cursor is associated again. A warp while disconnected swaps axes.
-    private func placeHostCursor(_ local: NSPoint) {
-        guard let window, let primary = NSScreen.screens.first else { return }
-        let inWindow = convert(local, to: nil)
-        let cocoa = window.convertToScreen(NSRect(origin: inWindow, size: .zero))
-        let cg = CGPoint(x: cocoa.minX, y: primary.frame.height - cocoa.minY)
-        CGWarpMouseCursorPosition(cg)
     }
 
     private func move(_ event: NSEvent) {
