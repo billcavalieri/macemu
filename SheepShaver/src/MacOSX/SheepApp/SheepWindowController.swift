@@ -19,6 +19,9 @@ final class SheepWindow: NSWindow {
         if event.type == .keyDown, let guestDisplay, guestDisplay.releaseByHotkey(event) {
             return
         }
+        if event.type == .keyUp, let guestDisplay, guestDisplay.consumeHotkeyUp(event) {
+            return
+        }
         if let guestDisplay, guestDisplay.claimMouse(event) {
             return
         }

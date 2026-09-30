@@ -70,6 +70,8 @@ final class GuestDisplayView: NSView {
     private var arrowHasPosition = false
     private var grabHold: Timer?
     private var moveMonitor: Any?
+    /// Ctrl-G is eaten on the way down. The matching G up must not reach the guest.
+    private var suppressGuestKeyUp: UInt16?
     /// Cursor position in the space `CGWarpMouseCursorPosition` uses.
     /// Sampled at the grab, and again when the window is key in front.
     /// A later read that disagrees means macOS reconnected the pointer.
@@ -378,23 +380,47 @@ final class GuestDisplayView: NSView {
     override func keyDown(with event: NSEvent) {
         if releaseByHotkey(event) { return }
         guard inputEnabled else { return }
-        VideoHostKey(Int32(event.keyCode), 1)
+        VideoHostKey(adbCode(event.keyCode), 1)
     }
 
     override func keyUp(with event: NSEvent) {
+        if consumeHotkeyUp(event) { return }
         guard inputEnabled else { return }
-        VideoHostKey(Int32(event.keyCode), 0)
+        VideoHostKey(adbCode(event.keyCode), 0)
     }
 
     override func flagsChanged(with event: NSEvent) {
         guard inputEnabled else { return }
         let now = event.modifierFlags
         change(.shift, 0x38, now)
-        change(.control, 0x3b, now)
+        change(.control, 0x36, now)
         change(.option, 0x3a, now)
         change(.command, 0x37, now)
         change(.capsLock, 0x39, now)
         modifiers = now
+    }
+
+    /// Carbon virtual key codes are not ADB codes. Letters and digits already
+    /// match the SDL table. These do not: host Control is 0x3B, which is the
+    /// guest's Left Arrow.
+    private func adbCode(_ host: UInt16) -> Int32 {
+        switch host {
+        case 0x38, 0x3c: return 0x38 // Shift
+        case 0x3a, 0x3d: return 0x3a // Option
+        case 0x37, 0x36: return 0x37 // Command
+        case 0x3b, 0x3e: return 0x36 // Control
+        case 0x39: return 0x39 // Caps Lock
+        case 0x7e: return 0x3e // Up
+        case 0x7d: return 0x3d // Down
+        case 0x7b: return 0x3b // Left
+        case 0x7c: return 0x3c // Right
+        case 0x35: return 0x35 // Escape
+        case 0x24: return 0x24 // Return
+        case 0x30: return 0x30 // Tab
+        case 0x33: return 0x33 // Delete
+        case 0x75: return 0x75 // Forward Delete
+        default: return Int32(host)
+        }
     }
 
     func applyMacCursor() {
@@ -441,9 +467,17 @@ final class GuestDisplayView: NSView {
         guard hotkey else { return false }
         if !attached { return gaming && event.isARepeat }
         if modifiers.contains(.control) {
-            VideoHostKey(0x3b, 0)
+            VideoHostKey(0x36, 0)
         }
+        suppressGuestKeyUp = event.keyCode
         ungrab("hotkey")
+        return true
+    }
+
+    /// The G up that follows an eaten Ctrl-G. One shot.
+    func consumeHotkeyUp(_ event: NSEvent) -> Bool {
+        guard event.keyCode == suppressGuestKeyUp else { return false }
+        suppressGuestKeyUp = nil
         return true
     }
 
