@@ -84,6 +84,16 @@ struct nw_jit_cpu {
 	 * updates these when it enters a successor. */
 	uint32_t gpr_live;
 	uint32_t fpr_live;
+	/* Memory exit record: pc is the faulting instruction; fault is the
+	 * exit cause. EA, byte width and direction describe the actual failed
+	 * subaccess, including string/multiple operations. SMC describes a
+	 * completed store that requires leaving the current block. */
+	uint32_t fault_width;
+	/* Private observation replay; appended to preserve generated ABI offsets. */
+	void *verify_context;
+	uint32_t (*verify_mem)(void *, uint32_t pc, uint32_t ea, unsigned width,
+	                       bool store, uint64_t *value);
+
 };
 
 typedef void (*nw_jit_fn)(struct nw_jit_cpu *cpu);
@@ -107,8 +117,8 @@ void nw_jit_set_mode(int mode);
 const char *nw_jit_mode_name(void);
 
 int nw_jit_op_supported(uint32_t op);
-/* Live path: supported ops whose EA is a writable/readable bank (NONE/IO
- * mem ops stay on kpx — 4b-2 fill at 50310490). */
+int nw_jit_op_verify_safe(uint32_t op);
+/* Production dispatcher. VERIFY separately gates unrecorded side effects. */
 int nw_jit_op_dispatch(uint32_t op);
 /* Branches (bc/b/bclr) and isync (flush pending icbi, then leave the
  * block). Stores do not end the block; a store into the executing page
@@ -125,9 +135,11 @@ enum {
 	NW_JIT_FAULT_DSI = 1,
 	NW_JIT_FAULT_IO = 2,
 	NW_JIT_FAULT_SMC = 3,	/* store into the executing code page */
+	NW_JIT_FAULT_VERIFY = 5, /* private replay rejected an unexpected access */
 	NW_JIT_FAULT_EXC = 4	/* helper already took a program exception */
 };
 
+uint64_t nw_jit_verify_misses(void);
 void nw_jit_verify_note(const uint32_t *ops, int n, int miss);
 void nw_jit_verify_fail(void);
 void nw_jit_verify_skip(int mem);
@@ -137,7 +149,7 @@ uint32_t nw_jit_skip_pc(uint32_t op);
 /* One-shot raw skip word + pc for unnamed prim-4 buckets and prim 6. */
 void nw_jit_skip_raw_once(uint32_t op, uint32_t pc);
 int nw_jit_skip_raw_last(uint32_t *op, uint32_t *pc, char *name, size_t n);
-void nw_jit_verify_uncompared(int fault);	/* 1 = DSI probe, 2 = I/O skip */
+void nw_jit_verify_uncompared(int fault);	/* 1 = DSI probe, 2 = I/O skip, 5 = unsupported replay effects */
 void nw_jit_note_skip_io(uint32_t ea, uint32_t pc);
 void nw_jit_verify_dump(const char *why);
 void nw_jit_pc_hot(uint32_t pc, uint32_t op);
@@ -166,7 +178,8 @@ nw_jit_fn nw_jit_cache_get(uint32_t phys_page, uint32_t guest_pc,
 			  uint32_t msr_ir, uint32_t endian, int *n_out,
 			  int *uses_fpr = 0, int *uses_vr = 0,
 			  uint32_t *chain_pc = 0, uint32_t *gpr_mask = 0,
-			  int16_t *chain_disp = 0, uint32_t *fpr_mask = 0);
+			  int16_t *chain_disp = 0, uint32_t *fpr_mask = 0,
+			  uint32_t *first_opcode = 0);
 void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 		      uint32_t endian, nw_jit_fn fn, int n,
 		      uint32_t first_opcode = 0, int uses_fpr = 0, int uses_vr = 0,
@@ -331,6 +344,10 @@ typedef uint32_t (*nw_jit_host_lwz_pa)(void *host, uint32_t pa, uint32_t pc, int
 typedef void (*nw_jit_host_stw_pa)(void *host, uint32_t pa, uint32_t val, uint32_t pc, int *fault);
 void nw_jit_set_host_pa(nw_jit_host_lwz_pa lwz, nw_jit_host_stw_pa stw);
 /* status: 0 = OK (*value in return), 1 = NOP (leave rD), 2 = EXC (return is new pc). */
+/* DEC accesses are CPU-owned, sampled at the instruction, and end a block.
+ * status 2 returns the exception PC; status 0 returns the sampled DEC. */
+typedef uint32_t (*nw_jit_host_dec)(void *, uint32_t value, uint32_t pc, int write, int *status);
+void nw_jit_set_host_dec(nw_jit_host_dec fn);
 typedef uint32_t (*nw_jit_host_mfspr)(void *host, uint32_t spr, uint32_t guest_pc, int *status);
 void nw_jit_set_host_mfspr(nw_jit_host_mfspr fn);
 /* Same work as kpx execute_isync: flush the pending icbi range (and NW

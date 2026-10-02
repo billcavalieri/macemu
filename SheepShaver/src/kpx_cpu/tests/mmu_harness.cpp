@@ -22,6 +22,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <fenv.h>
+#include "cpu/ppc/ppc-fp-environment.hpp"
 #include <vector>
 
 static int g_pass;
@@ -135,6 +137,413 @@ static void test_pmu_power_hook(int ev, void *ctx)
 		g_fail++; \
 	} \
 } while (0)
+
+/* Independent failure callbacks: no memory or CPU side effects. Failed
+ * loads deliberately return/write poison to test architectural commit. */
+struct jit_fault_fixture {
+	int cause;
+	uint32_t ea, pc, width, calls;
+};
+
+// Independent literal IEEE results, not the JIT's shared C-helper oracle.
+static uint64_t fp_test_bits(double d) { uint64_t b; memcpy(&b, &d, 8); return b; }
+static int fp_callback_round, fp_callback_flags, fp_callback_fault;
+static uint32_t fp_environment_load(void *, uint32_t, uint32_t, int *fault)
+{
+    CHECK(fegetround() == fp_callback_round);
+    CHECK(fetestexcept(FE_ALL_EXCEPT) == fp_callback_flags);
+    *fault = fp_callback_fault;
+    return 0x12345678u;
+}
+
+static void test_jit_fp_environment()
+{
+    fenv_t caller;
+    fegetenv(&caller);
+    const int saved_mode = nw_jit_mode();
+    nw_jit_set_mode(NW_JIT_ON);
+    nw_jit_set_host_mem(fp_environment_load, NULL);
+    nw_jit_set_host_pa(fp_environment_load, NULL);
+    const int modes[] = { FE_TONEAREST, FE_TOWARDZERO, FE_UPWARD, FE_DOWNWARD };
+    unsigned serial = 0;
+    for (unsigned host = 0; host < 4; ++host)
+    for (unsigned rn = 0; rn < 4; ++rn)
+    for (unsigned negative = 0; negative < 2; ++negative)
+    for (unsigned operation = 0; operation < 11; ++operation)
+    for (unsigned writer = 0; writer < 3; ++writer)
+    for (unsigned failing = 0; failing < 2; ++failing) {
+        nw_jit_cpu initial = {};
+        initial.host = &initial;
+        initial.lr = 0x200000u;
+        const uint64_t sign = negative ? UINT64_C(0x8000000000000000) : 0;
+        const bool away = negative ? rn == 3 : rn == 2;
+        uint32_t op;
+        uint64_t expected;
+        if (operation < 3) {
+            initial.fpr[1] = fp_test_bits(operation == 1 ? 9007199254740992.0 : 16777216.0) ^ sign;
+            initial.fpr[2] = fp_test_bits(1.0) ^ sign;
+            op = operation == 0 ? nw_ppc_fadds(3, 1, 2) : ((63u<<26)|(3u<<21)|(1u<<16)|(2u<<11)|(21u<<1));
+            expected = fp_test_bits(operation == 1 ? (away ? 9007199254740994.0 : 9007199254740992.0)
+                                                   : (away ? 16777218.0 : 16777216.0)) ^ sign;
+            if (operation == 2) {
+                initial.fpr[1] = fp_test_bits(16777217.0) ^ sign;
+                op = nw_ppc_frsp(3, 1);
+            }
+        } else if (operation < 5) {
+            initial.fpr[1] = fp_test_bits(1.5) ^ sign;
+            op = (63u << 26) | (3u << 21) | (1u << 11) | ((operation == 3 ? 14u : 15u) << 1);
+            int value = operation == 4 ? 1 : (rn == 0 || away ? 2 : 1);
+            if (negative) value = -value;
+            expected = (uint64_t)(int64_t)value;
+        } else if (operation < 7) {
+            initial.fpr[1] = fp_test_bits(1.0) ^ sign;
+            initial.fpr[2] = fp_test_bits(10.0);
+            op = ((operation == 5 ? 63u : 59u) << 26) | (3u << 21) | (1u << 16) | (2u << 11) | (18u << 1);
+            const bool high = rn == 0 || away;
+            expected = (operation == 5 ? (high ? UINT64_C(0x3fb999999999999a) : UINT64_C(0x3fb9999999999999))
+                                       : (high ? UINT64_C(0x3fb99999a0000000) : UINT64_C(0x3fb9999980000000))) ^ sign;
+        }
+        if (operation >= 7) {
+            initial.fpr[1] = UINT64_C(0x3ff0000000000001) ^ sign;
+            initial.fpr[2] = UINT64_C(0x3feffffffffffffe);
+            const unsigned xo = 28 + operation - 7;
+            initial.fpr[5] = fp_test_bits(xo & 1 ? -1.0 : 1.0) ^ sign;
+            op = (59u<<26)|(3u<<21)|(1u<<16)|(5u<<11)|(2u<<6)|(xo<<1);
+            expected = (xo < 30 ? UINT64_C(0xb970000000000000) : UINT64_C(0x3970000000000000)) ^ sign;
+        }
+        uint32_t ops[6]; unsigned count = 0;
+        if (writer == 0) ops[count++] = (63u << 26) | (7u << 23) | (rn << 12) | (134u << 1);
+        else if (writer == 1) {
+            initial.fpr[4] = rn;
+            ops[count++] = nw_ppc_mtfsf(1, 4);
+        } else {
+            ops[count++] = (63u << 26) | (30u << 21) | ((rn & 2 ? 38u : 70u) << 1);
+            ops[count++] = (63u << 26) | (31u << 21) | ((rn & 1 ? 38u : 70u) << 1);
+        }
+        ops[count++] = op;
+        ops[count++] = nw_ppc_lwz(6, 0, 0x80);
+        ops[count++] = nw_ppc_blr();
+        const uint32_t pc = 0xe00000u + 0x40u * serial++;
+        nw_jit_fn fn = nw_jit_compile(ops, count, pc, pc & ~0xfffu, 0, 0);
+        CHECK(fn != NULL);
+        for (unsigned native = 0; native < 2; ++native) {
+            nw_jit_cpu cpu = initial;
+            fesetround(modes[host]);
+            feclearexcept(FE_ALL_EXCEPT);
+            feraiseexcept(FE_DIVBYZERO);
+            fp_callback_round = modes[host];
+            fp_callback_flags = fetestexcept(FE_ALL_EXCEPT);
+            fp_callback_fault = failing ? NW_JIT_FAULT_DSI : 0;
+            nw_jit_dtlb_flush();
+            if (native) { if (fn) fn(&cpu); }
+            else nw_jit_interp_n(&cpu, ops, count - 2, pc);
+            CHECK(cpu.fpr[3] == expected);
+            CHECK((cpu.fpscr & 3u) == rn);
+            CHECK(fegetround() == modes[host]);
+            CHECK(fetestexcept(FE_ALL_EXCEPT) == fp_callback_flags);
+            CHECK(cpu.fault == (native && failing ? NW_JIT_FAULT_DSI : 0));
+        }
+    }
+    nw_jit_set_host_mem(NULL, NULL);
+    nw_jit_set_host_pa(NULL, NULL);
+    // Explicit architectural expectations for derived summaries and CR1.
+    struct summary_case { uint32_t initial, op, expected, cr; };
+    const summary_case cases[] = {
+        {0, (63u<<26)|(0u<<23)|(9u<<12)|(134u<<1)|1u, 0x90000000u, 0x09000000u},
+        {0x01000080u, (63u<<26)|(0u<<23)|(0u<<12)|(134u<<1)|1u, 0x61000080u, 0x06000000u},
+        {0, (63u<<26)|(1u<<21)|(38u<<1)|1u, 0, 0}, // FEX cannot be set explicitly
+        {0, (63u<<26)|(2u<<21)|(38u<<1)|1u, 0, 0}, // VX cannot be set explicitly
+        {0, (63u<<26)|(7u<<21)|(38u<<1)|1u, 0xa1000000u, 0x0a000000u},
+        {0xe1000080u, (63u<<26)|(7u<<21)|(70u<<1)|1u, 0x80000080u, 0x08000000u},
+        {0x61000080u, (63u<<26)|(2u<<23)|(1u<<18)|(64u<<1), 0x00000080u, 0x00100000u},
+        {0x50000040u, (63u<<26)|(2u<<23)|(0u<<18)|(64u<<1), 0x00000040u, 0x00500000u}
+    };
+    for (const summary_case &c : cases) {
+        uint32_t ops[] = { c.op, nw_ppc_blr() };
+        const uint32_t pc = 0xf00000u + 0x40u * serial++;
+        nw_jit_fn fn = nw_jit_compile(ops, 2, pc, pc & ~0xfffu, 0, 0);
+        CHECK(fn != NULL);
+        for (unsigned native = 0; native < 2; ++native) {
+            nw_jit_cpu cpu = {}; cpu.fpscr = c.initial; cpu.lr = 0x200000;
+            if (native) { if (fn) fn(&cpu); } else nw_jit_interp_n(&cpu, ops, 2, pc);
+            CHECK(cpu.fpscr == c.expected);
+            CHECK(cpu.cr == c.cr);
+        }
+    }
+#if defined(__aarch64__)
+    uint64_t host_control, host_status;
+    __asm__ volatile("mrs %0, fpcr\n\tmrs %1, fpsr" : "=r"(host_control), "=r"(host_status));
+    const uint64_t flushed = host_control | UINT64_C(0x3000000);
+    __asm__ volatile("msr fpcr, %0" :: "r"(flushed) : "memory");
+    for (unsigned compare = 0; compare < 2; ++compare) {
+        nw_jit_cpu initial = {}; initial.lr = 0x200000;
+        initial.fpr[1] = compare ? UINT64_C(0x7ff0000000000001) : UINT64_C(0x3810000000000000);
+        initial.fpr[2] = compare ? UINT64_C(0x3ff0000000000000) : UINT64_C(0x3800000000000000);
+        uint32_t ops[] = { compare ? ((63u<<26)|(3u<<23)|(1u<<16)|(2u<<11)|(32u<<1))
+                                   : ((59u<<26)|(3u<<21)|(1u<<16)|(2u<<11)|(20u<<1)), nw_ppc_blr() };
+        const uint32_t pc = 0x1800000u + 0x40u * compare;
+        nw_jit_fn fn = nw_jit_compile(ops, 2, pc, pc & ~0xfffu, 0, 0); CHECK(fn != NULL);
+        for (unsigned native = 0; native < 2; ++native) {
+            nw_jit_cpu cpu = initial;
+            if (native) { if (fn) fn(&cpu); } else nw_jit_interp_n(&cpu, ops, 2, pc);
+            uint64_t control, status;
+            __asm__ volatile("mrs %0, fpcr\n\tmrs %1, fpsr" : "=r"(control), "=r"(status));
+            if (control != flushed || status != host_status) fprintf(stderr,"control=%llx expected=%llx status=%llx expected=%llx\n", control, flushed, status, host_status);
+            CHECK(control == flushed && status == host_status);
+            if (!compare) {
+                CHECK(cpu.fpr[3] == UINT64_C(0x3800000000000000));
+                CHECK((cpu.fpscr & 0x1f000u) == 0x14000u);
+            } else CHECK((cpu.cr & 0x000f0000u) == 0x00010000u);
+        }
+    }
+    __asm__ volatile("msr fpcr, %0\n\tmsr fpsr, %1" :: "r"(host_control), "r"(host_status) : "memory");
+#endif
+    // Nesting restores the outer guest, and then the host, independently.
+    fesetround(FE_DOWNWARD);
+    {
+        ppc_fp_environment outer(2);
+        CHECK(fegetround() == FE_UPWARD);
+        { ppc_fp_environment inner(1); CHECK(fegetround() == FE_TOWARDZERO); }
+        CHECK(fegetround() == FE_UPWARD);
+    }
+    CHECK(fegetround() == FE_DOWNWARD);
+    fesetenv(&caller);
+    nw_jit_set_mode(saved_mode);
+}
+
+static void jit_fault_access(void *host, uint32_t ea, uint32_t pc, unsigned width, int *fault)
+{
+	jit_fault_fixture &f = *(jit_fault_fixture *)host;
+	f.ea = ea; f.pc = pc; f.width = width; ++f.calls;
+	*fault = f.cause;
+}
+static uint32_t jit_fault_word(void *h, uint32_t ea, uint32_t pc, int *fault)
+{ jit_fault_access(h, ea, pc, 4, fault); return 0xbadbad00; }
+static uint32_t jit_fault_half(void *h, uint32_t ea, uint32_t pc, int *fault)
+{ jit_fault_access(h, ea, pc, 2, fault); return 0xbad0; }
+static uint32_t jit_fault_byte(void *h, uint32_t ea, uint32_t pc, int *fault)
+{ jit_fault_access(h, ea, pc, 1, fault); return 0xba; }
+static void jit_fault_store_word(void *h, uint32_t ea, uint32_t, uint32_t pc, int *fault)
+{ jit_fault_access(h, ea, pc, 4, fault); }
+static void jit_fault_store_half(void *h, uint32_t ea, uint32_t, uint32_t pc, int *fault)
+{ jit_fault_access(h, ea, pc, 2, fault); }
+static void jit_fault_store_byte(void *h, uint32_t ea, uint32_t, uint32_t pc, int *fault)
+{ jit_fault_access(h, ea, pc, 1, fault); }
+static int jit_fault_conditional(void *h, uint32_t ea, uint32_t, uint32_t pc, int *fault)
+{ jit_fault_access(h, ea, pc, 4, fault); return 1; }
+static void jit_fault_double(void *h, uint32_t, uint32_t ea, uint32_t pc, int *fault, uint64_t *out)
+{ jit_fault_access(h, ea, pc, 8, fault); *out = 0xbadbadbadbadbad0ull; }
+static void jit_fault_store_double(void *h, uint32_t ea, uint64_t, uint32_t pc, int *fault)
+{ jit_fault_access(h, ea, pc, 8, fault); }
+static void jit_fault_vector(void *h, uint32_t, uint32_t ea, uint32_t pc, int *fault, uint32_t *out)
+{ jit_fault_access(h, ea, pc, 16, fault); for (unsigned i = 0; i < 4; ++i) out[i] = 0xbadbad00 + i; }
+static void jit_fault_store_vector(void *h, uint32_t ea, const uint32_t *, uint32_t pc, int *fault)
+{ jit_fault_access(h, ea, pc, 16, fault); }
+
+static void test_jit_memory_faults()
+{
+	const int saved_mode = nw_jit_mode();
+	nw_jit_set_mode(NW_JIT_ON);
+	nw_jit_set_host_mem(jit_fault_word, jit_fault_store_word);
+	nw_jit_set_host_pa(jit_fault_word, jit_fault_store_word);
+	nw_jit_set_host_half(jit_fault_half, jit_fault_store_half);
+	nw_jit_set_host_byte(jit_fault_byte, jit_fault_store_byte);
+	nw_jit_set_host_lwarx(jit_fault_word);
+	nw_jit_set_host_stwcx(jit_fault_conditional);
+	nw_jit_set_host_lfd(jit_fault_double);
+	nw_jit_set_host_stfd(jit_fault_store_double);
+	nw_jit_set_host_lvx(jit_fault_vector);
+	nw_jit_set_host_stvx(jit_fault_store_vector);
+	struct form { unsigned prim, xo, width, store; };
+	const form forms[] = {
+		{32,0,4,0}, {33,0,4,0}, {34,0,1,0}, {35,0,1,0},
+		{40,0,2,0}, {41,0,2,0}, {42,0,2,0}, {43,0,2,0},
+		{36,0,4,1}, {37,0,4,1}, {38,0,1,1}, {39,0,1,1}, {44,0,2,1}, {45,0,2,1},
+		{48,0,4,0}, {49,0,4,0}, {50,0,8,0}, {51,0,8,0},
+		{52,0,4,1}, {53,0,4,1}, {54,0,8,1}, {55,0,8,1},
+		{31,23,4,0}, {31,55,4,0}, {31,87,1,0}, {31,119,1,0},
+		{31,279,2,0}, {31,311,2,0}, {31,343,2,0}, {31,375,2,0},
+		{31,151,4,1}, {31,183,4,1}, {31,215,1,1}, {31,247,1,1},
+		{31,407,2,1}, {31,439,2,1},
+		{31,535,4,0}, {31,567,4,0}, {31,599,8,0}, {31,631,8,0},
+		{31,663,4,1}, {31,695,4,1}, {31,727,8,1}, {31,759,8,1},
+		{31,20,4,0}, {31,150,4,1}, {31,103,16,0}, {31,231,16,1}
+	};
+	const unsigned failures_before = g_fail;
+	for (unsigned k = 0; k < sizeof(forms) / sizeof(forms[0]); ++k) {
+		const form &f = forms[k];
+		const uint32_t op = (f.prim << 26) | (27u << 21) | (24u << 16) |
+			(f.prim == 31 ? (26u << 11) | (f.xo << 1) | (f.xo == 150) : 0x40u);
+		for (unsigned position = 0; position < 3; ++position) {
+			uint32_t ops[4];
+			for (unsigned i = 0; i < 3; ++i)
+				ops[i] = i == position ? op : nw_ppc_addi(5 + i, 0, 7 + i);
+			ops[3] = nw_ppc_blr();
+			const uint32_t start = 0xb0000 + k * 0x100 + position * 0x10;
+			nw_jit_fn fn = nw_jit_compile(ops, 4, start, start & ~0xfffu, 0, 0);
+			CHECK(fn != NULL);
+			if (!fn) continue;
+			for (int cause = NW_JIT_FAULT_DSI; cause <= NW_JIT_FAULT_IO; ++cause) {
+				jit_fault_fixture fixture = {cause, 0, 0, 0, 0};
+				nw_jit_cpu c = {};
+				c.host = &fixture; c.lr = 0x200000;
+				c.gpr[24] = 0xdead0000; c.gpr[26] = 0x40; c.gpr[27] = 0xabcdef01;
+				c.fpr[27] = 0x0123456789abcdefull;
+				for (unsigned i = 0; i < 4; ++i) c.vr[27][i] = 0x12345670 + i;
+				c.cr = 0xf1234567; c.xer = 0x80000000;
+				c.reserve_valid = 1; c.reserve_ea = 0xdead0040;
+				/* Stale metadata must be replaced, including direction. */
+				c.fault_ea = 0xbad00000; c.fault_st = !f.store; c.fault_width = 32;
+				nw_jit_dtlb_flush();
+				fn(&c);
+				CHECK(fixture.calls == 1 && fixture.ea == 0xdead0040 && fixture.width == f.width);
+				CHECK(c.fault == (unsigned)cause && c.fault_ea == fixture.ea);
+				CHECK(c.fault_st == f.store && c.fault_width == f.width);
+				CHECK(c.pc == start + position * 4 && fixture.pc == c.pc);
+				CHECK(c.gpr[24] == 0xdead0000 && c.gpr[27] == 0xabcdef01);
+				CHECK(c.fpr[27] == 0x0123456789abcdefull);
+				for (unsigned i = 0; i < 4; ++i) CHECK(c.vr[27][i] == 0x12345670 + i);
+				CHECK(c.cr == 0xf1234567 && c.xer == 0x80000000);
+				CHECK(c.reserve_valid == 1 && c.reserve_ea == 0xdead0040);
+				for (unsigned i = 0; i < 3; ++i) CHECK(c.gpr[5 + i] == (i < position ? 7 + i : 0));
+			}
+		}
+	}
+	/* Every store update commits RA on SMC, then suppresses the suffix.
+	 * This also detects comparing a helper-clobbered W8 instead of W10. */
+	for (unsigned k = 0; k < sizeof(forms) / sizeof(forms[0]); ++k) {
+		const form &f = forms[k];
+		if (!f.store) continue;
+		const uint32_t op = (f.prim << 26) | (27u << 21) | (24u << 16) |
+			(f.prim == 31 ? (26u << 11) | (f.xo << 1) | (f.xo == 150) : 0x40u);
+		jit_fault_fixture fixture = {NW_JIT_FAULT_SMC, 0, 0, 0, 0};
+		nw_jit_cpu c = {};
+		c.host = &fixture; c.gpr[24] = 0xdead0000; c.gpr[26] = 0x40;
+		c.gpr[27] = 0xabcdef01; c.cr = 0xf1234567; c.xer = 0x80000000;
+		c.reserve_valid = 1; c.reserve_ea = 0xdead0040;
+		uint32_t ops[] = {op, nw_ppc_addi(5,0,7), nw_ppc_blr()};
+		const uint32_t pc = 0xc0000 + k * 0x10;
+		nw_jit_fn fn = nw_jit_compile(ops,3,pc,pc & ~0xfffu,0,0);
+		CHECK(fn != NULL);
+		if (!fn) continue;
+		nw_jit_dtlb_flush(); fn(&c);
+		CHECK(c.fault == NW_JIT_FAULT_SMC && c.pc == pc && c.gpr[5] == 0);
+		CHECK(c.fault_ea == 0xdead0040 && c.fault_width == f.width && c.fault_st == 1);
+		const bool update = f.prim != 31 ? (f.prim & 1u) != 0 :
+			f.xo == 183 || f.xo == 247 || f.xo == 439 || f.xo == 695 || f.xo == 759;
+		CHECK(c.gpr[24] == (update ? 0xdead0040u : 0xdead0000u));
+		CHECK(c.cr == (f.xo == 150 ? 0x31234567u : 0xf1234567u));
+		CHECK(c.reserve_valid == (f.xo == 150 ? 0u : 1u));
+	}
+	/* A translated DTLB hit with no direct host pointer uses the PA helper.
+	 * Its callback sees PA, while the exit record must retain the logical EA. */
+	for (unsigned store = 0; store < 2; ++store) {
+		jit_fault_fixture fixture = {NW_JIT_FAULT_DSI, 0, 0, 0, 0};
+		nw_jit_cpu c = {}; c.host = &fixture; c.msr = 0x10;
+		c.gpr[24] = 0x12340040; c.gpr[27] = 0xabcdef01;
+		uint32_t ops[] = {((store ? 36u : 32u) << 26) | (27u << 21) | (24u << 16), nw_ppc_blr()};
+		const uint32_t pc = 0xd0000 + store * 0x10;
+		nw_jit_fn fn = nw_jit_compile(ops,2,pc,pc & ~0xfffu,2,0);
+		CHECK(fn != NULL);
+		if (!fn) continue;
+		nw_jit_dtlb_flush();
+		nw_jit_dtlb_fill(0x12340000,0x56780000,1,0,0);
+		fn(&c);
+		CHECK(fixture.calls == 1 && fixture.ea == 0x56780040);
+		CHECK(c.fault == NW_JIT_FAULT_DSI && c.fault_ea == 0x12340040);
+		CHECK(c.fault_width == 4 && c.fault_st == store && c.pc == pc);
+		CHECK(c.gpr[27] == 0xabcdef01);
+	}
+	nw_jit_set_host_mem(NULL, NULL); nw_jit_set_host_pa(NULL, NULL);
+	nw_jit_set_host_half(NULL, NULL); nw_jit_set_host_byte(NULL, NULL);
+	nw_jit_set_host_lwarx(NULL); nw_jit_set_host_stwcx(NULL);
+	nw_jit_set_host_lfd(NULL); nw_jit_set_host_stfd(NULL);
+	nw_jit_set_host_lvx(NULL); nw_jit_set_host_stvx(NULL);
+	/* lmw preserves completed registers, the faulting destination, and the
+	 * unexecuted suffix. No oracle that shares its helper supplies expectations. */
+	{
+		uint8_t ram[64] = {}; ram[60] = 0x11; ram[61] = 0x22; ram[62] = 0x33; ram[63] = 0x44;
+		nw_jit_cpu c = {}; c.mem = ram; c.mem_size = sizeof ram; c.gpr[24] = 60;
+		c.gpr[28] = 0xdeadbeef; c.gpr[29] = 0xfeedface;
+		uint32_t ops[] = {(46u << 26) | (27u << 21) | (24u << 16), nw_ppc_addi(5,0,7)};
+		nw_jit_fn fn = nw_jit_compile(ops,2,0xd1000,0xd1000,0,0);
+		CHECK(fn != NULL);
+		if (fn) {
+			nw_jit_dtlb_flush(); fn(&c);
+			CHECK(c.fault == NW_JIT_FAULT_DSI && c.fault_ea == 64 && c.fault_width == 4 && !c.fault_st);
+			CHECK(c.gpr[27] == 0x11223344 && c.gpr[28] == 0xdeadbeef && c.gpr[29] == 0xfeedface);
+			CHECK(c.pc == 0xd1000 && c.gpr[5] == 0);
+		}
+	}
+	/* Bounds arithmetic must not wrap and accept an inaccessible high EA. */
+	for (unsigned k = 0; k < sizeof(forms) / sizeof(forms[0]); ++k) {
+		const form &f = forms[k];
+		if (f.prim == 31 && f.xo != 20 && f.xo != 150 && f.xo != 103 && f.xo != 231) continue;
+		uint8_t ram[16] = {};
+		nw_jit_cpu c = {}; c.mem = ram; c.mem_size = sizeof ram;
+		c.gpr[24] = 0u - f.width; c.gpr[27] = 0xabcdef01;
+		c.cr = 0xf1234567; c.reserve_valid = 1; c.reserve_ea = c.gpr[24];
+		uint32_t op = (f.prim << 26) | (27u << 21) | (24u << 16) |
+			(f.prim == 31 ? (f.xo << 1) | (f.xo == 150) : 0);
+		const uint32_t pc = 0xd2000 + k * 0x10;
+		nw_jit_fn fn = nw_jit_compile(&op,1,pc,pc & ~0xfffu,0,0);
+		CHECK(fn != NULL);
+		if (!fn) continue;
+		nw_jit_dtlb_flush(); fn(&c);
+		CHECK(c.fault == NW_JIT_FAULT_DSI && c.fault_ea == 0u - f.width);
+		CHECK(c.fault_width == f.width && c.fault_st == f.store);
+		CHECK(c.pc == pc && c.gpr[24] == 0u - f.width && c.gpr[27] == 0xabcdef01);
+		CHECK(c.cr == 0xf1234567 && c.reserve_valid == 1);
+	}
+	/* A successful RAM conditional store into its own code page commits its
+	 * word, EQ/SO and reservation release before the SMC exit. */
+	{
+		uint8_t ram[64] = {};
+		nw_jit_cpu c = {}; c.mem = ram; c.mem_size = sizeof ram;
+		c.gpr[24] = 16; c.gpr[27] = 0x12345678;
+		c.cr = 0xf1234567; c.xer = 0x80000000; c.reserve_valid = 1; c.reserve_ea = 16;
+		uint32_t ops[] = {(31u << 26) | (27u << 21) | (24u << 16) | (150u << 1) | 1u, nw_ppc_addi(5,0,7)};
+		nw_jit_fn fn = nw_jit_compile(ops,2,0x100,0,0,0);
+		CHECK(fn != NULL);
+		if (fn) {
+			nw_jit_dtlb_flush(); fn(&c);
+			CHECK(c.fault == NW_JIT_FAULT_SMC && c.pc == 0x100 && c.gpr[5] == 0);
+			CHECK(c.cr == 0x31234567 && !c.reserve_valid);
+			CHECK(ram[16] == 0x12 && ram[17] == 0x34 && ram[18] == 0x56 && ram[19] == 0x78);
+		}
+	}
+	/* Wide RAM stores finish their payload before leaving on SMC. */
+	for (unsigned kind = 0; kind < 3; ++kind) {
+		uint8_t ram[64] = {};
+		nw_jit_cpu c = {}; c.mem = ram; c.mem_size = sizeof ram; c.gpr[24] = 16;
+		c.fpr[27] = 0x3ff0000000000000ull;
+		for (unsigned i = 0; i < 4; ++i) c.vr[27][i] = 0x11223340 + i;
+		const uint32_t store = ((kind == 2 ? 31u : kind == 1 ? 54u : 52u) << 26) |
+			(27u << 21) | (24u << 16) | (kind == 2 ? 231u << 1 : 0);
+		uint32_t ops[] = {nw_ppc_addi(5,0,7), store, nw_ppc_addi(6,0,9)};
+		const uint32_t pc = 0x180 + kind * 0x10;
+		nw_jit_fn fn = nw_jit_compile(ops,3,pc,0,0,0);
+		CHECK(fn != NULL);
+		if (!fn) continue;
+		nw_jit_dtlb_flush(); fn(&c);
+		CHECK(c.fault == NW_JIT_FAULT_SMC && c.pc == pc + 4 && c.gpr[5] == 7 && c.gpr[6] == 0);
+		CHECK(c.fault_width == (4u << kind) && c.fault_st == 1 && c.fault_ea == 16);
+		if (kind == 0) {
+			CHECK(ram[16] == 0x3f && ram[17] == 0x80 && ram[18] == 0 && ram[19] == 0);
+		} else if (kind == 1) {
+			CHECK(ram[16] == 0x3f && ram[17] == 0xf0);
+			for (unsigned i = 18; i < 24; ++i) CHECK(ram[i] == 0);
+		} else {
+			for (unsigned i = 0; i < 4; ++i) {
+				CHECK(ram[16 + i * 4] == 0x11 && ram[17 + i * 4] == 0x22 &&
+					  ram[18 + i * 4] == 0x33 && ram[19 + i * 4] == 0x40 + i);
+			}
+		}
+	}
+	printf("PPC precise-memory-exit forms=%zu positions=3 causes=2 failures=%u\n",
+		   sizeof(forms) / sizeof(forms[0]), g_fail - failures_before);
+	nw_jit_set_mode(saved_mode);
+}
 
 static void be32_store(uint8_t *mem, uint32_t pa, uint32_t value)
 {
@@ -3982,8 +4391,13 @@ int main()
 		fn = nw_jit_compile(ops, 4, 0x1500u, 0x1000u, 0, 0);
 		CHECK(fn != NULL);
 		fn(&b);
-		CHECK(a.dec == 0x55 && a.gpr[4] == 0x55 && a.dec_wr == 1);
-		CHECK(b.dec == a.dec && b.gpr[4] == a.gpr[4] && b.dec_wr == 1);
+		CHECK(a.dec == 0x55 && a.gpr[4] == 0 && a.dec_wr == 1 && a.pc == 0x1008u);
+		CHECK(b.dec == a.dec && b.gpr[4] == a.gpr[4] && b.dec_wr == 1 && b.pc == 0x1508u);
+		CHECK(nw_jit_interp_n(&a, ops + 2, 2, a.pc) == 1);
+		nw_jit_fn fn_dec_read = nw_jit_compile(ops + 2, 2, b.pc, 0x1000u, 0, 0);
+		CHECK(fn_dec_read != NULL);
+		if (fn_dec_read) fn_dec_read(&b);
+		CHECK(a.gpr[4] == 0x55 && b.gpr[4] == 0x55);
 
 		/* cache key: same (page, pc, ir, endian) hits; IR/DR/PR distinguish */
 		nw_jit_fn fn2 = nw_jit_compile(ops, 4, 0x1500u, 0x1000u, 0, 0);
@@ -4629,7 +5043,7 @@ int main()
 		fn(&b);
 		CHECK(a.gpr[4] == 0x0fff0fffu && b.gpr[4] == a.gpr[4]);
 
-		/* mtfsf: FM=0xff copies low word; FEX/VX stay 0 */
+		/* mtfsf: derived FEX/VX follow the written causes/enables. */
 		memset(&a, 0, sizeof(a));
 		a.lr = 0x2000u;
 		a.fpr[3] = 0xffffffffu;
@@ -4643,7 +5057,7 @@ int main()
 		fn = nw_jit_compile(ops, 2, 0x1c3cu, 0x1000u, 0, 0);
 		CHECK(fn != NULL);
 		fn(&b);
-		CHECK(a.fpscr == 0x9fffffffu && b.fpscr == a.fpscr);
+		CHECK(a.fpscr == 0xffffffffu && b.fpscr == a.fpscr);
 
 		/* frsp: kpx (float) then store as double; FPRF on the single */
 		memset(&a, 0, sizeof(a));
@@ -6894,6 +7308,9 @@ int main()
 		CHECK(av_fail == 0);
 		CHECK(av_run == 8);
 	}
+
+	test_jit_memory_faults();
+	test_jit_fp_environment();
 
 	printf("SheepShaver-MMUTests: %d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;

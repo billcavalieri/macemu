@@ -38,6 +38,7 @@
 
 #ifdef SHEEPSHAVER
 struct nw_jit_cpu;
+struct nw_jit_verify_trace;
 struct nw68_nk_state;
 #endif
 
@@ -104,6 +105,7 @@ protected:
 	uint32 pc() const			{ return regs().pc; }
 	void increment_pc(int o)	{ pc() += o; }
 
+	friend struct ppc_core_test_access;
 	friend class pc_operand;
 	friend class lr_operand;
 	friend class ctr_operand;
@@ -266,11 +268,18 @@ private:
 	uint32 dec_;
 	uint64 dec_tb_base_;	/* timebase when dec_ was last sampled */
 	bool dec_pending_;
+	unsigned dec_tick_div_;
 	uint64 exception_serial_;
 	int64 tb_offset_;		/* mtspr TBL/TBU: guest TB = host ticks + offset */
 #ifdef SHEEPSHAVER
 	uint32 last_fetch_pa_;
 	struct nw_jit_cpu *nw_jc_;
+	nw_jit_verify_trace *nw_verify_trace_;
+	uint32 nw_verify_ea_;
+	uint64 nw_verify_read(uint32 pa, unsigned width);
+	void nw_verify_write(uint32 pa, unsigned width, uint64 value);
+	int nw_jit_verify_block(struct nw_jit_cpu &shadow, void (*fn)(struct nw_jit_cpu *),
+	                        const uint32 *ops, int n, uint32 compiled_first = 0);
 	uint32 mm_ppc_pending_;
 #endif
 
@@ -307,6 +316,11 @@ private:
 	int programint_kcall_fast(void);
 #endif
 	void tick_decrementer();
+	void sample_decrementer();
+	void advance_decrementer(uint64 elapsed);
+#ifdef SHEEPSHAVER
+	bool jit_events_pending();
+#endif
 	void catch_up_timebase();	/* apply the TB delta now; idle sleep bypasses the 256 divider */
 #ifdef SHEEPSHAVER
 	int guest_idle_wait();
@@ -397,6 +411,7 @@ public:
 	static void jit_host_trap(void *host, struct nw_jit_cpu *cpu);
 	static void jit_host_sc(void *host, uint32 guest_pc);
 	static void jit_host_mtspr(void *host, uint32 spr, uint32 val);
+	static uint32 jit_host_dec(void *host, uint32 val, uint32 pc, int write, int *status);
 	static void jit_host_lvx(void *host, uint32 vd, uint32 ea, uint32 pc, int *fault, uint32 *out);
 	static void jit_host_stvx(void *host, uint32 ea, const uint32 *w, uint32 pc, int *fault);
 	static void jit_host_vmx(void *host, uint32 op, struct nw_jit_cpu *cpu);
@@ -433,7 +448,7 @@ public:
 
 	// Caches invalidation
 	void invalidate_cache();
-	void invalidate_cache_range(uintptr start, uintptr end);
+	void invalidate_cache_range(uintptr start, uintptr end, int source = -1);
 private:
 	struct { uintptr start, end; } cache_range;
 

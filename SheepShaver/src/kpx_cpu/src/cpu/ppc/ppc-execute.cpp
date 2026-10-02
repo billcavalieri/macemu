@@ -19,6 +19,9 @@
  */
 
 #include "sysdeps.h"
+#if defined(__clang__)
+#pragma STDC FENV_ACCESS ON
+#endif
 
 #include <stdio.h>
 #include <math.h>
@@ -32,6 +35,7 @@
 #include "cpu/ppc/ppc-operands.hpp"
 #include "cpu/ppc/ppc-operations.hpp"
 #include "cpu/ppc/ppc-execute.hpp"
+#include "cpu/ppc/ppc-fp-environment.hpp"
 
 #ifndef SHEEPSHAVER
 #include "basic-kernel.hpp"
@@ -43,6 +47,7 @@
 #include "nw_boot_contract.h"
 #include "nw_io.h"
 #include "nw_jit.h"
+#include "nw_jit_verify.h"
 #endif
 
 #if ENABLE_MON
@@ -104,21 +109,6 @@ void powerpc_cpu::execute_illegal(uint32 opcode)
 void powerpc_cpu::execute_nop(uint32 opcode)
 {
 	increment_pc(4);
-}
-
-/**
- *  Floating-point rounding modes conversion
- **/
-
-static inline int ppc_to_native_rounding_mode(int round)
-{
-	switch (round) {
-	case 0: return FE_TONEAREST;
-	case 1: return FE_TOWARDZERO;
-	case 2: return FE_UPWARD;
-	case 3: return FE_DOWNWARD;
-	}
-	return FE_TONEAREST;
 }
 
 /**
@@ -472,30 +462,8 @@ void powerpc_cpu::execute_multiply(uint32 opcode)
 
 void powerpc_cpu::record_fpscr(int exceptions)
 {
-#if PPC_ENABLE_FPU_EXCEPTIONS
-	// Reset non-sticky bits
-	fpscr() &= ~(FPSCR_VX_field::mask() | FPSCR_FEX_field::mask());
-
-	// Always update FX if any exception bit was set
-	if (exceptions)
-		fpscr() |= FPSCR_FX_field::mask() | exceptions;
-
-	// Always update VX
-	if (fpscr() & (FPSCR_VXSNAN_field::mask() | FPSCR_VXISI_field::mask() |
-				   FPSCR_VXISI_field::mask() | FPSCR_VXIDI_field::mask() |
-				   FPSCR_VXZDZ_field::mask() | FPSCR_VXIMZ_field::mask() |
-				   FPSCR_VXVC_field::mask() | FPSCR_VXSOFT_field::mask() |
-				   FPSCR_VXSQRT_field::mask() | FPSCR_VXCVI_field::mask()))
-		fpscr() |= FPSCR_VX_field::mask();
-
-	// Always update FEX
-	if (((fpscr() & FPSCR_VX_field::mask()) && (fpscr() & FPSCR_VE_field::mask())) ||
-		((fpscr() & FPSCR_OX_field::mask()) && (fpscr() & FPSCR_OE_field::mask())) ||
-		((fpscr() & FPSCR_UX_field::mask()) && (fpscr() & FPSCR_UE_field::mask())) ||
-		((fpscr() & FPSCR_ZX_field::mask()) && (fpscr() & FPSCR_ZE_field::mask())) ||
-		((fpscr() & FPSCR_XX_field::mask()) && (fpscr() & FPSCR_XE_field::mask())))
-		fpscr() |= FPSCR_FEX_field::mask();
-#endif
+    if (exceptions) fpscr() |= 0x80000000u | exceptions;
+    fpscr() = ppc_fpscr_summaries(fpscr());
 }
 
 /**
@@ -514,6 +482,7 @@ void powerpc_cpu::record_fpscr(int exceptions)
 template< class FP, class OP, class RD, class RA, class RB, class RC, class Rc, bool FPSCR >
 void powerpc_cpu::execute_fp_arith(uint32 opcode)
 {
+	const ppc_fp_environment fp_env(fpscr());
 	const double a = RA::get(this, opcode);
 	const double b = RB::get(this, opcode);
 	const double c = RC::get(this, opcode);
@@ -645,6 +614,47 @@ static inline void pa_write_8(uint32 pa, uint64 v, uint32 pc)
 	}
 }
 
+#ifdef SHEEPSHAVER
+uint64 powerpc_cpu::nw_verify_read(uint32 pa, unsigned width)
+{
+    uint64 value = 0;
+    switch (width) {
+    case 1: value = pa_read_1(pa, pc()); break;
+    case 2: value = pa_read_2(pa, pc()); break;
+    case 4: value = pa_read_4(pa, pc()); break;
+    case 8: value = pa_read_8(pa, pc()); break;
+    default: abort();
+    }
+    if (nw_verify_trace_) nw_verify_trace_->record(pc(), nw_verify_ea_, width, false, value);
+    return value;
+}
+
+void powerpc_cpu::nw_verify_write(uint32 pa, unsigned width, uint64 value)
+{
+    if (width < 8) value &= (UINT64_C(1) << (width * 8)) - 1;
+    switch (width) {
+    case 1: pa_write_1(pa, (uint32)value, pc()); break;
+    case 2: pa_write_2(pa, (uint32)value, pc()); break;
+    case 4: pa_write_4(pa, (uint32)value, pc()); break;
+    case 8: pa_write_8(pa, value, pc()); break;
+    default: abort();
+    }
+    if (nw_verify_trace_) {
+        const uint32 fault = !pa_is_io(pa) && !pa_is_rom(pa) &&
+            ((pa & ~0xfffu) == (last_fetch_pa_ & ~0xfffu)) ? NW_JIT_FAULT_SMC : 0;
+        nw_verify_trace_->record(pc(), nw_verify_ea_, width, true, value, fault);
+    }
+}
+#define VERIFY_PA_READ(PA, N) (nw_verify_trace_ ? nw_verify_read((PA), (N)) : pa_read_##N((PA), pc()))
+#define VERIFY_PA_WRITE(PA, N, V) do { \
+	if (nw_verify_trace_) nw_verify_write((PA), (N), (V)); \
+	else pa_write_##N((PA), (V), pc()); \
+} while (0)
+#else
+#define VERIFY_PA_READ(PA, N) pa_read_##N((PA), pc())
+#define VERIFY_PA_WRITE(PA, N, V) pa_write_##N((PA), (V), pc())
+#endif
+
 template< class OP, class RA, class RB, bool LD, int SZ, bool UP, bool RX >
 void powerpc_cpu::execute_loadstore(uint32 opcode)
 {
@@ -657,6 +667,20 @@ void powerpc_cpu::execute_loadstore(uint32 opcode)
 		return;
 
 #ifdef SHEEPSHAVER
+	if (nw_verify_trace_) {
+		if (LD) {
+			uint32 value = (uint32)nw_verify_read(pa, SZ);
+			if (RX) value = SZ == 2 ? bswap_16(value) : SZ == 4 ? bswap_32(value) : value;
+			operand_RD::set(this, opcode, OP::apply(value));
+		} else {
+			uint32 value = operand_RS::get(this, opcode);
+			if (RX) value = SZ == 2 ? bswap_16(value) : SZ == 4 ? bswap_32(value) : value;
+			nw_verify_write(pa, SZ, value);
+		}
+		if (UP) RA::set(this, opcode, ea);
+		increment_pc(4);
+		return;
+	}
 	/* New World: physical decode (nw_pa_kind) — I/O to devices, ROM stores dropped. */
 	if (pa_is_io(pa)) {
 		if (LD) {
@@ -718,6 +742,11 @@ void powerpc_cpu::execute_loadstore_multiple(uint32 opcode)
 		if (!guest_data_xlate(ea, 4, !LD, &pa))
 			return;
 #ifdef SHEEPSHAVER
+		if (nw_verify_trace_) {
+			if (LD) gpr(r) = (uint32)nw_verify_read(pa, 4);
+			else nw_verify_write(pa, 4, gpr(r));
+			r++; ea += 4; continue;
+		}
 		if (pa_is_io(pa)) {
 			if (LD)
 				gpr(r) = nw_io_read(pa, 4, pc());
@@ -772,12 +801,12 @@ void powerpc_cpu::execute_fp_loadstore(uint32 opcode)
 		if (DB) {
 			if (!guest_data_xlate(ea, 8, false, &pa))
 				return;
-			v = pa_read_8(pa, pc());
+			v = VERIFY_PA_READ(pa, 8);
 		}
 		else {
 			if (!guest_data_xlate(ea, 4, false, &pa))
 				return;
-			v = fp_load_single_convert(pa_read_4(pa, pc()));
+			v = fp_load_single_convert(VERIFY_PA_READ(pa, 4));
 		}
 		operand_fp_dw_RD::set(this, opcode, v);
 	}
@@ -787,12 +816,12 @@ void powerpc_cpu::execute_fp_loadstore(uint32 opcode)
 		if (DB) {
 			if (!guest_data_xlate(ea, 8, true, &pa))
 				return;
-			pa_write_8(pa, v, pc());
+			VERIFY_PA_WRITE(pa, 8, v);
 		}
 		else {
 			if (!guest_data_xlate(ea, 4, true, &pa))
 				return;
-			pa_write_4(pa, fp_store_single_convert(v), pc());
+			VERIFY_PA_WRITE(pa, 4, fp_store_single_convert(v));
 		}
 	}
 
@@ -942,6 +971,7 @@ void powerpc_cpu::execute_stwcx(uint32 opcode)
 template< bool OC >
 void powerpc_cpu::execute_fp_compare(uint32 opcode)
 {
+	const ppc_fp_environment fp_env(fpscr());
 	const double a = operand_fp_RA::get(this, opcode);
 	const double b = operand_fp_RB::get(this, opcode);
 	const int crfd = crfD_field::extract(opcode);
@@ -958,7 +988,6 @@ void powerpc_cpu::execute_fp_compare(uint32 opcode)
 
 	FPSCR_FPCC_field::insert(fpscr(), c);
 	cr().set(crfd, c);
-
 	// Update FPSCR exception bits
 #if PPC_ENABLE_FPU_EXCEPTIONS
 	int exceptions = 0;
@@ -985,6 +1014,7 @@ void powerpc_cpu::execute_fp_compare(uint32 opcode)
 template< class RN, class Rc >
 void powerpc_cpu::execute_fp_int_convert(uint32 opcode)
 {
+	const ppc_fp_environment fp_env(fpscr());
 	const double b = operand_fp_RB::get(this, opcode);
 	const uint32 r = RN::get(this, opcode);
 	any_register d;
@@ -1007,7 +1037,7 @@ void powerpc_cpu::execute_fp_int_convert(uint32 opcode)
 	if (b >= -(double)0x80000000 && b <= (double)0x7fffffff) {
 #if defined mathlib_lrint
 		int old_round = fegetround();
-		fesetround(ppc_to_native_rounding_mode(r));
+		fesetround(ppc_native_rounding(r));
 		d.j = (int32)mathlib_lrint(b);
 		fesetround(old_round);
 #else
@@ -1024,8 +1054,7 @@ void powerpc_cpu::execute_fp_int_convert(uint32 opcode)
 	else if (b > 0)
 		d.j = 0x7fffffff;
 	else
-		d.j = 0x80000000;
-
+		d.j = (int32)0x80000000u; // sign-extend the chosen integer-word representation
 	// Update FPSCR exception bits
 #if PPC_ENABLE_FPU_EXCEPTIONS
 	febarrier();
@@ -1036,7 +1065,6 @@ void powerpc_cpu::execute_fp_int_convert(uint32 opcode)
 		exceptions |= FPSCR_XX_field::mask();
 	record_fpscr(exceptions);
 #endif
-
 	// Set CR1 (FX, FEX, VX, VOX) if instruction has Rc set
 	if (Rc::test(opcode))
 		record_cr1();
@@ -1094,6 +1122,7 @@ void powerpc_cpu::fp_classify(FP x)
 template< class Rc >
 void powerpc_cpu::execute_fp_round(uint32 opcode)
 {
+	const ppc_fp_environment fp_env(fpscr());
 	const double b = operand_fp_RB::get(this, opcode);
 
 #if PPC_ENABLE_FPU_EXCEPTIONS
@@ -1106,7 +1135,6 @@ void powerpc_cpu::execute_fp_round(uint32 opcode)
 #endif
 
 	float d = (float)b;
-
 	// Update FPSCR exception bits
 #if PPC_ENABLE_FPU_EXCEPTIONS
 	febarrier();
@@ -1123,7 +1151,6 @@ void powerpc_cpu::execute_fp_round(uint32 opcode)
 	// FPSCR[FPRF] is set to the class and sign of the result
 	if (!FPSCR_VE_field::test(fpscr()))
 		fp_classify(d);
-
 	// Set CR1 (FX, FEX, VX, VOX) if instruction has Rc set
 	if (Rc::test(opcode))
 		record_cr1();
@@ -1180,6 +1207,7 @@ void powerpc_cpu::execute_mcrfs(uint32 opcode)
 					  FPSCR_VXVC_field::mask() | FPSCR_VXSOFT_field::mask() |
 					  FPSCR_VXSQRT_field::mask() | FPSCR_VXCVI_field::mask()));
 
+	record_fpscr(0);
 	increment_pc(4);
 }
 
@@ -1216,13 +1244,8 @@ void powerpc_cpu::execute_mtfsf(uint32 opcode)
 
 	// Move frB bits to FPSCR according to field mask
 	fpscr() = (fpscr() & ~m) | exceptions;
-
 	// Update FPSCR exception bits (don't implicitly update FX)
 	record_fpscr(0);
-
-	// Update native FP control word
-	if (m & FPSCR_RN_field::mask())
-		fesetround(ppc_to_native_rounding_mode(FPSCR_RN_field::extract(fpscr())));
 
 	// Set CR1 (FX, FEX, VX, VOX) if instruction has Rc set
 	if (Rc::test(opcode))
@@ -1238,23 +1261,18 @@ void powerpc_cpu::execute_mtfsfi(uint32 opcode)
 	uint32 m = 0xf << (4 * (7 - crfD));
 
 	// FPSCR[FX] is altered only if crfD = 0
-	if (crfD == 0)
+	if (crfD != 0)
 		m &= ~FPSCR_FX_field::mask();
 
 	// The mtfsfi instruction cannot alter FPSCR[FEX] nor FPSCR[VX] explicitly
-	int exceptions = RB::get(this, opcode) & m;
+	int exceptions = (RB::get(this, opcode) << (4 * (7 - crfD))) & m;
 	exceptions &= ~(FPSCR_FEX_field::mask() | FPSCR_VX_field::mask());
 
 	// Move immediate to FPSCR according to field crfD
 	fpscr() = (fpscr() & ~m) | exceptions;
 
-	// Update native FP control word
-	if (m & FPSCR_RN_field::mask())
-		fesetround(ppc_to_native_rounding_mode(FPSCR_RN_field::extract(fpscr())));
-
 	// Update FPSCR exception bits (don't implicitly update FX)
 	record_fpscr(0);
-
 	// Set CR1 (FX, FEX, VX, VOX) if instruction has Rc set
 	if (Rc::test(opcode))
 		record_cr1();
@@ -1272,14 +1290,12 @@ void powerpc_cpu::execute_mtfsb(uint32 opcode)
 	m &= ~(FPSCR_FEX_field::mask() | FPSCR_VX_field::mask());
 
 	// Bit crbD of the FPSCR is set or clear
+	const uint32 old = fpscr();
 	fpscr() &= ~m;
-
 	// Update FPSCR exception bits
-	record_fpscr(set_bit ? m : 0);
-
-	// Update native FP control word if FPSCR[RN] changed
-	if (m & FPSCR_RN_field::mask())
-		fesetround(ppc_to_native_rounding_mode(FPSCR_RN_field::extract(fpscr())));
+	if (set_bit) fpscr() |= m;
+	if (set_bit && !(old & m) && (m & 0x1ff80700u)) fpscr() |= 0x80000000u;
+	record_fpscr(0);
 
 	// Set CR1 (FX, FEX, VX, VOX) if instruction has Rc set
 	if (Rc::test(opcode))
@@ -1293,7 +1309,6 @@ void powerpc_cpu::execute_mffs(uint32 opcode)
 {
 	// Move FPSCR to FPR(FRD)
 	operand_fp_dw_RD::set(this, opcode, fpscr());
-
 	// Set CR1 (FX, FEX, VX, VOX) if instruction has Rc set
 	if (Rc::test(opcode))
 		record_cr1();
@@ -1546,21 +1561,10 @@ void powerpc_cpu::execute_mftbr(uint32 opcode)
 void powerpc_cpu::execute_invalidate_cache_range()
 {
 	if (cache_range.start != cache_range.end) {
-		invalidate_cache_range(cache_range.start, cache_range.end);
 #ifdef SHEEPSHAVER
-		if (ppc32_guest_mmu_enabled()) {
-			uint32 ea = cache_range.start & ~0xfffu;
-			const uint32 last = (cache_range.end - 1u) & ~0xfffu;
-			for (;;) {
-				const ppc32_xlate_result r =
-					ppc32_guest_mmu().translate(ea, PPC32_XLATE_IR, 4);
-				if (r.ok)
-					nw_jit_invalidate_page_src(r.pa, NW_JIT_FL_ICBI);
-				if (ea == last)
-					break;
-				ea += 0x1000u;
-			}
-		}
+		invalidate_cache_range(cache_range.start, cache_range.end, NW_JIT_FL_ICBI);
+#else
+		invalidate_cache_range(cache_range.start, cache_range.end);
 #endif
 		cache_range.start = cache_range.end = 0;
 	}

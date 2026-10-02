@@ -23,6 +23,7 @@
 #include <string.h>
 #include <assert.h>
 #include <time.h>
+#include <unistd.h>
 #include "vm_alloc.h"
 #include "cpu/vm.hpp"
 #include "cpu/ppc/ppc-cpu.hpp"
@@ -47,6 +48,7 @@
 #include "nw_devices.h"
 #include "nw_script.h"
 #include "nw_jit.h"
+#include "nw_jit_verify.h"
 #include "nw_68k_jit.h"
 #include "xlowmem.h"
 #include "nw_68k_core.h"
@@ -297,8 +299,9 @@ void powerpc_cpu::initialize()
 	fpu_retry_on_ = 0;
 	dec_ = 0xffffffffu;
 	tb_offset_ = 0;
-	dec_tb_base_ = tb_ticks();
+	dec_tb_base_ = tb_host_ticks();
 	dec_pending_ = false;
+	dec_tick_div_ = 0;
 	exception_serial_ = 0;
 #ifdef SHEEPSHAVER
 	last_fetch_pa_ = 0;
@@ -369,6 +372,7 @@ void powerpc_cpu::enable_guest_mmu(bool on)
 		nw_jit_set_host_msr(powerpc_cpu::jit_host_msr);
 		nw_jit_set_host_pa(powerpc_cpu::jit_host_lwz_pa, powerpc_cpu::jit_host_stw_pa);
 		nw_jit_set_host_mfspr(powerpc_cpu::jit_host_mfspr);
+		nw_jit_set_host_dec(powerpc_cpu::jit_host_dec);
 		nw_jit_set_host_isync(powerpc_cpu::jit_host_isync);
 		nw_jit_set_host_mtmsr(powerpc_cpu::jit_host_mtmsr);
 		nw_jit_set_host_mtsr(powerpc_cpu::jit_host_mtsr);
@@ -1081,6 +1085,7 @@ powerpc_cpu::spr_access_result powerpc_cpu::mfspr_guest(uint32 spr, uint32 *valu
 	default:
 		break;
 	}
+	if (spr == powerpc_registers::SPR_DEC) sample_decrementer();
 	if (mfspr_oea(spr, value))
 		return SPR_ACCESS_OK;
 	/* User-mode read aliases of the performance-monitor SPRs. */
@@ -1268,28 +1273,33 @@ void powerpc_cpu::tick_decrementer()
 	 * MSB raises the decrementer interrupt, once, as on hardware. The NK
 	 * programs DEC from TB deltas, so a DEC that ran at instruction rate
 	 * made every deadline look expired (DEC storm after the first fire). */
-	static unsigned div;
-	if (++div < 256u)
+	if (++dec_tick_div_ < 256u)
 		return;
-	div = 0;
+	dec_tick_div_ = 0;
 	catch_up_timebase();
+}
+
+void powerpc_cpu::advance_decrementer(uint64 elapsed)
+{
+    const uint32 old = dec_;
+    dec_ -= (uint32)elapsed;
+    // The next 0 -> -1 edge is old+1 ticks away, even if old is negative.
+    // Keep the full delta: a delayed sample can span one or more 32-bit wraps.
+    if (elapsed > (uint64)old) dec_pending_ = true;
+}
+
+void powerpc_cpu::sample_decrementer()
+{
+    // DEC runs from the host clock; software TB writes must not tick DEC.
+    const uint64 now = tb_host_ticks();
+    advance_decrementer(now - dec_tb_base_);
+    dec_tb_base_ = now;
 }
 
 void powerpc_cpu::catch_up_timebase()
 {
-	const uint64 now = tb_ticks();
-	const uint32 elapsed = (uint32)(now - dec_tb_base_);
-	dec_tb_base_ = now;
-	const uint32 old_dec = dec_;
-	dec_ = old_dec - elapsed;
-	if ((old_dec & 0x80000000u) == 0 && ((dec_ & 0x80000000u) || elapsed > old_dec))
-		dec_pending_ = true;
-	/* Edge 0→1 is the OEA; after take_dec, pending is clear. JIT ON can
-	 * leave DEC negative without a following mtdec (g6-js: 1×0x900 vs
-	 * 8678×0x500 at 503191d8, A-traps stall, Happy Mac frozen). Keep the
-	 * exception asserted while the MSB is 1 so nap still wakes. */
-	if (dec_ & 0x80000000u)
-		dec_pending_ = true;
+    sample_decrementer();
+
 #ifdef SHEEPSHAVER
 	nw_devices_tick();
 	nw_host_tick();
@@ -1297,6 +1307,7 @@ void powerpc_cpu::catch_up_timebase()
 #if NW_BOOT_LOG
 	/* Optional CPU-owned snapshots for diagnosing guest waits. Preview
 	 * translation touches no device and does not set guest PTE R/C bits. */
+	const uint64 now = tb_ticks();
 	static const char *nk_state_path = getenv("NW_TEST_NK_STATE_PATH");
 	static uint64 nk_state_last;
 	extern int64 TimebaseSpeed;
@@ -1661,6 +1672,9 @@ bool powerpc_cpu::guest_data_probe(uint32 ea, unsigned width, bool is_store, uin
 
 bool powerpc_cpu::guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa)
 {
+#ifdef SHEEPSHAVER
+	if (nw_verify_trace_) nw_verify_ea_ = ea;
+#endif
 	if (!ppc32_guest_mmu_enabled()) {
 		*pa = ea;
 		return true;
@@ -1670,6 +1684,9 @@ bool powerpc_cpu::guest_data_xlate(uint32 ea, unsigned width, bool is_store, uin
 		*pa = r.pa;
 		return true;
 	}
+#ifdef SHEEPSHAVER
+	if (nw_verify_trace_) nw_verify_trace_->record(pc(), ea, width, is_store, 0, NW_JIT_FAULT_DSI);
+#endif
 	take_data_dsi(ea, is_store, r.fault);
 	return false;
 }
@@ -1725,11 +1742,12 @@ bool powerpc_cpu::mtspr_oea(uint32 spr, uint32 value)
 	case powerpc_registers::SPR_SRR0:	srr0_ = value; return true;
 	case powerpc_registers::SPR_SRR1:	srr1_ = value; return true;
 	case powerpc_registers::SPR_DEC:
+		sample_decrementer();
 		/* Writing DEC with the MSB going 0->1 also raises the interrupt. */
 		if ((dec_ & 0x80000000u) == 0 && (value & 0x80000000u))
 			dec_pending_ = true;
 		dec_ = value;
-		dec_tb_base_ = tb_ticks();
+		dec_tb_base_ = tb_host_ticks();
 		return true;
 	case powerpc_registers::SPR_SPRG0:	sprg_[0] = value; return true;
 	case powerpc_registers::SPR_SPRG1:	sprg_[1] = value; return true;
@@ -1834,6 +1852,8 @@ powerpc_cpu::powerpc_cpu(task_struct *parent_task)
 	++ppc_refcount;
 #ifdef SHEEPSHAVER
 	nw_jc_ = 0;
+	nw_verify_trace_ = NULL;
+	nw_verify_ea_ = 0;
 	mm_ppc_pending_ = 0;
 #endif
 	initialize();
@@ -2290,6 +2310,25 @@ void powerpc_cpu::jit_host_sc(void *host, uint32 guest_pc)
 	ppc->take_sc();
 }
 
+uint32 powerpc_cpu::jit_host_dec(void *host, uint32 val, uint32 guest_pc, int write, int *status)
+{
+    powerpc_cpu *ppc = (powerpc_cpu *)host;
+    ppc->pc() = guest_pc;
+    uint32 value = ppc->dec_;
+    const spr_access_result result = write ? ppc->mtspr_guest(powerpc_registers::SPR_DEC, val)
+                                         : ppc->mfspr_guest(powerpc_registers::SPR_DEC, &value);
+    *status = result == SPR_ACCESS_EXC ? 2 : 0;
+    return *status == 2 ? ppc->pc() : ppc->dec_;
+}
+
+// Both native tail calls and C successors stop at the same event boundary.
+bool powerpc_cpu::jit_events_pending()
+{
+    sample_decrementer();
+    return !nw_68k_can_run() || (async_exception_pending() &&
+                               (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE));
+}
+
 void powerpc_cpu::jit_host_mtspr(void *host, uint32 spr, uint32 val)
 {
 	/* Same as execute_mtspr guest path without the PC bump. */
@@ -2347,16 +2386,17 @@ void powerpc_cpu::jit_host_stvx(void *host, uint32 ea, const uint32 *w, uint32 p
 		*fault = 1;
 		return;
 	}
-	jit_host_stw(host, ea +  0, w[0], pc, fault);
-	if (*fault)
-		return;
-	jit_host_stw(host, ea +  4, w[1], pc, fault);
-	if (*fault)
-		return;
-	jit_host_stw(host, ea +  8, w[2], pc, fault);
-	if (*fault)
-		return;
-	jit_host_stw(host, ea + 12, w[3], pc, fault);
+	/* The aligned 16-byte access has been probed as a whole. Complete it
+	 * before reporting SMC; four scalar callbacks could exit after word 0
+	 * and leave the rest of the architectural vector store unwritten. */
+	for (unsigned i = 0; i < 4; ++i)
+		vm_write_memory_4(pa + i * 4u, w[i]);
+	if (kind == NW_PA_FB)
+		nw_fb_damage_store(pa, 16);
+	else
+		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
+		*fault = NW_JIT_FAULT_SMC;
 }
 
 void powerpc_cpu::jit_host_vmx(void *host, uint32 op, struct nw_jit_cpu *cpu)
@@ -2513,8 +2553,7 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 	if (cpu->pc != chain_pc || cpu->fault)
 		return NULL;
 	if (nw_68k_wants_boundary(cpu->pc)) return NULL;
-	if (ppc->async_exception_pending() &&
-	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE))
+	if (ppc->jit_events_pending())
 		return NULL;
 	const uint32 hmsr = ppc32_guest_mmu().msr();
 	const uint32 hmsr_ir = ((hmsr & ppc32_mmu::MSR_IR) ? 1u : 0u) |
@@ -2549,7 +2588,7 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 		if ((ppc->dec_ & 0x80000000u) == 0 && (cpu->dec & 0x80000000u))
 			ppc->dec_pending_ = true;
 		ppc->dec_ = cpu->dec;
-		ppc->dec_tb_base_ = ppc->tb_ticks();
+		ppc->dec_tb_base_ = ppc->tb_host_ticks();
 		cpu->dec_wr = 0;
 		cpu->dec = ppc->dec_;
 	}
@@ -2660,6 +2699,8 @@ int powerpc_cpu::jit_host_stwcx(void *host, uint32 ea, uint32 val, uint32 pc, in
 			nw_fb_damage_store(pa, 4);
 		else
 			nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
+		if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
+			*fault = NW_JIT_FAULT_SMC;
 		eq = 1;
 	}
 	ppc->regs().reserve_valid = 0;
@@ -3175,6 +3216,122 @@ static bool nw_jit_peek(uint32 ea, uint32 *opcode)
 	return true;
 }
 
+/* KPX is authoritative and advances the actual machine once. The native
+ * shadow starts from the entry snapshot and consumes observations without
+ * touching translation/PTEs, RAM, devices, reservations or CPU callbacks. */
+int powerpc_cpu::nw_jit_verify_block(nw_jit_cpu &jc, nw_jit_fn fn, const uint32 *ops, int n, uint32 compiled_first)
+{
+    const nw_jit_cpu initial = jc;
+    nw_jit_verify_trace trace;
+    const uint64 serial = exception_serial_;
+    const uint32 start = pc();
+    struct recording_scope {
+        nw_jit_verify_trace *&slot;
+        recording_scope(nw_jit_verify_trace *&s, nw_jit_verify_trace &t) : slot(s) { assert(!slot); slot = &t; }
+        ~recording_scope() { slot = NULL; }
+    };
+    {
+        recording_scope recording(nw_verify_trace_, trace);
+        for (int i = 0; i < n && pc() == start + uint32(i) * 4; ++i) {
+            decode(ops[i])->execute(this, ops[i]);
+#if NW_BOOT_LOG
+            nw_event_insn();
+            nw_jit_pc_hot(start + uint32(i) * 4, ops[i]);
+#endif
+            if (exception_serial_ != serial || trace.smc || nw_jit_op_ends_block(ops[i])) break;
+        }
+    }
+    if (trace.overflow) {
+        nw_jit_verify_uncompared(NW_JIT_FAULT_VERIFY);
+        return 1; // reference has already advanced; never repeat its effects
+    }
+    jc.host = NULL;
+    jc.mem = NULL;
+    jc.verify_context = &trace;
+    jc.verify_mem = nw_jit_verify_trace::replay;
+    nw_jit_cpu_bind(&jc);
+    nw_jit_tail_begin();
+    fn(&jc);
+    jc.verify_mem = NULL;
+    jc.verify_context = NULL;
+    jc.jit_dtlb = NULL; // next production entry binds the live cache afresh
+
+    const bool dsi = trace.count && trace.accesses[trace.count - 1].fault == NW_JIT_FAULT_DSI;
+    const uint32 expected_pc = dsi ? trace.accesses[trace.count - 1].pc : pc();
+    const uint32 result_pc = jc.fault == NW_JIT_FAULT_SMC ? jc.pc + 4 : jc.pc;
+    unsigned bits = !trace.complete() ? 1u : 0;
+    if (result_pc != expected_pc) bits |= 2u;
+    if (jc.cr != cr().get()) bits |= 4u;
+    if (jc.xer != xer().get()) bits |= 8u;
+    if (jc.lr != lr()) bits |= 16u;
+    if (jc.ctr != ctr()) bits |= 32u;
+    if (jc.dec != dec_) bits |= 64u;
+    for (int i = 0; i < 32; ++i) {
+        if (jc.gpr[i] != gpr(i)) bits |= 128u;
+        if (jc.fpr[i] != fpr_dw(i)) bits |= 256u;
+        for (int w = 0; w < 4; ++w) if (jc.vr[i][w] != vr(i).w[w]) bits |= 512u;
+    }
+    if (jc.fpscr != fpscr()) bits |= 1024u;
+    if (jc.msr != (dsi ? initial.msr : ppc32_guest_mmu().msr())) bits |= 2048u;
+    if (jc.vscr != vscr().get()) bits |= 4096u;
+    const uint32 expected_fault = dsi ? NW_JIT_FAULT_DSI : trace.smc ? NW_JIT_FAULT_SMC : 0;
+    if (jc.fault != expected_fault) bits |= 8192u;
+    if (expected_fault && trace.count) {
+        const nw_jit_verify_trace::access &a = trace.accesses[trace.count - 1];
+        if (jc.fault_ea != a.ea || jc.fault_width != a.width || jc.fault_st != a.store) bits |= 8192u;
+    }
+    nw_jit_verify_note(ops, n, bits != 0);
+    static unsigned comparisons, misses, captures;
+    static uint32 captured_pc[16];
+    ++comparisons;
+    if (bits) {
+        ++misses;
+        bool already_captured = false;
+        for (unsigned i = 0; i < captures; ++i) already_captured |= captured_pc[i] == start;
+        if (!already_captured && captures < 16) {
+            captured_pc[captures++] = start;
+            printf("NW-BOOT JIT isolated verify miss #%u pc=%08x n=%d bits=%x accesses=%u/%u fault=%u expected=%u cached_op=%08x current_op=%08x\n",
+                   misses, start, n, bits, trace.cursor, trace.count, jc.fault, expected_fault, compiled_first, ops[0]);
+            // A bounded, deterministic replay record with no host pointers.
+            // Captures all input/output registers, opcodes and access observations.
+            char name[160];
+            snprintf(name, sizeof name, "/tmp/nw-ppc-verify-%ld-%u.txt", (long)getpid(), captures);
+            if (FILE *file = fopen(name, "w")) {
+                fprintf(file, "NW-PPC-VERIFY 1\npc %08x bits %x n %d\nfault %u %08x %u %u\n", start, bits, n, expected_fault,
+                        expected_fault && trace.count ? trace.accesses[trace.count - 1].ea : 0,
+                        expected_fault && trace.count ? trace.accesses[trace.count - 1].width : 0,
+                        expected_fault && trace.count ? trace.accesses[trace.count - 1].store : 0);
+                fprintf(file, "cached_first %08x\n", compiled_first);
+                for (int i = 0; i < n; ++i) fprintf(file, "op %08x\n", ops[i]);
+                fprintf(file, "state cr xer fpscr lr ctr dec msr vscr\ninput %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                        initial.cr, initial.xer, initial.fpscr, initial.lr, initial.ctr, initial.dec, initial.msr, initial.vscr);
+                fprintf(file, "reference %08x %08x %08x %08x %08x %08x %08x %08x pc %08x\n",
+                        cr().get(), xer().get(), fpscr(), lr(), ctr(), dec_, initial.msr, vscr().get(), expected_pc);
+                fprintf(file, "native %08x %08x %08x %08x %08x %08x %08x %08x pc %08x\n",
+                        jc.cr, jc.xer, jc.fpscr, jc.lr, jc.ctr, jc.dec, jc.msr, jc.vscr, result_pc);
+                for (int i = 0; i < 32; ++i) {
+                    fprintf(file, "gpr %d %08x %08x %08x\n", i, initial.gpr[i], gpr(i), jc.gpr[i]);
+                    fprintf(file, "fpr %d %016llx %016llx %016llx\n", i,
+                            (unsigned long long)initial.fpr[i], (unsigned long long)fpr_dw(i), (unsigned long long)jc.fpr[i]);
+                    for (int w = 0; w < 4; ++w) fprintf(file, "vr %d %d %08x %08x %08x\n", i, w, initial.vr[i][w], vr(i).w[w], jc.vr[i][w]);
+                }
+                for (unsigned i = 0; i < trace.count; ++i) {
+                    const nw_jit_verify_trace::access &a = trace.accesses[i];
+                    fprintf(file, "access %08x %08x %u %u %u %016llx\n", a.pc, a.ea, a.width, a.store, a.fault, (unsigned long long)a.value);
+                }
+                fclose(file);
+                printf("NW-BOOT JIT verify capture %s\n", name);
+            }
+            fflush(stdout);
+        }
+    } else if (comparisons <= 16) {
+        printf("NW-BOOT JIT isolated verify ok #%u pc=%08x n=%d accesses=%u\n", comparisons, start, n, trace.count);
+        fflush(stdout);
+    }
+    if (comparisons % 100000 == 0) nw_jit_verify_dump(comparisons % 1000000 == 0 ? "isolated" : "periodic");
+    return 1;
+}
+
 int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 {
 	const int mode = nw_jit_mode();
@@ -3195,9 +3352,10 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	uint32_t gpr_mask = 0xffffffffu;
 	uint32_t fpr_mask = 0xffffffffu;
 	int16_t chain_disp = 0;
+	uint32_t compiled_first = first_opcode;
 	nw_jit_fn fn = nw_jit_cache_get(phys_page, guest_pc, msr_ir, 0, &n,
 					&uses_fpr, &uses_vr, &chain_pc, &gpr_mask,
-					&chain_disp, &fpr_mask);
+					&chain_disp, &fpr_mask, &compiled_first);
 	if (fn == NW_JIT_INTERPRET)
 		return 0;
 	if (fn && n > 0 && n <= NW_JIT_MAX_BLOCK) {
@@ -3310,6 +3468,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 						cut = NW_JIT_CUT_CLASS_CHANGE;
 						break;
 					}
+					if (mode == NW_JIT_VERIFY && !nw_jit_op_verify_safe(op)) break;
 					if (!nw_jit_op_dispatch(op)) {
 						nw_jit_skip_raw_once(op, guest_pc + (uint32)n * 4u);
 						nw_jit_note_skip_unsup(op, (unsigned)n,
@@ -3354,6 +3513,15 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			fflush(stdout);
 		}
 		return 0;
+	}
+
+	if (mode == NW_JIT_VERIFY) {
+		for (int i = 0; i < n; ++i) {
+			if (!nw_jit_op_verify_safe(ops[i])) {
+				nw_jit_verify_uncompared(NW_JIT_FAULT_VERIFY);
+				return 0;
+			}
+		}
 	}
 
 	if (!nw_jc_) {
@@ -3406,13 +3574,14 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	/* A mixed block can start with an integer op, so execute() did not
 	 * see an FP opcode. MSR[FP] still has to be on or the NK never
 	 * saves the FPRs across a switch. */
-	if (uses_fpr && !(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_FP)) {
+	if (mode == NW_JIT_ON && uses_fpr && !(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_FP)) {
 		take_fpu();
 		return 1;
 	}
 	jc.fault = 0;
 	jc.fault_ea = 0;
 	jc.fault_st = 0;
+	jc.fault_width = 0;
 	jc.dec_wr = 0;
 	jc.nstore = 0;
 	jc.reserve_valid = 0;
@@ -3460,7 +3629,10 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	jc.dec = dec_;
 	jc.msr = ppc32_guest_mmu().msr();
 	jc.host = this;
+	jc.verify_mem = NULL;
+	jc.verify_context = NULL;
 	nw_jit_cpu_bind(&jc);
+	if (mode == NW_JIT_VERIFY) return nw_jit_verify_block(jc, fn, ops, n, compiled_first);
 
 	auto commit = [&]() {
 		nw_commit_gpr(&jc, this);
@@ -3487,7 +3659,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			if ((dec_ & 0x80000000u) == 0 && (jc.dec & 0x80000000u))
 				dec_pending_ = true;
 			dec_ = jc.dec;
-			dec_tb_base_ = tb_ticks();
+			dec_tb_base_ = tb_host_ticks();
 		}
 	};
 
@@ -3531,20 +3703,12 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	fn(&jc);
 #endif
 	int n_total = n;
-	uint32 dsi_block_pc = guest_pc;
-	int dsi_block_n = n;
 	{
 		const int extra = nw_jit_tail_n();
 		if (extra > 0) {
 			n_total += extra;
-			uint32_t dpc = 0;
-			int dn = 0, tf = 0, tv = 0;
-			nw_jit_tail_dsi(&dpc, &dn);
+			int tf = 0, tv = 0;
 			nw_jit_tail_class(&tf, &tv);
-			if (dpc) {
-				dsi_block_pc = dpc;
-				dsi_block_n = dn;
-			}
 			if (tf)
 				uses_fpr = 1;
 			if (tv)
@@ -3565,6 +3729,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		 * taken target smeared menu/title glyphs; hopping to LR/CTR
 		 * blacked the framebuffer. Equality on chain_pc stays. */
 		for (;;) {
+			if (jit_events_pending()) break;
 			if (hops >= 8) {
 				nw_jit_note_hop_stop(NW_JIT_HOP_CAP);
 				break;
@@ -3638,9 +3803,8 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			jc.fault = 0;
 			jc.fault_ea = 0;
 			jc.fault_st = 0;
+			jc.fault_width = 0;
 			jc.nstore = 0;
-			dsi_block_pc = jc.pc;
-			dsi_block_n = n2;
 			last_fetch_pa_ = npa;
 			/* The successor's inline DTLB reads jc.msr, not hmsr.
 			 * Leaving the entry MSR there rejected way 1 for the
@@ -3689,33 +3853,13 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 #endif
 			return 1;
 		}
-		if (mode == NW_JIT_ON && jc.fault == 1 && ppc32_guest_mmu_enabled()) {
-			unsigned dsi_w = 4;
-			uint32 fop = first_opcode;
-			/* dsi_block_pc/dsi_block_n name the block that faulted, which
-			 * after a hop is not the one first_opcode came from. */
-			if (jc.pc >= dsi_block_pc &&
-			    jc.pc < dsi_block_pc + (uint32)dsi_block_n * 4u && (jc.pc & 3u) == 0) {
-				if (mode == NW_JIT_ON)
-					fop = vm_read_memory_4(last_fetch_pa_ + (jc.pc - dsi_block_pc));
-				else
-					fop = ops[(int)((jc.pc - dsi_block_pc) / 4u)];
-			}
-			{
-				const int fprim = (int)(fop >> 26);
-				const int fxo = (int)((fop >> 1) & 0x3ff);
-				if (fprim == 34 || fprim == 35 ||
-				    (fprim == 31 && (fxo == 87 || fxo == 119)))
-					dsi_w = 1;
-				else if (fprim == 40 || fprim == 41 || fprim == 42 || fprim == 43 ||
-					 (fprim == 31 && (fxo == 279 || fxo == 311 ||
-							  fxo == 343 || fxo == 375)))
-					dsi_w = 2;
-				else if (fprim == 50 || fprim == 51 || fprim == 54 || fprim == 55)
-					dsi_w = 8;
-			}
+		if (mode == NW_JIT_ON && jc.fault == NW_JIT_FAULT_DSI &&
+		    jc.fault_width && ppc32_guest_mmu_enabled()) {
+			/* Width belongs to the actual failed subaccess. Reconstructing it
+			 * from the first opcode misses indexed FP/vector, narrow stores,
+			 * and partial string/multiple accesses, especially after chaining. */
 			const ppc32_xlate_result xr = ppc32_guest_mmu().translate(
-				jc.fault_ea, PPC32_XLATE_DR, dsi_w, jc.fault_st != 0);
+				jc.fault_ea, PPC32_XLATE_DR, jc.fault_width, jc.fault_st != 0);
 			if (!xr.ok) {
 				commit();
 				pc() = jc.pc;
@@ -3783,128 +3927,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		return 1;
 	}
 
-	for (int i = 0; i < n; i++) {
-		if (pc() != guest_pc + (uint32)i * 4u)
-			break;
-		const instr_info_t *ii = decode(ops[i]);
-		ii->execute(this, ops[i]);
-#if NW_BOOT_LOG
-		nw_event_insn();
-		nw_jit_pc_hot(guest_pc + (uint32)i * 4u, ops[i]);
-#endif
-		if (nw_jit_op_ends_block(ops[i]))
-			break;
-	}
-
-	unsigned bits = 0;
-	if (jc.pc != pc())
-		bits |= 2u;
-	if (jc.cr != cr().get())
-		bits |= 4u;
-	if (jc.xer != xer().get())
-		bits |= 8u;
-	if (jc.fpscr != fpscr())
-		bits |= 1024u;
-	if (jc.msr != ppc32_guest_mmu().msr())
-		bits |= 2048u;
-	if (jc.lr != lr())
-		bits |= 16u;
-	if (jc.ctr != ctr())
-		bits |= 32u;
-	if (jc.dec != dec_)
-		bits |= 64u;
-	int dg = -1, df = -1, dv = -1;
-	for (int i = 0; i < 32; i++) {
-		if (jc.gpr[i] != gpr(i)) {
-			bits |= 128u;
-			if (dg < 0)
-				dg = i;
-		}
-	}
-	for (int i = 0; i < 32; i++) {
-		if (jc.fpr[i] != fpr_dw(i)) {
-			bits |= 256u;
-			if (df < 0)
-				df = i;
-		}
-	}
-	for (int i = 0; i < 32; i++) {
-		if (jc.vr[i][0] != vr(i).w[0] || jc.vr[i][1] != vr(i).w[1] ||
-		    jc.vr[i][2] != vr(i).w[2] || jc.vr[i][3] != vr(i).w[3]) {
-			bits |= 512u;
-			if (dv < 0)
-				dv = i;
-		}
-	}
-	nw_jit_verify_note(ops, n, bits != 0);
-
-	struct uniq_miss { uint32 op; unsigned n, bits; uint32 pc0; };
-	static uniq_miss uniq[48];
-	static unsigned nuniq, nmiss, ncmp;
-	ncmp++;
-
-	if (bits) {
-		nmiss++;
-		int slot = -1;
-		for (unsigned i = 0; i < nuniq; i++) {
-			if (uniq[i].op == first_opcode) {
-				slot = (int)i;
-				break;
-			}
-		}
-		if (slot < 0 && nuniq < 48u) {
-			slot = (int)nuniq++;
-			uniq[slot].op = first_opcode;
-			uniq[slot].n = 0;
-			uniq[slot].bits = 0;
-			uniq[slot].pc0 = guest_pc;
-		}
-		if (slot >= 0) {
-			uniq[slot].n++;
-			uniq[slot].bits |= bits;
-		}
-		const int first_of_op = (slot >= 0 && uniq[slot].n == 1);
-		if (first_of_op || nmiss <= 8u) {
-			printf("NW-BOOT JIT verify miss #%u uniq=%d n=%u ninsns=%d pc=%08x op=%08x bits=%x\n",
-			       nmiss, slot + 1, slot >= 0 ? uniq[slot].n : 0u, n,
-			       (unsigned)guest_pc, (unsigned)first_opcode, bits);
-			printf("NW-BOOT JIT verify jit pc=%08x cr=%08x xer=%08x fpscr=%08x lr=%08x ctr=%08x dec=%08x msr=%08x\n",
-			       (unsigned)jc.pc, (unsigned)jc.cr, (unsigned)jc.xer, (unsigned)jc.fpscr,
-			       (unsigned)jc.lr, (unsigned)jc.ctr, (unsigned)jc.dec, (unsigned)jc.msr);
-			printf("NW-BOOT JIT verify kpx pc=%08x cr=%08x xer=%08x fpscr=%08x lr=%08x ctr=%08x dec=%08x msr=%08x\n",
-			       (unsigned)pc(), (unsigned)cr().get(), (unsigned)xer().get(), (unsigned)fpscr(),
-			       (unsigned)lr(), (unsigned)ctr(), (unsigned)dec_,
-			       (unsigned)ppc32_guest_mmu().msr());
-			if (dg >= 0)
-				printf("NW-BOOT JIT verify gpr%d jit=%08x kpx=%08x\n",
-				       dg, (unsigned)jc.gpr[dg], (unsigned)gpr(dg));
-			if (df >= 0)
-				printf("NW-BOOT JIT verify fpr%d jit=%016llx kpx=%016llx\n",
-				       df, (unsigned long long)jc.fpr[df],
-				       (unsigned long long)fpr_dw(df));
-			if (dv >= 0)
-				printf("NW-BOOT JIT verify vr%d jit=%08x%08x%08x%08x kpx=%08x%08x%08x%08x\n",
-				       dv,
-				       (unsigned)jc.vr[dv][0], (unsigned)jc.vr[dv][1],
-				       (unsigned)jc.vr[dv][2], (unsigned)jc.vr[dv][3],
-				       (unsigned)vr(dv).w[0], (unsigned)vr(dv).w[1],
-				       (unsigned)vr(dv).w[2], (unsigned)vr(dv).w[3]);
-			if (bits & 4u) {
-				const int ra = (int)((first_opcode >> 16) & 0x1f);
-				const int rb = (int)((first_opcode >> 11) & 0x1f);
-				printf("NW-BOOT JIT verify cr-ops ra=%d %08x rb=%d %08x\n",
-				       ra, (unsigned)jc.gpr[ra], rb, (unsigned)jc.gpr[rb]);
-			}
-			fflush(stdout);
-		}
-	} else if (ncmp <= 16u) {
-		printf("NW-BOOT JIT verify ok #%u ninsns=%d pc=%08x op=%08x -> pc=%08x\n",
-		       ncmp, n, (unsigned)guest_pc, (unsigned)first_opcode, (unsigned)pc());
-		fflush(stdout);
-	}
-	if ((ncmp % 100000u) == 0)
-		nw_jit_verify_dump((ncmp % 1000000u) == 0 ? "hist" : "periodic");
-	return 1;
+	return 0;
 }
 #endif
 
@@ -4275,8 +4298,20 @@ void powerpc_block_info::invalidate()
 #endif
 }
 
-void powerpc_cpu::invalidate_cache_range(uintptr start, uintptr end)
+void powerpc_cpu::invalidate_cache_range(uintptr start, uintptr end, int source)
 {
+#ifdef SHEEPSHAVER
+	/* FlushCodeCache/MakeExecutable publish guest code through this entry.
+	 * Notify both New World engines as well as the legacy KPX cache. */
+	if (ppc32_guest_mmu_enabled() && start < end && start <= UINT32_MAX) {
+		const uint64 limit = std::min<uint64>((uint64)end, UINT64_C(1) << 32);
+		for (uint64 ea = (uint64)start & ~UINT64_C(0xfff); ea < limit; ea += 0x1000) {
+			const ppc32_xlate_result r = ppc32_guest_mmu().translate(
+				(uint32)ea, PPC32_XLATE_IR, 4, false, false);
+			if (r.ok) nw_jit_invalidate_page_src(r.pa, source < 0 ? NW_JIT_FL_HOST : source);
+		}
+	}
+#endif
 	D(bug("Invalidate cache block [%08x - %08x]\n", start, end));
 #if PPC_DECODE_CACHE || PPC_ENABLE_JIT
 #if DYNGEN_DIRECT_BLOCK_CHAINING
