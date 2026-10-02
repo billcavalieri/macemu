@@ -38,6 +38,7 @@
 #include "nw_io.h"
 #include "nw_script.h"
 #include "nw_68k_jit.h"
+#include "nw_68k_core.h"
 #include "nw_jit.h"
 
 // Used for NativeOp trampolines
@@ -230,6 +231,11 @@ typedef bit_field< 19, 19 > FN_field;
 typedef bit_field< 20, 25 > NATIVE_OP_field;
 typedef bit_field< 26, 31 > EMUL_OP_field;
 
+#if NW_BOOT_LOG
+static thread_local uint32 nw_last_return_pc;
+static thread_local int nw_last_return_depth;
+#endif
+
 void sheepshaver_cpu::call_execute_emul_op(powerpc_cpu * cpu, uint32 emul_op) {
 	static_cast<sheepshaver_cpu *>(cpu)->execute_emul_op(emul_op);
 }
@@ -269,6 +275,13 @@ void sheepshaver_cpu::execute_emul_op(uint32 emul_op)
 		saved_cr &= 0xff9fffff; // mask_operand::compute(11, 8)
 	uint32 saved_xer = get_xer();
 	EmulOp(&r68, gpr(24), emul_op);
+#if NW_BOOT_LOG
+	if (spcflags().test(SPCFLAG_CPU_EXEC_RETURN) && getenv("NW_TEST_NK_STATE_PATH")) {
+		printf("NW-BOOT CPU return pending after EmulOp selector=%u pc=%08x depth=%d last_return=%08x last_depth=%d r24=%08x r29=%08x\n",
+		       emul_op, pc(), nw_68k_execute_depth(), nw_last_return_pc, nw_last_return_depth, gpr(24), gpr(29));
+		fflush(stdout);
+	}
+#endif
 	set_cr(saved_cr);
 	set_xer(saved_xer);
 	for (int i = 0; i < 8; i++)
@@ -276,6 +289,14 @@ void sheepshaver_cpu::execute_emul_op(uint32 emul_op)
 	for (int i = 0; i < 7; i++)
 		gpr(16 + i) = r68.a[i];
 	gpr(1) = r68.a[7];
+	// Scripted timing runs borrow this valid NK entry frame. Preserve the
+	// callback's complete return state around the nested diagnostic routine.
+	if (nw_script_benchmark_pending()) {
+		nw68_nk_state saved;
+		nw_68k_snapshot(saved);
+		nw_script_guest_benchmark();
+		nw_68k_restore(saved);
+	}
 	WriteMacInt32(XLM_RUN_MODE, MODE_68K);
 }
 
@@ -291,6 +312,29 @@ void sheepshaver_cpu::execute_sheep(uint32 opcode)
 		break;
 
 	case 1:		// EXEC_RETURN
+		/* An external interrupt may return directly to this host trampoline.
+		 * Ordinary NK handlers go through 66090/d114 before dispatching the
+		 * next instruction; unwinding here bypassed that check and discarded
+		 * the pending CR2 state with the nested frame's saved registers. Give
+		 * the NK its normal slow dispatch, with this instruction as the retry
+		 * target, before allowing the host frame to leave. The guest decides
+		 * whether the interrupt is masked and issues its own IACK/EOI. */
+		if (ROMType == ROMTYPE_NEWWORLD && ppc32_guest_mmu_enabled() &&
+		    pc() == 0x680ff208u && gpr(29) == pc() &&
+		    gpr(30) == 0x68060000u && CR_LT_field<2>::test(get_cr())) {
+			lr() = pc();
+			pc() = gpr(30) | 0xd114u;
+			break;
+		}
+#if NW_BOOT_LOG
+		nw_last_return_pc = pc();
+		nw_last_return_depth = nw_68k_execute_depth();
+		if (nw_last_return_depth <= 1 && getenv("NW_TEST_NK_STATE_PATH")) {
+			printf("NW-BOOT CPU outer return requested pc=%08x opcode=%08x r24=%08x r29=%08x cr=%08x\n",
+			       pc(), opcode, gpr(24), gpr(29), get_cr());
+			fflush(stdout);
+		}
+#endif
 		spcflags().set(SPCFLAG_CPU_EXEC_RETURN);
 		break;
 

@@ -1037,6 +1037,10 @@ int main()
 		program_pte(&ram[0], sdr1, 5, ea, 0, rpn);
 		const uint32_t pte1_pa = pteg_addr(sdr1, ((5u & 0x7ffffu) ^ ((ea >> 12) & 0xffffu))) + 4;
 		CHECK((nw_be32_load(&ram[0], pte1_pa) & 0x180u) == 0);
+		// Native preparation/verification checks permissions without writing
+		// PTE R/C bits. A later real access must still set them on a TLB hit.
+		CHECK(mmu.translate(ea, PPC32_XLATE_DR, 4, true, false).ok);
+		CHECK((nw_be32_load(&ram[0], pte1_pa) & 0x180u) == 0);
 		ppc32_xlate_result sup = mmu.translate(ea, PPC32_XLATE_DR, 4, false);
 		CHECK(sup.ok && sup.pa == (rpn << 12));
 		CHECK((nw_be32_load(&ram[0], pte1_pa) & 0x180u) == 0x100u);	/* R set, C clear */
@@ -1200,7 +1204,7 @@ int main()
 		CHECK(nw_openpic_read(NW_OPENPIC_CPU0 + 0xa0) == 0x60);
 		CHECK(nw_io_ext_irq == 0);					/* in service */
 		nw_openpic_write(NW_OPENPIC_CPU0 + 0xb0, 0);
-		CHECK(nw_io_ext_irq == 1);					/* level: still asserted until the handler clears it */
+		CHECK(nw_io_ext_irq == 0);					/* IACK consumed this VBL; EOI ends service */
 		nw_display_vbl_clear();
 		CHECK(nw_io_ext_irq == 0);
 		g_fake_tb += 25000000u;						/* a second without ticks: no burst, re-arms */
@@ -1533,11 +1537,16 @@ int main()
 		CHECK(pmu_recv() == 0x7c);							/* Talk R0, mouse at 7 */
 		CHECK(pmu_recv() == 0x7d);							/* dy -3, button down */
 		CHECK(pmu_recv() == 0x85);							/* dx 5, secondary up */
-		/* poll off: queued input waits for an explicit Talk R0 */
+		/* Poll off: host input signals a wake event but leaves the key
+		 * queued for an explicit Talk R0 (no autopoll data consumption). */
 		pmu_send(NW_PMU_ADB_POLL_OFF);
 		nw_adb_key(0x00, 1);
 		g_fake_tb += 25000000u / 40;
 		nw_devices_tick();
+		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == 0);
+		pmu_send(NW_PMU_INT_ACK);
+		CHECK(pmu_recv() == 1);
+		CHECK(pmu_recv() == NW_PMU_INT_ADB);
 		CHECK(nw_io_read(NW_IO_MACIO_GPIO_BASE + 8 + 1, 1, 0) == NW_GPIO_IN_DATA);
 		pmu_send(NW_PMU_ADB_CMD); pmu_send(3); pmu_send(0x2c); pmu_send(0x00); pmu_send(0);
 		pmu_send(NW_PMU_INT_ACK);
@@ -1879,7 +1888,8 @@ int main()
 				ndev_flash++;
 		}
 		CHECK(ndev_flash == 16);
-		CHECK(nw_io_n_devices() == 11 + 16);	/* 11 mac-io models + 16 flash aliases */
+		CHECK(nw_io_n_devices() == 12 + 16);	/* mac-io + SheepBlaster + flash aliases */
+		CHECK(nw_pa_kind(NW_IO_SHEEPBLASTER_BASE) == NW_PA_IO);
 		/* a store to ROM must not reach host memory: the interpreter
 		 * drops when !nw_pa_writable, which is 0 for the ROM bank. */
 		uint8_t rom_sent[4] = { 0xaa, 0xbb, 0xcc, 0xdd };
@@ -2579,6 +2589,33 @@ int main()
 				CHECK(h.msr == 0x10u);
 				CHECK(nw_jit_dtlb_hits() == mh + 1);
 				CHECK(nw_jit_dtlb_misses() == mm);
+			}
+		}
+
+		/* D-form loads must preserve RD/RA on a fault at every position,
+		 * including the NK's high-numbered prefetch registers. Successful
+		 * prefixes commit; no suffix executes after the failed access. */
+		for (unsigned form = 0; form < 4; ++form) {
+			for (unsigned position = 0; position < 3; ++position) {
+				uint8_t ram[64] = {};
+				memset(&b, 0, sizeof b);
+				b.mem = ram; b.mem_size = sizeof ram; b.lr = 0x2000;
+				b.gpr[24] = 60; b.gpr[27] = 0xdeadbeef;
+				uint32_t load = ((32u + form) << 26) | (27u << 21) | (24u << 16) | 4;
+				uint32_t fault_ops[4];
+				for (unsigned k = 0; k < 3; ++k)
+					fault_ops[k] = k == position ? load : nw_ppc_addi(5 + k, 0, 7 + k);
+				fault_ops[3] = nw_ppc_blr();
+				const uint32_t start = 0x90000 + form * 0x100 + position * 0x10;
+				fn = nw_jit_compile(fault_ops, 4, start, start & ~0xfffu, 0, 0);
+				CHECK(fn != NULL);
+				if (!fn) continue;
+				fn(&b);
+				CHECK(b.fault == 1 && b.fault_ea == 64 && !b.fault_st);
+				CHECK(b.pc == start + position * 4);
+				CHECK(b.gpr[24] == 60 && b.gpr[27] == 0xdeadbeef);
+				for (unsigned k = 0; k < 3; ++k)
+					CHECK(b.gpr[5 + k] == (k < position ? 7 + k : 0));
 			}
 		}
 
@@ -4134,7 +4171,10 @@ int main()
 				i++;
 			}
 			CHECK(nw_jit_wrap_count() > w0);
-			CHECK(nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL) == keep);
+			/* Compaction may move live code. Reacquire its address and
+			 * verify semantic survival rather than stale pointer identity. */
+			keep = nw_jit_cache_get(0x2000u, 0x2000u, 0, 0, NULL);
+			CHECK(keep != NULL);
 			struct nw_jit_cpu kc;
 			memset(&kc, 0, sizeof(kc));
 			kc.lr = 0x3000u;

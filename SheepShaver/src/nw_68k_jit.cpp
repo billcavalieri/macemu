@@ -1,553 +1,530 @@
-/*
- *  nw_68k_jit.cpp - Phase 0 histogram and Phase 1 fallback-only skeleton
- *
- *  (C) 2026 Bill Cavalieri
- *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
- *
- *  Memory goes through the guest MMU. The cache key is
- *  (phys_page, 68k pc, SR.S). The body of every entry is one NK insn.
- */
-
+/* Direct New World 68k-to-ARM64 dispatch. The NK owns service/fault
+ * continuations. Native preparation has no device or memory-write effects. */
 #include "nw_68k_jit.h"
-#include "nw_boot_contract.h"
+#include "nw_68k_core.h"
+#include "nw_jit.h"
+#include "nw_io.h"
 #include "cpu/ppc/ppc-cpu.hpp"
-#include "cpu_emulation.h"
 #include "prefs.h"
-
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#ifdef __APPLE__
-#include <pthread.h>
-#endif
+#include <new>
+#include <vector>
 
-enum { NW68_TABLE = 0x68080000u, NW68_TABLE_END = 0x68100000u };
-enum { NW68_CACHE = 4096, NW68_TOP = 16 };
-
-static int in_table(uint32_t pc)
+namespace {
+bool table(uint32_t pc) { return pc >= 0x68080000u && pc < 0x68100000u && !(pc & 7); }
+enum mode { OFF, ON, VERIFY };
+mode selected_mode()
 {
-	return pc >= NW68_TABLE && pc < NW68_TABLE_END;
+	static int selected = -1;
+	if (selected < 0) {
+		const char *e = getenv("NW_JIT68K_MODE");
+		selected = e ? (!strcmp(e, "on") ? ON : !strcmp(e, "verify") ? VERIFY : OFF) :
+			PrefsFindBool("jit68k_host") ? ON : OFF;
+	}
+	return (mode)selected;
 }
-
-void nw_log_mkdir(const char *dir)
-{
-	char buf[512];
-	size_t n;
-	if (!dir || !dir[0])
-		return;
-	n = strlen(dir);
-	if (n >= sizeof(buf))
-		return;
-	memcpy(buf, dir, n + 1);
-	for (size_t i = 1; i < n; i++) {
-		if (buf[i] != '/')
-			continue;
-		buf[i] = 0;
-		if (mkdir(buf, 0755) != 0 && errno != EEXIST)
-			return;
-		buf[i] = '/';
-	}
-	if (mkdir(buf, 0755) != 0 && errno != EEXIST)
-		return;
-}
-
-static int hist_on(void)
-{
-	static int on = -1;
-	if (on < 0) {
-		const char *e = getenv("NW_JIT68K_HIST");
-		if (e && (strcmp(e, "1") == 0 || strcmp(e, "on") == 0))
-			on = 1;
-		else if (e && (strcmp(e, "0") == 0 || strcmp(e, "off") == 0))
-			on = 0;
-		else
-			on = PrefsFindBool("jit68k_host") ? 1 : 0;
-	}
-	return on;
-}
-
-static uint64_t g_op_n[65536];
-static uint64_t g_op_tot;
-static uint64_t g_fallback_n;
-static uint64_t g_m68_n[65536];
-static struct { uint32_t pc; uint64_t n; } g_pc[1024];
-static int g_hist_atexit;
-
-static void hist_write(void)
-{
-	char path[512];
-	const char *env = getenv("NW_JIT68K_HIST_PATH");
-	if (env && env[0])
-		snprintf(path, sizeof(path), "%s", env);
-	else {
-		const char *home = getenv("HOME");
-		if (!home || !home[0])
-			return;
-		snprintf(path, sizeof(path), "%s/Library/Logs/SheepShaver", home);
-		nw_log_mkdir(path);
-		snprintf(path, sizeof(path), "%s/Library/Logs/SheepShaver/jit68k-hist.txt", home);
-	}
-	FILE *f = fopen(path, "w");
-	if (!f)
-		return;
-	fprintf(f, "hits %llu fallback %llu\n",
-		(unsigned long long)g_op_tot,
-		(unsigned long long)g_fallback_n);
-	int top_i[NW68_TOP];
-	int ntop = 0;
-	for (int op = 0; op < 65536; op++) {
-		if (!g_op_n[op])
-			continue;
-		int k = ntop;
-		while (k > 0 && g_op_n[op] > g_op_n[top_i[k - 1]])
-			k--;
-		if (k >= NW68_TOP)
-			continue;
-		int n = ntop < NW68_TOP ? ntop : NW68_TOP - 1;
-		for (int j = n; j > k; j--)
-			top_i[j] = top_i[j - 1];
-		top_i[k] = op;
-		if (ntop < NW68_TOP)
-			ntop++;
-	}
-	uint64_t top_sum = 0;
-	for (int i = 0; i < ntop; i++)
-		top_sum += g_op_n[top_i[i]];
-	const unsigned pct = g_op_tot ? (unsigned)((top_sum * 100ull) / g_op_tot) : 0;
-	fprintf(f, "top %d opcodes %u%% of hits\n", ntop, pct);
-	for (int i = 0; i < ntop; i++) {
-		const int op = top_i[i];
-		const unsigned opct = g_op_tot ? (unsigned)((g_op_n[op] * 1000ull) / g_op_tot) : 0;
-		fprintf(f, "op %04x n=%llu %u/1000\n", op,
-			(unsigned long long)g_op_n[op], opct);
-	}
-	int pt[NW68_TOP];
-	int npt = 0;
-	for (int i = 0; i < 1024; i++) {
-		if (!g_pc[i].n)
-			continue;
-		int k = npt;
-		while (k > 0 && g_pc[i].n > g_pc[pt[k - 1]].n)
-			k--;
-		if (k >= NW68_TOP)
-			continue;
-		int n = npt < NW68_TOP ? npt : NW68_TOP - 1;
-		for (int j = n; j > k; j--)
-			pt[j] = pt[j - 1];
-		pt[k] = i;
-		if (npt < NW68_TOP)
-			npt++;
-	}
-	uint64_t pc_sum = 0;
-	for (int i = 0; i < npt; i++)
-		pc_sum += g_pc[pt[i]].n;
-	const unsigned pc_pct = g_op_tot ? (unsigned)((pc_sum * 100ull) / g_op_tot) : 0;
-	fprintf(f, "top %d pcs %u%% of hits\n", npt, pc_pct);
-	for (int i = 0; i < npt; i++)
-		fprintf(f, "pc %08x n=%llu\n", g_pc[pt[i]].pc,
-			(unsigned long long)g_pc[pt[i]].n);
-	{
-		int mt[NW68_TOP];
-		int nmt = 0;
-		for (int op = 0; op < 65536; op++) {
-			if (!g_m68_n[op])
-				continue;
-			int k = nmt;
-			while (k > 0 && g_m68_n[op] > g_m68_n[mt[k - 1]])
-				k--;
-			if (k >= NW68_TOP)
-				continue;
-			int n = nmt < NW68_TOP ? nmt : NW68_TOP - 1;
-			for (int j = n; j > k; j--)
-				mt[j] = mt[j - 1];
-			mt[k] = op;
-			if (nmt < NW68_TOP)
-				nmt++;
-		}
-		fprintf(f, "m68 top %d\n", nmt);
-		for (int i = 0; i < nmt; i++)
-			fprintf(f, "m68 %04x n=%llu\n", mt[i],
-				(unsigned long long)g_m68_n[mt[i]]);
-	}
-	fclose(f);
-}
-
-static void m68_note(powerpc_cpu *cpu)
-{
-	const uint32_t pc = cpu->gpr(24);
-	if (pc < 2)
-		return;
-	const uint32_t op = ReadMacInt16(pc - 2) & 0xffffu;
-	g_m68_n[op]++;
-	if (!g_hist_atexit) {
-		g_hist_atexit = 1;
-		atexit(hist_write);
-	}
-}
-
-void nw_68k_op_summary(void)
-{
-	int mt[8];
-	int nmt = 0;
-	for (int op = 0; op < 65536; op++) {
-		if (!g_m68_n[op])
-			continue;
-		int k = nmt;
-		while (k > 0 && g_m68_n[op] > g_m68_n[mt[k - 1]])
-			k--;
-		if (k >= 8)
-			continue;
-		int n = nmt < 8 ? nmt : 7;
-		for (int j = n; j > k; j--)
-			mt[j] = mt[j - 1];
-		mt[k] = op;
-		if (nmt < 8)
-			nmt++;
-	}
-	if (!nmt)
-		return;
-	printf("NW-BOOT G1: jit68k op");
-	for (int i = 0; i < nmt; i++)
-		printf(" %04x=%llu", mt[i], (unsigned long long)g_m68_n[mt[i]]);
-	printf("\n");
-	hist_write();
-}
-
-void nw_68k_hist_note(uint32_t ppc_pc, uint32_t pc68)
-{
-	if (!hist_on() || !in_table(ppc_pc))
-		return;
-	if (!g_hist_atexit) {
-		g_hist_atexit = 1;
-		atexit(hist_write);
-	}
-	const uint32_t op = (ppc_pc - NW68_TABLE) >> 3;
-	if (op < 65536u) {
-		g_op_n[op]++;
-		g_op_tot++;
-	}
-	const unsigned h = (pc68 >> 1) & 1023u;
-	for (int n = 0; n < 8; n++) {
-		const unsigned i = (h + (unsigned)n) & 1023u;
-		if (g_pc[i].n == 0 || g_pc[i].pc == pc68) {
-			g_pc[i].pc = pc68;
-			g_pc[i].n++;
-			break;
+struct verification_frame;
+thread_local verification_frame *reference;
+bool quarantined[65536];
+unsigned mismatch_traces;
+struct captured_reads {
+	struct byte { uint32_t key; uint8_t value; };
+	std::vector<byte> bytes;
+	bool stable = true;
+	void add(uint32_t pa, unsigned width, uint32_t value, bool overwrite = false) {
+		for (unsigned j = 0; j < width; ++j) {
+			const uint8_t v = value >> ((width - j - 1) * 8);
+			bool found = false;
+			for (byte &b : bytes) if (b.key == pa + j) {
+				if (overwrite) b.value = v; else stable &= b.value == v;
+				found = true; break;
+			}
+			if (!found) bytes.push_back({pa + j, v});
 		}
 	}
-}
-
-static int g_armed, g_arm_depth, g_left, g_took, g_active;
-static uint32_t g_stop_pc;
-
-void nw_68k_arm_one(void)
-{
-	g_armed = 1;
-	g_arm_depth = -1;
-	g_left = 0;
-	g_took = 0;
-}
-
-int nw_68k_stop_one(uint32_t ppc_pc, int depth)
-{
-	if (!g_armed)
-		return 0;
-	if (g_arm_depth < 0)
-		g_arm_depth = depth;
-	if (depth != g_arm_depth)
-		return 0;
-	if (!in_table(ppc_pc)) {
-		g_left = 1;
-		return 0;
+	bool get(uint32_t key, uint8_t &value) const {
+		for (const byte &b : bytes) if (b.key == key) { value = b.value; return true; }
+		return false;
 	}
-	if (!g_left)
-		return 0;
-	g_armed = 0;
-	g_left = 0;
-	g_took = 1;
-	g_stop_pc = ppc_pc;
-	return 1;
-}
-
-int nw_68k_took_one(void)
-{
-	const int t = g_took;
-	g_took = 0;
-	g_armed = 0;
-	return t;
-}
-
-struct nw_68k_ent {
-	uint32_t page, pc, sr_s;
-	void (*fn)(powerpc_cpu *);
-	uint8_t used;
 };
-
-static struct nw_68k_ent g_cache[NW68_CACHE];
-static uint8_t *g_code;
-static uint32_t g_entry;
-
-static void sync_pull(powerpc_cpu *cpu, uint32_t *d, uint32_t *a, uint32_t *pc, uint32_t *sr)
+thread_local captured_reads *active_samples;
+bool plain_memory(uint32_t pa, bool store)
 {
-	for (int i = 0; i < 8; i++)
-		d[i] = cpu->gpr(8 + i);
-	for (int i = 0; i < 7; i++)
-		a[i] = cpu->gpr(16 + i);
-	*pc = cpu->gpr(24);
-	*sr = cpu->gpr(25);
+	const int k = nw_pa_kind(pa);
+	return k != NW_PA_IO && k != NW_PA_NONE && k != NW_PA_FB && (!store || nw_pa_writable(pa));
 }
-
-static void sync_push(powerpc_cpu *cpu, const uint32_t *d, const uint32_t *a, uint32_t pc, uint32_t sr)
-{
-	for (int i = 0; i < 8; i++)
-		cpu->gpr(8 + i) = d[i];
-	for (int i = 0; i < 7; i++)
-		cpu->gpr(16 + i) = a[i];
-	cpu->gpr(24) = pc;
-	cpu->gpr(25) = sr;
-}
-
-static void nw_68k_one(powerpc_cpu *cpu)
-{
-	uint32_t d[8], a[7], pc, sr;
-	sync_pull(cpu, d, a, &pc, &sr);
-	sync_push(cpu, d, a, pc, sr);
-	nw_68k_arm_one();
-	cpu->execute(g_entry);
-	sync_pull(cpu, d, a, &pc, &sr);
-	sync_push(cpu, d, a, pc, sr);
-	g_fallback_n++;
-}
-
-static int emit_w(uint32_t **p, uint32_t *end, uint32_t w)
-{
-	if (*p >= end)
-		return 0;
-	*(*p)++ = w;
-	return 1;
-}
-
-static int emit_imm64(uint32_t **p, uint32_t *end, int rd, uint64_t v)
-{
-	if (!emit_w(p, end, 0xd2800000u | ((uint32_t)(v & 0xffffu) << 5) | (uint32_t)rd))
-		return 0;
-	if (!emit_w(p, end, 0xf2a00000u | ((uint32_t)((v >> 16) & 0xffffu) << 5) | (uint32_t)rd))
-		return 0;
-	if (!emit_w(p, end, 0xf2c00000u | ((uint32_t)((v >> 32) & 0xffffu) << 5) | (uint32_t)rd))
-		return 0;
-	return emit_w(p, end, 0xf2e00000u | ((uint32_t)((v >> 48) & 0xffffu) << 5) | (uint32_t)rd);
-}
-
-static void (*g_stub)(powerpc_cpu *);
-static uint32_t *g_emit_p, *g_emit_end;
-
-/* Top opcodes from one Debug boot (jit68k op line). Each gets an ARM
- * stub. The stub runs the already-native handler and stops when the
- * bclr lands back in the opcode table. It does not chain that bclr. */
-static const uint16_t k_ranked[] = {
-	0x3007, 0x7000, 0x2078, 0x6770, 0x5247, 0x4e56, 0x4219, 0x51c8,
-	0x4e75, 0x0c42, 0x2f0a
+struct bus_context {
+	nw68_page_cache translations;
+	powerpc_cpu *cpu; uint32_t pc; uint16_t opcode, prefetched;
+	uint32_t pages[8], write_pages[32]; unsigned npages, nwrites;
+	uint32_t read_addresses[64]; uint8_t read_widths[64]; unsigned nreads;
+	uint32_t resolved_ea, resolved_pa; unsigned resolved_width;
+	bool resolved_store, resolved_valid;
 };
-enum { N_RANKED = 11 };
-static void (*g_ranked_fn[N_RANKED])(powerpc_cpu *);
-
-static int ranked_index(uint32_t op)
+bool preview_page(void *opaque, uint32_t ea, bool store, uint32_t *pa)
 {
-	for (int i = 0; i < N_RANKED; i++)
-		if (k_ranked[i] == op)
-			return i;
-	return -1;
+	return ((bus_context *)opaque)->cpu->guest_data_probe(ea, 1, store, pa, 0, false);
 }
-
-static int code_ready(void)
+bool record_read(bus_context &c, uint32_t ea, unsigned width)
 {
-	if (g_code)
-		return 1;
-	void *m = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
-		       MAP_ANON | MAP_PRIVATE
-#ifdef MAP_JIT
-		       | MAP_JIT
-#endif
-		       , -1, 0);
-	if (m == MAP_FAILED)
-		return 0;
-	g_code = (uint8_t *)m;
-	g_emit_p = (uint32_t *)g_code;
-	g_emit_end = g_emit_p + 1024;
-	return 1;
+	for (unsigned j = 0; j < c.nreads; ++j)
+		/* PTE referenced state belongs to the logical page. Translation and
+		 * protection are checked within a fixed dispatch context; one successful
+		 * access per page suffices when materializing R at commit. Crossing
+		 * operands separately record the second page in probe(). */
+		if ((c.read_addresses[j] >> 12) == (ea >> 12)) return true;
+	if (c.nreads == 64) return false;
+	c.read_addresses[c.nreads] = ea; c.read_widths[c.nreads++] = width;
+	return true;
 }
-
-static void code_seal(uint32_t *start)
+bool probe(bus_context &c, uint32_t ea, unsigned width, bool store, uint32_t *pa)
 {
-#ifdef __APPLE__
-	pthread_jit_write_protect_np(1);
-#endif
-	__builtin___clear_cache((char *)start, (char *)g_emit_p);
-}
-
-static int make_stub(void)
-{
-	if (g_stub)
-		return 1;
-	if (!code_ready())
-		return 0;
-#ifdef __APPLE__
-	pthread_jit_write_protect_np(0);
-#endif
-	uint32_t *start = g_emit_p;
-	/* stp x29, x30, [sp, #-16]!; x0 is the cpu; blr to nw_68k_one; ret. */
-	if (!emit_w(&g_emit_p, g_emit_end, 0xa9bf7bfdu))
-		return 0;
-	if (!emit_imm64(&g_emit_p, g_emit_end, 9, (uint64_t)(uintptr_t)nw_68k_one))
-		return 0;
-	if (!emit_w(&g_emit_p, g_emit_end, 0xd63f0120u))
-		return 0;
-	if (!emit_w(&g_emit_p, g_emit_end, 0xa8c17bfdu))
-		return 0;
-	if (!emit_w(&g_emit_p, g_emit_end, 0xd65f03c0u))
-		return 0;
-	code_seal(start);
-	g_stub = (void (*)(powerpc_cpu *))start;
-	return 1;
-}
-
-static void nw_68k_ranked(powerpc_cpu *cpu, uint32_t op)
-{
-	const uint32_t entry = g_entry;
-	uint32_t landed = entry;
-	(void)op;
-	nw_68k_arm_one();
-	if (!cpu->nw_68k_jit_step(entry, &landed) || !in_table(landed)) {
-		cpu->execute(landed);
-		g_fallback_n++;
-		return;
+	c.resolved_valid = false;
+	if ((uint64_t)ea + width > (uint64_t)UINT32_MAX + 1 || (width > 1 && (ea & 1))) return false;
+	uint32_t first;
+	if (!nw68_page_translate(c.translations, &c, preview_page, ea, store, &first) || !plain_memory(first, store)) return false;
+	/* Word-aligned long operands are supported by the NK's alignment fixup.
+	 * They may cross a page: re-probe bytes on the second page and require
+	 * contiguous, permitted physical memory before reading or staging.
+	 * Preparation has no callbacks, context transitions or committed stores.
+	 * Its page previews therefore share a fixed SR/BAT/protection context,
+	 * with read/write permissions kept distinct. Still check
+	 * every physical byte against host memory-bank permissions. */
+	for (unsigned j = 1; j < width; ++j) {
+		if (((ea + j) ^ ea) & ~4095u) {
+			uint32_t next;
+			if (!nw68_page_translate(c.translations, &c, preview_page, ea + j, store, &next) || next != first + j) return false;
+			if (!store && !record_read(c, ea + j, 1)) return false;
+		}
+		if (!plain_memory(first + j, store)) return false;
 	}
-	g_armed = 0;
-	g_left = 0;
-	g_took = 1;
-	g_stop_pc = landed;
+	/* A journaled PTE store would change translation before later accesses
+	 * in the real NK. Delegate it before effects rather than previewing the
+	 * rest of a block against the old hash table. */
+	if (store && nw68_hash_table_overlap(first, width, ppc32_guest_mmu().sdr1())) return false;
+	*pa = first;
+	c.resolved_ea = ea; c.resolved_pa = first; c.resolved_width = width;
+	c.resolved_store = store; c.resolved_valid = true;
+	return true;
 }
-
-static int emit_ranked(int index, uint16_t op)
+bool read_code(void *opaque, uint32_t ea, uint16_t *value, uint32_t *physical, bool snapshot)
 {
-	if (g_ranked_fn[index])
-		return 1;
-	if (!code_ready())
-		return 0;
-#ifdef __APPLE__
-	pthread_jit_write_protect_np(0);
-#endif
-	uint32_t *start = g_emit_p;
-	/* stp; mov w1, #op; blr x9 = nw_68k_ranked; ldp; ret. */
-	if (!emit_w(&g_emit_p, g_emit_end, 0xa9bf7bfdu))
-		return 0;
-	if (!emit_w(&g_emit_p, g_emit_end, 0x52800000u | ((uint32_t)op << 5) | 1u))
-		return 0;
-	if (!emit_imm64(&g_emit_p, g_emit_end, 9, (uint64_t)(uintptr_t)nw_68k_ranked))
-		return 0;
-	if (!emit_w(&g_emit_p, g_emit_end, 0xd63f0120u))
-		return 0;
-	if (!emit_w(&g_emit_p, g_emit_end, 0xa8c17bfdu))
-		return 0;
-	if (!emit_w(&g_emit_p, g_emit_end, 0xd65f03c0u))
-		return 0;
-	code_seal(start);
-	g_ranked_fn[index] = (void (*)(powerpc_cpu *))start;
-	return 1;
+	bus_context &c = *(bus_context *)opaque;
+	if (!probe(c, ea, 2, false, physical) || !record_read(c, ea, 2)) return false;
+	const uint32_t page = *physical & ~4095u;
+	for (unsigned j = 0; j < c.nwrites; ++j) if (c.write_pages[j] == page) return false;
+	bool found = false; for (unsigned j = 0; j < c.npages; ++j) if (c.pages[j] == page) found = true;
+	if (!found) { if (c.npages == 8) return false; c.pages[c.npages++] = page; }
+	/* Preserve the NK's already-prefetched snapshot. */
+	*value = snapshot && ea == c.pc ? c.opcode : snapshot && ea == c.pc + 2u ? c.prefetched : vm_read_memory_2(*physical);
+	return true;
 }
-
-static void (*body_for(powerpc_cpu *cpu))(powerpc_cpu *)
-{
-	const uint32_t pc68 = cpu->gpr(24);
-	if (pc68 >= 2) {
-		const int ri = ranked_index(ReadMacInt16(pc68 - 2) & 0xffffu);
-		if (ri >= 0 && emit_ranked(ri, k_ranked[ri]))
-			return g_ranked_fn[ri];
+bool code_read(void *p, uint32_t ea, uint16_t *v, uint32_t *pa) { return read_code(p, ea, v, pa, true); }
+bool code_fetch(void *p, uint32_t ea, uint16_t *v, uint32_t *pa) { return read_code(p, ea, v, pa, false); }
+bool resolve_address(void *p, uint32_t ea, unsigned width, bool store, uint32_t *pa) {
+	bus_context &c = *(bus_context *)p;
+	/* The journal asks for the byte key immediately after a plain-memory
+	 * access/probe, without callbacks or a context transition in between.
+	 * Reuse just that resolution; this cache never crosses a dispatch. */
+	if (c.resolved_valid && c.resolved_ea == ea && c.resolved_width == width && c.resolved_store == store) {
+		*pa = c.resolved_pa; return true;
 	}
-	if (!make_stub())
-		return NULL;
-	return g_stub;
+	return probe(c, ea, width, store, pa);
 }
-
-static uint32_t sr_s_bit(powerpc_cpu *cpu)
+bool data_read(void *opaque, uint32_t ea, unsigned width, uint32_t *value)
 {
-	return (cpu->gpr(25) >> 13) & 1u;
+	bus_context &c = *(bus_context *)opaque; uint32_t pa;
+	if (!probe(c, ea, width, false, &pa) || !record_read(c, ea, width)) return false;
+	*value = width == 1 ? vm_read_memory_1(pa) : width == 2 ? vm_read_memory_2(pa) : vm_read_memory_4(pa);
+	if (active_samples) active_samples->add(pa, width, *value);
+	return true;
 }
-
-static void (*cache_fn(powerpc_cpu *cpu))(powerpc_cpu *)
+bool write_probe(void *opaque, uint32_t ea, unsigned width)
 {
-	const uint32_t pc68 = cpu->gpr(24);
-	const uint32_t page = nw_la_to_pa(pc68) & ~0xfffu;
-	const uint32_t sr = sr_s_bit(cpu);
-	const unsigned h = (page ^ (pc68 << 1) ^ sr) & (NW68_CACHE - 1);
-	for (int n = 0; n < 8; n++) {
-		struct nw_68k_ent *e = &g_cache[(h + (unsigned)n) & (NW68_CACHE - 1)];
-		if (e->used && e->page == page && e->pc == pc68 && e->sr_s == sr)
-			return e->fn;
-		if (!e->used) {
-			void (*fn)(powerpc_cpu *) = body_for(cpu);
-			if (!fn)
-				return NULL;
-			e->used = 1;
-			e->page = page;
-			e->pc = pc68;
-			e->sr_s = sr;
-			e->fn = fn;
-			return e->fn;
+	bus_context &c = *(bus_context *)opaque; uint32_t pa;
+	if (!probe(c, ea, width, true, &pa)) return false;
+	for (unsigned byte = 0; byte < width; ++byte) {
+		const uint32_t page = (pa + byte) & ~4095u;
+		for (unsigned j = 0; j < c.npages; ++j) if (c.pages[j] == page) return false;
+		bool found = false;
+		for (unsigned j = 0; j < c.nwrites; ++j) if (c.write_pages[j] == page) found = true;
+		if (!found) {
+			if (c.nwrites == 32) return false;
+			c.write_pages[c.nwrites++] = page;
 		}
 	}
-	void (*fn)(powerpc_cpu *) = body_for(cpu);
-	if (!fn)
-		return NULL;
-	struct nw_68k_ent *e = &g_cache[h];
-	e->used = 1;
-	e->page = page;
-	e->pc = pc68;
-	e->sr_s = sr;
-	e->fn = fn;
-	return e->fn;
+	return true;
+}
+void data_write(void *opaque, uint32_t ea, unsigned width, uint32_t value)
+{
+	bus_context &c = *(bus_context *)opaque; uint32_t pa;
+	/* No callbacks/context changes occur between prepare and commit. */
+	if (!c.cpu->guest_data_probe(ea, width, true, &pa)) abort();
+	for (unsigned j = 1; j < width; ++j) if (((ea + j) ^ ea) & ~4095u) {
+		uint32_t next;
+		if (!c.cpu->guest_data_probe(ea + j, 1, true, &next) || next != pa + j) abort();
+	}
+	if (width == 1) vm_write_memory_1(pa, value);
+	else if (width == 2) vm_write_memory_2(pa, value);
+	else vm_write_memory_4(pa, value);
+	nw_jit_invalidate_range_src(pa, width, NW_JIT_FL_ISTORE);
+}
+bool compatible_nk()
+{
+	const ppc32_xlate_result a = ppc32_guest_mmu().translate(0x68066000u, PPC32_XLATE_IR, 4, false, false);
+	const ppc32_xlate_result b = ppc32_guest_mmu().translate(0x6806c000u, PPC32_XLATE_IR, 4, false, false);
+	if (!a.ok || !b.ok || !plain_memory(a.pa, false) || !plain_memory(b.pa, false)) return false;
+	/* Check current words even if handlers are patched without icbi. The
+	 * mapping is uniform within each page; only two translations are needed. */
+	return vm_read_memory_4(a.pa + 0x84) == 0x537d1b78u && vm_read_memory_4(a.pa + 0x88) == 0x7fa803a6u &&
+		vm_read_memory_4(a.pa + 0x8c) == 0xaf780002u && vm_read_memory_4(a.pa + 0x90) == 0x4ca80020u &&
+		vm_read_memory_4(b.pa + 0xd84) == 0x7cc00026u && vm_read_memory_4(b.pa + 0xd98) == 0x50c41fbeu &&
+		vm_read_memory_4(b.pa + 0xdf4) == 0x7cc80120u && vm_read_memory_4(b.pa + 0xdf8) == 0x7c8103a6u;
+}
+bool equal_state(const nw68_state &a, const nw68_state &b)
+{
+	return a.pc == b.pc && a.ccr == b.ccr && a.so == b.so && a.extend_so == b.extend_so &&
+		!memcmp(a.d, b.d, sizeof a.d) && !memcmp(a.a, b.a, sizeof a.a);
+}
+struct shadow_bus {
+	bus_context *real;
+	const captured_reads *samples = nullptr;
+	nw68_write writes[512]; unsigned nwrite;
+	static bool code(void *p, uint32_t ea, uint16_t *v, uint32_t *pa) {
+		shadow_bus &b = *(shadow_bus *)p;
+		return b.samples ? code_read(b.real, ea, v, pa) : code_fetch(b.real, ea, v, pa);
+	}
+	static bool fetch(void *p, uint32_t ea, uint16_t *v, uint32_t *pa) {
+		return code_fetch(((shadow_bus *)p)->real, ea, v, pa);
+	}
+	static bool read(void *p, uint32_t ea, unsigned width, uint32_t *v) {
+		shadow_bus &b = *(shadow_bus *)p;
+		if (!b.samples && !data_read(b.real, ea, width, v)) return false;
+		uint32_t key;
+		if (!resolve_address(b.real, ea, width, false, &key)) return false;
+		if (b.samples) {
+			*v = 0;
+			for (unsigned j = 0; j < width; ++j) {
+				uint8_t byte = 0; bool found = b.samples->get(key + j, byte);
+				for (unsigned k = 0; k < b.nwrite; ++k) {
+					const nw68_write &w = b.writes[k];
+					if (key + j >= w.key && key + j - w.key < w.width) {
+						byte = w.value >> ((w.width - (key + j - w.key) - 1) * 8); found = true;
+					}
+				}
+				if (!found) return false;
+				*v = (*v << 8) | byte;
+			}
+			return true;
+		}
+		for (unsigned j = 0; j < width; ++j) for (unsigned k = 0; k < b.nwrite; ++k) {
+			const nw68_write &w = b.writes[k];
+			if (key + j >= w.key && key + j - w.key < w.width) {
+				const unsigned sh = (width - j - 1) * 8, ws = (w.width - (key + j - w.key) - 1) * 8;
+				*v = (*v & ~(255u << sh)) | (((w.value >> ws) & 255u) << sh);
+			}
+		}
+		return true;
+	}
+	static bool probe(void *p, uint32_t ea, unsigned width) {
+		return write_probe(((shadow_bus *)p)->real, ea, width);
+	}
+	static bool resolve(void *p, uint32_t ea, unsigned width, bool store, uint32_t *pa) {
+		return resolve_address(((shadow_bus *)p)->real, ea, width, store, pa);
+	}
+	bool append(const nw68_frame &f) {
+		if (nwrite + f.nwrite > 512) return false;
+		for (unsigned j = 0; j < f.nwrite; ++j) writes[nwrite++] = f.writes[j];
+		return true;
+	}
+	bool effects_match(unsigned count) {
+		for (unsigned k = 0; k < count; ++k) for (unsigned j = 0; j < writes[k].width; ++j) {
+			const uint32_t ea = writes[k].ea + j; bool overwritten = false;
+			for (unsigned later = k + 1; later < count; ++later)
+				if (writes[k].key + j >= writes[later].key && writes[k].key + j - writes[later].key < writes[later].width) overwritten = true;
+			if (overwritten) continue;
+			uint32_t pa;
+			if (!::probe(*real, ea, 1, false, &pa) ||
+			    vm_read_memory_1(pa) != ((writes[k].value >> ((writes[k].width-j-1)*8)) & 255)) return false;
+		}
+		return true;
+	}
+	bool journal_matches(const nw68_frame &frame) const {
+		captured_reads a, b;
+		for (unsigned n = 0; n < nwrite; ++n) a.add(writes[n].key, writes[n].width, writes[n].value, true);
+		for (unsigned n = 0; n < frame.nwrite; ++n) b.add(frame.writes[n].key, frame.writes[n].width, frame.writes[n].value, true);
+		if (a.bytes.size() != b.bytes.size()) return false;
+		for (const captured_reads::byte &entry : a.bytes) {
+			uint8_t value;
+			if (!b.get(entry.key, value) || value != entry.value) return false;
+		}
+		return true;
+	}
+};
+struct checkpoint { nw68_state state; unsigned writes; };
+struct verification_frame {
+	powerpc_cpu *cpu; int depth; bool left; uint64_t steps, serial, generation;
+	bus_context context; shadow_bus shadow;
+	nw68_nk_state nk; nw68_state before;
+	nw68_instruction instruction; nw68_frame predicted;
+	checkpoint checkpoints[16]; unsigned count;
+};
+void failure_trace(const nw68_nk_state &nk, const nw68_state &before,
+		   const nw68_frame &predicted, const nw68_state &actual)
+{
+	if (mismatch_traces++ >= 32) return;
+	const char *path = getenv("NW_JIT68K_TRACE_PATH");
+	FILE *f = path && *path ? fopen(path, "a") : stdout;
+	if (!f) f = stdout;
+	const nw68_instruction &i = *predicted.instruction;
+	fprintf(f, "jit68k failure pc=%08x op=%04x family=%s msr=%08x depth=%d cr=%08x xer=%08x r25=%08x steps=%llu words=",
+		before.pc, i.opcode, nw68_operation_name(i.operation), ppc32_guest_mmu().msr(),
+		reference ? reference->depth : 0, nk.cr, nk.xer, nk.gpr[25],
+		(unsigned long long)(reference ? reference->steps : 0));
+	for (unsigned j = 0; j < i.word_count; ++j) fprintf(f, "%04x ", i.words[j]);
+	fprintf(f, "\nCCR before=%02x native=%02x reference=%02x PC native=%08x reference=%08x SO before=%u native=%u reference=%u savedSO before=%u native=%u reference=%u\n",
+		before.ccr, predicted.state.ccr, actual.ccr, predicted.state.pc, actual.pc,
+		before.so, predicted.state.so, actual.so, before.extend_so, predicted.state.extend_so, actual.extend_so);
+	for (unsigned j = 0; j < 8; ++j)
+		fprintf(f, "r%u D before=%08x native=%08x reference=%08x A before=%08x native=%08x reference=%08x\n",
+			j, before.d[j], predicted.state.d[j], actual.d[j], before.a[j], predicted.state.a[j], actual.a[j]);
+	for (unsigned j = 0; j < predicted.nwrite; ++j)
+		fprintf(f, "write ea=%08x width=%u value=%08x\n", predicted.writes[j].ea, predicted.writes[j].width, predicted.writes[j].value);
+	fflush(f); if (f != stdout) fclose(f);
+}
 }
 
-uint64_t nw_68k_fallback_count(void)
+bool nw_68k_wants_boundary(uint32_t pc)
 {
-	return g_fallback_n;
+	if (!table(pc)) return false;
+	const mode m = selected_mode();
+	/* Verification observes every ROM continuation. Native selection needs
+	 * only candidate boundaries; service-only handlers retain the existing
+	 * bounded PPC chaining and normal event checks. */
+	return m == VERIFY || (m == ON &&
+		nw68_opcode_policy((pc - 0x68080000u) >> 3) == NW68_DIRECT);
+}
+
+void nw_68k_reference_chain(uint32_t pc, uint32_t opcode_pc, uint32_t dispatch)
+{
+	if (!nw_68k_hist_enabled() || !table(pc) || dispatch != pc) return;
+	const mode m = selected_mode();
+	if (m == VERIFY || (m == ON &&
+		nw68_opcode_policy((pc - 0x68080000u) >> 3) == NW68_DIRECT)) return;
+	nw_68k_hist_note(pc, opcode_pc);
+	nw_68k_note_exit_at((pc - 0x68080000u) >> 3, NW68_EXIT_SERVICE, opcode_pc);
+}
+
+bool nw_68k_reference_active(const powerpc_cpu *cpu)
+{
+	return reference && reference->cpu == cpu;
+}
+
+void nw_68k_end_execution(powerpc_cpu *cpu, int depth)
+{
+	if (reference && reference->cpu == cpu && reference->depth == depth) {
+		nw_68k_note_exit_at(reference->instruction.opcode, NW68_EXIT_VERIFY_SKIPPED, reference->before.pc);
+		delete reference; reference = 0;
+	}
+}
+
+void nw_68k_observe(powerpc_cpu *cpu, uint32_t pc, int depth)
+{
+	if (!reference || reference->cpu != cpu || reference->depth != depth) return;
+	if (++reference->steps > 1000000) { nw_68k_end_execution(cpu, depth); return; }
+	if (!table(pc)) reference->left = true;
+}
+
+static void complete_reference(powerpc_cpu *cpu)
+{
+	verification_frame &v = *reference;
+	nw68_nk_state nk; cpu->nw_68k_snapshot(nk);
+	nw68_state actual; nw68_import(nk, actual);
+	bool match = false, covered = false;
+	for (unsigned j = 0; j < v.count; ++j) if (actual.pc == v.checkpoints[j].state.pc) {
+		covered = true;
+		if (equal_state(actual, v.checkpoints[j].state) && v.shadow.effects_match(v.checkpoints[j].writes)) { match = true; break; }
+	}
+	const bool comparable = v.serial == cpu->nw_68k_exception_serial() &&
+		v.generation == nw68_code_generation() && covered;
+	if (!match && comparable) {
+		quarantined[v.instruction.opcode] = true;
+		printf("NW-BOOT G1: jit68k verify mismatch pc=%08x op=%04x family=%s expected_pc=%08x actual_pc=%08x expected_ccr=%02x actual_ccr=%02x\n",
+			v.before.pc, v.instruction.opcode, nw68_operation_name(v.instruction.operation), v.predicted.state.pc, actual.pc, v.predicted.state.ccr, actual.ccr);
+		fflush(stdout); failure_trace(v.nk, v.before, v.predicted, actual);
+	}
+	nw_68k_note_exit_at(v.instruction.opcode, match && comparable ? NW68_EXIT_VERIFIED : comparable ? NW68_EXIT_SERVICE : NW68_EXIT_VERIFY_SKIPPED, v.before.pc);
+	delete reference; reference = 0;
+}
+
+int nw_68k_dispatch(powerpc_cpu *cpu)
+{
+	const uint32_t entry = cpu->nw_68k_ppc_pc();
+	if (!table(entry) || cpu->gpr(29) != entry) return 0;
+	if (reference) {
+		if (reference->cpu != cpu || reference->depth != cpu->nw_68k_execute_depth() || !reference->left) return 0;
+		complete_reference(cpu);
+	}
+	nw_68k_hist_note(entry, cpu->gpr(24) - 2u);
+	const mode m = selected_mode();
+	if (m == OFF) { nw_68k_note_exit_at((entry - 0x68080000u) >> 3, NW68_EXIT_SERVICE, cpu->gpr(24) - 2u); return 0; }
+	const uint16_t op = (entry - 0x68080000u) >> 3;
+	if (m == ON && nw68_opcode_policy(op) == NW68_NANOKERNEL) {
+		nw_68k_note_exit_at(op, NW68_EXIT_SERVICE, cpu->gpr(24) - 2u); return 0;
+	}
+	nw68_nk_state nk; cpu->nw_68k_snapshot(nk);
+	if (quarantined[op]) { nw_68k_note_exit_at(op, NW68_EXIT_SERVICE, nk.gpr[24] - 2u); return 0; }
+	if (!cpu->guest_mmu_enabled() || nk.gpr[0] || nk.gpr[30] != 0x68060000u ||
+	    (nk.gpr[24] & 1) || (nk.cr & 0x04800000u) || nk.gpr[23] || !cpu->nw_68k_can_run() || !compatible_nk()) {
+		nw_68k_note_exit_at(op, NW68_EXIT_UNAVAILABLE, nk.gpr[24] - 2u); return 0;
+	}
+	nw68_state state; nw68_import(nk, state);
+	const uint64_t generation = nw68_code_generation();
+	const uint32_t translation_context = ppc32_guest_mmu().msr() &
+		(ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR | ppc32_mmu::MSR_PR);
+	bus_context context = {}; context.cpu = cpu; context.pc = state.pc;
+	context.opcode = op; context.prefetched = (uint16_t)nk.gpr[27];
+	nw68_bus bus = { &context, code_read, data_read, write_probe, data_write, code_fetch, resolve_address };
+	static const bool blocks_enabled = []() -> bool {
+		const char *e = getenv("NW_JIT68K_BLOCKS"); return !e || strcmp(e, "0");
+	}();
+	static const bool decoded_enabled = []() -> bool {
+		const char *e = getenv("NW_JIT68K_DECODED"); return !e || strcmp(e, "0");
+	}();
+	nw68_instruction block[NW68_BLOCK_MAX];
+	unsigned count = 1;
+	uint16_t current; uint32_t physical;
+	const bool cached = m == ON && blocks_enabled && decoded_enabled &&
+		code_read(&context, state.pc, &current, &physical) &&
+		nw68_cached_block(state.pc, translation_context, physical & ~4095u,
+			op, (uint16_t)nk.gpr[27], block, &count);
+	if (!cached && !nw68_decode(state.pc, bus, block[0])) {
+		nw_68k_note_exit_at(op, NW68_EXIT_SERVICE, nk.gpr[24] - 2u); return 0;
+	}
+	const nw68_instruction instruction = block[0];
+	const bus_context single_context = context;
+	if (!cached && m == ON && blocks_enabled && context.npages == 1) {
+		while (count < NW68_BLOCK_MAX) {
+			const nw68_instruction &previous = block[count-1];
+			// Only a direct BRA has a statically known successor. Other
+			// transfers end the block; no translated pointer escapes the cache.
+			if (previous.control && (previous.operation != NW68_BRANCH || previous.condition != 0)) break;
+			const uint32_t next = previous.control ? previous.pc + 2u + (uint32_t)previous.displacement : previous.pc + previous.length;
+			if ((next ^ state.pc) & ~4095u) break;
+			nw68_instruction candidate; const bus_context saved = context;
+			if (!nw68_decode(next, bus, candidate) ||
+			    context.npages != 1 || ((next + candidate.length - 1u) ^ state.pc) & ~4095u) { context = saved; break; }
+			block[count++] = candidate;
+		}
+	}
+	unsigned flag_mask = 0;
+	for (unsigned n = 0; n < count; ++n) flag_mask |= block[n].flags;
+	nw68_frame result;
+	static const bool check_blocks = []() -> bool {
+		const char *e = getenv("NW_JIT68K_CHECK_BLOCKS"); return e && !strcmp(e, "1");
+	}();
+	captured_reads samples;
+	if (check_blocks && m == ON && count > 1) active_samples = &samples;
+	nw68_exit exit = nw68_run_block(block, count, state, bus, translation_context, context.pages, context.npages, result, generation);
+	active_samples = nullptr;
+	if (exit != NW68_EXIT_NATIVE && count > 1) {
+		/* A later unsafe operand must not deny native execution to the
+		 * current safe instruction. Preparation has no guest side effects,
+		 * so retry only that instruction with its original dependency set. */
+		context = single_context; count = 1; flag_mask = instruction.flags;
+		exit = nw68_run(instruction, state, bus, translation_context, context.pages, context.npages, result, generation);
+	}
+	if (exit != NW68_EXIT_NATIVE) { nw_68k_note_exit_at(op, exit, nk.gpr[24] - 2u); return 0; }
+	static uint64_t blocks_compared, blocks_inconclusive;
+	if (check_blocks && m == ON && count > 1 && samples.stable) {
+		nw68_state scalar = state;
+		nw68_frame one;
+		bus_context comparison = context;
+		shadow_bus shadow; shadow.real = &comparison; shadow.nwrite = 0; shadow.samples = &samples;
+		nw68_bus replay = { &shadow, shadow_bus::code, shadow_bus::read, shadow_bus::probe,
+			0, shadow_bus::fetch, shadow_bus::resolve };
+		bool match = true;
+		for (unsigned n = 0; n < result.completed; ++n) {
+			nw68_instruction single = block[n]; single.flags_live = single.flags;
+			if (n && one.next_op != single.opcode) { match = false; break; }
+			comparison.pc = scalar.pc; comparison.opcode = single.opcode;
+			comparison.prefetched = n ? one.next_prefetch : (uint16_t)nk.gpr[27];
+			if (scalar.pc != single.pc ||
+			    nw68_run(single, scalar, replay, translation_context, context.pages,
+				context.npages, one, generation) != NW68_EXIT_NATIVE ||
+			    !shadow.append(one)) { match = false; break; }
+			scalar = one.state;
+		}
+		match = match && equal_state(scalar, result.state) &&
+			one.next_op == result.next_op && one.next_prefetch == result.next_prefetch &&
+			shadow.journal_matches(result);
+		if (!match && generation == nw68_code_generation()) {
+			printf("NW-BOOT G1: jit68k block mismatch pc=%08x op=%04x count=%u cached=%u\n",
+				state.pc, op, count, cached);
+			failure_trace(nk, state, result, scalar); fflush(stdout); abort();
+		}
+		if (generation == nw68_code_generation()) ++blocks_compared;
+		else ++blocks_inconclusive;
+	} else if (check_blocks && m == ON && count > 1) ++blocks_inconclusive;
+	static uint64_t block_report;
+	const uint64_t report = (blocks_compared + blocks_inconclusive) >> 20;
+	if (check_blocks && report > block_report) {
+		block_report = report;
+		printf("NW-BOOT G1: jit68k block-check compared=%llu inconclusive=%llu\n",
+			(unsigned long long)blocks_compared, (unsigned long long)blocks_inconclusive);
+	}
+	if (m == VERIFY) {
+		/* Observe the ordinary loop: no synthetic execute() frame, no repeated
+		 * host/device effects, and no changes to exception/interrupt nesting. */
+		reference = new (std::nothrow) verification_frame();
+		if (!reference) { nw_68k_note_exit_at(op, NW68_EXIT_UNAVAILABLE, nk.gpr[24] - 2u); return 0; }
+		verification_frame &v = *reference;
+		v.cpu = cpu; v.depth = cpu->nw_68k_execute_depth(); v.left = false; v.steps = 0;
+		v.generation = generation;
+		v.context = context; v.shadow.real = &v.context; v.shadow.nwrite = 0; v.shadow.append(result);
+		v.nk = nk; v.before = state; v.instruction = instruction; v.predicted = result;
+		v.predicted.instruction = &v.instruction;
+		v.count = 1; v.checkpoints[0] = { result.state, v.shadow.nwrite };
+		nw68_bus speculative = { &v.shadow, shadow_bus::code, shadow_bus::read, shadow_bus::probe, 0, shadow_bus::code, shadow_bus::resolve };
+		/* Most ROM fusion is short. Four checkpoints retain those compares
+		 * without predicting fifteen extra instructions at every dispatch.
+		 * Longer continuations are explicitly inconclusive; diagnostics can
+		 * request the full bounded window when investigating a fused handler. */
+		static const unsigned verify_window = []() -> unsigned {
+			const char *e = getenv("NW_JIT68K_VERIFY_WINDOW");
+			const unsigned n = e ? (unsigned)strtoul(e, 0, 10) : 4;
+			return n >= 1 && n <= 16 ? n : 4;
+		}();
+		while (v.count < verify_window) {
+			nw68_instruction next; nw68_frame frame;
+			if (!nw68_decode(v.checkpoints[v.count-1].state.pc, speculative, next) ||
+			    nw68_run(next, v.checkpoints[v.count-1].state, speculative, translation_context, v.context.pages, v.context.npages, frame, generation) != NW68_EXIT_NATIVE ||
+				!v.shadow.append(frame)) break;
+			v.checkpoints[v.count++] = { frame.state, v.shadow.nwrite };
+		}
+		v.serial = cpu->nw_68k_exception_serial();
+		return 0;
+	}
+	// Commit PTE read references only after the complete instruction/block
+	// and successor prefetch are safe. Store C bits are set by data_write.
+	for (unsigned j = 0; j < context.nreads; ++j) {
+		uint32_t pa;
+		if (!cpu->guest_data_probe(context.read_addresses[j], context.read_widths[j], false, &pa)) abort();
+	}
+	nw68_commit(result);
+	nw68_export(nk, result.state, flag_mask, result.next_op, result.next_prefetch);
+	cpu->nw_68k_restore(nk); nw_68k_note_exit_at(op, NW68_EXIT_NATIVE, state.pc);
+	for (unsigned j = 1; j < result.completed; ++j) {
+		nw_68k_hist_note(0x68080000u + ((uint32_t)block[j].opcode << 3), block[j].pc);
+		nw_68k_note_exit_at(block[j].opcode, NW68_EXIT_NATIVE, block[j].pc);
+	}
+	return 1;
 }
 
 void nw_68k_jit_execute(powerpc_cpu *cpu, uint32_t entry)
 {
-	static int announced;
-	if (!announced) {
-		announced = 1;
-		printf("NW-BOOT G1: jit68k_host on\n");
-		fflush(stdout);
-	}
-	/* EMUL_OP from inside a handler calls Execute68k again. That nested
-	 * call stays on the plain NK path so it cannot clear the outer arm. */
-	if (g_active) {
-		cpu->execute(entry);
-		return;
-	}
-	g_active = 1;
-	const uint32_t saved = g_entry;
-	g_entry = entry;
-	for (;;) {
-		m68_note(cpu);
-		void (*fn)(powerpc_cpu *) = cache_fn(cpu);
-		if (!fn) {
-			cpu->execute(g_entry);
-			break;
-		}
-		fn(cpu);
-		if (!nw_68k_took_one())
-			break;
-		const uint32_t next = g_stop_pc;
-		if (!in_table(next))
-			break;
-		g_entry = next;
-	}
-	g_entry = saved;
-	g_active = 0;
+	/* The ordinary loop owns dispatch, events, nesting and execution returns. */
+	cpu->execute(entry);
 }

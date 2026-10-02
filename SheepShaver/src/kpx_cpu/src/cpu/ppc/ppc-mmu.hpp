@@ -107,13 +107,15 @@ public:
 	 * width is the access size in bytes (1/2/4/8), used as a non-zero
 	 * access marker. is_store asks for write permission (data only) and
 	 * sets the PTE C bit on success; fetches need execute permission.
+	 * record_access=false is a permission/translation preview: it may warm
+	 * the TLB but never changes guest PTE R/C bits. Real accesses default true.
 	 * Protection follows the OEA: key = MSR[PR] ? Kp : Ks; PP 0..3 with
 	 * key 0 -> RW RW RW RO, key 1 -> none RO RW RO; BAT PP 0 none, 2 RW,
 	 * 1/3 RO. BAT translations are not cached; TLB entries are tagged with
 	 * the segment register they were derived from.
 	 */
 	ppc32_xlate_result translate(uint32_t ea, ppc32_xlate_space space, unsigned width,
-				     bool is_store = false);
+				     bool is_store = false, bool record_access = true);
 
 	void get_ibat(unsigned i, uint32_t *upper, uint32_t *lower) const;
 	void get_dbat(unsigned i, uint32_t *upper, uint32_t *lower) const;

@@ -38,6 +38,7 @@
 
 #ifdef SHEEPSHAVER
 struct nw_jit_cpu;
+struct nw68_nk_state;
 #endif
 
 class powerpc_cpu
@@ -265,6 +266,7 @@ private:
 	uint32 dec_;
 	uint64 dec_tb_base_;	/* timebase when dec_ was last sampled */
 	bool dec_pending_;
+	uint64 exception_serial_;
 	int64 tb_offset_;		/* mtspr TBL/TBU: guest TB = host ticks + offset */
 #ifdef SHEEPSHAVER
 	uint32 last_fetch_pa_;
@@ -365,12 +367,20 @@ public:
 	bool guest_fetch(uint32 *opcode);
 	bool guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa);
 	bool guest_data_probe(uint32 ea, unsigned width, bool is_store, uint32 *pa,
-			      int *via_bat = 0);
+			      int *via_bat = 0, bool record_access = true);
 #ifdef SHEEPSHAVER
 	int nw_jit_try(uint32 first_opcode);
-	/* One native handler. Does not hop bclr/bcctr. *landed is the PC
-	 * after the block returns. 0 means the caller runs execute(*landed). */
-	int nw_68k_jit_step(uint32 entry, uint32 *landed);
+	void nw_68k_snapshot(nw68_nk_state &) const;
+	void nw_68k_restore(const nw68_nk_state &);
+	uint32 nw_68k_ppc_pc() const { return pc(); }
+	int nw_68k_execute_depth() const { return execute_depth; }
+	uint64 nw_68k_exception_serial() const { return exception_serial_; }
+	bool nw_68k_can_run() const {
+		/* JIT_EXEC_RETURN requests a KPX block exit; it remains set in the
+		 * New World MMU interpreter and is not a pending host/guest event. */
+		return !spcflags().test(SPCFLAG_CPU_EXEC_RETURN | SPCFLAG_CPU_TRIGGER_INTERRUPT |
+			SPCFLAG_CPU_HANDLE_INTERRUPT | SPCFLAG_CPU_ENTER_MON);
+	}
 	void nw_mm_queue_ppc(uint32 proc) { mm_ppc_pending_ = proc; }
 	uint32 nw_mm_take_ppc() { uint32 p = mm_ppc_pending_; mm_ppc_pending_ = 0; return p; }
 	virtual void nw_invoke_mm_ppc(uint32 entry);

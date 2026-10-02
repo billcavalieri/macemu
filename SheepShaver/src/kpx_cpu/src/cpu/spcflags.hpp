@@ -36,6 +36,8 @@ enum {
 class basic_spcflags
 {
 	uint32 mask;
+	// Retain the register layout used by generated code. Flag access itself
+	// must be atomic: some hosts have no implementation of spin_lock().
 	spinlock_t lock;
 
 public:
@@ -43,26 +45,32 @@ public:
 	basic_spcflags()
 		{ init(); }
 
+	basic_spcflags(basic_spcflags const &other)
+		{ init(other.get()); lock = SPIN_LOCK_UNLOCKED; }
+
+	basic_spcflags &operator=(basic_spcflags const &other)
+		{ init(other.get()); return *this; }
+
 	void init()
-		{ mask = 0; lock = SPIN_LOCK_UNLOCKED; }
+		{ init(0); lock = SPIN_LOCK_UNLOCKED; }
 
 	bool empty() const
-		{ return (mask == 0); }
+		{ return (get() == 0); }
 
 	bool test(uint32 v) const
-		{ return (mask & v); }
+		{ return (get() & v); }
 
 	void init(uint32 v)
-		{ spin_lock(&lock); mask = v; spin_unlock(&lock); }
+		{ __atomic_store_n(&mask, v, __ATOMIC_RELEASE); }
 
 	uint32 get() const
-		{ return mask; }
+		{ return __atomic_load_n(&mask, __ATOMIC_ACQUIRE); }
 
 	void set(uint32 v)
-		{ spin_lock(&lock); mask |= v; spin_unlock(&lock); }
+		{ __atomic_fetch_or(&mask, v, __ATOMIC_ACQ_REL); }
 
 	void clear(uint32 v)
-		{ spin_lock(&lock); mask &= ~v; spin_unlock(&lock); }
+		{ __atomic_fetch_and(&mask, ~v, __ATOMIC_ACQ_REL); }
 };
 
 #endif /* SPCFLAGS_H */

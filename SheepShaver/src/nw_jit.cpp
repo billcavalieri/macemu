@@ -21,6 +21,7 @@
 
 #include "nw_jit.h"
 #include "nw_68k_jit.h"
+#include "nw_68k_core.h"
 #include "nw_io.h"
 #include "nw_boot_contract.h"
 
@@ -508,6 +509,7 @@ void nw_jit_mtsr_note(unsigned sr, uint32_t old_val, uint32_t new_val)
 	if (((old_val ^ new_val) & (uint32_t)NW_JIT_SR_XLATE) == 0)
 		return;
 	g_mtsr_vsid++;
+	nw68_context_changed();
 	g_sr_gen[sr & 0xfu]++;
 	g_itlb_sticky = 0;
 }
@@ -2034,6 +2036,7 @@ static int code_ready(void)
 
 void nw_jit_reset(void)
 {
+	nw68_invalidate_all();
 	memset(g_cache, 0, sizeof(g_cache));
 	memset(g_pagebit_ram, 0, sizeof(g_pagebit_ram));
 	memset(g_pagebit_rom, 0, sizeof(g_pagebit_rom));
@@ -2092,6 +2095,8 @@ void nw_jit_reset(void)
 void nw_jit_invalidate_page_src(uint32_t phys_page, int src)
 {
 	phys_page &= ~0xfffu;
+	/* 68k code ownership is independent of the PPC page-bit filter. */
+	nw68_invalidate_page(phys_page);
 	if (src < 0 || src >= NW_JIT_FL_N)
 		src = NW_JIT_FL_OTHER;
 	if (!page_may_have_code(phys_page))
@@ -2128,6 +2133,7 @@ void nw_jit_invalidate_range_src(uint32_t pa, uint32_t nbytes, int src)
 
 void nw_jit_invalidate_all_src(int src)
 {
+	nw68_invalidate_all();
 	if (src < 0 || src >= NW_JIT_FL_N)
 		src = NW_JIT_FL_OTHER;
 	g_flush_calls[src]++;
@@ -3175,6 +3181,7 @@ void nw_jit_set_host_stfd(nw_jit_host_stfd fn)
 
 void nw_jit_dtlb_flush_src(int src)
 {
+	nw68_context_changed();
 	if (src < 0 || src >= NW_JIT_DTLB_FL_N)
 		src = NW_JIT_DTLB_FL_OTHER;
 	g_dtlb_fl[src]++;
@@ -3189,6 +3196,7 @@ void nw_jit_dtlb_flush(void)
 
 void nw_jit_dtlb_drop_sr(unsigned sr, int src)
 {
+	nw68_context_changed();
 	if (src < 0 || src >= NW_JIT_DTLB_FL_N)
 		src = NW_JIT_DTLB_FL_OTHER;
 	g_dtlb_fl[src]++;
@@ -3204,6 +3212,7 @@ void nw_jit_dtlb_drop_sr(unsigned sr, int src)
 
 void nw_jit_dtlb_drop_bat(uint32_t upper, int src)
 {
+	nw68_context_changed();
 	if (src < 0 || src >= NW_JIT_DTLB_FL_N)
 		src = NW_JIT_DTLB_FL_OTHER;
 	g_dtlb_fl[src]++;
@@ -3215,6 +3224,7 @@ void nw_jit_dtlb_drop_bat(uint32_t upper, int src)
 
 void nw_jit_dtlb_drop_page(uint32_t ea, int src)
 {
+	nw68_context_changed();
 	if (src < 0 || src >= NW_JIT_DTLB_FL_N)
 		src = NW_JIT_DTLB_FL_OTHER;
 	g_dtlb_fl[src]++;
@@ -8781,18 +8791,21 @@ static int emit_call_lwz(struct emit *e, uint32_t pc, int rd, int ra, int simm, 
 		return 0;
 	if (!emit_helper_ea(e, ra, simm))
 		return 0;
+	if (upd && ra && !emit_w(e, 0xb9001be8u)) /* saved EA */
+		return 0;
 	if (!emit_dtlb_and_helpers(e, 0))
 		return 0;
-	if (!emit_w(e, a64_orr_reg(W8, 31, W0)))	/* mov w8, w0 */
+	if (!emit_w(e, a64_orr_reg(W9, 31, W0)))	/* preserve result across fault check */
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))			/* mov x0, x19 */
 		return 0;
-	if (!emit_store_gpr(e, W8, rd))
-		return 0;
+	/* A fault handler must observe the original destination and base. */
 	if (!emit_fault_check(e))
 		return 0;
+	if (!emit_store_gpr(e, W9, rd))
+		return 0;
 	if (upd && ra) {
-		if (!emit_helper_ea(e, ra, simm))
+		if (!emit_w(e, 0xb9401be8u)) /* reload saved EA */
 			return 0;
 		if (!emit_store_gpr(e, W8, ra))
 			return 0;
@@ -8818,26 +8831,21 @@ static int emit_call_lb(struct emit *e, uint32_t pc, int rd, int ra, int simm, i
 		return 0;
 	if (!emit_w(e, 0xd63f0120u))
 		return 0;
-	if (!emit_w(e, a64_orr_reg(W8, 31, W0)))
+	if (!emit_w(e, a64_orr_reg(W9, 31, W0)))
 		return 0;
 	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
-	if (!emit_store_gpr(e, W8, rd))
+	if (!emit_fault_check(e))
 		return 0;
-	if (!upd || !ra)
-		return emit_fault_check(e);
-	if (!emit_w(e, a64_ldr_w(W9, X0, (uint32_t)offsetof(struct nw_jit_cpu, fault))))
+	if (!emit_store_gpr(e, W9, rd))
 		return 0;
-	uint32_t *cbnz_p = e->p;
-	if (!emit_w(e, a64_cbnz(W9, 0)))
-		return 0;
-	if (!emit_w(e, 0xb9401beau))	/* ldr w10, [sp, #24] saved EA */
-		return 0;
-	if (!emit_store_gpr(e, W10, ra))
-		return 0;
-	uint32_t *after_p = e->p;
-	*cbnz_p = a64_cbnz(W9, (int)(after_p - cbnz_p));
-	return emit_fault_check(e);
+	if (upd && ra) {
+		if (!emit_w(e, 0xb9401be8u)) /* reload saved EA */
+			return 0;
+		if (!emit_store_gpr(e, W8, ra))
+			return 0;
+	}
+	return 1;
 }
 
 static int emit_call_stb(struct emit *e, uint32_t pc, int rs, int ra, int simm, int upd)

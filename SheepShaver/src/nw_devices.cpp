@@ -243,10 +243,10 @@ static uint32_t pic_iack(void)
 				mode = ReadMacInt32(XLM_RUN_MODE);
 				tm = ReadMacInt32(0x16A);
 			}
-			printf("NW-BOOT G1: pic_iack n=%u src=%d vec=%02x pc=%08x ctpr=%u vbl_serv=%d ext=%d lvl=%u nest=%d mode=%u tm=%u\n",
+			printf("NW-BOOT G1: pic_iack n=%u src=%d vec=%02x pc=%08x ctpr=%u vbl_serv=%d ext=%d lvl=%u nest=%d mode=%u tm=%u ack=%llu\n",
 			       n, src, (unsigned)vec, (unsigned)nw_io_last_pc(),
 			       (unsigned)pic.ctpr, pic.src[NW_VBL_IRQ].servicing, nw_io_ext_irq,
-			       lvl, nest, mode, tm);
+			       lvl, nest, mode, tm, (unsigned long long)(src >= 0 ? pic.src[src].ack_serial : 0));
 			fflush(stdout);
 		}
 	}
@@ -257,17 +257,28 @@ static uint32_t pic_iack(void)
 static void pic_eoi(void)
 {
 	int which = -1;
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+	uint64_t acknowledgement = 0, age = 0;
+#endif
 	if (servicing_priority(&which) >= 0)
+	{
+#if defined(NW_BOOT_LOG) && NW_BOOT_LOG
+		acknowledgement = pic.src[which].ack_serial;
+		const uint64_t now = tb_now();
+		age = now >= pic.src[which].ack_time ? tb_to_hz(now - pic.src[which].ack_time, 1000000) : 0;
+#endif
 		pic.src[which].servicing = 0;
+	}
 	pic_update();
 #if defined(NW_BOOT_LOG) && NW_BOOT_LOG
 	{
 		static unsigned n;
 		n++;
 		if (n <= 32u || which == NW_VBL_IRQ)
-			printf("NW-BOOT G1: pic_eoi n=%u src=%d pc=%08x vbl_serv=%d ext=%d\n",
+			printf("NW-BOOT G1: pic_eoi n=%u src=%d pc=%08x vbl_serv=%d ext=%d ack=%llu age_us=%llu\n",
 			       n, which, (unsigned)nw_io_last_pc(),
-			       pic.src[NW_VBL_IRQ].servicing, nw_io_ext_irq);
+			       pic.src[NW_VBL_IRQ].servicing, nw_io_ext_irq,
+			       (unsigned long long)acknowledgement, (unsigned long long)age);
 	}
 #endif
 }

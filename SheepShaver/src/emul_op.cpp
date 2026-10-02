@@ -157,6 +157,64 @@ void nw_audio_try(void)
 
 static int nw_reg_arm;
 static int nw_audio_live;
+static bool nw_components_busy;
+static bool nw_components_hooks_installed;
+static bool nw_components_done;
+static const uint16 nw_event_traps[2] = { 0xa860, 0xa970 };
+static uint32 nw_event_original[2], nw_event_patch[2], nw_event_installed[2];
+
+/* RegisterComponent can load component resources through asynchronous disk
+ * reads. Calling it inside a File Manager/ExtFS callback prevents that
+ * outstanding operation from returning and deadlocks its completion. Install
+ * a short-lived head patch on the application's event loop instead. The Trap
+ * Manager owns the table and any Mixed Mode transition to the original code.
+ * Preserve all 68k argument registers and tail-jump to the previous handler. */
+static void nw_components_install_hooks(void)
+{
+	if (nw_components_hooks_installed || nw_components_busy || !nw_reg_arm)
+		return;
+	nw_components_busy = true;
+	for (int i = 0; i < 2; ++i) {
+		M68kRegisters rr = {};
+		rr.d[0] = nw_event_traps[i];
+		Execute68kTrap(0xa746, &rr); // GetToolTrapAddress
+		nw_event_original[i] = rr.a[0];
+		uint8 stub[16];
+		int n = 0;
+		nw_emit16(stub, &n, 0x48e7); nw_emit16(stub, &n, 0xfffe);
+		nw_emit16(stub, &n, M68K_EMUL_OP_COMPONENTS_IDLE);
+		nw_emit16(stub, &n, 0x4cdf); nw_emit16(stub, &n, 0x7fff);
+		nw_emit16(stub, &n, 0x4ef9); nw_emit32(stub, &n, rr.a[0]);
+		nw_event_patch[i] = SheepProc(stub, n);
+		rr.d[0] = nw_event_traps[i];
+		rr.a[0] = nw_event_patch[i];
+		Execute68kTrap(0xa647, &rr); // SetToolTrapAddress
+		rr.d[0] = nw_event_traps[i];
+		Execute68kTrap(0xa746, &rr);
+		// On PPC the Trap Manager may wrap our 68k entry in a descriptor.
+		nw_event_installed[i] = rr.a[0];
+	}
+	nw_components_hooks_installed = true;
+	nw_components_busy = false;
+}
+
+static void nw_components_remove_hooks(void)
+{
+	for (int i = 0; i < 2; ++i) {
+		// A later daisy-chain patch may still call our entry after cleanup.
+		// Retire its host callback even if we cannot remove it from the head.
+		WriteMacInt16(nw_event_patch[i] + 4, M68K_NOP);
+		M68kRegisters rr = {};
+		rr.d[0] = nw_event_traps[i];
+		Execute68kTrap(0xa746, &rr);
+		// Preserve a patch installed by somebody else after ours.
+		if (rr.a[0] == nw_event_installed[i]) {
+			rr.d[0] = nw_event_traps[i];
+			rr.a[0] = nw_event_original[i];
+			Execute68kTrap(0xa647, &rr);
+		}
+	}
+}
 
 int nw_audio_service_ok(void)
 {
@@ -294,27 +352,35 @@ int32 nw_sheepblaster_delegate(uint32 params, uint32 target)
 
 void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 {
-	/* Not from the Time Manager task: registration allocates memory,
-	 * which is not allowed at interrupt time. */
+	/* Only install Trap Manager hooks here. Component registration itself
+	 * runs from the event loop, never inside a driver or resource callback. */
 	bool sb_op = selector == OP_AUDIO_DISPATCH || selector == OP_SHEEPBLASTER ||
 		selector == OP_SHEEPBLASTER_TICK;
-	/* One RegisterComponent per trap. All three on the first EmulOp
-	 * after the Finder name walks the component list and the desktop
-	 * does not return. */
-	if (!sb_op) {
-		if (nw_reg_arm)
-			nw_register_output();
-		else if (QtCodecRegister())
-			;
-		else if (SheepForceRaveRegister())
-			;
-	}
+	if (!sb_op)
+		nw_components_install_hooks();
 	if (nw_debug_arm && !sb_op) {
 		nw_debug_arm = 0;
 		nw_audio_debug_scan();
 	}
 	D(bug("EmulOp %04x at %08x\n", selector, pc));
 	switch (selector) {
+		case OP_COMPONENTS_IDLE:
+			if (!nw_components_busy && !nw_components_done) {
+				nw_components_busy = true;
+				if (nw_reg_arm)
+					nw_register_output();
+				else if (QtCodecRegister())
+					;
+				else if (SheepForceRaveRegister())
+					;
+				else {
+					nw_components_done = true;
+					nw_components_remove_hooks();
+					printf("SheepForce: event-loop component registration completed\n");
+				}
+				nw_components_busy = false;
+			}
+			break;
 		case OP_BREAK:				// Breakpoint
 			printf("*** Breakpoint\n");
 			Dump68kRegs(r);

@@ -1,5 +1,5 @@
 /*
- *  nw_script.cpp - New World operator script (Debug builds only)
+ *  nw_script.cpp - New World operator script (opt-in diagnostics)
  *
  *  (C) 2026 Bill Cavalieri
  *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
@@ -24,6 +24,10 @@
 #include "video.h"
 #include "nw_devices.h"
 #include "nw_script.h"
+#include "thunks.h"
+#include "nw_jit.h"
+#include "nw_68k_jit.h"
+#include "main.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,11 +35,10 @@
 #include <vector>
 #include <string>
 
-#if 1
 
 namespace {
 
-enum step_kind { ST_WAIT_UNTIL, ST_KEY, ST_MOUSE_TO, ST_BUTTON, ST_SHOT, ST_LOG, ST_PAUSE, ST_DUMP };
+enum step_kind { ST_WAIT_UNTIL, ST_KEY, ST_MOUSE_TO, ST_BUTTON, ST_SHOT, ST_LOG, ST_PAUSE, ST_DUMP, ST_BENCH68, ST_WAIT_FINDER, ST_WAIT_PIXEL, ST_PHASE };
 
 struct step {
 	step_kind kind;
@@ -54,10 +57,14 @@ std::vector<step> steps;
 size_t head;
 std::vector<periodic> periodics;
 uint64 t0_us;			/* first tick */
+uint64 finder_ready_us;
+uint64 pixel_ready_us;
 uint64 not_before_us;	/* pacing between emitted events */
 int shot_index;
 int mouse_tries;
 bool active;
+bool benchmark_active;
+int benchmark_pending = -1;
 
 enum { KEY_GAP_US = 40000, MOUSE_STEP_US = 30000, MOUSE_MAX_STEP = 4, MOUSE_TOL = 2, MOUSE_MAX_TRIES = 2000 };
 
@@ -164,7 +171,18 @@ std::string rest_after(const std::string &line, int n)
 bool parse_command(const std::string &line, const std::vector<std::string> &tok, size_t ci, int lineno)
 {
 	const std::string &cmd = tok[ci];
-	if (cmd == "shot" && tok.size() > ci + 1) {
+	if (cmd == "waitfinder") {
+		push(ST_WAIT_FINDER);
+	} else if (cmd == "waitpixel" && tok.size() > ci + 3) {
+		push(ST_WAIT_PIXEL, atoi(tok[ci + 1].c_str()), atoi(tok[ci + 2].c_str()),
+		     tok[ci + 3]);
+	} else if (cmd == "phase") {
+		push(ST_PHASE);
+	} else if (cmd == "bench68" && tok.size() > ci + 2) {
+		const long iterations = strtol(tok[ci + 1].c_str(), NULL, 10);
+		if (iterations < 1 || iterations > 10000000) return false;
+		push(ST_BENCH68, (int)iterations, 0, tok[ci + 2]);
+	} else if (cmd == "shot" && tok.size() > ci + 1) {
 		push(ST_SHOT, 0, 0, tok[ci + 1]);
 	} else if (cmd == "text") {
 		const std::string s = rest_after(line, (int)ci + 1);
@@ -232,7 +250,9 @@ bool parse(const char *path)
 		if (hash != std::string::npos) line.erase(hash);
 		const std::vector<std::string> tok = split(line);
 		if (tok.empty()) continue;
-		if (tok[0] == "at" && tok.size() >= 3) {
+		if (tok[0] == "waitfinder" || tok[0] == "waitpixel" || tok[0] == "phase") {
+			parse_command(line, tok, 0, lineno);
+		} else if (tok[0] == "at" && tok.size() >= 3) {
 			const uint64 t = (uint64)(atof(tok[1].c_str()) * 1e6);
 			push(ST_WAIT_UNTIL, 0, 0, std::string(), t);
 			parse_command(line, tok, 2, lineno);
@@ -324,7 +344,7 @@ void nw_script_init(void)
 
 void nw_script_tick(void)
 {
-	if (!active)
+	if (!active || benchmark_active)
 		return;
 	const uint64 now = GetTicks_usec();
 	if (!t0_us)
@@ -347,6 +367,40 @@ void nw_script_tick(void)
 			if (el < s.t_us)
 				return;
 			break;
+		case ST_WAIT_FINDER:
+			/* CurApName changes while background startup tasks run. Observe
+			 * Finder once, then allow those tasks to settle; requiring an
+			 * uninterrupted name incorrectly rejects a working desktop. */
+			if (!finder_ready_us) {
+				if (ReadMacInt8(0x910) != 6 || ReadMacInt32(0x911) != 0x46696e64u) return;
+				finder_ready_us = now;
+			}
+			if (now - finder_ready_us < 30000000) return;
+			finder_ready_us = 0;
+			head++;
+			return;
+		case ST_PHASE:
+			t0_us = now;
+			printf("NW-BOOT SCRIPT workload-start\n"); fflush(stdout);
+			head++;
+			return;
+		case ST_WAIT_PIXEL: {
+			if (!screen_base || cur_mode < 0) return;
+			const VideoInfo &mode = VModes[cur_mode];
+			if (s.a < 0 || s.b < 0 || s.a >= mode.viXsize || s.b >= mode.viYsize ||
+			    mode.viAppleMode != APPLE_32_BIT) return;
+			const uint8 *p = Mac2HostAddr(screen_base) + s.b * mode.viRowBytes + s.a * 4;
+			const uint32 rgb = ((uint32)p[1] << 16) | ((uint32)p[2] << 8) | p[3];
+			if (rgb != (uint32)strtoul(s.text.c_str(), NULL, 16)) {
+				pixel_ready_us = 0;
+				return;
+			}
+			if (!pixel_ready_us) pixel_ready_us = now;
+			if (now - pixel_ready_us < 1000000) return;
+			pixel_ready_us = 0;
+			printf("NW-BOOT SCRIPT pixel ready x=%d y=%d rgb=%06x\n", s.a, s.b, rgb);
+			break;
+		}
 		case ST_PAUSE:
 			not_before_us = now + (uint64)s.a * 1000u;
 			head++;
@@ -398,7 +452,11 @@ void nw_script_tick(void)
 			take_shot(s.text, now);
 			break;
 		case ST_LOG:
+			if (benchmark_pending >= 0) return;
 			printf("NW-BOOT SCRIPT t=%.1f %s\n", el / 1e6, s.text.c_str());
+			break;
+		case ST_BENCH68:
+			benchmark_pending = (int)head;
 			break;
 		case ST_DUMP: {
 			/* guest logical addresses in RAM only (the script has no MMU) */
@@ -422,15 +480,52 @@ void nw_script_tick(void)
 		active = false;
 }
 
+// Only the normal EMUL_OP bridge may service this request: its NK registers
+// and guest stack are live. A timer poll can interrupt arbitrary native PPC.
+void nw_script_guest_benchmark(void)
+{
+	if (benchmark_pending < 0 || benchmark_active) return;
+	step &s = steps[benchmark_pending];
+	benchmark_pending = -1;
+
+	/* A real nested guest routine, through the normal CPU/MMU/event
+	 * loop. Scripts are suspended during it, but device timers and
+	 * interrupts remain enabled. One warm run precedes five samples. */
+	benchmark_active = true;
+	SheepVar program(22);
+	const uint16 code[] = {0x2e3c, (uint16)((unsigned)s.a >> 16), (uint16)s.a,
+		0x7000,0x7201,0xd081,0xb181,0x4841,0x5387,0x66f6,0x4e75};
+	for (unsigned j = 0; j < sizeof code / sizeof code[0]; ++j)
+		WriteMacInt16(program.addr() + 2*j, code[j]);
+	MakeExecutable(0, program.addr(), sizeof code);
+	uint32 expected0 = 0, expected1 = 1;
+	for (int j = 0; j < s.a; ++j) {
+		expected0 += expected1; expected1 ^= expected0;
+		expected1 = (expected1 << 16) | (expected1 >> 16);
+	}
+	FILE *output = fopen(s.text.c_str(), "w");
+	if (output) fprintf(output,"sample,iterations,microseconds,d0,d1,d7,correct,native,instructions\n");
+	for (unsigned sample = 0; sample < 6; ++sample) {
+		M68kRegisters regs = {};
+		nw_68k_measure_begin(program.addr(), program.addr() + sizeof code);
+		const uint64 start = GetTicks_usec();
+		Execute68k(program.addr(), &regs);
+		const uint64 elapsed = GetTicks_usec() - start;
+		const uint64 native = nw_68k_measure_end();
+		const bool correct = regs.d[0] == expected0 && regs.d[1] == expected1 && regs.d[7] == 0;
+		if (sample && output) fprintf(output,"%u,%d,%llu,%08x,%08x,%08x,%u,%llu,%llu\n",sample,s.a,
+			(unsigned long long)elapsed,regs.d[0],regs.d[1],regs.d[7],correct,
+			(unsigned long long)native, (unsigned long long)s.a * 5 + 4);
+		printf("NW-BOOT SCRIPT bench68 sample=%u iterations=%d us=%llu correct=%u\n",
+			sample,s.a,(unsigned long long)elapsed,correct);
+	}
+	if (output) fclose(output);
+	benchmark_active = false;
+}
+
 int nw_script_active(void)
 {
 	return active ? 1 : 0;
 }
 
-#else
-
-void nw_script_init(void) {}
-void nw_script_tick(void) {}
-int nw_script_active(void) { return 0; }
-
-#endif
+bool nw_script_benchmark_pending(void) { return benchmark_pending >= 0 && !benchmark_active; }

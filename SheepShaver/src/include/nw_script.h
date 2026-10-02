@@ -1,5 +1,5 @@
 /*
- *  nw_script.h - New World operator script (Debug builds only)
+ *  nw_script.h - New World opt-in operator script
  *
  *  (C) 2026 Bill Cavalieri
  *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
@@ -27,9 +27,11 @@
  * keyboard and mouse input into the modelled ADB bus plus guest frame-buffer
  * snapshots, so an unattended run can be walked through the Finder and the
  * installer and looked at afterwards. Only what a person at the window
- * could do; nothing in the guest is touched.
+ * could do. The explicit bench68 command also installs and times a small
+ * guest routine at the next ordinary host callback, with state restored.
  *
- * Enabled by NW_SCRIPT=<file> in the environment (Debug, NW_BOOT_LOG builds).
+ * Enabled by NW_SCRIPT=<file> in the environment. Release builds retain
+ * this explicit operator path for comparable guest-loop timing.
  * One command per line, `#` comments, times in seconds since the guest
  * started; `at` lines must be in increasing order.
  *
@@ -43,6 +45,10 @@
  *   at <sec> down | up            button 0 held / released
  *   at <sec> log <text>           `NW-BOOT SCRIPT <text>` in the log
  *   at <sec> dump <hexaddr> <hexlen> <path>   guest RAM (logical) to a file
+ *   at <sec> bench68 <iterations> <path>     warmup + five guest-loop timings
+ *   waitfinder                  observe Finder, then let startup tasks settle for 30 s
+ *   waitpixel <x> <y> <RRGGBB>   wait for a stable pixel in a 32-bit guest display
+ *   phase                       restart script time and log workload-start
  *
  * Cursor moves are closed-loop on the guest's Mouse low-memory global,
  * so acceleration and clamping in the guest do not matter.
@@ -54,7 +60,9 @@ extern "C" {
 
 void nw_script_init(void);	/* reads NW_SCRIPT; no-op when unset */
 void nw_script_tick(void);	/* from the CPU thread's coarse tick */
-int nw_script_active(void);	/* 1 while a Debug operator script is running */
+int nw_script_active(void);	/* 1 while an opt-in operator script is running */
+void nw_script_guest_benchmark(void); /* only at a normal EMUL_OP boundary */
+bool nw_script_benchmark_pending(void);
 
 #ifdef __cplusplus
 }

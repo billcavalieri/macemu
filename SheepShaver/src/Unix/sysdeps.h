@@ -358,6 +358,14 @@ static inline int testandset(volatile int *p)
 }
 #endif
 
+#if defined(__aarch64__) || defined(__arm64__)
+#define HAVE_TEST_AND_SET 1
+static inline int testandset(volatile int *p)
+{
+	return __atomic_exchange_n(p, 1, __ATOMIC_ACQUIRE);
+}
+#endif
+
 #ifdef __arm__
 #define HAVE_TEST_AND_SET 1
 static inline int testandset(volatile int *p)
@@ -387,7 +395,11 @@ static inline void spin_lock(spinlock_t *lock)
 
 static inline void spin_unlock(spinlock_t *lock)
 {
+#if defined(__aarch64__) || defined(__arm64__)
+	__atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+#else
 	*lock = 0;
+#endif
 }
 
 static inline int spin_trylock(spinlock_t *lock)

@@ -313,7 +313,7 @@ void ppc32_mmu::note_access(tlb_entry *e, bool is_store)
 }
 
 ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, unsigned width,
-					bool is_store)
+					bool is_store, bool record_access)
 {
 	ppc32_xlate_result r;
 	r.ok = false;
@@ -371,7 +371,7 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 		r.fault = PPC32_FAULT_PROT;
 		return r;
 	}
-	note_access(e, is_store);
+	if (record_access) note_access(e, is_store);
 	r.ok = true;
 	r.pa = e->pa_page | (ea & 0xfffu);
 	return r;

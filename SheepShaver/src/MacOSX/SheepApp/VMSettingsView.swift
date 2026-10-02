@@ -285,6 +285,7 @@ final class SettingsSheet: NSWindowController, NSTableViewDataSource, NSTableVie
                 PrefRow("rom", "rom", .text, ""),
                 PrefRow("jit", "jit", .toggle, "true"),
                 PrefRow("jit68k", "jit68k", .toggle, "false"),
+                PrefRow("jit68k_host", "Host 68k JIT", .toggle, "true"),
                 PrefRow("ignoresegv", "ignoresegv", .toggle, "true"),
                 PrefRow("ignoreillegal", "ignoreillegal", .toggle, "true"),
                 PrefRow("cpuclock", "cpuclock", .integer, "0"),

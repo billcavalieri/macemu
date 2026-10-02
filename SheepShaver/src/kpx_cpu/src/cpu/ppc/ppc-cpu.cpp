@@ -48,6 +48,8 @@
 #include "nw_script.h"
 #include "nw_jit.h"
 #include "nw_68k_jit.h"
+#include "xlowmem.h"
+#include "nw_68k_core.h"
 #include "prefs.h"
 #include "timer.h"
 #endif
@@ -297,6 +299,7 @@ void powerpc_cpu::initialize()
 	tb_offset_ = 0;
 	dec_tb_base_ = tb_ticks();
 	dec_pending_ = false;
+	exception_serial_ = 0;
 #ifdef SHEEPSHAVER
 	last_fetch_pa_ = 0;
 #endif
@@ -558,6 +561,7 @@ uint32 powerpc_cpu::exception_vector(uint32 vec) const
 
 void powerpc_cpu::take_exception(uint32 vec, uint32 srr0, uint32 srr1_extra, uint32 event_pc)
 {
+	++exception_serial_;
 	ppc32_mmu &mmu = ppc32_guest_mmu();
 	if (event_pc == 0xffffffffu)
 		event_pc = srr0;
@@ -975,7 +979,7 @@ uint64 powerpc_cpu::tb_host_ticks() const
 #ifdef SHEEPSHAVER
 	extern int64 TimebaseSpeed;
 	const uint64 us = GetTicks_usec();
-	return (us / 1000000u) * (uint64)TimebaseSpeed + ((us % 1000000u) * (uint64)TimebaseSpeed) / 1000000u;
+	return (us / 1000000u) * (uint64)25000000 + ((us % 1000000u) * (uint64)25000000) / 1000000u;
 #else
 	return ((uint64)clock() * 25000000u) / CLOCKS_PER_SEC;
 #endif
@@ -1290,6 +1294,39 @@ void powerpc_cpu::catch_up_timebase()
 	nw_devices_tick();
 	nw_host_tick();
 	nw_script_tick();
+#if NW_BOOT_LOG
+	/* Optional CPU-owned snapshots for diagnosing guest waits. Preview
+	 * translation touches no device and does not set guest PTE R/C bits. */
+	static const char *nk_state_path = getenv("NW_TEST_NK_STATE_PATH");
+	static uint64 nk_state_last;
+	extern int64 TimebaseSpeed;
+	if (nk_state_path && now - nk_state_last >= (uint64)(TimebaseSpeed > 0 ? TimebaseSpeed : 25000000)) {
+		nk_state_last = now;
+		std::string temporary = std::string(nk_state_path) + ".tmp";
+		FILE *f = fopen(temporary.c_str(), "w");
+		if (f) {
+			fprintf(f, "pc=%08x cr=%08x xer=%08x lr=%08x msr=%08x mode=%u depth=%d\n",
+			        pc(), cr().get(), xer().get(), lr(), ppc32_guest_mmu().msr(), ReadMacInt32(XLM_RUN_MODE), execute_depth);
+			for (unsigned r = 0; r < 32; ++r) fprintf(f, "r%u=%08x%c", r, gpr(r), r % 4 == 3 ? '\n' : ' ');
+			const uint32 bases[] = {gpr(24) - 18u, gpr(20) - 16u, gpr(1), 0x910u};
+			for (unsigned b = 0; b < 4; ++b) {
+				uint32 actual_pa = 0;
+				const bool mapped = guest_data_probe(bases[b], 1, false, &actual_pa, NULL, false);
+				fprintf(f, "data %08x mapped=%u pa=%08x mac_pa=%08x:", bases[b], mapped, actual_pa, nw_la_to_pa(bases[b]));
+				for (unsigned j = 0; j < 64; ++j) {
+					uint32 pa;
+					if (guest_data_probe(bases[b] + j, 1, false, &pa, NULL, false) &&
+					    nw_pa_kind(pa) != NW_PA_IO && nw_pa_kind(pa) != NW_PA_NONE && nw_pa_kind(pa) != NW_PA_FB)
+						fprintf(f, " %02x", vm_read_memory_1(pa));
+					else fprintf(f, " --");
+				}
+				fprintf(f, "\n");
+			}
+			fclose(f);
+			rename(temporary.c_str(), nk_state_path);
+		}
+	}
+#endif
 	if (nw_sheepblaster_tracing()) {
 		static time_t sb_last;
 		static int sb_n;
@@ -1438,6 +1475,15 @@ static bool nw_aline_dispatch_pa(uint32 pa)
 	       pa <= ROMBase + NW_EMU_ALINE_TOOL_AUTOPOP;
 }
 
+#if NW_BOOT_LOG
+/* CPU-thread-owned trap history: no guest writes or repeated callbacks.
+ * Keep only a bounded ring and emit it on SysError, so a diagnostic run
+ * records the File Manager calls preceding failure without log flooding. */
+struct nw_trap_record { uint32 trap, pc, d0, d1, a0, a1, a2, a6, sp; };
+static nw_trap_record nw_trap_history[128];
+static uint64 nw_trap_sequence;
+#endif
+
 static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
 {
 	extern uint32 ROMBase;
@@ -1449,6 +1495,14 @@ static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
 		return;
 	const uint32 trap = (ppc->gpr(29) >> 3) & 0xffffu;
 	nw_event_aline(trap, ppc->gpr(24) - 2u, h);
+#if NW_BOOT_LOG
+	static const bool keep_traps = getenv("NW_TEST_NK_STATE_PATH") != NULL;
+	if (keep_traps) {
+		nw_trap_record &r = nw_trap_history[nw_trap_sequence++ % 128];
+		r = {trap, ppc->gpr(24) - 2u, ppc->gpr(8), ppc->gpr(9),
+			ppc->gpr(16), ppc->gpr(17), ppc->gpr(18), ppc->gpr(22), ppc->gpr(1)};
+	}
+#endif
 	if (trap == 0xa9c9) {
 		static int n_syserr;
 		if (n_syserr < 16) {
@@ -1459,7 +1513,45 @@ static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
 			if (hp)
 				op = (uint16)((hp[0] << 8) | hp[1]);
 			printf("NW-BOOT SysError #%d 68k_pc=%08x opcode=%04x\n",
-			       (int)ppc->gpr(8), (unsigned)pc68, (unsigned)op);
+			       (int16)ppc->gpr(8), (unsigned)pc68, (unsigned)op);
+#if NW_BOOT_LOG
+			const char *path = getenv("NW_TEST_NK_STATE_PATH");
+			if (path && (int16)ppc->gpr(8) > 0) {
+				char dump_path[1024];
+				snprintf(dump_path, sizeof dump_path, "%s.syserr-%d", path, n_syserr);
+				FILE *f = fopen(dump_path, "w");
+				if (f) {
+					nw68_nk_state state; ppc->nw_68k_snapshot(state);
+					fprintf(f, "SysError=%d pc68=%08x ppc=%08x cr=%08x xer=%08x lr=%08x ctr=%08x\n",
+					        (int16)ppc->gpr(8), pc68, state.ppc_pc, state.cr, state.xer, state.lr, state.ctr);
+					for (unsigned r = 0; r < 32; ++r)
+						fprintf(f, "r%u=%08x%c", r, ppc->gpr(r), r % 4 == 3 ? '\n' : ' ');
+					const uint64 first_trap = nw_trap_sequence > 128 ? nw_trap_sequence - 128 : 0;
+					for (uint64 j = first_trap; j < nw_trap_sequence; ++j) {
+						const nw_trap_record &r = nw_trap_history[j % 128];
+						fprintf(f, "trap #%llu op=%04x pc=%08x d0=%08x d1=%08x a0=%08x a1=%08x a2=%08x a6=%08x sp=%08x\n",
+							(unsigned long long)j, r.trap, r.pc, r.d0, r.d1, r.a0, r.a1, r.a2, r.a6, r.sp);
+					}
+					const uint32 roots[] = {pc68, pc68 - 4096u, 0u, ppc->gpr(1), ppc->gpr(1) + 4096u,
+						ppc->gpr(16), ppc->gpr(17), ppc->gpr(18), ppc->gpr(19), ppc->gpr(20), ppc->gpr(21), ppc->gpr(22)};
+					for (unsigned r = 0; r < sizeof roots / sizeof roots[0]; ++r) {
+						const uint32 base = roots[r] & ~4095u;
+						bool duplicate = false;
+						for (unsigned j = 0; j < r; ++j) duplicate |= (roots[j] & ~4095u) == base;
+						if (duplicate) continue;
+						for (unsigned offset = 0; offset < 4096; offset += 4) {
+							if (!(offset & 31)) fprintf(f, "\n%08x:", base + offset);
+							uint32 physical;
+							if (ppc->guest_data_probe(base + offset, 4, false, &physical, NULL, false) &&
+							    nw_pa_kind(physical) != NW_PA_IO && nw_pa_kind(physical) != NW_PA_NONE && nw_pa_kind(physical) != NW_PA_FB)
+								fprintf(f, " %08x", vm_read_memory_4(physical));
+							else fprintf(f, " --------");
+						}
+					}
+					fputc('\n', f); fclose(f);
+				}
+			}
+#endif
 			fflush(stdout);
 		}
 	}
@@ -1549,7 +1641,7 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 }
 
 bool powerpc_cpu::guest_data_probe(uint32 ea, unsigned width, bool is_store, uint32 *pa,
-				  int *via_bat)
+				  int *via_bat, bool record_access)
 {
 	if (!ppc32_guest_mmu_enabled()) {
 		*pa = ea;
@@ -1557,7 +1649,7 @@ bool powerpc_cpu::guest_data_probe(uint32 ea, unsigned width, bool is_store, uin
 			*via_bat = 0;
 		return true;
 	}
-	ppc32_xlate_result r = ppc32_guest_mmu().translate(ea, PPC32_XLATE_DR, width, is_store);
+	ppc32_xlate_result r = ppc32_guest_mmu().translate(ea, PPC32_XLATE_DR, width, is_store, record_access);
 	if (r.ok) {
 		*pa = r.pa;
 		if (via_bat)
@@ -1891,6 +1983,13 @@ void powerpc_registers::interrupt_copy(powerpc_registers &oregs, powerpc_registe
 bool powerpc_cpu::check_spcflags()
 {
 	if (spcflags().test(SPCFLAG_CPU_EXEC_RETURN)) {
+#if defined(SHEEPSHAVER) && NW_BOOT_LOG
+		if (execute_depth <= 1) {
+			printf("NW-BOOT CPU outer execution-return pc=%08x r24=%08x r29=%08x r1=%08x cr=%08x mode=%u\n",
+			       pc(), gpr(24), gpr(29), gpr(1), cr().get(), ReadMacInt32(XLM_RUN_MODE));
+			fflush(stdout);
+		}
+#endif
 		spcflags().clear(SPCFLAG_CPU_EXEC_RETURN);
 		return false;
 	}
@@ -2413,6 +2512,7 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 		return NULL;
 	if (cpu->pc != chain_pc || cpu->fault)
 		return NULL;
+	if (nw_68k_wants_boundary(cpu->pc)) return NULL;
 	if (ppc->async_exception_pending() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE))
 		return NULL;
@@ -2436,6 +2536,9 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 		return NULL;
 	if (f2 && !(hmsr & ppc32_mmu::MSR_FP))
 		return NULL;
+	nw_68k_reference_chain(cpu->pc,
+		(cpu->gpr_live & (1u << 24) ? cpu->gpr[24] : ppc->gpr(24)) - 2u,
+		cpu->gpr_live & (1u << 29) ? cpu->gpr[29] : ppc->gpr(29));
 	nw_commit_gpr(cpu, ppc);
 	nw_pull_gpr(cpu, ppc, sg);
 	ppc->cr().set(cpu->cr);
@@ -3474,6 +3577,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 				nw_jit_note_hop_stop(NW_JIT_HOP_PC_MISMATCH);
 				break;
 			}
+			if (nw_68k_wants_boundary(jc.pc)) break;
 			/* Re-read MSR: hop 1 may have run mtmsr/rfi via a host
 			 * helper, which changes both the class gate and the key. */
 			const uint32 hmsr = ppc32_guest_mmu().msr();
@@ -3515,6 +3619,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			jc.dec_wr = 0;
 			jc.dec = dec_;
 			pc() = jc.pc;
+			nw_68k_reference_chain(jc.pc, gpr(24) - 2u, gpr(29));
 			nw_pull_gpr(&jc, this, sg);
 			if (f2) {
 				nw_pull_fpr(&jc, this, sf ? sf : 0xffffffffu, fpscr());
@@ -3803,38 +3908,16 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 }
 #endif
 
-int powerpc_cpu::nw_68k_jit_step(uint32 entry, uint32 *landed)
+void powerpc_cpu::nw_68k_snapshot(nw68_nk_state &s) const
 {
-	pc() = entry;
-	if (landed)
-		*landed = entry;
-	if (ppc32_guest_mmu_enabled()) {
-		tick_decrementer();
-		if (async_exception_pending() &&
-		    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE)) {
-			take_async_exception();
-			if (landed)
-				*landed = pc();
-			return 0;
-		}
-	}
-	uint32 opcode;
-	if (!guest_fetch(&opcode)) {
-		if (landed)
-			*landed = pc();
-		return 0;
-	}
-	/* The compiled handler runs through its bclr. chain_pc stays 0 for
-	 * bclr and bcctr, so the hop loop returns here instead of following
-	 * LR or CTR. */
-	if (!nw_jit_try(opcode)) {
-		if (landed)
-			*landed = pc();
-		return 0;
-	}
-	if (landed)
-		*landed = pc();
-	return 1;
+	for (unsigned i = 0; i < 32; ++i) s.gpr[i] = gpr(i);
+	s.cr = cr().get(); s.xer = xer().get(); s.lr = lr(); s.ctr = ctr(); s.ppc_pc = pc();
+}
+
+void powerpc_cpu::nw_68k_restore(const nw68_nk_state &s)
+{
+	for (unsigned i = 0; i < 32; ++i) gpr(i) = s.gpr[i];
+	cr().set(s.cr); xer().set(s.xer); lr() = s.lr; ctr() = s.ctr; pc() = s.ppc_pc;
 }
 
 void powerpc_cpu::execute(uint32 entry)
@@ -3987,9 +4070,7 @@ void powerpc_cpu::execute(uint32 entry)
 	do_interpret:
 	for (;;) {
 #ifdef SHEEPSHAVER
-		if (nw_68k_stop_one(pc(), execute_depth))
-			goto return_site;
-		nw_68k_hist_note(pc(), gpr(24));
+		nw_68k_observe(this, pc(), execute_depth);
 #endif
 		uint32 opcode;
 		if (ppc32_guest_mmu_enabled()) {
@@ -4010,6 +4091,14 @@ void powerpc_cpu::execute(uint32 entry)
 			}
 #endif
 		}
+#ifdef SHEEPSHAVER
+		/* Native 68k returns after at most eight register instructions.
+		 * Normal guest execution and Execute68k share this event boundary. */
+		if (nw_68k_dispatch(this)) {
+			if (!spcflags().empty() && !check_spcflags()) goto return_site;
+			continue;
+		}
+#endif
 		if (!guest_fetch(&opcode)) {
 			if (!spcflags().empty() && !check_spcflags())
 				goto return_site;
@@ -4020,16 +4109,25 @@ void powerpc_cpu::execute(uint32 entry)
 		 * before a shared-folder host callback. Never force an EOI. Disabled
 		 * unless explicitly requested in a diagnostic build's environment. */
 		if (ppc32_guest_mmu_enabled() &&
-		    opcode == (POWERPC_EMUL_OP | (OP_EXTFS_HFS + 3u))) {
+		    (opcode == (POWERPC_EMUL_OP | (OP_EXTFS_HFS + 3u)) ||
+		     (opcode == (POWERPC_EMUL_OP | 1u) && pc() == 0x680ff208u))) {
 			static unsigned requested = []() -> unsigned {
 				const char *s = getenv("NW_TEST_EXTFS_IRQS");
 				return s ? (unsigned)strtoul(s, NULL, 10) : 0u;
 			}();
 			static unsigned injected;
+			static unsigned return_requested = []() -> unsigned {
+				const char *s = getenv("NW_TEST_RETURN_IRQS");
+				return s ? (unsigned)strtoul(s, NULL, 10) : 0u;
+			}();
+			static unsigned return_injected;
+			const bool at_return = opcode == (POWERPC_EMUL_OP | 1u);
+			unsigned &delivered = at_return ? return_injected : injected;
+			const unsigned limit = at_return ? return_requested : requested;
 			static uint64_t last;
-			const uint64_t now = requested ? GetTicks_usec() : 0;
+			const uint64_t now = limit ? GetTicks_usec() : 0;
 			struct nw_pic_service service;
-			if (injected < requested && now - last >= 1000000 &&
+			if (delivered < limit && now - last >= 1000000 &&
 			    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE) &&
 			    ReadMacInt8(0x910) == 6 && ReadMacInt32(0x911) == 0x46696e64u &&
 			    !nw_pic_service_snapshot(&service) &&
@@ -4037,8 +4135,9 @@ void powerpc_cpu::execute(uint32 entry)
 				nw_openpic_set_irq(NW_VBL_IRQ, 1);
 				if (nw_io_ext_irq) {
 					last = now;
-					printf("NW-BOOT G1: irq-test extfs injection=%u pc=%08x cr=%08x\n",
-					       ++injected, (unsigned)pc(), (unsigned)cr().get());
+					printf("NW-BOOT G1: irq-test %s injection=%u pc=%08x cr=%08x\n",
+					       at_return ? "return" : "extfs", ++delivered,
+					       (unsigned)pc(), (unsigned)cr().get());
 					fflush(stdout);
 					take_external();
 					continue;
@@ -4059,7 +4158,9 @@ void powerpc_cpu::execute(uint32 entry)
 			continue;
 		}
 #ifdef SHEEPSHAVER
-		if (nw_jit_try(opcode)) {
+		/* Verification needs exactly one NK handler. PPC block chaining can
+		 * cross several 68k boundaries before the loop's stop hook runs. */
+		if (!nw_68k_reference_active(this) && nw_jit_try(opcode)) {
 			if (!spcflags().empty() && !check_spcflags())
 				goto return_site;
 			continue;
@@ -4094,6 +4195,9 @@ void powerpc_cpu::execute(uint32 entry)
 			goto return_site;
 	}
   return_site:
+#ifdef SHEEPSHAVER
+	nw_68k_end_execution(this, execute_depth);
+#endif
 	// Tell upper level we invalidated cache?
 	if (invalidated_cache)
 		spcflags().set(SPCFLAG_JIT_EXEC_RETURN);

@@ -1011,7 +1011,7 @@ int main(int argc, char **argv)
 #ifdef USE_MACOS_VIDEO
 	{
 		extern std::string UserPrefsPath;
-		if (UserPrefsPath.empty()) {
+		if (UserPrefsPath.empty() && vmdir == NULL) {
 			const char *chosen = SheepHostWaitForConfig();
 			if (chosen && chosen[0])
 				UserPrefsPath = chosen;

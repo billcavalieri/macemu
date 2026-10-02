@@ -61,7 +61,7 @@ prefs_desc common_prefs_items[] = {
 	{"ignoreillegal", TYPE_BOOLEAN, false, "ignore illegal instructions"},
 	{"jit", TYPE_BOOLEAN, false,        "enable JIT compiler"},
 	{"jit68k", TYPE_BOOLEAN, false,     "enable 68k DR emulator"},
-	{"jit68k_host", TYPE_BOOLEAN, false, "opt-in host 68k fallback JIT"},
+	{"jit68k_host", TYPE_BOOLEAN, false, "enable New World direct ARM64 68k JIT"},
 	{"keyboardtype", TYPE_INT32, false, "hardware keyboard type"},
 	{"hardcursor", TYPE_BOOLEAN, false, "hardware mouse cursor"},
 	{"hotkey", TYPE_INT32, false,       "hotkey modifier"},
@@ -115,7 +115,7 @@ void AddPrefsDefaults(void)
 	PrefsAddBool("jit", false);
 #endif
 	PrefsAddBool("jit68k", false);
-	PrefsAddBool("jit68k_host", false);
+	PrefsAddBool("jit68k_host", true);
 
 	PrefsAddInt32("keyboardtype", 5);
 	PrefsAddString("mouse", "absolute");
