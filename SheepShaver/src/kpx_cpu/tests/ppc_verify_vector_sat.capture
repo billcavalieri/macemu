@@ -1,0 +1,202 @@
+NW-PPC-VERIFY 2
+pc 00147080 bits 1000 n 1
+fault 0 00000000 0 0
+cached_first 00000000
+reservation 0 00000000 0 00000000 0 00000000
+op 10210f88
+state cr xer fpscr lr ctr dec msr vscr
+input 12345678 e1234567 00000000 00000000 00000000 000003e8 02000000 00010000
+reference 12345678 e1234567 00000000 00000000 00000000 000003e8 02000000 00010001 pc 00147084
+native 12345678 e1234567 00000000 00000000 00000000 000003e8 02000000 00010000 pc 00147084
+gpr 0 12340000 12340000 12340000
+fpr 0 0000000000000000 0000000000000000 0000000000000000
+vr 0 0 7fffffff 7fffffff 7fffffff
+vr 0 1 7fffffff 7fffffff 7fffffff
+vr 0 2 7fffffff 7fffffff 7fffffff
+vr 0 3 7fffffff 7fffffff 7fffffff
+gpr 1 12340001 12340001 12340001
+fpr 1 0000000000000000 0000000000000000 0000000000000000
+vr 1 0 7fffffff 00000000 00000000
+vr 1 1 7fffffff 00000000 00000000
+vr 1 2 7fffffff 00000000 00000000
+vr 1 3 7fffffff 7fffffff 7fffffff
+gpr 2 12340002 12340002 12340002
+fpr 2 0000000000000000 0000000000000000 0000000000000000
+vr 2 0 7fffffff 7fffffff 7fffffff
+vr 2 1 7fffffff 7fffffff 7fffffff
+vr 2 2 7fffffff 7fffffff 7fffffff
+vr 2 3 7fffffff 7fffffff 7fffffff
+gpr 3 12340003 12340003 12340003
+fpr 3 0000000000000000 0000000000000000 0000000000000000
+vr 3 0 7fffffff 7fffffff 7fffffff
+vr 3 1 7fffffff 7fffffff 7fffffff
+vr 3 2 7fffffff 7fffffff 7fffffff
+vr 3 3 7fffffff 7fffffff 7fffffff
+gpr 4 12340004 12340004 12340004
+fpr 4 0000000000000000 0000000000000000 0000000000000000
+vr 4 0 7fffffff 7fffffff 7fffffff
+vr 4 1 7fffffff 7fffffff 7fffffff
+vr 4 2 7fffffff 7fffffff 7fffffff
+vr 4 3 7fffffff 7fffffff 7fffffff
+gpr 5 12340005 12340005 12340005
+fpr 5 0000000000000000 0000000000000000 0000000000000000
+vr 5 0 7fffffff 7fffffff 7fffffff
+vr 5 1 7fffffff 7fffffff 7fffffff
+vr 5 2 7fffffff 7fffffff 7fffffff
+vr 5 3 7fffffff 7fffffff 7fffffff
+gpr 6 12340006 12340006 12340006
+fpr 6 0000000000000000 0000000000000000 0000000000000000
+vr 6 0 7fffffff 7fffffff 7fffffff
+vr 6 1 7fffffff 7fffffff 7fffffff
+vr 6 2 7fffffff 7fffffff 7fffffff
+vr 6 3 7fffffff 7fffffff 7fffffff
+gpr 7 12340007 12340007 12340007
+fpr 7 0000000000000000 0000000000000000 0000000000000000
+vr 7 0 7fffffff 7fffffff 7fffffff
+vr 7 1 7fffffff 7fffffff 7fffffff
+vr 7 2 7fffffff 7fffffff 7fffffff
+vr 7 3 7fffffff 7fffffff 7fffffff
+gpr 8 12340008 12340008 12340008
+fpr 8 0000000000000000 0000000000000000 0000000000000000
+vr 8 0 7fffffff 7fffffff 7fffffff
+vr 8 1 7fffffff 7fffffff 7fffffff
+vr 8 2 7fffffff 7fffffff 7fffffff
+vr 8 3 7fffffff 7fffffff 7fffffff
+gpr 9 12340009 12340009 12340009
+fpr 9 0000000000000000 0000000000000000 0000000000000000
+vr 9 0 7fffffff 7fffffff 7fffffff
+vr 9 1 7fffffff 7fffffff 7fffffff
+vr 9 2 7fffffff 7fffffff 7fffffff
+vr 9 3 7fffffff 7fffffff 7fffffff
+gpr 10 1234000a 1234000a 1234000a
+fpr 10 0000000000000000 0000000000000000 0000000000000000
+vr 10 0 7fffffff 7fffffff 7fffffff
+vr 10 1 7fffffff 7fffffff 7fffffff
+vr 10 2 7fffffff 7fffffff 7fffffff
+vr 10 3 7fffffff 7fffffff 7fffffff
+gpr 11 1234000b 1234000b 1234000b
+fpr 11 0000000000000000 0000000000000000 0000000000000000
+vr 11 0 7fffffff 7fffffff 7fffffff
+vr 11 1 7fffffff 7fffffff 7fffffff
+vr 11 2 7fffffff 7fffffff 7fffffff
+vr 11 3 7fffffff 7fffffff 7fffffff
+gpr 12 1234000c 1234000c 1234000c
+fpr 12 0000000000000000 0000000000000000 0000000000000000
+vr 12 0 7fffffff 7fffffff 7fffffff
+vr 12 1 7fffffff 7fffffff 7fffffff
+vr 12 2 7fffffff 7fffffff 7fffffff
+vr 12 3 7fffffff 7fffffff 7fffffff
+gpr 13 1234000d 1234000d 1234000d
+fpr 13 0000000000000000 0000000000000000 0000000000000000
+vr 13 0 7fffffff 7fffffff 7fffffff
+vr 13 1 7fffffff 7fffffff 7fffffff
+vr 13 2 7fffffff 7fffffff 7fffffff
+vr 13 3 7fffffff 7fffffff 7fffffff
+gpr 14 1234000e 1234000e 1234000e
+fpr 14 0000000000000000 0000000000000000 0000000000000000
+vr 14 0 7fffffff 7fffffff 7fffffff
+vr 14 1 7fffffff 7fffffff 7fffffff
+vr 14 2 7fffffff 7fffffff 7fffffff
+vr 14 3 7fffffff 7fffffff 7fffffff
+gpr 15 1234000f 1234000f 1234000f
+fpr 15 0000000000000000 0000000000000000 0000000000000000
+vr 15 0 7fffffff 7fffffff 7fffffff
+vr 15 1 7fffffff 7fffffff 7fffffff
+vr 15 2 7fffffff 7fffffff 7fffffff
+vr 15 3 7fffffff 7fffffff 7fffffff
+gpr 16 12340010 12340010 12340010
+fpr 16 0000000000000000 0000000000000000 0000000000000000
+vr 16 0 7fffffff 7fffffff 7fffffff
+vr 16 1 7fffffff 7fffffff 7fffffff
+vr 16 2 7fffffff 7fffffff 7fffffff
+vr 16 3 7fffffff 7fffffff 7fffffff
+gpr 17 12340011 12340011 12340011
+fpr 17 0000000000000000 0000000000000000 0000000000000000
+vr 17 0 7fffffff 7fffffff 7fffffff
+vr 17 1 7fffffff 7fffffff 7fffffff
+vr 17 2 7fffffff 7fffffff 7fffffff
+vr 17 3 7fffffff 7fffffff 7fffffff
+gpr 18 12340012 12340012 12340012
+fpr 18 0000000000000000 0000000000000000 0000000000000000
+vr 18 0 7fffffff 7fffffff 7fffffff
+vr 18 1 7fffffff 7fffffff 7fffffff
+vr 18 2 7fffffff 7fffffff 7fffffff
+vr 18 3 7fffffff 7fffffff 7fffffff
+gpr 19 12340013 12340013 12340013
+fpr 19 0000000000000000 0000000000000000 0000000000000000
+vr 19 0 7fffffff 7fffffff 7fffffff
+vr 19 1 7fffffff 7fffffff 7fffffff
+vr 19 2 7fffffff 7fffffff 7fffffff
+vr 19 3 7fffffff 7fffffff 7fffffff
+gpr 20 12340014 12340014 12340014
+fpr 20 0000000000000000 0000000000000000 0000000000000000
+vr 20 0 7fffffff 7fffffff 7fffffff
+vr 20 1 7fffffff 7fffffff 7fffffff
+vr 20 2 7fffffff 7fffffff 7fffffff
+vr 20 3 7fffffff 7fffffff 7fffffff
+gpr 21 12340015 12340015 12340015
+fpr 21 0000000000000000 0000000000000000 0000000000000000
+vr 21 0 7fffffff 7fffffff 7fffffff
+vr 21 1 7fffffff 7fffffff 7fffffff
+vr 21 2 7fffffff 7fffffff 7fffffff
+vr 21 3 7fffffff 7fffffff 7fffffff
+gpr 22 12340016 12340016 12340016
+fpr 22 0000000000000000 0000000000000000 0000000000000000
+vr 22 0 7fffffff 7fffffff 7fffffff
+vr 22 1 7fffffff 7fffffff 7fffffff
+vr 22 2 7fffffff 7fffffff 7fffffff
+vr 22 3 7fffffff 7fffffff 7fffffff
+gpr 23 12340017 12340017 12340017
+fpr 23 0000000000000000 0000000000000000 0000000000000000
+vr 23 0 7fffffff 7fffffff 7fffffff
+vr 23 1 7fffffff 7fffffff 7fffffff
+vr 23 2 7fffffff 7fffffff 7fffffff
+vr 23 3 7fffffff 7fffffff 7fffffff
+gpr 24 12340018 12340018 12340018
+fpr 24 0000000000000000 0000000000000000 0000000000000000
+vr 24 0 7fffffff 7fffffff 7fffffff
+vr 24 1 7fffffff 7fffffff 7fffffff
+vr 24 2 7fffffff 7fffffff 7fffffff
+vr 24 3 7fffffff 7fffffff 7fffffff
+gpr 25 12340019 12340019 12340019
+fpr 25 0000000000000000 0000000000000000 0000000000000000
+vr 25 0 7fffffff 7fffffff 7fffffff
+vr 25 1 7fffffff 7fffffff 7fffffff
+vr 25 2 7fffffff 7fffffff 7fffffff
+vr 25 3 7fffffff 7fffffff 7fffffff
+gpr 26 1234001a 1234001a 1234001a
+fpr 26 0000000000000000 0000000000000000 0000000000000000
+vr 26 0 7fffffff 7fffffff 7fffffff
+vr 26 1 7fffffff 7fffffff 7fffffff
+vr 26 2 7fffffff 7fffffff 7fffffff
+vr 26 3 7fffffff 7fffffff 7fffffff
+gpr 27 1234001b 1234001b 1234001b
+fpr 27 0000000000000000 0000000000000000 0000000000000000
+vr 27 0 7fffffff 7fffffff 7fffffff
+vr 27 1 7fffffff 7fffffff 7fffffff
+vr 27 2 7fffffff 7fffffff 7fffffff
+vr 27 3 7fffffff 7fffffff 7fffffff
+gpr 28 1234001c 1234001c 1234001c
+fpr 28 0000000000000000 0000000000000000 0000000000000000
+vr 28 0 7fffffff 7fffffff 7fffffff
+vr 28 1 7fffffff 7fffffff 7fffffff
+vr 28 2 7fffffff 7fffffff 7fffffff
+vr 28 3 7fffffff 7fffffff 7fffffff
+gpr 29 1234001d 1234001d 1234001d
+fpr 29 0000000000000000 0000000000000000 0000000000000000
+vr 29 0 7fffffff 7fffffff 7fffffff
+vr 29 1 7fffffff 7fffffff 7fffffff
+vr 29 2 7fffffff 7fffffff 7fffffff
+vr 29 3 7fffffff 7fffffff 7fffffff
+gpr 30 1234001e 1234001e 1234001e
+fpr 30 0000000000000000 0000000000000000 0000000000000000
+vr 30 0 7fffffff 7fffffff 7fffffff
+vr 30 1 7fffffff 7fffffff 7fffffff
+vr 30 2 7fffffff 7fffffff 7fffffff
+vr 30 3 7fffffff 7fffffff 7fffffff
+gpr 31 1234001f 1234001f 1234001f
+fpr 31 0000000000000000 0000000000000000 0000000000000000
+vr 31 0 7fffffff 7fffffff 7fffffff
+vr 31 1 7fffffff 7fffffff 7fffffff
+vr 31 2 7fffffff 7fffffff 7fffffff
+vr 31 3 7fffffff 7fffffff 7fffffff

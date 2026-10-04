@@ -57,6 +57,9 @@
 #include "user_strings.h"
 #include "sys.h"
 #include "disk_unix.h"
+#if defined(SHEEPSHAVER) && EMULATED_PPC
+#include "nw_jit.h"
+#endif
 
 #if defined(BINCUE)
 #include "bincue.h"
@@ -799,7 +802,7 @@ static size_t sys_pwrite_all(int fd, void *buffer, loff_t offset, size_t length)
  *  returns number of bytes read (or 0)
  */
 
-size_t Sys_read(void *arg, void *buffer, loff_t offset, size_t length)
+static size_t sys_read_data(void *arg, void *buffer, loff_t offset, size_t length)
 {
 	mac_file_handle *fh = (mac_file_handle *)arg;
 	if (!fh)
@@ -814,6 +817,17 @@ size_t Sys_read(void *arg, void *buffer, loff_t offset, size_t length)
 		return fh->generic_disk->read(buffer, offset, length);
 
 	return sys_pread_all(fh->fd, buffer, offset + fh->start_byte, length);
+}
+
+size_t Sys_read(void *arg, void *buffer, loff_t offset, size_t length)
+{
+    const size_t actual = sys_read_data(arg,buffer,offset,length);
+#if defined(SHEEPSHAVER) && EMULATED_PPC
+    // Publish every byte that changed, including a short read. Disk/CD
+    // callers pass raw guest buffers and cannot rely on accessor notifications.
+    if (actual) nw_jit_host_memory_written(buffer,uint32_t(actual));
+#endif
+    return actual;
 }
 
 

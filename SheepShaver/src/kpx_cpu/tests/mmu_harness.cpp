@@ -23,6 +23,7 @@
 #include <string.h>
 #include <time.h>
 #include <fenv.h>
+#include <unistd.h>
 #include "cpu/ppc/ppc-fp-environment.hpp"
 #include <vector>
 
@@ -735,12 +736,12 @@ static const struct jit_av_case jit_av_sweep_cases[] = {
 	{ "vsum4sbs", JIT_AV_VX, 4, 1800 },
 	{ "vsum4shs", JIT_AV_VX, 4, 1608 },
 	{ "vsum4ubs", JIT_AV_VX, 4, 1544 },
-	{ "vupkhpx", JIT_AV_VX, 4, 846 },
-	{ "vupkhsb", JIT_AV_VX, 4, 526 },
-	{ "vupkhsh", JIT_AV_VX, 4, 590 },
-	{ "vupklpx", JIT_AV_VX, 4, 974 },
-	{ "vupklsb", JIT_AV_VX, 4, 654 },
-	{ "vupklsh", JIT_AV_VX, 4, 718 },
+	{ "vupkhpx", JIT_AV_VX_VB, 4, 846 },
+	{ "vupkhsb", JIT_AV_VX_VB, 4, 526 },
+	{ "vupkhsh", JIT_AV_VX_VB, 4, 590 },
+	{ "vupklpx", JIT_AV_VX_VB, 4, 974 },
+	{ "vupklsb", JIT_AV_VX_VB, 4, 654 },
+	{ "vupklsh", JIT_AV_VX_VB, 4, 718 },
 };
 enum { JIT_AV_SWEEP_N = (int)(sizeof(jit_av_sweep_cases)/sizeof(jit_av_sweep_cases[0])) };
 /* === end G2 helpers === */
@@ -2109,7 +2110,10 @@ int main()
 		nw_io_write(0xff004000u, 1, NW_FLASH_CMD_READ_ARRAY, 0);
 
 		/* a commit: erase bank B, program a generation-5 image, persist, come back */
-		static const char *path = "/tmp/nw-nvram-harness.flash";
+		char path[] = "/tmp/nw-nvram-harness-XXXXXX";
+		const int fixture_fd = mkstemp(path);
+		CHECK(fixture_fd >= 0);
+		if (fixture_fd >= 0) close(fixture_fd);
 		remove(path);
 		nw_io_reset();
 		nw_nvram_init(path);
@@ -2878,6 +2882,21 @@ int main()
 				CHECK(nw_jit_itlb_lookup(0x1000u, &ipa) == 1);
 				nw_jit_mtsr_note(0, 0x00000100u, 0x00000200u); /* VSID change */
 				CHECK(nw_jit_itlb_lookup(0x1000u, &ipa) == 0);
+			}
+
+			/* Fetch context changes must invalidate sticky and table entries.
+			 * DR/EE/FP alone do not change instruction translation rights. */
+			for (unsigned old_context = 0; old_context < 4; ++old_context)
+			for (unsigned new_context = 0; new_context < 4; ++new_context)
+			for (unsigned sticky = 0; sticky < 2; ++sticky) {
+				const uint32_t old_msr = ((old_context & 1) ? 0x20u : 0) | ((old_context & 2) ? 0x4000u : 0);
+				const uint32_t new_msr = ((new_context & 1) ? 0x20u : 0) | ((new_context & 2) ? 0x4000u : 0) | 0xa010u;
+				nw_jit_itlb_flush(); nw_jit_itlb_fill(0x1000u,0x2000u);
+				if (!sticky) nw_jit_itlb_fill(0x4000u,0x5000u);
+				nw_jit_itlb_note_msr(old_msr,new_msr);
+				uint32_t ipa = 0xdeadbeefu;
+				CHECK(nw_jit_itlb_lookup(0x1004u,&ipa) == (old_context == new_context));
+				CHECK(ipa == (old_context == new_context ? 0x2004u : 0xdeadbeefu));
 			}
 
 			/* DTLB SR v2: T-bit noise does not miss; VSID change does */
@@ -4539,7 +4558,7 @@ int main()
 			int16_t cd = 0;
 			CHECK(nw_jit_cache_get(0x2000u, 0x2900u, 0, 0, &cn, NULL, NULL, &ch,
 					       NULL, &cd) == cfn);
-			CHECK(ch == 0x2904u);
+			CHECK(ch == NW_JIT_CHAIN_DYNAMIC);
 			CHECK(cd == 16);
 			cops[0] = nw_ppc_bclr(NW_PPC_BO_ALWAYS, 0);
 			cfn = nw_jit_compile(cops, 1, 0x2a00u, 0x2000u, 0, 0);
@@ -4548,7 +4567,7 @@ int main()
 			ch = 0xffffu;
 			CHECK(nw_jit_cache_get(0x2000u, 0x2a00u, 0, 0, &cn, NULL, NULL, &ch,
 					       NULL, &cd) == cfn);
-			CHECK(ch == 0);
+			CHECK(ch == NW_JIT_CHAIN_DYNAMIC);
 			CHECK(cd == 1);
 			cops[0] = nw_ppc_bcctr(NW_PPC_BO_ALWAYS, 0);
 			cfn = nw_jit_compile(cops, 1, 0x2b00u, 0x2000u, 0, 0);
@@ -6949,8 +6968,8 @@ int main()
 		CHECK(nw_jit_op_supported(nw_ppc_lhzux(4, 1, 2)));
 		CHECK(!nw_jit_op_supported(nw_ppc_lhzux(4, 0, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_stbux(3, 1, 2)));
-		CHECK(nw_jit_op_ends_block(nw_ppc_vslo(3, 1, 2)));
-		CHECK(nw_jit_op_ends_block(nw_ppc_vsro(3, 1, 2)));
+		CHECK(!nw_jit_op_ends_block(nw_ppc_vslo(3, 1, 2)));
+		CHECK(!nw_jit_op_ends_block(nw_ppc_vsro(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_vslb(3, 1, 2)));
 		CHECK(nw_jit_op_supported(nw_ppc_mulhw(4, 3, 5, 1)));
 		CHECK(nw_jit_op_supported(nw_ppc_lhzx(3, 1, 2)));
@@ -7194,7 +7213,12 @@ int main()
 			switch (c->kind) {
 			case JIT_AV_SPLAT_S: op = jit_av_encode(c, 3, 5, 0, 0); break;
 			case JIT_AV_SPLAT_U: op = jit_av_encode(c, 3, 2, 1, 0); break;
-			case JIT_AV_VX_VB:   op = jit_av_encode(c, 3, 0, 1, 0); break;
+			case JIT_AV_VX_VB:
+                op = jit_av_encode(c, 3, 0, 1, 0);
+                // Unary vector encodings require vA=0. Reject the old sweep's
+                // malformed form as well as executing the canonical one.
+                CHECK(!nw_jit_op_supported(op | (1u<<16)));
+                break;
 			case JIT_AV_MFVSCR:  op = jit_av_encode(c, 3, 0, 0, 0); break;
 			case JIT_AV_MTVSCR:  op = jit_av_encode(c, 0, 0, 2, 0); break;
 			default:             op = jit_av_encode(c, 3, 1, 2, 4); break;

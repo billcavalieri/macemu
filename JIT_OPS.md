@@ -1,6 +1,6 @@
 # SheepShaver NW JIT — opcode checklist
 
-Generated **2026-09-21** from `powerpc_ii_table` in `SheepShaver/src/kpx_cpu/src/cpu/ppc/ppc-decode.cpp` (345 names) against `nw_jit_op_supported` / `nw_jit_op_ends_block` in `SheepShaver/src/nw_jit.cpp`.
+Generated **2026-10-03** from `powerpc_ii_table` in `SheepShaver/src/kpx_cpu/src/cpu/ppc/ppc-decode.cpp` (345 names) against `nw_jit_op_supported` / `nw_jit_op_ends_block` in `SheepShaver/src/nw_jit.cpp`.
 
 Regenerate: `python3 tools/gen_jit_ops_md.py` (ports `nw_jit_op_supported` against `powerpc_ii_table`).
 
@@ -8,21 +8,60 @@ Regenerate: `python3 tools/gen_jit_ops_md.py` (ports `nw_jit_op_supported` again
 
 | Mark | Meaning |
 |------|---------|
-| `[x]` | **done** — representative encoding(s) pass the allowlist; no known form caveat; AltiVec name referenced in `nw_jit.cpp` |
-| `[~]` | **partial** — allowlisted with a form caveat (Rc, RA≠0, BO, AA, ends_block), or AltiVec XO hit without a named emit reference |
+| `[x]` | **accepted** — sampled encodings pass the allowlist, including applicable OE/Rc combinations; independent conformance is tracked above |
+| `[~]` | **partial** — sampled form rejected (OE, Rc, RA, BO, AA) or an explicit execution/form caveat remains |
 | `[ ]` | **todo** — not in `nw_jit_op_supported` (falls to interpreter / `skip_unsup`) |
 | `[-]` | **exclude** — do not mill |
 
 **Wave** follows the mill-everything plan (W1 hot partials → W7 AltiVec FP → W8 sweep).
 
-A checked box means the JIT **will attempt** the op. It is not a forever VERIFY sign-off.
+The generated opcode marks describe dispatch coverage. Acceptance does not establish architectural correctness, independent verification, direct ARM64 emission, or unrestricted chaining. The separate qualification ledger records that work.
+
+<!-- PPC-JIT-REVISIT-BEGIN -->
+## Revisit and qualification checklist
+
+Updated October 3, 2026. Generated rows below describe accepted encodings; this ledger tracks implementation, independent correctness and production restrictions separately. Regeneration preserves this section. The implementation evidence is in [NW-PPC-JIT-PLAN.md](NW-PPC-JIT-PLAN.md).
+
+- [x] **P1 — OE encoding inventory:** the generator now probes OE=0/1 × Rc=0/1 for every applicable XO form. Its Python support model agrees with the actual C allowlist for 6,555 sampled encodings across 345 names. This is policy parity, not ISA conformance or exhaustive encoding validation.
+- [x] **P1 — Missing overflow forms:** implemented `nego`, `addmeo`, `addzeo`, `subfmeo`, `subfzeo` and their record forms. Literal result/XER CA/OV/sticky SO/CR0 checks cover incoming flags, r0 sources, source/destination aliases, KPX/local-C/ARM64/private replay and mixed production native/C chains with pending DEC stops. Debug and Release initially pass 673,364 core checks; four MMU runs each pass 34,585. The subsequent vector snapshot includes these changes and passes the cloned-guest integration run below; guest comparison counts are not per-opcode coverage.
+- [ ] **Shared instruction metadata:** replace the separately maintained Python/C policies with one descriptor for encoding constraints, masks, execution class, effects and generated coverage/tests. Thirty-five VMX fixed-zero constraints are now shared, with automatic C/Python policy comparison; the whole-ISA descriptor remains open. Keep accepted names and architectural qualification separate.
+- [x] **P2 — Selected integer VMX and vector memory replay:** 41 named integer/permutation/VSCR forms and 12 vector memory/shift-mask forms now use private state and ordered observations. Fixed missing sticky SAT updates in `vsumsws`, `vmsumshs` and `vpkswss`. KPX/local-C/ARM64/replay comparisons cover all 15 operand-alias topologies, adversarial lanes, SAT/CR state, logical aliases, permission/SMC exits, destructive devices, malformed tapes and selected integer/vector chain transitions. Debug/Release with vector inlining off/on each pass 6,749,555 core checks plus three 205-check captures; four MMU runs each pass 34,585. The cloned guest completes 300 desktop seconds with 549.3 million PPC block comparisons and zero mismatches, 16 mouse targets, 20 interrupts and a shared-file write. Per-opcode qualification comes from the host fixtures, not the aggregate guest count.
+- [x] **P2 — Remaining integer VMX delegation:** replaced live-CPU delegation for 83 more integer names (90 forms including record variants) with private, staged register execution. All 131 integer/permutation/VSCR forms now pass KPX/local-C/ARM64/replay comparisons across 15 alias topologies and 16 lane patterns. Added 28 literal ISA boundary cases, all 2,048 decoder-slot classification checks and adversarial host-callback isolation checks. Four Debug/Release/vector-inline configurations each pass 37,923,491 core checks and three 205-check captures; four MMU runs each pass 34,585. ASan/UBSan private-kernel stress passes 132,480 executions. The cloned guest completes 300 desktop seconds, 16 mouse targets, 20 interrupts and a shared-file write with 538.2 million PPC block comparisons and zero mismatches; this aggregate count is integration evidence.
+- [ ] **P2 — Broader VMX qualification:** all recognized integer/vector-FP calculations now execute privately. Fixed-zero fields, full immediate domains, selected vector-unavailable/program/DSI entry and pending-event priorities now have independent evidence. Selected instruction-fetch faults and context changes now have evidence. Broaden operand/undefined-input profiles, other exception priorities, and additional fault/chain combinations. Dispatch/replay coverage does not certify all VMX encodings or CPU profiles.
+- [x] **P2 — Private vector FP execution:** replaced live delegation for 22 names / 26 forms; repaired KPX vector RN/environment, NJ, NaNs, signed zero, fused operations and saturating conversions. All forms pass alias/host-RN/scalar-RN/NJ/SAT comparisons, supplemented by 26 literal FP cases, sampled independent estimate accuracy/monotonicity, callback isolation and mixed production chains. Four Debug/Release/vector-inline configurations each pass 57,864,241 core checks, three 205-check captures and 34,585 MMU checks. ASan/UBSan passes 168,960 FP plus 132,480 integer kernel executions. The cloned guest completes 300 desktop seconds, 16 mouse targets, 20 interrupts and a shared-file write with 544.3 million PPC comparisons and zero mismatches; the aggregate count is integration evidence.
+- [x] **P2 — VMX encoding/immediate and availability boundaries:** reject decoder-invalid/malformed primary-opcode-4 words before acceleration; share 20 fixed-zero constraints with New World decode and the generator. Added 396 full-domain immediate cases, 106 single-bit malformed forms and 336 actual CPU-loop exception fixtures with prefix/chain and unavailable-before-data-access checks. Four host configurations each pass 59,985,581 core checks, three 205-check captures, 196,608 C/Python policy probes and 34,599 MMU checks. Cloned-guest repetition passes 300 desktop seconds, 543.7 million PPC comparisons with zero misses, a shared-folder write, 16 mouse targets and 20 injected interrupts. The first attempt's failed scripted file action is retained in the plan.
+- [x] **P2 — Further VMX exception/event priorities:** illegal primary-opcode-4 encodings now take program exceptions with VEC disabled; every DSI increments the exception counter so isolated replay cannot execute a cached suffix at the handler vector. Expanded to 1,200 synchronous fixtures, 360 pending-event/DEC-write boundaries, 144 streaming/VRSAVE controls and two DSI-vector/next-PC alias regressions. Four configurations pass 60,263,131 core checks and 34,600 MMU checks each. The cloned guest passes 300 desktop seconds with 544.2 million PPC comparisons and zero misses, 16 mouse targets, all 20 injected interrupts and a shared-folder write.
+- [x] **P2 — Instruction fetch and opcode-31 VMX boundaries:** invalidate instruction translations when IR or PR changes through interpreter/native MSR writes, returns and exception entry. Added 2,160 fetch-fault fixtures, 60 warmed-cache transitions, 1,488 malformed opcode-31 fixtures and 1,176 valid recognition controls. Fifteen additional shared encoding constraints reject malformed AltiVec memory/streaming forms in New World decode, policy, local C and emission. Four configurations pass 61,015,602 core checks, 393,216 policy probes and 34,664 MMU checks each. The cloned guest passes 300 desktop seconds with 537 million PPC comparisons and zero misses, 16 mouse targets, all 20 injected interrupts and a shared-folder write.
+- [ ] **P2 — Further vector FP conformance/acceleration:** broaden finite/exceptional operand cross-products and undefined-input/exception-priority profiles; qualify hardware estimate profiles and independent NEON FP paths. Conversion immediate domains and selected fixed-zero boundaries now have evidence. Current ARM64 FP blocks call the portable kernel; qualify and measure any new inline path before optimizing masks/residency.
+- [x] **P3 — Current `vslo`/`vsro` block qualification:** removed the special block-ending restriction, retaining private alias-safe helpers. Added 23,040 dependent-block cases over every control byte and D/A/B alias partition, 128 cold-builder boundary cases, 128 precise DSI cases and 256 production chain/event cases. Four configurations each pass 74,346,035 core checks and 34,664 MMU checks. Separate current ON and VERIFY guests each complete 300 desktop seconds, 16 mouse targets, 20 interrupts and a shared-folder write; VERIFY has 540.2 million PPC comparisons and zero misses. Removal is qualified by current-code evidence; it is not a claim of a historical causal repair.
+- [ ] **Historical octet-shift lock attribution:** the September 19 snapshot with only the restriction removed reaches Finder; its restricted control does not within the same observation period. The original unrestricted-block lock is not reproduced or causally explained. Preserve that question separately from the now-qualified current implementation; see the plan for source diffs, hashes, screenshots and limits of this single comparison.
+- [x] **P4 — Selected privileged/system observations:** typed services now support private replay for SPR/MSR, segment/BAT, `rfi`, traps/`sc`, TB/DEC, TLB/cache/synchronization operations and aligned `dcbz`. Independent operands, privilege, PC/MSR/exception state and instruction boundaries are checked; external services execute once. Added 2,244 literal system cases, 30 whole-line/cache-owner cases, nine malformed-tape guards and a version-3 trap capture. Four configurations each pass 75,043,992 core checks and 34,664 MMU checks. Final ON/VERIFY guests each complete 300 desktop seconds, 16 mouse targets, 20 ordered interrupts and a shared-folder write; VERIFY has 521.4 million PPC comparisons and zero misses. Independent hardware/MMU service and broader CPU-profile conformance remain open.
+- [x] **P5 — Current branch successor qualification:** conditional and LR/CTR transfers now use actual-PC successors on both native and C paths, preserving frame-pop, state masks, availability, MMU/cache and pending-event gates. Added 81,920 literal successor cases, 96 address/link replay cases, 72 mixed-state/gate cases and 2,000 bounded indirect loops. Three stale-vector negative controls reproduce corrupted pixel stores; three repaired controls pass. Host and cloned ON/VERIFY qualification is recorded with P4 above; original full-guest incident attribution is separate. No measured performance gain is claimed.
+- [ ] **Historical branch graphics incident attribution:** current negative controls reproduce the stale-vector-copy mechanism documented in `1cef33b4`; they do not replay the original full guest black-frame incident. Preserve exact historical reproduction and causal attribution separately from qualified current chaining.
+- [x] **P6 — Selected scalar conversions, comparisons and bit-preserving moves:** repaired `fctiw`/`fctiwz` rounding/range, FR/FI, invalid/inexact causes and enabled-invalid result suppression; qualified ordered/unordered NaN comparison status and selected precise/imprecise exception publication. Literal fixtures cover 319,488 conversion, 36,864 comparison, 1,040 move/select and 1,656 production entry/commit cases. Eight Debug/Release × FP/vector-inline configurations each pass 89,316,271 core checks, five capture replays and 34,664 MMU checks; policy and kernel sanitizer checks pass. Latest ON/VERIFY clones each pass 300 desktop seconds, 16 mouse targets, 20 ordered interrupts and a shared write; VERIFY passes 508.7 million PPC comparisons with zero mismatches. Final evidence and retained failed qualification runs are in the plan.
+- [x] **P6 — Raw file-read code publication:** completed `Sys_read` bytes now invalidate both PPC and host-68k code owners for direct guest buffers. Eight real-file ON/VERIFY cases cover full/short reads, page crossings, untouched neighbors and EOF/host-buffer controls; 124 checks pass and the old backend fails 12 publication assertions. This qualifies the selected synchronous raw-read path.
+- [x] **P6 — Round to single (`frsp`):** implemented exact NaN projection/quieting and VE suppression, all RN modes, FR/FI/sticky causes/FPRF, enabled +/-192 exponent adjustments and precise block stops. Independent numeric/integer-significand engines pass 248,832 literal cases including 82,944 production cases. Eight host configurations each pass 139,445,268 core checks, all five captures, policy/sanitizer checks and 34,664 MMU checks. Same-binary ON/VERIFY clones each pass 300 desktop seconds, 16 mouse targets, 20 ordered interrupts and a shared write; VERIFY passes 520 million PPC comparisons with zero mismatches and clean final Finder graphics. Generated ARM64 uses the complete kernel in both FP-inline settings. Broader arithmetic and performance remain separate.
+- [x] **P6 — Basic arithmetic special results:** repaired all eight existing add/subtract/multiply/divide forms for full-payload A/B NaN priority, signaling/generated invalid causes, VE/ZE destination/FPRF suppression, finite/zero ZX and infinity/zero controls, exact special FR/FI and signed zeros. Valid finite FPRF with VE and selected FE/pre-existing-status instruction stops now agree across reference/helper/inline paths. Independent fixtures cover 2,525,184 engine cases including 841,728 production cases; the bounded old-helper control fails 1,736 assertions. Eight host configurations each pass 648,133,797 core checks, five captures, policy/sanitizer suites and 34,664 MMU checks. Same-binary ON/VERIFY clones each pass 300 desktop seconds, 16 cursor targets, 20 ordered interrupts and a shared write; VERIFY has 524.7 million PPC comparisons and zero mismatches, with clean Finder graphics. Finite FR/FI/OX/UX/XX/adjusted results remain open; no performance gain is claimed.
+- [ ] **P6 — Remaining scalar FP conformance:** complete finite sticky causes/FR/FI and enabled overflow/underflow results, fused final-rounding/NaN/exception behavior and estimate profiles. Selected conversion/comparison, `frsp` and basic special-result behavior have separate milestones; the finite/fused arithmetic policy remains incomplete.
+- [ ] **P6 — Basic arithmetic reference/native repair:** complete finite add/subtract/multiply/divide in both precisions: single rounding, FR/FI replacement and new OX/UX/XX, adjusted overflow/underflow results and selected FE block stops. NaN/invalid/ZX, result suppression and valid FPRF have a separate special-result milestone. Repair reference and helper/inline paths together; enabling legacy flag tracking alone is insufficient.
+- [ ] **P6 — Optional square-root CPU support:** `fsqrt`/`fsqrts` currently have no KPX decoder entry or JIT implementation. Eight current rejection/illegal-instruction controls pass. Define the intended optional instruction profile, implement the decoder/reference/native paths and qualify NaNs, negative inputs, signed zero, rounding/status/enables and precise instruction stops before accepting these opcodes.
+- [ ] **Source publication incident and broader host writers:** capture the full originally cached source and writer/publication trace for exact attribution of the retained cached-NOP/current-branch incident. Fresh-source capture replay passes but does not reproduce the old block. Audit remaining raw host/DMA writers and noncontiguous buffer policy separately from the repaired `Sys_read` path.
+- [ ] **P6 — Wide memory/invalid forms:** audit scalar, FP, vector and cache-line accesses across page/bank boundaries, noncontiguous physical mappings and partial fault/SMC completion. Keep valid encoding expansion separate from illegal/update-register/64-bit forms outside the modeled CPU; check their fallback/exception policy.
+- [x] **Strings:** all four supported string forms have isolated replay, protected/noncontiguous page-boundary and SMC-prefix coverage. Broader architectural invalid-form policy remains in the memory audit.
+- [x] **Aligned single-CPU atomics:** `lwarx`/`stwcx.` have typed translation observations, physical aliases, private reservations, device/ROM handling and selected native/C chain evidence.
+- [ ] **Atomic remaining scope:** independently audit alignment, reservation granules and invalidation by DMA/other agents, physical-bus faults and the intended CPU model. Do not claim SMP coherency from the existing single-CPU tests.
+- [ ] **Independent validation infrastructure:** independently replay translations, capture complete originally cached source, automatically reduce failures, and broaden production selective-mask/chain exception combinations.
+- [ ] **External-control exclusions:** revisit `eciwx`/`ecowx` only with an EAR/external-control device model and permission/alignment/exception tests or measured guest demand. KPX currently uses no-ops and JIT fallback; simply allowlisting them is not an implementation. Keep `invalid` excluded with correct illegal-instruction delivery.
+- [ ] **Performance and cache qualification:** correct retirement/dispatch accounting; measure repeated serial Release interpreter/JIT workloads with identical cloned media; qualify remap/SMC/compaction/lifetime and long event/nap stress. Prioritize inlining and additional chains using measured helper/dispatch costs.
+
+<!-- PPC-JIT-REVISIT-END -->
 
 ## Summary
 
 | Status | Count |
 |--------|------:|
-| done | 308 |
-| partial | 34 |
+| accepted | 310 |
+| partial | 32 |
 | todo | 0 |
 | exclude | 3 |
 | **total** | **345** |
@@ -156,7 +195,7 @@ A checked box means the JIT **will attempt** the op. It is not a forever VERIFY 
 | [x] | `vslb` | altivec | — | `VX_form` 4/260 | kpx: `EXECUTE_VECTOR_ARITH(vsl<uint8>, V16QI, V16QI, V16QI, NONE)`; VX_form prim=4 xo=260 CFLOW_NORMAL; in allowlist |
 | [x] | `vsldoi` | altivec | — | `VA_form` 4/44 | kpx: `EXECUTE_VECTOR_SHIFT_OCTET(-1, V16QIm, V16QIm, V16QIm, SHB)`; VA_form prim=4 xo=44 CFLOW_NORMAL; in allowlist |
 | [x] | `vslh` | altivec | — | `VX_form` 4/324 | kpx: `EXECUTE_VECTOR_ARITH(vsl<uint16>, V8HI, V8HI, V8HI, NONE)`; VX_form prim=4 xo=324 CFLOW_NORMAL; in allowlist |
-| [~] | `vslo` | altivec | W6 | `VX_form` 4/1036 | kpx: `EXECUTE_VECTOR_SHIFT_OCTET(-1, V16QIm, V16QIm, NONE, SHBO)`; VX_form prim=4 xo=1036 CFLOW_NORMAL; Allowlisted but **ends_block** (one-op; Starting Up lock).; **ends_block**; in allowlist |
+| [x] | `vslo` | altivec | — | `VX_form` 4/1036 | kpx: `EXECUTE_VECTOR_SHIFT_OCTET(-1, V16QIm, V16QIm, NONE, SHBO)`; VX_form prim=4 xo=1036 CFLOW_NORMAL; in allowlist |
 | [x] | `vslw` | altivec | — | `VX_form` 4/388 | kpx: `EXECUTE_VECTOR_ARITH(vsl<uint32>, V4SI, V4SI, V4SI, NONE)`; VX_form prim=4 xo=388 CFLOW_NORMAL; in allowlist |
 | [x] | `vspltb` | altivec | — | `VX_form` 4/524 | kpx: `EXECUTE_VECTOR_SPLAT(nop, V16QI, V16QIm, false)`; VX_form prim=4 xo=524 CFLOW_NORMAL; in allowlist |
 | [x] | `vsplth` | altivec | — | `VX_form` 4/588 | kpx: `EXECUTE_VECTOR_SPLAT(nop, V8HI, V8HIm, false)`; VX_form prim=4 xo=588 CFLOW_NORMAL; in allowlist |
@@ -170,7 +209,7 @@ A checked box means the JIT **will attempt** the op. It is not a forever VERIFY 
 | [x] | `vsraw` | altivec | — | `VX_form` 4/900 | kpx: `EXECUTE_VECTOR_ARITH(vsr<int32>, V4SI, V4SIs, V4SIs, NONE)`; VX_form prim=4 xo=900 CFLOW_NORMAL; in allowlist |
 | [x] | `vsrb` | altivec | — | `VX_form` 4/516 | kpx: `EXECUTE_VECTOR_ARITH(vsr<uint8>, V16QI, V16QI, V16QI, NONE)`; VX_form prim=4 xo=516 CFLOW_NORMAL; in allowlist |
 | [x] | `vsrh` | altivec | — | `VX_form` 4/580 | kpx: `EXECUTE_VECTOR_ARITH(vsr<uint16>, V8HI, V8HI, V8HI, NONE)`; VX_form prim=4 xo=580 CFLOW_NORMAL; in allowlist |
-| [~] | `vsro` | altivec | W6 | `VX_form` 4/1100 | kpx: `EXECUTE_VECTOR_SHIFT_OCTET(+1, V16QIm, V16QIm, NONE, SHBO)`; VX_form prim=4 xo=1100 CFLOW_NORMAL; Allowlisted but **ends_block** (one-op; Starting Up lock).; **ends_block**; in allowlist |
+| [x] | `vsro` | altivec | — | `VX_form` 4/1100 | kpx: `EXECUTE_VECTOR_SHIFT_OCTET(+1, V16QIm, V16QIm, NONE, SHBO)`; VX_form prim=4 xo=1100 CFLOW_NORMAL; in allowlist |
 | [x] | `vsrw` | altivec | — | `VX_form` 4/644 | kpx: `EXECUTE_VECTOR_ARITH(vsr<uint32>, V4SI, V4SI, V4SI, NONE)`; VX_form prim=4 xo=644 CFLOW_NORMAL; in allowlist |
 | [x] | `vsubcuw` | altivec | — | `VX_form` 4/1408 | kpx: `EXECUTE_VECTOR_ARITH(subcuw, V4SI, V4SI, V4SI, NONE)`; VX_form prim=4 xo=1408 CFLOW_NORMAL; in allowlist |
 | [x] | `vsubfp` | altivec | — | `VX_form` 4/74 | kpx: `EXECUTE_VECTOR_ARITH(fsubs, V4SF, V4SF, V4SF, NONE)`; VX_form prim=4 xo=74 CFLOW_NORMAL; in allowlist |
@@ -208,7 +247,7 @@ A checked box means the JIT **will attempt** the op. It is not a forever VERIFY 
 | [x] | `crorc` | control | — | `XL_form` 19/417 | kpx: `EXECUTE_CR_OP(orc)`; XL_form prim=19 xo=417 CFLOW_NORMAL; in allowlist |
 | [x] | `crxor` | control | — | `XL_form` 19/193 | kpx: `EXECUTE_CR_OP(xor)`; XL_form prim=19 xo=193 CFLOW_NORMAL; in allowlist |
 | [x] | `isync` | control | — | `X_form` 19/150 | kpx: `EXECUTE_0(isync)`; X_form prim=19 xo=150 CFLOW_NORMAL; **ends_block**; in allowlist |
-| [~] | `rfi` | control | — | `XL_form` 19/50 | kpx: `EXECUTE_0(rfi)`; XL_form prim=19 xo=50 CFLOW_JUMP; Block-end helper + ret.; **ends_block**; in allowlist |
+| [~] | `rfi` | control | — | `XL_form` 19/50 | kpx: `EXECUTE_0(rfi)`; XL_form prim=19 xo=50 CFLOW_JUMP; Typed system return; private PC/MSR restore; ends block.; **ends_block**; in allowlist |
 | [x] | `sc` | control | — | `SC_form` 17/0 | kpx: `EXECUTE_0(syscall)`; SC_form prim=17 xo=0 CFLOW_NORMAL; **ends_block**; in allowlist |
 | [x] | `fabs` | fp | — | `X_form` 63/264 | kpx: `EXECUTE_FP_ARITH(double, fabs, RD, RB, NONE, NONE, RC_BIT_G, false)`; X_form prim=63 xo=264 CFLOW_NORMAL; in allowlist |
 | [x] | `fadd` | fp | — | `A_form` 63/21 | kpx: `EXECUTE_FP_ARITH(double, fadd, RD, RA, RB, NONE, RC_BIT_G, true)`; A_form prim=63 xo=21 CFLOW_NORMAL; in allowlist |
@@ -280,7 +319,7 @@ A checked box means the JIT **will attempt** the op. It is not a forever VERIFY 
 | [x] | `cntlzw` | integer | — | `X_form` 31/26 | kpx: `EXECUTE_GENERIC_ARITH(cntlzw, RA, RS, NONE, NONE, OE_BIT_0, RC_BIT_G)`; X_form prim=31 xo=26 CFLOW_NORMAL; in allowlist |
 | [x] | `dcba` | integer | — | `X_form` 31/758 | kpx: `EXECUTE_0(nop)`; X_form prim=31 xo=758 CFLOW_NORMAL; kpx nop.; in allowlist |
 | [x] | `dcbf` | integer | — | `X_form` 31/86 | kpx: `EXECUTE_0(nop)`; X_form prim=31 xo=86 CFLOW_NORMAL; kpx nop.; in allowlist |
-| [x] | `dcbi` | integer | — | `X_form` 31/470 | kpx: `EXECUTE_0(nop)`; X_form prim=31 xo=470 CFLOW_NORMAL; kpx nop.; in allowlist |
+| [x] | `dcbi` | integer | — | `X_form` 31/470 | kpx: `EXECUTE_0(dcbi)`; X_form prim=31 xo=470 CFLOW_NORMAL; in allowlist |
 | [x] | `dcbst` | integer | — | `X_form` 31/54 | kpx: `EXECUTE_0(nop)`; X_form prim=31 xo=54 CFLOW_NORMAL; kpx nop.; in allowlist |
 | [x] | `dcbt` | integer | — | `X_form` 31/278 | kpx: `EXECUTE_0(nop)`; X_form prim=31 xo=278 CFLOW_NORMAL; kpx nop.; in allowlist |
 | [x] | `dcbtst` | integer | — | `X_form` 31/246 | kpx: `EXECUTE_0(nop)`; X_form prim=31 xo=246 CFLOW_NORMAL; kpx nop.; in allowlist |
@@ -377,26 +416,24 @@ A checked box means the JIT **will attempt** the op. It is not a forever VERIFY 
 | [x] | `mcrxr` | spr | — | `X_form` 31/512 | kpx: `EXECUTE_0(mcrxr)`; X_form prim=31 xo=512 CFLOW_NORMAL; in allowlist |
 | [x] | `mfcr` | spr | — | `X_form` 31/19 | kpx: `EXECUTE_GENERIC_ARITH(nop, RD, CR, NONE, NONE, OE_BIT_0, RC_BIT_0)`; X_form prim=31 xo=19 CFLOW_NORMAL; in allowlist |
 | [x] | `mfmsr` | spr | — | `X_form` 31/83 | kpx: `EXECUTE_0(mfmsr)`; X_form prim=31 xo=83 CFLOW_NORMAL; in allowlist |
-| [~] | `mfspr` | spr | — | `XFX_form` 31/339 | kpx: `EXECUTE_1(mfspr, operand_SPR)`; XFX_form prim=31 xo=339 CFLOW_NORMAL; Supported; non-user SPR ends block via helper.; in allowlist |
+| [~] | `mfspr` | spr | — | `XFX_form` 31/339 | kpx: `EXECUTE_1(mfspr, operand_SPR)`; XFX_form prim=31 xo=339 CFLOW_NORMAL; Typed system reads; block boundaries depend on SPR.; in allowlist |
 | [x] | `mfsr` | spr | — | `X_form` 31/595 | kpx: `EXECUTE_0(mfsr)`; X_form prim=31 xo=595 CFLOW_NORMAL; in allowlist |
 | [x] | `mfsrin` | spr | — | `X_form` 31/659 | kpx: `EXECUTE_0(mfsrin)`; X_form prim=31 xo=659 CFLOW_NORMAL; in allowlist |
 | [~] | `mftb` | spr | — | `XFX_form` 31/371 | kpx: `EXECUTE_1(mftbr, operand_TBR)`; XFX_form prim=31 xo=371 CFLOW_NORMAL; TBL/TBU only.; in allowlist |
 | [x] | `mtcrf` | spr | — | `XFX_form` 31/144 | kpx: `EXECUTE_0(mtcrf)`; XFX_form prim=31 xo=144 CFLOW_NORMAL; in allowlist |
 | [~] | `mtmsr` | spr | — | `X_form` 31/146 | kpx: `EXECUTE_0(mtmsr)`; X_form prim=31 xo=146 CFLOW_NORMAL; ends_block.; **ends_block**; in allowlist |
-| [x] | `mtspr` | spr | — | `XFX_form` 31/467 | kpx: `EXECUTE_1(mtspr, operand_SPR)`; XFX_form prim=31 xo=467 CFLOW_NORMAL; Supported; guest helper for non-user.; in allowlist |
+| [x] | `mtspr` | spr | — | `XFX_form` 31/467 | kpx: `EXECUTE_1(mtspr, operand_SPR)`; XFX_form prim=31 xo=467 CFLOW_NORMAL; Typed system writes; non-user except VRSAVE ends block.; in allowlist |
 | [~] | `mtsr` | spr | — | `X_form` 31/210 | kpx: `EXECUTE_0(mtsr)`; X_form prim=31 xo=210 CFLOW_NORMAL; ends_block.; **ends_block**; in allowlist |
 | [~] | `mtsrin` | spr | — | `X_form` 31/242 | kpx: `EXECUTE_0(mtsrin)`; X_form prim=31 xo=242 CFLOW_NORMAL; ends_block.; **ends_block**; in allowlist |
 
 ## Todo / partial by wave
 
-### W6 (6)
+### W6 (4)
 
 - [~] `lvx` — kpx: `EXECUTE_VECTOR_LOADSTORE(load, V2DI, RA_or_0, RB)`; X_form prim=31 xo=103 CFLOW_NORMAL; hint ignored (lvxl same path).; in allowlist
 - [~] `lvxl` — kpx: `EXECUTE_VECTOR_LOADSTORE(load, V2DI, RA_or_0, RB)`; X_form prim=31 xo=359 CFLOW_NORMAL; hint ignored.; in allowlist
 - [~] `stvx` — kpx: `EXECUTE_VECTOR_LOADSTORE(store, V2DI, RA_or_0, RB)`; X_form prim=31 xo=231 CFLOW_NORMAL; hint ignored.; in allowlist
 - [~] `stvxl` — kpx: `EXECUTE_VECTOR_LOADSTORE(store, V2DI, RA_or_0, RB)`; X_form prim=31 xo=487 CFLOW_NORMAL; hint ignored.; in allowlist
-- [~] `vslo` — kpx: `EXECUTE_VECTOR_SHIFT_OCTET(-1, V16QIm, V16QIm, NONE, SHBO)`; VX_form prim=4 xo=1036 CFLOW_NORMAL; Allowlisted but **ends_block** (one-op; Starting Up lock).; **ends_block**; in allowlist
-- [~] `vsro` — kpx: `EXECUTE_VECTOR_SHIFT_OCTET(+1, V16QIm, V16QIm, NONE, SHBO)`; VX_form prim=4 xo=1100 CFLOW_NORMAL; Allowlisted but **ends_block** (one-op; Starting Up lock).; **ends_block**; in allowlist
 
 ### exclude (3)
 
@@ -404,7 +441,7 @@ A checked box means the JIT **will attempt** the op. It is not a forever VERIFY 
 - [-] `ecowx` — kpx: `EXECUTE_0(nop)`; X_form prim=31 xo=438 CFLOW_NORMAL; External control; no device model.; not in `nw_jit_op_supported`
 - [-] `invalid` — kpx: `EXECUTE_0(illegal)`; INVALID_form prim=0 xo=0 CFLOW_TRAP; Not a real insn. Prim=6 skip noise is usually this class.; not in `nw_jit_op_supported`
 
-## Already done (checked)
+## Accepted names (dispatch coverage)
 
 Quick list of `[x]` names for scanning:
 
@@ -434,11 +471,11 @@ Quick list of `[x]` names for scanning:
 `vmsumubm`, `vmsumuhm`, `vmsumuhs`, `vmulesb`, `vmulesh`, `vmuleub`, `vmuleuh`, `vmulosb`, `vmulosh`, `vmuloub`
 `vmulouh`, `vnmsubfp`, `vnor`, `vor`, `vperm`, `vpkpx`, `vpkshss`, `vpkshus`, `vpkswss`, `vpkswus`
 `vpkuhum`, `vpkuhus`, `vpkuwum`, `vpkuwus`, `vrefp`, `vrfim`, `vrfin`, `vrfip`, `vrfiz`, `vrlb`
-`vrlh`, `vrlw`, `vrsqrtefp`, `vsel`, `vsl`, `vslb`, `vsldoi`, `vslh`, `vslw`, `vspltb`
-`vsplth`, `vspltisb`, `vspltish`, `vspltisw`, `vspltw`, `vsr`, `vsrab`, `vsrah`, `vsraw`, `vsrb`
-`vsrh`, `vsrw`, `vsubcuw`, `vsubfp`, `vsubsbs`, `vsubshs`, `vsubsws`, `vsububm`, `vsububs`, `vsubuhm`
-`vsubuhs`, `vsubuwm`, `vsubuws`, `vsum2sws`, `vsum4sbs`, `vsum4shs`, `vsum4ubs`, `vsumsws`, `vupkhpx`, `vupkhsb`
-`vupkhsh`, `vupklpx`, `vupklsb`, `vupklsh`, `vxor`, `xor`, `xori`, `xoris`
+`vrlh`, `vrlw`, `vrsqrtefp`, `vsel`, `vsl`, `vslb`, `vsldoi`, `vslh`, `vslo`, `vslw`
+`vspltb`, `vsplth`, `vspltisb`, `vspltish`, `vspltisw`, `vspltw`, `vsr`, `vsrab`, `vsrah`, `vsraw`
+`vsrb`, `vsrh`, `vsro`, `vsrw`, `vsubcuw`, `vsubfp`, `vsubsbs`, `vsubshs`, `vsubsws`, `vsububm`
+`vsububs`, `vsubuhm`, `vsubuhs`, `vsubuwm`, `vsubuws`, `vsum2sws`, `vsum4sbs`, `vsum4shs`, `vsum4ubs`, `vsumsws`
+`vupkhpx`, `vupkhsb`, `vupkhsh`, `vupklpx`, `vupklsb`, `vupklsh`, `vxor`, `xor`, `xori`, `xoris`
 
 ## Notes on reading encodings
 

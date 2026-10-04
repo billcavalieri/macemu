@@ -5,8 +5,11 @@
 #include "cpu/ppc/ppc-cpu.hpp"
 #include "nw_jit.h"
 #include "nw_jit_verify.h"
+#include "nw_68k_core.h"
 #include "nw_io.h"
 #include "nw_boot_contract.h"
+#include "sys.h"
+#include <unistd.h>
 #include <fenv.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,26 +23,727 @@ extern void nw_jit_helper_stb(nw_jit_cpu *, uint32_t, uint32_t);
 extern void nw_jit_helper_sth(nw_jit_cpu *, uint32_t, uint32_t);
 extern void nw_jit_helper_lfd(nw_jit_cpu *, uint32_t, uint32_t, uint32_t);
 extern void nw_jit_helper_stfd(nw_jit_cpu *, uint32_t, uint32_t, uint32_t);
+extern void nw_jit_helper_lvx(nw_jit_cpu *, uint32_t, uint32_t, uint32_t);
+extern void nw_jit_helper_stvx(nw_jit_cpu *, uint32_t, uint32_t, uint32_t);
+extern void nw_jit_helper_vmx(nw_jit_cpu *, uint32_t);
+static unsigned delegated_vmx_calls;
+static void forbidden_vmx_callback(void *, uint32_t, nw_jit_cpu *) { ++delegated_vmx_calls; }
 static unsigned passed, failed;
 #define CHECK(c) do { if (c) ++passed; else { ++failed; fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); } } while (0)
+static int fp_callback_round, fp_callback_flags;
 static uint64 fake_us;
 uint64 ppc_test_ticks_usec() { return fake_us; }
 
-struct verify_device { unsigned reads = 0, writes = 0; uint32 value = 10; };
+struct verify_device { unsigned reads = 0, writes = 0; uint32 value = 10; void (*on_write)(void *) = NULL; void *on_write_context = NULL; };
 static uint32 device_read(void *context, uint32, int) {
     verify_device &d = *static_cast<verify_device *>(context);
     ++d.reads; return d.value++;
 }
 static void device_write(void *context, uint32, int, uint32 value) {
     verify_device &d = *static_cast<verify_device *>(context);
-    ++d.writes; d.value = value;
+    ++d.writes; d.value = value; if (d.on_write) d.on_write(d.on_write_context);
 }
 
 struct ppc_core_test_access {
+    static void checked_fp_exception(void *host, nw_jit_cpu *c) {
+        CHECK(fegetround() == fp_callback_round);
+        CHECK(fetestexcept(FE_ALL_EXCEPT) == fp_callback_flags);
+        powerpc_cpu::jit_host_fp_exception(host,c);
+    }
+    static void *stale_vector_tail(void *host, nw_jit_cpu *c, uint32 pc, int *n,
+        int *f, int *v, uint32 *dsi, uint32 *chain, int cf, int cv) {
+        powerpc_cpu *ppc = static_cast<powerpc_cpu *>(host);
+        uint32 stale[32][4];
+        for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) stale[r][w] = ppc->vr(r).w[w];
+        void *next = powerpc_cpu::jit_host_chain(host,c,pc,n,f,v,dsi,chain,cf,cv);
+        if (next && *v && cv) memcpy(c->vr,stale,sizeof stale);
+        return next;
+    }
     static int run();
+    static int scalar_p6(powerpc_cpu *);
+    static int frsp_p6(powerpc_cpu *);
+    static int basic_special_p6(powerpc_cpu *);
+    static int io_publication(powerpc_cpu *);
+    static void stop_on_device(void *context) { static_cast<powerpc_cpu *>(context)->spcflags().set(SPCFLAG_CPU_EXEC_RETURN); }
     static void instruction(powerpc_cpu *cpu, uint32 op) { cpu->decode(op)->execute(cpu, op); }
 };
 static uint64 bits(double d) { uint64 b; memcpy(&b, &d, 8); return b; }
+int ppc_core_test_access::io_publication(powerpc_cpu *cpu)
+{
+    cpu->enable_guest_mmu(true);
+    nw_jit_set_mode(NW_JIT_VERIFY); // initialize the optional inline check before emitting code
+    ppc32_mmu &mmu = ppc32_guest_mmu();
+    const uint32 base = 0x10000000u;
+    void *const wanted = (void *)(VMBaseDiff + base);
+    void *const ram = mmap(wanted,0x4000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    CHECK(ram == wanted); if (ram != wanted) return 1;
+    nw_banks_set(NW_PA_RAM,base,0x4000);
+    char path[] = "/tmp/macemu-ppc-code-read-XXXXXX";
+    const int fd = mkstemp(path); CHECK(fd >= 0);
+    uint8 payload[512]; memset(payload,0xa5,sizeof payload);
+    payload[0]=0x48; payload[1]=0; payload[2]=4; payload[3]=1; // bl +0x400
+    if (fd >= 0) { CHECK(write(fd,payload,sizeof payload) == sizeof payload); close(fd); }
+    void *file = fd >= 0 ? Sys_open(path,true) : NULL; CHECK(file != NULL);
+    unsigned cases = 0;
+    if (file) {
+        const uint32 nop = 0x60000000u;
+        for (unsigned verify : {0u,1u})
+        for (unsigned crossing : {0u,1u})
+        for (unsigned short_read : {0u,1u}) {
+            ++cases; nw_jit_invalidate_all(); nw_jit_itlb_flush(); mmu.reset();
+            const uint32 start = base + (crossing ? 0xffc : 0x200);
+            const uint32 second = base+0x1100, untouched = base+0x3000;
+            memset(ram,0x5a,0x4000);
+            vm_write_memory_4(start,nop);
+            vm_write_memory_4(second,nop); vm_write_memory_4(untouched,nop);
+            nw_jit_fn old = nw_jit_compile(&nop,1,start,start&~0xfffu,0,0);
+            nw_jit_fn next = nw_jit_compile(&nop,1,second,second&~0xfffu,0,0);
+            nw_jit_fn other = nw_jit_compile(&nop,1,untouched,untouched&~0xfffu,0,0);
+            CHECK(old && next && other);
+            CHECK(Sys_read(file,vm_do_get_real_address(start),0,short_read ? 1024 : 512) == 512);
+            CHECK(!memcmp(vm_do_get_real_address(start),payload,512));
+            CHECK(vm_read_memory_1(start-1) == 0x5a && vm_read_memory_1(start+512) == 0x5a);
+            const bool published = nw_jit_cache_get(start&~0xfffu,start,0,0,NULL) == NULL;
+            CHECK(published);
+            CHECK(nw_jit_cache_get(second&~0xfffu,second,0,0,NULL) == (crossing ? NULL : next));
+            CHECK(nw_jit_cache_get(untouched&~0xfffu,untouched,0,0,NULL) == other);
+            cpu->pc()=start; cpu->last_fetch_pa_=start; cpu->cr().set(0x12345678); cpu->xer().set(0xe0000000);
+            cpu->lr()=cpu->ctr()=0; cpu->spcflags().init(); cpu->dec_=1000000;
+            cpu->dec_tb_base_=cpu->tb_host_ticks(); cpu->dec_pending_=false;
+            const uint64 misses=nw_jit_verify_misses();
+            nw_jit_set_host_chain(NULL); nw_jit_set_mode(verify ? NW_JIT_VERIFY : NW_JIT_ON);
+            if (published) {
+                CHECK(cpu->nw_jit_try(0x48000401u) == 1);
+                CHECK(cpu->pc() == start+0x400 && cpu->lr() == start+4);
+                CHECK(cpu->cr().get() == 0x12345678 && cpu->xer().get() == 0xe0000000 && !cpu->ctr());
+                CHECK(nw_jit_verify_misses() == misses);
+            }
+            // EOF, invalid handles and non-guest output buffers do not publish
+            // a guest write or invalidate unrelated cached code.
+            uint8 host[512];
+            CHECK(Sys_read(file,vm_do_get_real_address(untouched),512,512) == 0);
+            CHECK(Sys_read(NULL,vm_do_get_real_address(untouched),0,512) == 0);
+            CHECK(Sys_read(file,host,0,512) == 512 && !memcmp(host,payload,512));
+            CHECK(nw_jit_cache_get(untouched&~0xfffu,untouched,0,0,NULL) == other);
+        }
+        Sys_close(file);
+    }
+    unlink(path); nw_jit_invalidate_all(); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,0x4000);
+    nw_jit_set_host_chain(powerpc_cpu::jit_host_chain); nw_jit_set_mode(NW_JIT_ON);
+    printf("Raw file-read publication: %u full/short/page-boundary ON/VERIFY cases\n",cases);
+    return failed ? 1 : 0;
+}
+int ppc_core_test_access::scalar_p6(powerpc_cpu *cpu)
+{
+    struct conversion { double input; int64 value[4]; unsigned flags[4]; }; // flags: FI=1, FR=2, invalid=4
+    const conversion inputs[] = {
+        {0.0,{0,0,0,0},{0,0,0,0}}, {-0.0,{0,0,0,0},{0,0,0,0}},
+        {0.5,{0,0,1,0},{1,1,3,1}}, {-0.5,{0,0,0,-1},{1,1,1,3}},
+        {1.5,{2,1,2,1},{3,1,3,1}}, {-1.5,{-2,-1,-1,-2},{3,1,1,3}},
+        {2.5,{2,2,3,2},{1,1,3,1}}, {-2.5,{-2,-2,-2,-3},{1,1,1,3}},
+        {1.25,{1,1,2,1},{1,1,3,1}}, {-1.25,{-1,-1,-1,-2},{1,1,1,3}},
+        {2147483647.0,{2147483647,2147483647,2147483647,2147483647},{0,0,0,0}},
+        {2147483647.25,{2147483647,2147483647,2147483647,2147483647},{1,1,4,1}},
+        {2147483647.5,{2147483647,2147483647,2147483647,2147483647},{4,1,4,1}},
+        {2147483648.0,{2147483647,2147483647,2147483647,2147483647},{4,4,4,4}},
+        {-2147483648.0,{-2147483648LL,-2147483648LL,-2147483648LL,-2147483648LL},{0,0,0,0}},
+        {-2147483648.25,{-2147483648LL,-2147483648LL,-2147483648LL,-2147483648LL},{1,1,1,4}},
+        {-2147483648.5,{-2147483648LL,-2147483648LL,-2147483648LL,-2147483648LL},{1,1,1,4}},
+        {-2147483649.0,{-2147483648LL,-2147483648LL,-2147483648LL,-2147483648LL},{4,4,4,4}},
+        {0x1p-1074,{0,0,1,0},{1,1,3,1}}, {-0x1p-1074,{0,0,0,-1},{1,1,1,3}}
+    };
+    cpu->enable_guest_mmu(true);
+    nw_jit_set_host_fp_exception(checked_fp_exception);
+    ppc32_mmu &mmu = ppc32_guest_mmu();
+    fenv_t environment; fegetenv(&environment);
+    unsigned cases = 0;
+    nw_jit_set_host_chain(NULL); nw_jit_set_mode(NW_JIT_VERIFY);
+    const uint32 prefix = (63u<<26)|(7u<<21)|(4u<<11)|(40u<<1);
+    const uint32 suffix = (63u<<26)|(5u<<21)|(6u<<11)|(72u<<1);
+    for (unsigned convert : {0u,1u})
+    for (unsigned rc : {0u,1u})
+    for (unsigned alias : {0u,1u}) {
+        const unsigned fd = alias ? 1 : 3;
+        const uint32 op = (63u<<26)|(fd<<21)|(1u<<11)|((convert ? 15u : 14u)<<1)|rc;
+        uint32 ops[] = {prefix,op,suffix}; const uint32 pc = 0x16000;
+        nw_jit_invalidate_all();
+        nw_jit_fn fn = nw_jit_compile(ops,3,pc,pc,0,0); CHECK(fn != NULL); if (!fn) continue;
+        for (unsigned ci = 0; ci < sizeof inputs/sizeof inputs[0] + 6; ++ci)
+        for (unsigned rn = 0; rn < 4; ++rn)
+        for (unsigned sticky : {0u,0x03000100u,0x83000100u})
+        for (unsigned enable : {0u,0x80u,0x8u,0x88u})
+        for (unsigned fe : {0u,0x100u,0x800u,0x900u})
+        for (unsigned ip : {0u,0x40u}) {
+            const unsigned rounding = convert ? 1 : rn;
+            uint64 source; int64 word; unsigned status; bool snan = false;
+            if (ci < sizeof inputs/sizeof inputs[0]) {
+                source = bits(inputs[ci].input); word = inputs[ci].value[rounding]; status = inputs[ci].flags[rounding];
+            } else {
+                const uint64 special[] = {0x7ff0000000000000ULL,0xfff0000000000000ULL,0x7ff8123456789abcULL,0xfff8123456789abcULL,0x7ff0123456789abcULL,0xfff0123456789abcULL};
+                unsigned si = ci - sizeof inputs/sizeof inputs[0]; source = special[si];
+                word = si == 0 ? 2147483647 : -2147483648LL; status = 4; snan = si >= 4;
+            }
+            const uint32 causes = status & 4 ? 0x100u | (snan ? 0x01000000u : 0) : status & 1 ? 0x02000000u : 0;
+            const uint32 initial_fpscr = sticky | enable | rn | 0x75000u;
+            uint32 result_fpscr = (initial_fpscr & ~0x60000u) | causes;
+            if (causes & ~initial_fpscr) result_fpscr |= 0x80000000u;
+            if (status & 1) result_fpscr |= 0x20000u;
+            if (status & 2) result_fpscr |= 0x40000u;
+            result_fpscr &= ~0x60000000u;
+            if (result_fpscr & 0x01000100u) result_fpscr |= 0x20000000u;
+            if ((result_fpscr & 0x20000000u) && (enable & 0x80u) || (result_fpscr & 0x02000000u) && (enable & 8u)) result_fpscr |= 0x40000000u;
+            const bool except = fe && (result_fpscr & 0x40000000u);
+            const bool suppressed = (status & 4) && (enable & 0x80u);
+            for (unsigned engine = 0; engine < 4; ++engine) {
+                ++cases; const unsigned failures = failed;
+                nw_jit_cpu before = {}; before.pc = pc; before.msr = 0x2000u | fe | ip;
+                before.fpscr = initial_fpscr; before.cr = 0xb2345678u; before.dec = cpu->dec_;
+                for (unsigned r = 0; r < 32; ++r) before.fpr[r] = bits(double(r + 32));
+                before.fpr[1] = source;
+                cpu->pc() = pc; cpu->last_fetch_pa_ = pc; mmu.set_msr(before.msr);
+                cpu->fpscr() = before.fpscr; cpu->cr().set(before.cr); cpu->xer().set(0); cpu->lr() = cpu->ctr() = 0;
+                cpu->srr0_ = cpu->srr1_ = 0; cpu->spcflags().init(); cpu->regs().reserve_valid = 0;
+                for (unsigned r = 0; r < 32; ++r) { cpu->fpr_dw(r) = before.fpr[r]; cpu->gpr(r) = 0; }
+                nw_jit_cpu result = before;
+                fesetround(engine & 1 ? FE_UPWARD : FE_DOWNWARD); feclearexcept(FE_ALL_EXCEPT); feraiseexcept(FE_DIVBYZERO);
+                const int host_flags = fetestexcept(FE_ALL_EXCEPT), host_round = fegetround();
+                fp_callback_round = host_round; fp_callback_flags = host_flags;
+                if (engine == 0) {
+                    const uint64 serial = cpu->exception_serial_;
+                    for (uint32 instruction_op : ops) { instruction(cpu,instruction_op); if (cpu->exception_serial_ != serial) break; }
+                } else if (engine == 1) (void)nw_jit_interp_n(&result,ops,3,pc);
+                else if (engine == 2) { result.host = cpu; nw_jit_cpu_bind(&result); nw_jit_tail_begin(); fn(&result); }
+                else { const uint64 misses = nw_jit_verify_misses(); CHECK(cpu->nw_jit_verify_block(result,fn,ops,3) == 1); CHECK(nw_jit_verify_misses() == misses); }
+                if (engine == 0 || engine == 3) {
+                    result.pc = cpu->pc(); result.fpscr = cpu->fpscr(); result.cr = cpu->cr().get(); result.msr = mmu.msr(); result.srr0 = cpu->srr0_; result.srr1 = cpu->srr1_;
+                    for (unsigned r = 0; r < 32; ++r) result.fpr[r] = cpu->fpr_dw(r);
+                }
+                CHECK(result.fpscr == result_fpscr);
+                CHECK(result.cr == (rc ? (before.cr & ~0x0f000000u) | ((result_fpscr >> 4) & 0x0f000000u) : before.cr));
+                CHECK(result.pc == (except ? (ip ? 0xfff00700u : 0x700u) : pc + 12));
+                CHECK(result.msr == (except ? before.msr & ~0x0204ef32u : before.msr));
+                if (except) { CHECK(result.srr0 == pc + 4); CHECK(result.srr1 == ((before.msr & ~0x783f0000u) | 0x100000u)); if (engine == 2) { CHECK(cpu->pc() == result.pc); CHECK(cpu->srr0_ == result.srr0 && cpu->srr1_ == result.srr1); CHECK(cpu->fpscr() == result.fpscr); } }
+                for (unsigned r = 0; r < 32; ++r) {
+                    const uint64 expected = r == 7 ? before.fpr[4] ^ 0x8000000000000000ULL :
+                        r == fd ? suppressed ? before.fpr[fd] : uint64(word) : r == 5 && !except ? before.fpr[6] : before.fpr[r];
+                    CHECK(result.fpr[r] == expected);
+                }
+                CHECK(fegetround() == host_round && fetestexcept(FE_ALL_EXCEPT) == host_flags);
+                if (failed != failures && failed < 50) fprintf(stderr,"P6 conversion case=%u engine=%u ci=%u rn=%u rc=%u alias=%u sticky=%08x en=%x fe=%x fpscr=%08x expected=%08x\n",cases,engine,ci,rn,rc,alias,sticky,enable,fe,result.fpscr,result_fpscr);
+            }
+        }
+    }
+    const unsigned conversion_cases = cases;
+    struct compare_case { uint64 a,b; uint32 cc; bool snan,nan; };
+    const compare_case pairs[] = {
+        {0,0x8000000000000000ULL,2,false,false},
+        {0x8000000000000000ULL,0,2,false,false},
+        {0x3ff0000000000000ULL,0x4000000000000000ULL,8,false,false},
+        {0x4000000000000000ULL,0x3ff0000000000000ULL,4,false,false},
+        {0x7ff0000000000000ULL,0xfff0000000000000ULL,4,false,false},
+        {0x0000000000000001ULL,0,4,false,false},
+        {0x7ff8123456789abcULL,0x3ff0000000000000ULL,1,false,true},
+        {0x3ff0000000000000ULL,0xfff8123456789abcULL,1,false,true},
+        {0x7ff0123456789abcULL,0x3ff0000000000000ULL,1,true,true},
+        {0x3ff0000000000000ULL,0xfff0123456789abcULL,1,true,true},
+        {0x7ff8123456789abcULL,0xfff0123456789abcULL,1,true,true},
+        {0x7ff0123456789abcULL,0xfff8123456789abcULL,1,true,true}
+    };
+    for (unsigned ordered : {0u,1u})
+    for (unsigned crfd = 0; crfd < 8; ++crfd) {
+        const uint32 op = (63u<<26)|(crfd<<23)|(1u<<16)|(2u<<11)|(ordered ? 64u : 0u);
+        uint32 ops[] = {prefix,op,suffix}; const uint32 pc = 0x17000;
+        nw_jit_invalidate_all();
+        nw_jit_fn fn = nw_jit_compile(ops,3,pc,pc,0,0); CHECK(fn != NULL); if (!fn) continue;
+        for (const compare_case &pair : pairs)
+        for (unsigned sticky : {0u,0x01080000u,0x81080000u})
+        for (unsigned enable : {0u,0x80u})
+        for (unsigned fe : {0u,0x100u,0x800u,0x900u})
+        for (unsigned ip : {0u,0x40u})
+        for (unsigned engine = 0; engine < 4; ++engine) {
+            ++cases; const unsigned failures = failed;
+            const uint32 causes = pair.snan ? 0x01000000u | (ordered && !enable ? 0x80000u : 0u) : ordered && pair.nan ? 0x80000u : 0u;
+            nw_jit_cpu before = {}; before.pc = pc; before.msr = 0x2000u | fe | ip;
+            before.fpscr = sticky | enable | 0x72003u; before.cr = 0xb2345678u; before.dec = cpu->dec_;
+            uint32 expected_fpscr = (before.fpscr & ~0xf000u) | (pair.cc<<12) | causes;
+            if (causes & ~before.fpscr) expected_fpscr |= 0x80000000u;
+            expected_fpscr &= ~0x60000000u;
+            if (expected_fpscr & 0x01080000u) expected_fpscr |= 0x20000000u;
+            if ((expected_fpscr & 0x20000000u) && enable) expected_fpscr |= 0x40000000u;
+            const unsigned sh = 28 - 4 * crfd;
+            const uint32 expected_cr = (before.cr & ~(15u<<sh)) | (pair.cc<<sh);
+            const bool except = fe && (expected_fpscr & 0x40000000u);
+            for (unsigned r = 0; r < 32; ++r) before.fpr[r] = bits(double(r+32));
+            before.fpr[1] = pair.a; before.fpr[2] = pair.b;
+            cpu->pc() = pc; cpu->last_fetch_pa_ = pc; mmu.set_msr(before.msr);
+            cpu->fpscr() = before.fpscr; cpu->cr().set(before.cr); cpu->xer().set(0); cpu->lr() = cpu->ctr() = 0;
+            cpu->srr0_ = cpu->srr1_ = 0; cpu->spcflags().init(); cpu->regs().reserve_valid = 0;
+            for (unsigned r = 0; r < 32; ++r) { cpu->fpr_dw(r) = before.fpr[r]; cpu->gpr(r) = 0; }
+            nw_jit_cpu result = before;
+            fesetround(engine & 1 ? FE_TOWARDZERO : FE_TONEAREST); feclearexcept(FE_ALL_EXCEPT); feraiseexcept(FE_DIVBYZERO);
+            const int host_flags = fetestexcept(FE_ALL_EXCEPT), host_round = fegetround();
+            fp_callback_round = host_round; fp_callback_flags = host_flags;
+            if (engine == 0) { const uint64 serial = cpu->exception_serial_; for (uint32 instruction_op : ops) { instruction(cpu,instruction_op); if (cpu->exception_serial_ != serial) break; } }
+            else if (engine == 1) (void)nw_jit_interp_n(&result,ops,3,pc);
+            else if (engine == 2) { result.host = cpu; nw_jit_cpu_bind(&result); nw_jit_tail_begin(); fn(&result); }
+            else { const uint64 misses = nw_jit_verify_misses(); CHECK(cpu->nw_jit_verify_block(result,fn,ops,3) == 1); CHECK(nw_jit_verify_misses() == misses); }
+            if (engine == 0 || engine == 3) {
+                result.pc = cpu->pc(); result.fpscr = cpu->fpscr(); result.cr = cpu->cr().get(); result.msr = mmu.msr(); result.srr0 = cpu->srr0_; result.srr1 = cpu->srr1_;
+                for (unsigned r = 0; r < 32; ++r) result.fpr[r] = cpu->fpr_dw(r);
+            }
+            CHECK(result.fpscr == expected_fpscr); CHECK(result.cr == expected_cr);
+            CHECK(result.pc == (except ? (ip ? 0xfff00700u : 0x700u) : pc + 12));
+            CHECK(result.msr == (except ? before.msr & ~0x0204ef32u : before.msr));
+            if (except) { CHECK(result.srr0 == pc + 4); CHECK(result.srr1 == ((before.msr & ~0x783f0000u) | 0x100000u)); if (engine == 2) { CHECK(cpu->pc() == result.pc); CHECK(cpu->srr0_ == result.srr0 && cpu->srr1_ == result.srr1); CHECK(cpu->fpscr() == result.fpscr); } }
+            for (unsigned r = 0; r < 32; ++r) {
+                const uint64 expected = r == 7 ? before.fpr[4] ^ 0x8000000000000000ULL : r == 5 && !except ? before.fpr[6] : before.fpr[r];
+                CHECK(result.fpr[r] == expected);
+            }
+            CHECK(fegetround() == host_round && fetestexcept(FE_ALL_EXCEPT) == host_flags);
+            if (failed != failures && failed < 50) fprintf(stderr,"P6 compare ordered=%u cr=%u engine=%u en=%x fe=%x fpscr=%08x expected=%08x\n",ordered,crfd,engine,enable,fe,result.fpscr,expected_fpscr);
+        }
+    }
+    const unsigned compare_cases = cases - conversion_cases;
+    const uint64 move_values[] = {0x7ff0123456789abcULL,0xfff0123456789abcULL,0x7ff8123456789abcULL,0xfff8123456789abcULL,0,0x8000000000000000ULL,0x7ff0000000000000ULL,0xfff0000000000000ULL,1,0x8000000000000001ULL};
+    for (unsigned kind = 0; kind < 5; ++kind)
+    for (unsigned alias = 0; alias < (kind == 4 ? 5u : 2u); ++alias) {
+        const unsigned fd = alias == 1 ? 1 : alias == 2 ? 2 : alias == 3 ? 3 : 4;
+        const unsigned ra = 1, rb = alias == 4 ? 1 : 2, fc = alias == 4 ? 1 : 3;
+        const unsigned real_fd = kind != 4 && alias == 1 ? rb : alias == 4 ? 1 : fd;
+        for (unsigned rc : {0u,1u}) {
+            const unsigned xo[] = {72,40,264,136,23};
+            const uint32 op = (63u<<26)|(real_fd<<21)|((kind == 4 ? ra : 0u)<<16)|(rb<<11)|((kind == 4 ? fc : 0u)<<6)|(xo[kind]<<1)|rc;
+            const uint32 pc = 0x18000; nw_jit_invalidate_all();
+            nw_jit_fn fn = nw_jit_compile(&op,1,pc,pc,0,0); CHECK(fn != NULL); if (!fn) continue;
+            for (uint64 value : move_values)
+            for (unsigned engine = 0; engine < 4; ++engine) {
+                ++cases; nw_jit_cpu before = {}; before.pc = pc; before.msr = 0x2900u;
+                before.cr = 0x12345678u; before.fpscr = 0xe10750f3u; before.dec = cpu->dec_;
+                for (unsigned r = 0; r < 32; ++r) before.fpr[r] = bits(double(r+32));
+                before.fpr[ra] = value; before.fpr[rb] = alias == 4 ? value : 0xfff0123456789abcULL;
+                before.fpr[fc] = alias == 4 ? value : 0x7ff8abcdef123456ULL;
+                if (kind != 4) before.fpr[rb] = value;
+                const uint64 operand = before.fpr[rb], abs = before.fpr[ra] & 0x7fffffffffffffffULL;
+                const bool positive = abs <= 0x7ff0000000000000ULL && (!(before.fpr[ra]>>63) || abs == 0);
+                const uint64 expected = kind == 0 ? operand : kind == 1 ? operand ^ 0x8000000000000000ULL : kind == 2 ? operand & 0x7fffffffffffffffULL : kind == 3 ? operand | 0x8000000000000000ULL : positive ? before.fpr[fc] : before.fpr[rb];
+                cpu->pc() = pc; cpu->last_fetch_pa_ = pc; mmu.set_msr(before.msr);
+                cpu->fpscr() = before.fpscr; cpu->cr().set(before.cr); cpu->xer().set(0); cpu->lr() = cpu->ctr() = 0;
+                cpu->srr0_ = cpu->srr1_ = 0; cpu->spcflags().init(); cpu->regs().reserve_valid = 0;
+                for (unsigned r = 0; r < 32; ++r) { cpu->fpr_dw(r) = before.fpr[r]; cpu->gpr(r) = 0; }
+                nw_jit_cpu result = before;
+                fesetround(engine & 1 ? FE_UPWARD : FE_DOWNWARD); feclearexcept(FE_ALL_EXCEPT); feraiseexcept(FE_DIVBYZERO);
+                const int host_flags = fetestexcept(FE_ALL_EXCEPT), host_round = fegetround();
+                if (engine == 0) instruction(cpu,op);
+                else if (engine == 1) (void)nw_jit_interp_n(&result,&op,1,pc);
+                else if (engine == 2) { result.host = cpu; nw_jit_cpu_bind(&result); nw_jit_tail_begin(); fn(&result); }
+                else { const uint64 misses = nw_jit_verify_misses(); CHECK(cpu->nw_jit_verify_block(result,fn,&op,1) == 1); CHECK(nw_jit_verify_misses() == misses); }
+                if (engine == 0 || engine == 3) { result.pc = cpu->pc(); result.fpscr = cpu->fpscr(); result.cr = cpu->cr().get(); for (unsigned r = 0; r < 32; ++r) result.fpr[r] = cpu->fpr_dw(r); }
+                CHECK(result.pc == pc + 4); CHECK(!result.fault); CHECK(result.fpscr == before.fpscr);
+                CHECK(result.cr == (rc ? (before.cr & ~0x0f000000u) | ((before.fpscr >> 4) & 0x0f000000u) : before.cr));
+                for (unsigned r = 0; r < 32; ++r) CHECK(result.fpr[r] == (r == real_fd ? expected : before.fpr[r]));
+                CHECK(fegetround() == host_round && fetestexcept(FE_ALL_EXCEPT) == host_flags);
+            }
+        }
+    }
+    fesetenv(&environment); nw_jit_set_host_chain(powerpc_cpu::jit_host_chain); nw_jit_set_mode(NW_JIT_ON);
+    printf("P6 scalar conversion: %u literal engine cases; compare: %u cases; NaN/moves: %u cases\n", conversion_cases, compare_cases, cases-conversion_cases-compare_cases);
+    nw_jit_set_host_fp_exception(powerpc_cpu::jit_host_fp_exception);
+    return failed ? 1 : 0;
+}
+int ppc_core_test_access::frsp_p6(powerpc_cpu *cpu)
+{
+    // Literal outcomes from exact rational boundary values, not either engine.
+    // flags: FI=1, FR=2, UX=4, OX=8, VXSNAN=16, preserve FR/FI=32.
+    struct round_case { uint64 input, result[4]; unsigned flags[4]; uint64 adjusted[4]; unsigned adjusted_flags[4]; };
+    const round_case inputs[] = {
+        {0x0000000000000000ULL,{0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL},{0,0,0,0},{0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL},{0,0,0,0}},
+        {0x3ff0000000000000ULL,{0x3ff0000000000000ULL,0x3ff0000000000000ULL,0x3ff0000000000000ULL,0x3ff0000000000000ULL},{0,0,0,0},{0x3ff0000000000000ULL,0x3ff0000000000000ULL,0x3ff0000000000000ULL,0x3ff0000000000000ULL},{0,0,0,0}},
+        {0x3ff0000010000000ULL,{0x3ff0000000000000ULL,0x3ff0000000000000ULL,0x3ff0000020000000ULL,0x3ff0000000000000ULL},{1,1,3,1},{0x3ff0000000000000ULL,0x3ff0000000000000ULL,0x3ff0000020000000ULL,0x3ff0000000000000ULL},{1,1,3,1}},
+        {0x3ff0000010000001ULL,{0x3ff0000020000000ULL,0x3ff0000000000000ULL,0x3ff0000020000000ULL,0x3ff0000000000000ULL},{3,1,3,1},{0x3ff0000020000000ULL,0x3ff0000000000000ULL,0x3ff0000020000000ULL,0x3ff0000000000000ULL},{3,1,3,1}},
+        {0x3ff000000fffffffULL,{0x3ff0000000000000ULL,0x3ff0000000000000ULL,0x3ff0000020000000ULL,0x3ff0000000000000ULL},{1,1,3,1},{0x3ff0000000000000ULL,0x3ff0000000000000ULL,0x3ff0000020000000ULL,0x3ff0000000000000ULL},{1,1,3,1}},
+        {0x3ff0000030000000ULL,{0x3ff0000040000000ULL,0x3ff0000020000000ULL,0x3ff0000040000000ULL,0x3ff0000020000000ULL},{3,1,3,1},{0x3ff0000040000000ULL,0x3ff0000020000000ULL,0x3ff0000040000000ULL,0x3ff0000020000000ULL},{3,1,3,1}},
+        {0x47efffffe0000000ULL,{0x47efffffe0000000ULL,0x47efffffe0000000ULL,0x47efffffe0000000ULL,0x47efffffe0000000ULL},{0,0,0,0},{0x47efffffe0000000ULL,0x47efffffe0000000ULL,0x47efffffe0000000ULL,0x47efffffe0000000ULL},{0,0,0,0}},
+        {0x47efffffe8000000ULL,{0x47efffffe0000000ULL,0x47efffffe0000000ULL,0x7ff0000000000000ULL,0x47efffffe0000000ULL},{1,1,9,1},{0x47efffffe0000000ULL,0x47efffffe0000000ULL,0x3bf0000000000000ULL,0x47efffffe0000000ULL},{1,1,11,1}},
+        {0x47effffff0000000ULL,{0x7ff0000000000000ULL,0x47efffffe0000000ULL,0x7ff0000000000000ULL,0x47efffffe0000000ULL},{9,1,9,1},{0x3bf0000000000000ULL,0x47efffffe0000000ULL,0x3bf0000000000000ULL,0x47efffffe0000000ULL},{11,1,11,1}},
+        {0x47f0000000000000ULL,{0x7ff0000000000000ULL,0x47efffffe0000000ULL,0x7ff0000000000000ULL,0x47efffffe0000000ULL},{9,9,9,9},{0x3bf0000000000000ULL,0x3bf0000000000000ULL,0x3bf0000000000000ULL,0x3bf0000000000000ULL},{8,8,8,8}},
+        {0x7fefffffffffffffULL,{0x7ff0000000000000ULL,0x47efffffe0000000ULL,0x7ff0000000000000ULL,0x47efffffe0000000ULL},{9,9,9,9},{0x73f0000000000000ULL,0x73efffffe0000000ULL,0x73f0000000000000ULL,0x73efffffe0000000ULL},{11,9,11,9}},
+        {0x3810000000000000ULL,{0x3810000000000000ULL,0x3810000000000000ULL,0x3810000000000000ULL,0x3810000000000000ULL},{0,0,0,0},{0x3810000000000000ULL,0x3810000000000000ULL,0x3810000000000000ULL,0x3810000000000000ULL},{0,0,0,0}},
+        {0x380fffffc0000000ULL,{0x380fffffc0000000ULL,0x380fffffc0000000ULL,0x380fffffc0000000ULL,0x380fffffc0000000ULL},{0,0,0,0},{0x440fffffc0000000ULL,0x440fffffc0000000ULL,0x440fffffc0000000ULL,0x440fffffc0000000ULL},{4,4,4,4}},
+        {0x380fffffe0000000ULL,{0x3810000000000000ULL,0x380fffffc0000000ULL,0x3810000000000000ULL,0x380fffffc0000000ULL},{7,5,7,5},{0x440fffffe0000000ULL,0x440fffffe0000000ULL,0x440fffffe0000000ULL,0x440fffffe0000000ULL},{4,4,4,4}},
+        {0x3800000000000000ULL,{0x3800000000000000ULL,0x3800000000000000ULL,0x3800000000000000ULL,0x3800000000000000ULL},{0,0,0,0},{0x4400000000000000ULL,0x4400000000000000ULL,0x4400000000000000ULL,0x4400000000000000ULL},{4,4,4,4}},
+        {0x36a0000000000000ULL,{0x36a0000000000000ULL,0x36a0000000000000ULL,0x36a0000000000000ULL,0x36a0000000000000ULL},{0,0,0,0},{0x42a0000000000000ULL,0x42a0000000000000ULL,0x42a0000000000000ULL,0x42a0000000000000ULL},{4,4,4,4}},
+        {0x3690000000000000ULL,{0x0000000000000000ULL,0x0000000000000000ULL,0x36a0000000000000ULL,0x0000000000000000ULL},{5,5,7,5},{0x4290000000000000ULL,0x4290000000000000ULL,0x4290000000000000ULL,0x4290000000000000ULL},{4,4,4,4}},
+        {0x3690000000000001ULL,{0x36a0000000000000ULL,0x0000000000000000ULL,0x36a0000000000000ULL,0x0000000000000000ULL},{7,5,7,5},{0x4290000000000000ULL,0x4290000000000000ULL,0x4290000020000000ULL,0x4290000000000000ULL},{5,5,7,5}},
+        {0x368fffffffffffffULL,{0x0000000000000000ULL,0x0000000000000000ULL,0x36a0000000000000ULL,0x0000000000000000ULL},{5,5,7,5},{0x4290000000000000ULL,0x428fffffe0000000ULL,0x4290000000000000ULL,0x428fffffe0000000ULL},{7,5,7,5}},
+        {0x0000000000000001ULL,{0x0000000000000000ULL,0x0000000000000000ULL,0x36a0000000000000ULL,0x0000000000000000ULL},{5,5,7,5},{0x08d0000000000000ULL,0x08d0000000000000ULL,0x08d0000000000000ULL,0x08d0000000000000ULL},{4,4,4,4}},
+        {0x0000000000000003ULL,{0x0000000000000000ULL,0x0000000000000000ULL,0x36a0000000000000ULL,0x0000000000000000ULL},{5,5,7,5},{0x08e8000000000000ULL,0x08e8000000000000ULL,0x08e8000000000000ULL,0x08e8000000000000ULL},{4,4,4,4}},
+        {0x0010000000000000ULL,{0x0000000000000000ULL,0x0000000000000000ULL,0x36a0000000000000ULL,0x0000000000000000ULL},{5,5,7,5},{0x0c10000000000000ULL,0x0c10000000000000ULL,0x0c10000000000000ULL,0x0c10000000000000ULL},{4,4,4,4}},
+        {0x07b0000000000000ULL,{0x0000000000000000ULL,0x0000000000000000ULL,0x36a0000000000000ULL,0x0000000000000000ULL},{5,5,7,5},{0x13b0000000000000ULL,0x13b0000000000000ULL,0x13b0000000000000ULL,0x13b0000000000000ULL},{4,4,4,4}},
+        {0x7ff0000000000000ULL,{0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x7ff0000000000000ULL},{32,32,32,32},{0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x7ff0000000000000ULL},{32,32,32,32}},
+        {0x7ff8123456789abcULL,{0x7ff8123440000000ULL,0x7ff8123440000000ULL,0x7ff8123440000000ULL,0x7ff8123440000000ULL},{0,0,0,0},{0x7ff8123440000000ULL,0x7ff8123440000000ULL,0x7ff8123440000000ULL,0x7ff8123440000000ULL},{0,0,0,0}},
+        {0x7ff0000000000001ULL,{0x7ff8000000000000ULL,0x7ff8000000000000ULL,0x7ff8000000000000ULL,0x7ff8000000000000ULL},{16,16,16,16},{0x7ff8000000000000ULL,0x7ff8000000000000ULL,0x7ff8000000000000ULL,0x7ff8000000000000ULL},{16,16,16,16}},
+        {0x7ff0123456789abcULL,{0x7ff8123440000000ULL,0x7ff8123440000000ULL,0x7ff8123440000000ULL,0x7ff8123440000000ULL},{16,16,16,16},{0x7ff8123440000000ULL,0x7ff8123440000000ULL,0x7ff8123440000000ULL,0x7ff8123440000000ULL},{16,16,16,16}},
+    };
+    struct control { unsigned enable, fe, ip; };
+    const control controls[] = {
+        {0,0,0},{0,0x900,0x40},{0x80,0,0},{0x80,0x100,0},
+        {0x80,0x800,0},{0x80,0x900,0x40},{0x40,0,0},{0x40,0x900,0x40},
+        {0x20,0,0},{0x20,0x100,0},{0x20,0x800,0x40},{0x20,0x900,0},
+        {8,0,0},{8,0x900,0x40},{0xe8,0,0},{0xe8,0x900,0x40}
+    };
+    cpu->enable_guest_mmu(true); nw_jit_set_mode(NW_JIT_VERIFY);
+    nw_jit_set_host_fp_exception(checked_fp_exception); nw_jit_set_host_chain(NULL);
+    ppc32_mmu &mmu = ppc32_guest_mmu();
+    const uint32 base = 0x10000000u, pc = base+0x1000;
+    void *const wanted = (void *)(VMBaseDiff+base);
+    void *const ram = mmap(wanted,0x2000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    CHECK(ram == wanted); if (ram != wanted) return 1;
+    nw_banks_set(NW_PA_RAM,base,0x2000);
+    fenv_t environment; fegetenv(&environment);
+    const int host_modes[] = {FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};
+    unsigned cases = 0, publication_cases = 0;
+    for (unsigned alias : {0u,1u})
+    for (unsigned rc : {0u,1u}) {
+        const unsigned fd = alias ? 1 : 3;
+        const uint32 ops[] = {(63u<<26)|(7u<<21)|(4u<<11)|(40u<<1),
+            (63u<<26)|(fd<<21)|(1u<<11)|(12u<<1)|rc,
+            (63u<<26)|(5u<<21)|(6u<<11)|(72u<<1)};
+        nw_jit_invalidate_all();
+        for (unsigned i = 0; i < 3; ++i) vm_write_memory_4(pc+4*i,ops[i]);
+        vm_write_memory_4(pc+12,0); // builder stops at the unsupported sentinel
+        nw_jit_fn fn = nw_jit_compile(ops,3,pc,pc,0,0); CHECK(fn != NULL); if (!fn) continue;
+        for (const auto &test : inputs)
+        for (unsigned negative : {0u,1u})
+        for (unsigned rn = 0; rn < 4; ++rn)
+        for (const auto &control : controls)
+        for (unsigned sticky : {0u,0x1b000000u,0x9b000000u})
+        for (unsigned engine = 0; engine < 6; ++engine) {
+            ++cases; if (engine >= 4) ++publication_cases;
+            const unsigned failures = failed;
+            const uint64 sign = uint64(negative)<<63, source = test.input|sign;
+            const unsigned rounding = negative && rn >= 2 ? rn ^ 1u : rn;
+            const unsigned exp = unsigned(test.input>>52);
+            const bool tiny = test.input && exp < 897;
+            const bool adjusted = (tiny && (control.enable & 0x20u)) ||
+                ((test.flags[rounding] & 8u) && (control.enable & 0x40u));
+            const unsigned status = adjusted ? test.adjusted_flags[rounding] : test.flags[rounding];
+            const uint64 answer = (adjusted ? test.adjusted[rounding] : test.result[rounding])|sign;
+            const uint32 causes = (status&1 ? 0x02000000u : 0) | (status&4 ? 0x08000000u : 0) |
+                (status&8 ? 0x10000000u : 0) | (status&16 ? 0x01000000u : 0);
+            const bool suppressed = (status&16) && (control.enable&0x80u);
+            nw_jit_cpu before = {}; before.pc=pc; before.msr=0x2000u|control.fe|control.ip;
+            before.cr=0xb2345678u; before.xer=0xe0000000u;
+            before.fpscr=sticky|control.enable|rn|0x75000u;
+            // Independently derive initial and resulting summary bits from causes/enables.
+            auto summaries = [](uint32 f) {
+                f &= ~0x60000000u;
+                if (f & 0x01f80700u) f |= 0x20000000u;
+                if ((f&0x20000000u) && (f&0x80u) || (f&0x10000000u) && (f&0x40u) ||
+                    (f&0x08000000u) && (f&0x20u) || (f&0x04000000u) && (f&0x10u) ||
+                    (f&0x02000000u) && (f&8u)) f |= 0x40000000u;
+                return f;
+            };
+            before.fpscr=summaries(before.fpscr);
+            uint32 expected_fpscr=before.fpscr;
+            if (!(status&32)) expected_fpscr=(expected_fpscr&~0x60000u)|(status&1 ? 0x20000u : 0)|(status&2 ? 0x40000u : 0);
+            if (!suppressed) {
+                const uint64 magnitude=answer&0x7fffffffffffffffULL;
+                const uint32 classification=magnitude>0x7ff0000000000000ULL ? 17 : !magnitude ? negative ? 18 : 2 :
+                    magnitude==0x7ff0000000000000ULL ? negative ? 9 : 5 :
+                    !adjusted && magnitude<0x3810000000000000ULL ? negative ? 24 : 20 : negative ? 8 : 4;
+                expected_fpscr=(expected_fpscr&~0x1f000u)|(classification<<12);
+            }
+            if (causes&~before.fpscr) expected_fpscr|=0x80000000u;
+            expected_fpscr=summaries(expected_fpscr|causes);
+            const bool except=control.fe && (expected_fpscr&0x40000000u);
+            before.srr0=0x12345678; before.srr1=0x87654321;
+            for (unsigned r=0;r<32;++r) {
+                before.fpr[r]=bits(double(r+32)); before.gpr[r]=0x12340000u+r;
+                for (unsigned w=0;w<4;++w) before.vr[r][w]=0x89100000u+r*4+w;
+            }
+            before.fpr[1]=source;
+            mmu.reset(); mmu.set_msr(before.msr); cpu->pc()=pc; cpu->last_fetch_pa_=pc;
+            cpu->dec_=1000000; cpu->dec_tb_base_=cpu->tb_host_ticks(); cpu->dec_pending_=false; before.dec=cpu->dec_;
+            cpu->fpscr()=before.fpscr; cpu->cr().set(before.cr); cpu->xer().set(before.xer); cpu->lr()=cpu->ctr()=0;
+            cpu->srr0_=before.srr0; cpu->srr1_=before.srr1; cpu->spcflags().init(); cpu->regs().reserve_valid=0;
+            for (unsigned r=0;r<32;++r) {
+                cpu->fpr_dw(r)=before.fpr[r]; cpu->gpr(r)=before.gpr[r];
+                for (unsigned w=0;w<4;++w) cpu->vr(r).w[w]=before.vr[r][w];
+            }
+            nw_jit_cpu result=before;
+            fesetround(host_modes[engine&3]); feclearexcept(FE_ALL_EXCEPT); feraiseexcept(FE_DIVBYZERO);
+            fp_callback_round=fegetround(); fp_callback_flags=fetestexcept(FE_ALL_EXCEPT);
+            const uint64 serial=cpu->exception_serial_, misses=nw_jit_verify_misses();
+            if (!engine) {
+                for (uint32 op : ops) { instruction(cpu,op); if (cpu->exception_serial_!=serial) break; }
+            } else if (engine==1) (void)nw_jit_interp_n(&result,ops,3,pc);
+            else if (engine==2) { result.host=cpu; nw_jit_cpu_bind(&result); nw_jit_tail_begin(); fn(&result); }
+            else if (engine==3) CHECK(cpu->nw_jit_verify_block(result,fn,ops,3)==1);
+            else { nw_jit_set_mode(engine==4 ? NW_JIT_ON : NW_JIT_VERIFY); CHECK(cpu->nw_jit_try(ops[0])==1); }
+            CHECK(nw_jit_verify_misses()==misses);
+            if (engine==0 || engine>=3) {
+                result.pc=cpu->pc(); result.fpscr=cpu->fpscr(); result.cr=cpu->cr().get(); result.msr=mmu.msr();
+                result.srr0=cpu->srr0_; result.srr1=cpu->srr1_;
+                for (unsigned r=0;r<32;++r) {
+                    result.fpr[r]=cpu->fpr_dw(r); result.gpr[r]=cpu->gpr(r);
+                    for (unsigned w=0;w<4;++w) result.vr[r][w]=cpu->vr(r).w[w];
+                }
+            }
+            CHECK(result.fpscr==expected_fpscr);
+            CHECK(result.cr==(rc ? (before.cr&~0x0f000000u)|((expected_fpscr>>4)&0x0f000000u) : before.cr));
+            CHECK(result.pc==(except ? control.ip ? 0xfff00700u : 0x700u : pc+12));
+            CHECK(result.msr==(except ? before.msr&~0x0204ef32u : before.msr));
+            CHECK(result.srr0==(except ? pc+4 : before.srr0));
+            CHECK(result.srr1==(except ? (before.msr&~0x783f0000u)|0x100000u : before.srr1));
+            if (engine==0 || engine==2 || engine>=4) CHECK(cpu->exception_serial_==serial+unsigned(except));
+            for (unsigned r=0;r<32;++r) {
+                CHECK(result.fpr[r]==(r==7 ? before.fpr[4]^0x8000000000000000ULL :
+                    r==fd ? suppressed ? before.fpr[r] : answer : r==5 && !except ? before.fpr[6] : before.fpr[r]));
+                CHECK(result.gpr[r]==before.gpr[r]);
+                for (unsigned w=0;w<4;++w) CHECK(result.vr[r][w]==before.vr[r][w]);
+            }
+            CHECK(fegetround()==fp_callback_round && fetestexcept(FE_ALL_EXCEPT)==fp_callback_flags);
+            if (failed!=failures && failed<100) fprintf(stderr,"frsp engine=%u source=%016llx rn=%u en=%x fe=%x status=%x got=%016llx/%08x expected=%016llx/%08x\n",engine,(unsigned long long)source,rn,control.enable,control.fe,status,(unsigned long long)result.fpr[fd],result.fpscr,(unsigned long long)answer,expected_fpscr);
+        }
+    }
+    printf("P6 frsp: %u literal engine cases, including %u production entry/commit cases\n",cases,publication_cases);
+    fesetenv(&environment); nw_jit_invalidate_all(); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,0x2000);
+    nw_jit_set_host_fp_exception(powerpc_cpu::jit_host_fp_exception);
+    nw_jit_set_host_chain(powerpc_cpu::jit_host_chain); nw_jit_set_mode(NW_JIT_ON);
+    return failed ? 1 : 0;
+}
+int ppc_core_test_access::basic_special_p6(powerpc_cpu *cpu)
+{
+    // Literal special-result and finite-control expectations. Mask bits select
+    // divide/subtract/add/multiply; cancellation zeros acquire the RN sign.
+    struct basic_case { unsigned mask; uint64 a,b,result; uint32 cause; bool clear, cancel; };
+    const basic_case inputs[] = {
+        {15,0x7ff8123456789abcULL,0x3ff0000000000000ULL,0x7ff8123456789abcULL,0x00000000u,true,false},
+        {15,0x3ff0000000000000ULL,0xfff8abcdef123456ULL,0xfff8abcdef123456ULL,0x00000000u,true,false},
+        {15,0x7ff0123456789abcULL,0x3ff0000000000000ULL,0x7ff8123456789abcULL,0x01000000u,true,false},
+        {15,0x3ff0000000000000ULL,0xfff0abcdef123456ULL,0xfff8abcdef123456ULL,0x01000000u,true,false},
+        {15,0x7ff8123456789abcULL,0xfff0abcdef123456ULL,0x7ff8123456789abcULL,0x01000000u,true,false},
+        {15,0x7ff0123456789abcULL,0xfff8abcdef123456ULL,0x7ff8123456789abcULL,0x01000000u,true,false},
+        {15,0x7ff8123456789abcULL,0xfff8abcdef123456ULL,0x7ff8123456789abcULL,0x00000000u,true,false},
+        {15,0x7ff0123456789abcULL,0xfff0abcdef123456ULL,0x7ff8123456789abcULL,0x01000000u,true,false},
+        {15,0x7ff0000000000001ULL,0x0000000000000000ULL,0x7ff8000000000001ULL,0x01000000u,true,false},
+        {15,0x7ff8123456789abcULL,0x7ff8123456789abcULL,0x7ff8123456789abcULL,0x00000000u,true,false},
+        {15,0x7ff0123456789abcULL,0x7ff0123456789abcULL,0x7ff8123456789abcULL,0x01000000u,true,false},
+        {4,0x7ff0000000000000ULL,0xfff0000000000000ULL,0x7ff8000000000000ULL,0x00800000u,true,false},
+        {2,0x7ff0000000000000ULL,0xfff0000000000000ULL,0x7ff0000000000000ULL,0x00000000u,true,false},
+        {1,0x7ff0000000000000ULL,0xfff0000000000000ULL,0x7ff8000000000000ULL,0x00400000u,true,false},
+        {4,0xfff0000000000000ULL,0x7ff0000000000000ULL,0x7ff8000000000000ULL,0x00800000u,true,false},
+        {2,0xfff0000000000000ULL,0x7ff0000000000000ULL,0xfff0000000000000ULL,0x00000000u,true,false},
+        {1,0xfff0000000000000ULL,0x7ff0000000000000ULL,0x7ff8000000000000ULL,0x00400000u,true,false},
+        {4,0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x00000000u,true,false},
+        {2,0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x7ff8000000000000ULL,0x00800000u,true,false},
+        {1,0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x7ff8000000000000ULL,0x00400000u,true,false},
+        {4,0xfff0000000000000ULL,0xfff0000000000000ULL,0xfff0000000000000ULL,0x00000000u,true,false},
+        {2,0xfff0000000000000ULL,0xfff0000000000000ULL,0x7ff8000000000000ULL,0x00800000u,true,false},
+        {1,0xfff0000000000000ULL,0xfff0000000000000ULL,0x7ff8000000000000ULL,0x00400000u,true,false},
+        {1,0x0000000000000000ULL,0x0000000000000000ULL,0x7ff8000000000000ULL,0x00200000u,true,false},
+        {4,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,false},
+        {2,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,true},
+        {1,0x0000000000000000ULL,0x8000000000000000ULL,0x7ff8000000000000ULL,0x00200000u,true,false},
+        {4,0x0000000000000000ULL,0x8000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,true},
+        {2,0x0000000000000000ULL,0x8000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,false},
+        {1,0x8000000000000000ULL,0x0000000000000000ULL,0x7ff8000000000000ULL,0x00200000u,true,false},
+        {4,0x8000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,true},
+        {2,0x8000000000000000ULL,0x0000000000000000ULL,0x8000000000000000ULL,0x00000000u,true,false},
+        {1,0x8000000000000000ULL,0x8000000000000000ULL,0x7ff8000000000000ULL,0x00200000u,true,false},
+        {4,0x8000000000000000ULL,0x8000000000000000ULL,0x8000000000000000ULL,0x00000000u,true,false},
+        {2,0x8000000000000000ULL,0x8000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,true},
+        {1,0x3ff0000000000000ULL,0x0000000000000000ULL,0x7ff0000000000000ULL,0x04000000u,true,false},
+        {1,0x3ff0000000000000ULL,0x8000000000000000ULL,0xfff0000000000000ULL,0x04000000u,true,false},
+        {1,0xbff0000000000000ULL,0x0000000000000000ULL,0xfff0000000000000ULL,0x04000000u,true,false},
+        {1,0xbff0000000000000ULL,0x8000000000000000ULL,0x7ff0000000000000ULL,0x04000000u,true,false},
+        {8,0x0000000000000000ULL,0x7ff0000000000000ULL,0x7ff8000000000000ULL,0x00100000u,true,false},
+        {8,0x7ff0000000000000ULL,0x0000000000000000ULL,0x7ff8000000000000ULL,0x00100000u,true,false},
+        {8,0x0000000000000000ULL,0xfff0000000000000ULL,0x7ff8000000000000ULL,0x00100000u,true,false},
+        {8,0xfff0000000000000ULL,0x0000000000000000ULL,0x7ff8000000000000ULL,0x00100000u,true,false},
+        {8,0x8000000000000000ULL,0x7ff0000000000000ULL,0x7ff8000000000000ULL,0x00100000u,true,false},
+        {8,0x7ff0000000000000ULL,0x8000000000000000ULL,0x7ff8000000000000ULL,0x00100000u,true,false},
+        {8,0x8000000000000000ULL,0xfff0000000000000ULL,0x7ff8000000000000ULL,0x00100000u,true,false},
+        {8,0xfff0000000000000ULL,0x8000000000000000ULL,0x7ff8000000000000ULL,0x00100000u,true,false},
+        {15,0x7ff0000000000000ULL,0x3ff0000000000000ULL,0x7ff0000000000000ULL,0x00000000u,true,false},
+        {15,0xfff0000000000000ULL,0x3ff0000000000000ULL,0xfff0000000000000ULL,0x00000000u,true,false},
+        {4,0x3ff0000000000000ULL,0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x00000000u,true,false},
+        {2,0x3ff0000000000000ULL,0x7ff0000000000000ULL,0xfff0000000000000ULL,0x00000000u,true,false},
+        {8,0x3ff0000000000000ULL,0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x00000000u,true,false},
+        {1,0x3ff0000000000000ULL,0x7ff0000000000000ULL,0x0000000000000000ULL,0x00000000u,true,false},
+        {4,0x3ff0000000000000ULL,0xfff0000000000000ULL,0xfff0000000000000ULL,0x00000000u,true,false},
+        {2,0x3ff0000000000000ULL,0xfff0000000000000ULL,0x7ff0000000000000ULL,0x00000000u,true,false},
+        {8,0x3ff0000000000000ULL,0xfff0000000000000ULL,0xfff0000000000000ULL,0x00000000u,true,false},
+        {1,0x3ff0000000000000ULL,0xfff0000000000000ULL,0x8000000000000000ULL,0x00000000u,true,false},
+        {8,0x0000000000000000ULL,0x4000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,false},
+        {1,0x0000000000000000ULL,0x4000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,false},
+        {8,0x8000000000000000ULL,0x4000000000000000ULL,0x8000000000000000ULL,0x00000000u,true,false},
+        {1,0x8000000000000000ULL,0x4000000000000000ULL,0x8000000000000000ULL,0x00000000u,true,false},
+        {8,0x4000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,false},
+        {8,0x4000000000000000ULL,0x8000000000000000ULL,0x8000000000000000ULL,0x00000000u,true,false},
+        {1,0x4000000000000000ULL,0x8000000000000000ULL,0xfff0000000000000ULL,0x04000000u,true,false},
+        {1,0x7ff0000000000000ULL,0x0000000000000000ULL,0x7ff0000000000000ULL,0x00000000u,true,false},
+        {1,0x7ff0000000000000ULL,0x8000000000000000ULL,0xfff0000000000000ULL,0x00000000u,true,false},
+        {1,0xfff0000000000000ULL,0x0000000000000000ULL,0xfff0000000000000ULL,0x00000000u,true,false},
+        {1,0xfff0000000000000ULL,0x8000000000000000ULL,0x7ff0000000000000ULL,0x00000000u,true,false},
+        {2,0x0000000000000001ULL,0x0000000000000001ULL,0x0000000000000000ULL,0x00000000u,false,true},
+        {4,0x0000000000000000ULL,0x4000000000000000ULL,0x4000000000000000ULL,0x00000000u,false,false},
+        {2,0x0000000000000000ULL,0x4000000000000000ULL,0xc000000000000000ULL,0x00000000u,false,false},
+        {4,0x3ff0000000000000ULL,0xbff0000000000000ULL,0x0000000000000000ULL,0x00000000u,false,true},
+        {2,0x3ff0000000000000ULL,0x3ff0000000000000ULL,0x0000000000000000ULL,0x00000000u,false,true},
+        {8,0x0000000000000000ULL,0x0000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,false},
+        {8,0x0000000000000000ULL,0x8000000000000000ULL,0x8000000000000000ULL,0x00000000u,true,false},
+        {8,0x8000000000000000ULL,0x0000000000000000ULL,0x8000000000000000ULL,0x00000000u,true,false},
+        {8,0x8000000000000000ULL,0x8000000000000000ULL,0x0000000000000000ULL,0x00000000u,true,false},
+        {8,0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x7ff0000000000000ULL,0x00000000u,true,false},
+        {8,0x7ff0000000000000ULL,0xfff0000000000000ULL,0xfff0000000000000ULL,0x00000000u,true,false},
+        {8,0xfff0000000000000ULL,0x7ff0000000000000ULL,0xfff0000000000000ULL,0x00000000u,true,false},
+        {8,0xfff0000000000000ULL,0xfff0000000000000ULL,0x7ff0000000000000ULL,0x00000000u,true,false},
+        {4,0x3ff0000000000000ULL,0x4000000000000000ULL,0x4008000000000000ULL,0x00000000u,false,false},
+        {2,0x3ff0000000000000ULL,0x4000000000000000ULL,0xbff0000000000000ULL,0x00000000u,false,false},
+        {8,0x3ff0000000000000ULL,0x4000000000000000ULL,0x4000000000000000ULL,0x00000000u,false,false},
+        {1,0x3ff0000000000000ULL,0x4000000000000000ULL,0x3fe0000000000000ULL,0x00000000u,false,false},
+    };
+    struct control { unsigned enable, fe, ip; };
+    const control controls[] = {
+        {0,0,0},{0,0x900,0x40},{0x80,0,0},{0x80,0x100,0},
+        {0x80,0x800,0},{0x80,0x900,0x40},{0x10,0,0},{0x10,0x100,0},
+        {0x10,0x800,0x40},{0x10,0x900,0},{0x90,0,0},{0x90,0x900,0x40},
+        {8,0,0},{8,0x900,0x40},{0xe8,0,0},{0xf8,0x900,0x40}
+    };
+    cpu->enable_guest_mmu(true); nw_jit_set_mode(NW_JIT_VERIFY);
+    nw_jit_set_host_fp_exception(checked_fp_exception); nw_jit_set_host_chain(NULL);
+    ppc32_mmu &mmu = ppc32_guest_mmu();
+    const uint32 base = 0x10000000u, pc = base+0x1000;
+    void *const wanted = (void *)(VMBaseDiff+base);
+    void *const ram = mmap(wanted,0x2000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    CHECK(ram == wanted); if (ram != wanted) return 1;
+    nw_banks_set(NW_PA_RAM,base,0x2000);
+    fenv_t environment; fegetenv(&environment);
+    const int host_modes[] = {FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};
+    unsigned cases = 0, publication_cases = 0;
+    const bool baseline = getenv("PPC_BASIC_BASELINE") != NULL;
+    for (unsigned precision : {59u,63u})
+    for (unsigned kind = 0; kind < 4; ++kind)
+    for (unsigned alias = 0; alias < 6; ++alias)
+    for (unsigned rc : {0u,1u}) {
+        if (baseline && (alias || rc)) continue;
+        const unsigned fa=1, fb=alias>=4 ? 1 : 2;
+        const unsigned fd=alias==1 || alias==5 ? 1 : alias==2 ? fb : alias==3 ? 0 : 4;
+        const unsigned kinds[]={18,20,21,25}, xo=kinds[kind];
+        const uint32 ops[] = {(63u<<26)|(7u<<21)|(8u<<11)|(40u<<1),
+            (precision<<26)|(fd<<21)|(fa<<16)|(fb<<(kind==3 ? 6 : 11))|(xo<<1)|rc,
+            (63u<<26)|(5u<<21)|(6u<<11)|(72u<<1)};
+        nw_jit_invalidate_all();
+        for (unsigned i = 0; i < 3; ++i) vm_write_memory_4(pc+4*i,ops[i]);
+        vm_write_memory_4(pc+12,0); // builder stops at the unsupported sentinel
+        nw_jit_fn fn = nw_jit_compile(ops,3,pc,pc,0,0); CHECK(fn != NULL); if (!fn) continue;
+        for (const auto &test : inputs)
+        for (unsigned rn = 0; rn < 4; ++rn)
+        for (const auto &control : controls)
+        for (unsigned sticky : {0u,0x1ff00000u,0x9ff00000u})
+        for (unsigned engine = 0; engine < 6; ++engine) {
+            if (!(test.mask & (1u<<kind)) || (alias>=4 && test.a!=test.b)) continue;
+            if (baseline && (rn || sticky || (engine!=0 && engine!=2) || control.ip || control.fe ||
+                (control.enable!=0 && control.enable!=0x80 && control.enable!=0x10))) continue;
+            ++cases; if (engine>=4) ++publication_cases;
+            const unsigned failures=failed;
+            const uint64 answer=test.cancel && rn==3 ? 0x8000000000000000ULL : test.result;
+            const uint32 causes=test.cause;
+            const bool suppressed=(causes&0x01f00000u) && (control.enable&0x80u) ||
+                (causes&0x04000000u) && (control.enable&0x10u);
+            nw_jit_cpu before={}; before.pc=pc; before.msr=0x2000u|control.fe|control.ip;
+            before.cr=0xb2345678u; before.xer=0xe0000000u;
+            before.fpscr=sticky|control.enable|rn|0x15000u|(test.clear ? 0x60000u : 0);
+            auto summaries=[](uint32 f) {
+                f&=~0x60000000u;
+                if (f&0x01f80700u) f|=0x20000000u;
+                if ((f&0x20000000u)&&(f&0x80u) || (f&0x10000000u)&&(f&0x40u) ||
+                    (f&0x08000000u)&&(f&0x20u) || (f&0x04000000u)&&(f&0x10u) ||
+                    (f&0x02000000u)&&(f&8u)) f|=0x40000000u;
+                return f;
+            };
+            before.fpscr=summaries(before.fpscr);
+            uint32 expected_fpscr=before.fpscr;
+            if (test.clear) expected_fpscr&=~0x60000u;
+            if (!suppressed) {
+                const uint64 magnitude=answer&0x7fffffffffffffffULL;
+                const bool negative=answer>>63;
+                const uint32 classification=magnitude>0x7ff0000000000000ULL ? 17 : !magnitude ? negative ? 18 : 2 :
+                    magnitude==0x7ff0000000000000ULL ? negative ? 9 : 5 : negative ? 8 : 4;
+                expected_fpscr=(expected_fpscr&~0x1f000u)|(classification<<12);
+            }
+            if (causes&~before.fpscr) expected_fpscr|=0x80000000u;
+            expected_fpscr=summaries(expected_fpscr|causes);
+            const bool except=control.fe && (expected_fpscr&0x40000000u);
+            before.srr0=0x12345678; before.srr1=0x87654321;
+            for (unsigned r=0;r<32;++r) {
+                before.fpr[r]=bits(double(r+32)); before.gpr[r]=0x12340000u+r;
+                for (unsigned w=0;w<4;++w) before.vr[r][w]=0x89100000u+r*4+w;
+            }
+            before.fpr[fa]=test.a; before.fpr[fb]=test.b;
+            // Encoded fixed-zero operand fields must not read FPR0.
+            before.fpr[0]=0xfff0000000000001ULL;
+            mmu.reset(); mmu.set_msr(before.msr); cpu->pc()=pc; cpu->last_fetch_pa_=pc;
+            cpu->dec_=1000000; cpu->dec_tb_base_=cpu->tb_host_ticks(); cpu->dec_pending_=false; before.dec=cpu->dec_;
+            cpu->fpscr()=before.fpscr; cpu->cr().set(before.cr); cpu->xer().set(before.xer); cpu->lr()=cpu->ctr()=0;
+            cpu->srr0_=before.srr0; cpu->srr1_=before.srr1; cpu->spcflags().init(); cpu->regs().reserve_valid=0;
+            for (unsigned r=0;r<32;++r) {
+                cpu->fpr_dw(r)=before.fpr[r]; cpu->gpr(r)=before.gpr[r];
+                for (unsigned w=0;w<4;++w) cpu->vr(r).w[w]=before.vr[r][w];
+            }
+            nw_jit_cpu result=before;
+            fesetround(host_modes[engine&3]); feclearexcept(FE_ALL_EXCEPT); feraiseexcept(FE_DIVBYZERO);
+            fp_callback_round=fegetround(); fp_callback_flags=fetestexcept(FE_ALL_EXCEPT);
+            const uint64 serial=cpu->exception_serial_, misses=nw_jit_verify_misses();
+            if (!engine) {
+                for (uint32 op : ops) { instruction(cpu,op); if (cpu->exception_serial_!=serial) break; }
+            } else if (engine==1) (void)nw_jit_interp_n(&result,ops,3,pc);
+            else if (engine==2) { result.host=cpu; nw_jit_cpu_bind(&result); nw_jit_tail_begin(); fn(&result); }
+            else if (engine==3) CHECK(cpu->nw_jit_verify_block(result,fn,ops,3)==1);
+            else { nw_jit_set_mode(engine==4 ? NW_JIT_ON : NW_JIT_VERIFY); CHECK(cpu->nw_jit_try(ops[0])==1); }
+            CHECK(nw_jit_verify_misses()==misses);
+            if (engine==0 || engine>=3) {
+                result.pc=cpu->pc(); result.fpscr=cpu->fpscr(); result.cr=cpu->cr().get(); result.msr=mmu.msr();
+                result.srr0=cpu->srr0_; result.srr1=cpu->srr1_;
+                for (unsigned r=0;r<32;++r) {
+                    result.fpr[r]=cpu->fpr_dw(r); result.gpr[r]=cpu->gpr(r);
+                    for (unsigned w=0;w<4;++w) result.vr[r][w]=cpu->vr(r).w[w];
+                }
+            }
+            CHECK(result.fpscr==expected_fpscr);
+            CHECK(result.cr==(rc ? (before.cr&~0x0f000000u)|((expected_fpscr>>4)&0x0f000000u) : before.cr));
+            CHECK(result.pc==(except ? control.ip ? 0xfff00700u : 0x700u : pc+12));
+            CHECK(result.msr==(except ? before.msr&~0x0204ef32u : before.msr));
+            CHECK(result.srr0==(except ? pc+4 : before.srr0));
+            CHECK(result.srr1==(except ? (before.msr&~0x783f0000u)|0x100000u : before.srr1));
+            if (engine==0 || engine==2 || engine>=4) CHECK(cpu->exception_serial_==serial+unsigned(except));
+            for (unsigned r=0;r<32;++r) {
+                CHECK(result.fpr[r]==(r==7 ? before.fpr[8]^0x8000000000000000ULL :
+                    r==fd ? suppressed ? before.fpr[r] : answer : r==5 && !except ? before.fpr[6] : before.fpr[r]));
+                CHECK(result.gpr[r]==before.gpr[r]);
+                for (unsigned w=0;w<4;++w) CHECK(result.vr[r][w]==before.vr[r][w]);
+            }
+            CHECK(fegetround()==fp_callback_round && fetestexcept(FE_ALL_EXCEPT)==fp_callback_flags);
+            if (failed!=failures && failed<100) fprintf(stderr,"basic engine=%u prim=%u xo=%u alias=%u a=%016llx b=%016llx rn=%u en=%x fe=%x got=%016llx/%08x expected=%016llx/%08x\n",engine,precision,xo,alias,(unsigned long long)test.a,(unsigned long long)test.b,rn,control.enable,control.fe,(unsigned long long)result.fpr[fd],result.fpscr,(unsigned long long)answer,expected_fpscr);
+        }
+    }
+    printf("P6 basic special: %u literal engine cases, including %u production entry/commit cases\n",cases,publication_cases);
+    for (unsigned prim : {59u,63u}) for (unsigned rc : {0u,1u}) for (unsigned ip : {0u,0x40u}) {
+        const uint32 op=(prim<<26)|(4u<<21)|(1u<<11)|(22u<<1)|rc, msr=0x2000u|ip;
+        CHECK(!nw_jit_op_supported(op));
+        mmu.reset(); mmu.set_msr(msr); cpu->pc()=pc; cpu->fpscr()=0x12345678u; cpu->cr().set(0xabcdef01u);
+        const uint64 serial=cpu->exception_serial_, old=cpu->fpr_dw(4);
+        instruction(cpu,op); CHECK(cpu->exception_serial_==serial+1);
+        CHECK(cpu->pc()==(ip ? 0xfff00700u : 0x700u)); CHECK(cpu->srr0_==pc);
+        CHECK(cpu->srr1_==((msr&~0x783f0000u)|0x80000u));
+        CHECK(cpu->fpr_dw(4)==old && cpu->fpscr()==0x12345678u && cpu->cr().get()==0xabcdef01u);
+    }
+    fesetenv(&environment); nw_jit_invalidate_all(); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,0x2000);
+    nw_jit_set_host_fp_exception(powerpc_cpu::jit_host_fp_exception);
+    nw_jit_set_host_chain(powerpc_cpu::jit_host_chain); nw_jit_set_mode(NW_JIT_ON);
+    return failed ? 1 : 0;
+}
 int ppc_core_test_access::run()
 {
     powerpc_cpu *cpu = new powerpc_cpu;
@@ -198,6 +902,762 @@ int ppc_core_test_access::run()
         CHECK(cpu->dec_pending_ == (!user && write));
     }
 
+    scalar_p6(cpu);
+    frsp_p6(cpu);
+    basic_special_p6(cpu);
+    io_publication(cpu);
+    // Literal boundary expectations qualify every OE/Rc form independently
+    // of the JIT helpers. Run KPX, the local C path, ARM64 and private replay.
+    struct integer_boundary { unsigned kind; uint32 a, result[2]; unsigned carry[2], overflow[2]; };
+    const integer_boundary integer_cases[] = {
+        {0u, 0x00000000u, {0x00000000u, 0x00000000u}, {0u, 1u}, {0u, 0u}},
+        {0u, 0x00000001u, {0xffffffffu, 0xffffffffu}, {0u, 1u}, {0u, 0u}},
+        {0u, 0xffffffffu, {0x00000001u, 0x00000001u}, {0u, 1u}, {0u, 0u}},
+        {0u, 0x7fffffffu, {0x80000001u, 0x80000001u}, {0u, 1u}, {0u, 0u}},
+        {0u, 0x80000000u, {0x80000000u, 0x80000000u}, {0u, 1u}, {1u, 1u}},
+        {0u, 0x80000001u, {0x7fffffffu, 0x7fffffffu}, {0u, 1u}, {0u, 0u}},
+        {0u, 0x7ffffffeu, {0x80000002u, 0x80000002u}, {0u, 1u}, {0u, 0u}},
+        {0u, 0xfffffffeu, {0x00000002u, 0x00000002u}, {0u, 1u}, {0u, 0u}},
+        {0u, 0x12345678u, {0xedcba988u, 0xedcba988u}, {0u, 1u}, {0u, 0u}},
+        {1u, 0x00000000u, {0xffffffffu, 0x00000000u}, {0u, 1u}, {0u, 0u}},
+        {1u, 0x00000001u, {0x00000000u, 0x00000001u}, {1u, 1u}, {0u, 0u}},
+        {1u, 0xffffffffu, {0xfffffffeu, 0xffffffffu}, {1u, 1u}, {0u, 0u}},
+        {1u, 0x7fffffffu, {0x7ffffffeu, 0x7fffffffu}, {1u, 1u}, {0u, 0u}},
+        {1u, 0x80000000u, {0x7fffffffu, 0x80000000u}, {1u, 1u}, {1u, 0u}},
+        {1u, 0x80000001u, {0x80000000u, 0x80000001u}, {1u, 1u}, {0u, 0u}},
+        {1u, 0x7ffffffeu, {0x7ffffffdu, 0x7ffffffeu}, {1u, 1u}, {0u, 0u}},
+        {1u, 0xfffffffeu, {0xfffffffdu, 0xfffffffeu}, {1u, 1u}, {0u, 0u}},
+        {1u, 0x12345678u, {0x12345677u, 0x12345678u}, {1u, 1u}, {0u, 0u}},
+        {2u, 0x00000000u, {0x00000000u, 0x00000001u}, {0u, 0u}, {0u, 0u}},
+        {2u, 0x00000001u, {0x00000001u, 0x00000002u}, {0u, 0u}, {0u, 0u}},
+        {2u, 0xffffffffu, {0xffffffffu, 0x00000000u}, {0u, 1u}, {0u, 0u}},
+        {2u, 0x7fffffffu, {0x7fffffffu, 0x80000000u}, {0u, 0u}, {0u, 1u}},
+        {2u, 0x80000000u, {0x80000000u, 0x80000001u}, {0u, 0u}, {0u, 0u}},
+        {2u, 0x80000001u, {0x80000001u, 0x80000002u}, {0u, 0u}, {0u, 0u}},
+        {2u, 0x7ffffffeu, {0x7ffffffeu, 0x7fffffffu}, {0u, 0u}, {0u, 0u}},
+        {2u, 0xfffffffeu, {0xfffffffeu, 0xffffffffu}, {0u, 0u}, {0u, 0u}},
+        {2u, 0x12345678u, {0x12345678u, 0x12345679u}, {0u, 0u}, {0u, 0u}},
+        {3u, 0x00000000u, {0xfffffffeu, 0xffffffffu}, {1u, 1u}, {0u, 0u}},
+        {3u, 0x00000001u, {0xfffffffdu, 0xfffffffeu}, {1u, 1u}, {0u, 0u}},
+        {3u, 0xffffffffu, {0xffffffffu, 0x00000000u}, {0u, 1u}, {0u, 0u}},
+        {3u, 0x7fffffffu, {0x7fffffffu, 0x80000000u}, {1u, 1u}, {1u, 0u}},
+        {3u, 0x80000000u, {0x7ffffffeu, 0x7fffffffu}, {1u, 1u}, {0u, 0u}},
+        {3u, 0x80000001u, {0x7ffffffdu, 0x7ffffffeu}, {1u, 1u}, {0u, 0u}},
+        {3u, 0x7ffffffeu, {0x80000000u, 0x80000001u}, {1u, 1u}, {0u, 0u}},
+        {3u, 0xfffffffeu, {0x00000000u, 0x00000001u}, {1u, 1u}, {0u, 0u}},
+        {3u, 0x12345678u, {0xedcba986u, 0xedcba987u}, {1u, 1u}, {0u, 0u}},
+        {4u, 0x00000000u, {0xffffffffu, 0x00000000u}, {0u, 1u}, {0u, 0u}},
+        {4u, 0x00000001u, {0xfffffffeu, 0xffffffffu}, {0u, 0u}, {0u, 0u}},
+        {4u, 0xffffffffu, {0x00000000u, 0x00000001u}, {0u, 0u}, {0u, 0u}},
+        {4u, 0x7fffffffu, {0x80000000u, 0x80000001u}, {0u, 0u}, {0u, 0u}},
+        {4u, 0x80000000u, {0x7fffffffu, 0x80000000u}, {0u, 0u}, {0u, 1u}},
+        {4u, 0x80000001u, {0x7ffffffeu, 0x7fffffffu}, {0u, 0u}, {0u, 0u}},
+        {4u, 0x7ffffffeu, {0x80000001u, 0x80000002u}, {0u, 0u}, {0u, 0u}},
+        {4u, 0xfffffffeu, {0x00000001u, 0x00000002u}, {0u, 0u}, {0u, 0u}},
+        {4u, 0x12345678u, {0xedcba987u, 0xedcba988u}, {0u, 0u}, {0u, 0u}},
+    };
+    const unsigned integer_xo[] = {104, 234, 202, 232, 200}; // neg/addme/addze/subfme/subfze
+    nw_jit_set_mode(NW_JIT_ON);
+    mmu.reset();
+    unsigned integer_form = 0;
+    for (unsigned kind = 0; kind < 5; ++kind)
+    for (unsigned oe = 0; oe < 2; ++oe)
+    for (unsigned rc = 0; rc < 2; ++rc)
+    for (unsigned alias = 0; alias < 3; ++alias) {
+        const unsigned ra = alias == 2 ? 0 : 4, rd = alias == 1 ? ra : 3;
+        const uint32 op = (31u<<26)|(rd<<21)|(ra<<16)|(integer_xo[kind]<<1)|(oe<<10)|rc;
+        const uint32 start = 0x120000u + 64 * integer_form++;
+        CHECK(nw_jit_op_supported(op)); CHECK(nw_jit_op_verify_safe(op));
+        nw_jit_fn fn = nw_jit_compile(&op, 1, start, start & ~0xfffu, 0, 0);
+        CHECK(fn != NULL);
+        for (const integer_boundary &c : integer_cases) {
+            if (c.kind != kind) continue;
+            for (unsigned ca = 0; ca < 2; ++ca)
+            for (unsigned incoming = 0; incoming < 4; ++incoming) {
+                nw_jit_cpu input = {}; input.pc = start;
+                input.cr = 0xf2345678u;
+                input.xer = 0x01234567u | (ca<<29) | (incoming<<30);
+                for (unsigned r = 0; r < 32; ++r) input.gpr[r] = 0x41000000u + 0x010101u * r;
+                input.gpr[ra] = c.a;
+                uint32 expected_xer = input.xer;
+                if (kind) expected_xer = (expected_xer & ~0x20000000u) | (c.carry[ca]<<29);
+                if (oe) {
+                    expected_xer &= ~0x40000000u;
+                    if (c.overflow[ca]) expected_xer |= 0xc0000000u;
+                }
+                const uint32 result = c.result[ca];
+                const uint32 nibble = (result == 0 ? 2u : (result & 0x80000000u ? 8u : 4u)) | (expected_xer>>31);
+                const uint32 expected_cr = rc ? (input.cr & 0x0fffffffu) | (nibble<<28) : input.cr;
+                for (unsigned engine = 0; engine < 4; ++engine) {
+                    nw_jit_cpu shadow = input;
+                    if (engine == 1) {
+                        CHECK(nw_jit_interp_n(&shadow, &op, 1, start) == 0);
+                    } else if (engine == 2) {
+                        if (!fn) continue;
+                        nw_jit_cpu_bind(&shadow); nw_jit_tail_begin(); fn(&shadow);
+                    } else {
+                        cpu->pc() = start; cpu->last_fetch_pa_ = start;
+                        cpu->cr().set(input.cr); cpu->xer().set(input.xer);
+                        cpu->spcflags().init(); cpu->regs().reserve_valid = 0;
+                        for (unsigned r = 0; r < 32; ++r) cpu->gpr(r) = input.gpr[r];
+                        if (engine == 3) {
+                            if (!fn) continue;
+                            shadow.dec = cpu->dec_; shadow.fpscr = cpu->fpscr();
+                            shadow.lr = cpu->lr(); shadow.ctr = cpu->ctr(); shadow.vscr = cpu->vscr().get();
+                            for (unsigned r = 0; r < 32; ++r) {
+                                shadow.fpr[r] = cpu->fpr_dw(r);
+                                for (unsigned w = 0; w < 4; ++w) shadow.vr[r][w] = cpu->vr(r).w[w];
+                            }
+                            const uint64 misses = nw_jit_verify_misses();
+                            CHECK(cpu->nw_jit_verify_block(shadow, fn, &op, 1) == 1);
+                            CHECK(nw_jit_verify_misses() == misses);
+                        } else {
+                            instruction(cpu, op);
+                            shadow.pc = cpu->pc(); shadow.xer = cpu->xer().get(); shadow.cr = cpu->cr().get();
+                            for (unsigned r = 0; r < 32; ++r) shadow.gpr[r] = cpu->gpr(r);
+                        }
+                    }
+                    CHECK(shadow.pc == start + 4 && !shadow.fault);
+                    CHECK(shadow.xer == expected_xer); CHECK(shadow.cr == expected_cr);
+                    for (unsigned r = 0; r < 32; ++r) CHECK(shadow.gpr[r] == (r == rd ? result : input.gpr[r]));
+                }
+            }
+        }
+    }
+
+    // Independent KPX/native vector comparisons cover every named private
+    // integer helper, all set partitions of D/A/B/C and adversarial lane bits.
+    // Private VMX FP comparisons follow the integer cases below.
+    struct vector_form { const char *name; unsigned xo, form; };
+    const vector_form vector_forms[] = {
+        {"vaddubm",0,0}, {"vor",1156,0}, {"vand",1028,0}, {"vandc",1092,0},
+        {"vxor",1220,0}, {"vsububm",1024,0}, {"vslh",324,0},
+        {"vcmpequw",134,0}, {"vcmpequw.",1158,0}, {"vcmpequb",6,0}, {"vcmpequb.",1030,0},
+        {"vminsb",770,0}, {"vsr",708,0}, {"vsrw",644,0}, {"vspltisw",908,1},
+        {"vsl",452,0}, {"vslo",1036,0}, {"vsro",1100,0}, {"vspltisb",780,1},
+        {"mtvscr",1604,2}, {"mfvscr",1540,3}, {"vsrb",516,0}, {"vslb",260,0},
+        {"vspltish",844,1}, {"vspltw",652,4}, {"vspltb",524,4},
+        {"vmrghb",12,0}, {"vmrglb",268,0}, {"vmrghw",140,0}, {"vmrglw",396,0},
+        {"vsumsws",1928,0}, {"vsel",42,5}, {"vperm",43,5}, {"vmsumshm",40,5},
+        {"vmsumshs",41,5}, {"vsldoi",44,6}, {"vmladduhm",34,5},
+        {"vadduwm",128,0}, {"vsraw",900,0}, {"vpkswss",462,0}, {"vsubshs",1856,0},
+        {"vaddcuw",384,0},
+        {"vaddsbs",768,0},
+        {"vaddshs",832,0},
+        {"vaddsws",896,0},
+        {"vaddubs",512,0},
+        {"vadduhm",64,0},
+        {"vadduhs",576,0},
+        {"vadduws",640,0},
+        {"vavgsb",1282,0},
+        {"vavgsh",1346,0},
+        {"vavgsw",1410,0},
+        {"vavgub",1026,0},
+        {"vavguh",1090,0},
+        {"vavguw",1154,0},
+        {"vcmpequh",70,0},
+        {"vcmpequh.",1094,0},
+        {"vcmpgtsb",774,0},
+        {"vcmpgtsb.",1798,0},
+        {"vcmpgtsh",838,0},
+        {"vcmpgtsh.",1862,0},
+        {"vcmpgtsw",902,0},
+        {"vcmpgtsw.",1926,0},
+        {"vcmpgtub",518,0},
+        {"vcmpgtub.",1542,0},
+        {"vcmpgtuh",582,0},
+        {"vcmpgtuh.",1606,0},
+        {"vcmpgtuw",646,0},
+        {"vcmpgtuw.",1670,0},
+        {"vmaxsb",258,0},
+        {"vmaxsh",322,0},
+        {"vmaxsw",386,0},
+        {"vmaxub",2,0},
+        {"vmaxuh",66,0},
+        {"vmaxuw",130,0},
+        {"vmhaddshs",32,5},
+        {"vmhraddshs",33,5},
+        {"vminsh",834,0},
+        {"vminsw",898,0},
+        {"vminub",514,0},
+        {"vminuh",578,0},
+        {"vminuw",642,0},
+        {"vmrghh",76,0},
+        {"vmrglh",332,0},
+        {"vmsummbm",37,5},
+        {"vmsumubm",36,5},
+        {"vmsumuhm",38,5},
+        {"vmsumuhs",39,5},
+        {"vmulesb",776,0},
+        {"vmulesh",840,0},
+        {"vmuleub",520,0},
+        {"vmuleuh",584,0},
+        {"vmulosb",264,0},
+        {"vmulosh",328,0},
+        {"vmuloub",8,0},
+        {"vmulouh",72,0},
+        {"vnor",1284,0},
+        {"vpkpx",782,0},
+        {"vpkshss",398,0},
+        {"vpkshus",270,0},
+        {"vpkswus",334,0},
+        {"vpkuhum",14,0},
+        {"vpkuhus",142,0},
+        {"vpkuwum",78,0},
+        {"vpkuwus",206,0},
+        {"vrlb",4,0},
+        {"vrlh",68,0},
+        {"vrlw",132,0},
+        {"vslw",388,0},
+        {"vsplth",588,4},
+        {"vsrab",772,0},
+        {"vsrah",836,0},
+        {"vsrh",580,0},
+        {"vsubcuw",1408,0},
+        {"vsubsbs",1792,0},
+        {"vsubsws",1920,0},
+        {"vsububs",1536,0},
+        {"vsubuhm",1088,0},
+        {"vsubuhs",1600,0},
+        {"vsubuwm",1152,0},
+        {"vsubuws",1664,0},
+        {"vsum2sws",1672,0},
+        {"vsum4sbs",1800,0},
+        {"vsum4shs",1608,0},
+        {"vsum4ubs",1544,0},
+        {"vupkhpx",846,7},
+        {"vupkhsb",526,7},
+        {"vupkhsh",590,7},
+        {"vupklpx",974,7},
+        {"vupklsb",654,7},
+        {"vupklsh",718,7}
+    };
+    const unsigned vector_aliases[][4] = {
+        {1,1,1,1}, {1,1,1,2}, {1,1,2,1}, {1,1,2,2}, {1,1,2,3},
+        {1,2,1,1}, {1,2,1,2}, {1,2,1,3}, {1,2,2,1}, {1,2,2,2},
+        {1,2,2,3}, {1,2,3,1}, {1,2,3,2}, {1,2,3,3}, {1,2,3,4}
+    };
+    unsigned vector_case = 0;
+    for (const vector_form &v : vector_forms)
+    for (const auto &alias : vector_aliases) {
+        const unsigned vd = alias[0], va = alias[1], vb = alias[2], vc = alias[3];
+        uint32 op = (4u<<26)|(vd<<21)|v.xo;
+        if (v.form != 2 && v.form != 3 && v.form != 7) op |= va<<16;
+        if (v.form != 1 && v.form != 3) op |= vb<<11;
+        if (v.form == 5 || v.form == 6) op |= vc<<6;
+        if (v.form == 2) op &= ~(31u<<21);
+        const uint32 start = 0x140000u + 64 * vector_case++;
+        nw_jit_set_mode(NW_JIT_ON); mmu.reset(); mmu.set_msr(NW_MSR_VEC);
+        nw_jit_fn fn = nw_jit_compile(&op, 1, start, start & ~0xfffu, 0, 0);
+        CHECK(fn != NULL); CHECK(nw_jit_op_verify_safe(op));
+        for (unsigned pattern = 0; pattern < 16; ++pattern)
+        for (unsigned sat = 0; sat < 2; ++sat) {
+            nw_jit_cpu input = {}; input.pc = start; input.msr = NW_MSR_VEC;
+            input.cr = 0x12345678; input.xer = 0xe1234567; input.vscr = 0x10000u | sat;
+            for (unsigned r = 0; r < 32; ++r) {
+                input.gpr[r] = 0x12340000u + r;
+                for (unsigned w = 0; w < 4; ++w) {
+                    const uint32 values[] = {0x01020304u * (1 + r + w), 0u, UINT32_MAX,
+                        0x7fffffffu, 0x80000000u, 0x80007fffu, 0x7fff8000u, 0x03020100u + 0x04040404u * w};
+                    uint32 mixed = 0x9e3779b9u * (r + 37 * w + 521 * pattern + 1);
+                    mixed ^= mixed >> 16; mixed *= 0x85ebca6bu;
+                    mixed ^= mixed >> 13; mixed *= 0xc2b2ae35u; mixed ^= mixed >> 16;
+                    input.vr[r][w] = pattern < 8 ? values[pattern] : mixed;
+                }
+            }
+            auto prepare_vector_cpu = [&]() {
+                cpu->pc() = start; cpu->last_fetch_pa_ = start;
+                cpu->cr().set(input.cr); cpu->xer().set(input.xer); cpu->vscr().set(input.vscr);
+                cpu->fpscr() = 0; cpu->lr() = 0; cpu->ctr() = 0; cpu->regs().reserve_valid = 0;
+                for (unsigned r = 0; r < 32; ++r) {
+                    cpu->gpr(r) = input.gpr[r]; cpu->fpr_dw(r) = 0;
+                    for (unsigned w = 0; w < 4; ++w) cpu->vr(r).w[w] = input.vr[r][w];
+                }
+            };
+            prepare_vector_cpu(); instruction(cpu, op);
+            const uint32 expected_cr = cpu->cr().get(), expected_vscr = cpu->vscr().get();
+            uint32 expected[32][4];
+            for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) expected[r][w] = cpu->vr(r).w[w];
+            for (unsigned engine = 0; engine < 3; ++engine) {
+                nw_jit_cpu shadow = input;
+                if (engine == 0) CHECK(nw_jit_interp_n(&shadow, &op, 1, start) == 0);
+                else if (engine == 1) {
+                    if (!fn) continue;
+                    nw_jit_cpu_bind(&shadow); nw_jit_tail_begin(); fn(&shadow);
+                } else {
+                    if (!fn) continue;
+                    prepare_vector_cpu(); shadow.dec = cpu->dec_;
+                    const uint64 misses = nw_jit_verify_misses();
+                    CHECK(cpu->nw_jit_verify_block(shadow, fn, &op, 1) == 1);
+                    CHECK(nw_jit_verify_misses() == misses);
+                }
+                if (shadow.cr != expected_cr || shadow.vscr != expected_vscr)
+                    fprintf(stderr,"vector %s alias=%u%u%u%u pattern=%u sat=%u engine=%u cr=%08x/%08x vscr=%08x/%08x\n",v.name,vd,va,vb,vc,pattern,sat,engine,shadow.cr,expected_cr,shadow.vscr,expected_vscr);
+                CHECK(shadow.pc == start + 4 && !shadow.fault);
+                CHECK(shadow.cr == expected_cr && shadow.vscr == expected_vscr && shadow.xer == input.xer);
+                for (unsigned r = 0; r < 32; ++r) {
+                    CHECK(shadow.gpr[r] == input.gpr[r]); CHECK(shadow.fpr[r] == 0);
+                    for (unsigned w = 0; w < 4; ++w) {
+                        if (shadow.vr[r][w] != expected[r][w])
+                            fprintf(stderr,"vector %s alias=%u%u%u%u pattern=%u sat=%u engine=%u r%u.w%u=%08x/%08x\n",v.name,vd,va,vb,vc,pattern,sat,engine,r,w,shadow.vr[r][w],expected[r][w]);
+                        CHECK(shadow.vr[r][w] == expected[r][w]);
+                    }
+                }
+            }
+        }
+    }
+
+    // Vector FP reference/native/private comparisons. Scalar RN and host
+    // rounding/exception flags must not control an AltiVec instruction.
+    const vector_form vector_fp_forms[] = {
+        {"vaddfp",10,0},
+        {"vcfsx",842,4},
+        {"vcfux",778,4},
+        {"vcmpbfp",966,0},
+        {"vcmpbfp.",1990,0},
+        {"vcmpeqfp",198,0},
+        {"vcmpeqfp.",1222,0},
+        {"vcmpgefp",454,0},
+        {"vcmpgefp.",1478,0},
+        {"vcmpgtfp",710,0},
+        {"vcmpgtfp.",1734,0},
+        {"vctsxs",970,4},
+        {"vctuxs",906,4},
+        {"vexptefp",394,7},
+        {"vlogefp",458,7},
+        {"vmaddfp",46,5},
+        {"vmaxfp",1034,0},
+        {"vminfp",1098,0},
+        {"vnmsubfp",47,5},
+        {"vrefp",266,7},
+        {"vrfim",714,7},
+        {"vrfin",522,7},
+        {"vrfip",650,7},
+        {"vrfiz",586,7},
+        {"vrsqrtefp",330,7},
+        {"vsubfp",74,0},
+    };
+    fenv_t vector_fp_host_env; fegetenv(&vector_fp_host_env);
+    unsigned vector_fp_case = 0;
+    for (const auto &v : vector_fp_forms) for (const auto &alias : vector_aliases) {
+        uint32 op = (4u<<26)|(alias[0]<<21)|v.xo;
+        if (v.form != 7) op |= alias[1]<<16;
+        op |= alias[2]<<11;
+        if (v.form == 5) op |= alias[3]<<6;
+        const uint32 start = 0x300000 + 64 * vector_fp_case++;
+        nw_jit_set_mode(NW_JIT_ON); mmu.reset(); mmu.set_msr(NW_MSR_VEC);
+        nw_jit_fn fn = nw_jit_compile(&op, 1, start, start & ~0xfffu, 0, 0);
+        CHECK(fn != NULL); CHECK(nw_jit_op_verify_safe(op));
+        for (unsigned pattern = 0; pattern < 16; ++pattern)
+        for (unsigned host = 0; host < 4; ++host)
+        for (unsigned nj = 0; nj < 2; ++nj) {
+            nw_jit_cpu input = {}; input.pc = start; input.msr = NW_MSR_VEC;
+            input.cr = 0x12345678; input.xer = 0xe1234567; input.fpscr = 0x12340000 | ((host + pattern) & 3);
+            input.vscr = (nj<<16) | (pattern & 1);
+            for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) {
+                const uint32 values[] = {0u,0x80000000u,0x3f000000u,0xbf000000u,0x7f800000u,0xff800000u,
+                    0x7fc10000u+r,0xff810000u+r,1u,0x80000001u,0x007fffffu,0x807fffffu,
+                    0x7f7fffffu,0x4f000000u,0xcf000000u,0x3f800001u+0x123u*r+0x456u*w};
+                input.vr[r][w] = values[(pattern + w) & 15];
+            }
+            uint64 host_control = 0, host_status = 0;
+            auto host_fp_preserved = [&]() {
+#if defined(__aarch64__)
+                uint64 control, status;
+                __asm__ volatile("mrs %0, fpcr\n\tmrs %1, fpsr" : "=r"(control), "=r"(status) :: "memory");
+                return control == host_control && status == host_status;
+#else
+                return true;
+#endif
+            };
+            auto prepare_fp_vector = [&]() {
+                cpu->pc() = start; cpu->last_fetch_pa_ = start;
+                cpu->cr().set(input.cr); cpu->xer().set(input.xer); cpu->vscr().set(input.vscr);
+                cpu->fpscr() = input.fpscr; cpu->lr() = cpu->ctr() = 0; cpu->regs().reserve_valid = 0;
+                for (unsigned r = 0; r < 32; ++r) {
+                    cpu->gpr(r) = 0; cpu->fpr_dw(r) = 0;
+                    for (unsigned w = 0; w < 4; ++w) cpu->vr(r).w[w] = input.vr[r][w];
+                }
+                fesetround(modes[host]); feclearexcept(FE_ALL_EXCEPT); feraiseexcept(FE_DIVBYZERO);
+#if defined(__aarch64__)
+                // Host FZ and default-NaN must not control guest vector FP.
+                __asm__ volatile("mrs %0, fpcr" : "=r"(host_control) :: "memory");
+                host_control |= UINT64_C(0x3000000);
+                __asm__ volatile("msr fpcr, %0\n\tmrs %1, fpsr" : "+r"(host_control), "=r"(host_status) :: "memory");
+#endif
+            };
+            prepare_fp_vector(); const int reference_flags = fetestexcept(FE_ALL_EXCEPT);
+            instruction(cpu, op);
+            CHECK(fegetround() == modes[host] && fetestexcept(FE_ALL_EXCEPT) == reference_flags && cpu->fpscr() == input.fpscr && host_fp_preserved());
+            const uint32 cr = cpu->cr().get(), vscr = cpu->vscr().get(); uint32 expected[32][4];
+            for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) expected[r][w] = cpu->vr(r).w[w];
+            for (unsigned engine = 0; engine < 3; ++engine) {
+                nw_jit_cpu result = input; prepare_fp_vector(); result.dec = cpu->dec_;
+                const int flags = fetestexcept(FE_ALL_EXCEPT);
+                if (engine == 0) CHECK(nw_jit_interp_n(&result, &op, 1, start) == 0);
+                if (engine == 1) { nw_jit_cpu_bind(&result); nw_jit_tail_begin(); if (fn) fn(&result); }
+                if (engine == 2) {
+                    const uint64 misses = nw_jit_verify_misses();
+                    if (fn) CHECK(cpu->nw_jit_verify_block(result, fn, &op, 1) == 1);
+                    CHECK(nw_jit_verify_misses() == misses);
+                }
+                CHECK(fegetround() == modes[host] && fetestexcept(FE_ALL_EXCEPT) == flags && host_fp_preserved());
+                CHECK(result.cr == cr && result.vscr == vscr && result.fpscr == input.fpscr);
+                CHECK(result.pc == start + 4 && !result.fault && result.xer == input.xer);
+                for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) {
+                    if (result.vr[r][w] != expected[r][w])
+                        fprintf(stderr,"FP vector %s alias=%u%u%u%u pattern=%u host=%u nj=%u engine=%u r%u.w%u=%08x/%08x\n",v.name,alias[0],alias[1],alias[2],alias[3],pattern,host,nj,engine,r,w,result.vr[r][w],expected[r][w]);
+                    CHECK(result.vr[r][w] == expected[r][w]);
+                }
+            }
+        }
+    }
+    fesetenv(&vector_fp_host_env);
+
+    // ISA estimate error bounds use a higher-precision mathematical oracle,
+    // not matching implementations. Each set is ordered for monotonicity.
+    // The chosen domains avoid overflow/underflow ambiguity in the estimates.
+    for (unsigned kind : {266u, 330u, 394u, 458u}) {
+        double previous = kind == 266 || kind == 330 ? INFINITY : -INFINITY;
+        for (unsigned sample = 0; sample < 256; ++sample) {
+            nw_jit_cpu state = {}; state.pc = 0x2e0000; state.msr = NW_MSR_VEC;
+            const float x = kind == 394 ? -120.0f + float(sample) * (240.0f / 255.0f) :
+                float(pow(2.0, -120.0 + double(sample) * (240.0 / 255.0)));
+            uint32 raw; memcpy(&raw, &x, 4);
+            for (unsigned w = 0; w < 4; ++w) state.vr[2][w] = raw;
+            const uint32 op = (4u<<26)|(3u<<21)|(2u<<11)|kind;
+            CHECK(nw_jit_interp_n(&state, &op, 1, state.pc) == 0);
+            float actual; memcpy(&actual, &state.vr[3][0], 4);
+            const long double oracle = kind == 266 ? 1.0L / x : kind == 330 ? 1.0L / sqrtl(x) :
+                kind == 394 ? powl(2.0L, x) : logl(x) / logl(2.0L);
+            const long double error = fabsl(actual - oracle);
+            if (kind == 458) {
+                CHECK(error <= 1.0L / 32);
+                if (fabsl(x - 1.0L) > 1.0L / 8) CHECK(error <= fabsl(oracle) / 8);
+            } else CHECK(error <= fabsl(oracle) / (kind == 394 ? 16 : 4096));
+            CHECK(isfinite(actual));
+            CHECK(kind == 266 || kind == 330 ? actual <= previous : actual >= previous);
+            previous = actual;
+        }
+    }
+    fesetround(FE_TONEAREST); feclearexcept(FE_ALL_EXCEPT);
+
+    // Every decoder slot is classified independently from the private helper
+    // descriptor, including record bits and all VA vC values. Invalid
+    // slots must not accidentally enter the verifier's positive allowlist.
+    for (unsigned low = 0; low < 2048; ++low) {
+        const uint32 op = (4u<<26) | low;
+        const char *name = cpu->decode(op)->name;
+        bool integer = false;
+        for (const auto &form : vector_forms) if (!strcmp(name, form.name)) integer = true;
+        for (const auto &form : vector_fp_forms) if (!strcmp(name, form.name)) integer = true;
+        // The fifth SHB bit is reserved; neither decoder nor VERIFY accepts it.
+        if (!strcmp(name, "vsldoi") && (op & 1024)) integer = false;
+        CHECK(bool(nw_jit_op_verify_safe(op)) == integer);
+    }
+    // Fixed-zero fields from the ISA, independently enumerated here. Every
+    // bit is mutated separately: both JIT entry points must reject it, and
+    // New World decode must deliver a precise illegal-instruction exception.
+    const struct { unsigned xo; uint32 zero; } reserved_fields[] = {
+        {526,31u<<16},{654,31u<<16},{590,31u<<16},{718,31u<<16},{846,31u<<16},{974,31u<<16},
+        {394,31u<<16},{458,31u<<16},{266,31u<<16},{330,31u<<16},{714,31u<<16},{522,31u<<16},{650,31u<<16},{586,31u<<16},
+        {780,31u<<11},{844,31u<<11},{908,31u<<11},
+        {1540,(31u<<16)|(31u<<11)}, {1604,(31u<<21)|(31u<<16)}, {44,1u<<10}};
+    unsigned reserved_case = 0;
+    for (const auto &field : reserved_fields) {
+        const uint32 canonical = ((4u<<26)|(31u<<21)|(31u<<16)|(31u<<11)|field.xo) & ~field.zero;
+        CHECK(nw_jit_op_supported(canonical) && nw_jit_op_verify_safe(canonical));
+        CHECK(strcmp(cpu->decode(canonical)->name, "invalid") != 0);
+        for (unsigned bit = 0; bit < 32; ++bit) if (field.zero & (1u<<bit)) {
+            const uint32 op = canonical | (1u<<bit), start = 0x6b0000 + 64 * reserved_case++;
+            CHECK(!nw_jit_op_supported(op) && !nw_jit_op_verify_safe(op));
+            CHECK(!strcmp(cpu->decode(op)->name, "invalid"));
+            CHECK(nw_jit_compile(&op, 1, start, start & ~0xfffu, 0, 0) == NULL);
+            nw_jit_cpu shadow = {}; shadow.pc = start; shadow.cr = 0x12345678; shadow.vscr = 0x10001;
+            const nw_jit_cpu before = shadow;
+            CHECK(nw_jit_interp_n(&shadow, &op, 1, start) == -1);
+            CHECK(!memcmp(&shadow, &before, sizeof shadow));
+            nw_jit_verify_trace trace;
+            shadow.verify_mem = nw_jit_verify_trace::replay; shadow.verify_context = &trace;
+            nw_jit_helper_vmx(&shadow, op);
+            CHECK(shadow.fault == NW_JIT_FAULT_VERIFY && trace.count == 0);
+            shadow = before;
+            mmu.set_msr(NW_MSR_VEC); cpu->pc() = start; cpu->cr().set(shadow.cr); cpu->vscr().set(shadow.vscr);
+            const uint64 serial = cpu->exception_serial_;
+            instruction(cpu, op);
+            CHECK(cpu->exception_serial_ == serial + 1 && cpu->pc() == 0x700 && cpu->srr0_ == start && cpu->srr1_ == (NW_MSR_VEC | 0x80000u));
+            CHECK(cpu->cr().get() == shadow.cr && cpu->vscr().get() == shadow.vscr);
+        }
+    }
+
+    // Unknown major-opcode-4 slots must use architectural fallback in ON
+    // as well as VERIFY. The decoder is independent of the JIT allowlist.
+    for (unsigned low = 0; low < 2048; ++low)
+    for (unsigned field : {21u,16u,11u})
+    for (unsigned value = 0; value < 32; ++value) {
+        const uint32 op = (4u<<26) | low | (value<<field);
+        bool known = strcmp(cpu->decode(op)->name, "invalid") != 0;
+        if ((op & 63u) == 44 && (op & 1024u)) known = false;
+        CHECK(bool(nw_jit_op_supported(op)) == known);
+        CHECK(bool(nw_jit_op_verify_safe(op)) == known);
+    }
+    for (unsigned engine = 0; engine < 2; ++engine) {
+        const uint32 start = 0x6a0000 + engine * 64, op = (4u<<26)|2047u;
+        mmu.reset(); mmu.set_msr(NW_MSR_VEC); cpu->pc() = start;
+        cpu->cr().set(0x12345678); cpu->xer().set(0xe1234567);
+        nw_jit_cpu shadow = {}; shadow.pc = start; shadow.host = cpu; shadow.msr = mmu.msr();
+        shadow.cr = cpu->cr().get(); shadow.xer = cpu->xer().get();
+        const uint64 serial = cpu->exception_serial_;
+        nw_jit_fn fn = engine ? nw_jit_compile(&op, 1, start, start & ~0xfffu, 0, 0) : NULL;
+        if (fn) { nw_jit_cpu_bind(&shadow); nw_jit_tail_begin(); fn(&shadow); }
+        else instruction(cpu, op);
+        CHECK(cpu->exception_serial_ == serial + 1);
+        CHECK(cpu->pc() == 0x700 && cpu->srr0_ == start && cpu->srr1_ == (NW_MSR_VEC | 0x80000u));
+        CHECK(cpu->cr().get() == 0x12345678 && cpu->xer().get() == 0xe1234567);
+    }
+
+    // An adversarial production callback proves that all formerly delegated
+    // integer and FP forms avoid the live CPU in production/private replay.
+    nw_jit_set_host_vmx(forbidden_vmx_callback); delegated_vmx_calls = 0;
+    for (unsigned index = 41; index < sizeof vector_forms / sizeof vector_forms[0] + sizeof vector_fp_forms / sizeof vector_fp_forms[0]; ++index)
+    for (unsigned verify = 0; verify < 2; ++verify) {
+        const auto &form = index < sizeof vector_forms / sizeof vector_forms[0] ? vector_forms[index] :
+            vector_fp_forms[index - sizeof vector_forms / sizeof vector_forms[0]];
+        uint32 op = (4u<<26)|(3u<<21)|(1u<<16)|(2u<<11)|form.xo|(form.form == 5 ? 4u<<6 : 0);
+        if (form.form == 7) op &= ~(31u<<16);
+        nw_jit_verify_trace trace;
+        nw_jit_cpu shadow = {}; shadow.pc = 0x2f0000; shadow.host = cpu;
+        shadow.verify_context = &trace;
+        if (verify) shadow.verify_mem = nw_jit_verify_trace::replay;
+        const uint32 live_cr = cpu->cr().get(), live_vscr = cpu->vscr().get(), live_pc = cpu->pc(), live_msr = mmu.msr();
+        uint32 live_vr[32][4];
+        for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) live_vr[r][w] = cpu->vr(r).w[w];
+        nw_jit_helper_vmx(&shadow, op);
+        CHECK(!delegated_vmx_calls && !shadow.fault && trace.complete());
+        CHECK(cpu->cr().get() == live_cr && cpu->vscr().get() == live_vscr && cpu->pc() == live_pc && mmu.msr() == live_msr);
+        for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == live_vr[r][w]);
+    }
+    nw_jit_set_host_vmx(powerpc_cpu::jit_host_vmx);
+
+    // ISA literal boundaries for private integer and FP VMX. These expectations do
+    // not call either implementation to compute results. Each destination
+    // aliases A, B, C or neither; sources remain distinct.
+    struct vector_literal { const char *name; uint32 xo, a[4], b[4], c[4], out[4], sat, va, cr, nj = 1, scale = 1; };
+    std::vector<vector_literal> vector_literals = {
+        {"vaddcuw", 384, {0xffffffffu, 0x80000000u, 0x00000000u, 0x7fffffffu}, {0x00000001u, 0x80000000u, 0xffffffffu, 0x00000001u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000001u, 0x00000001u, 0x00000000u, 0x00000000u}, 0, 0, 0x12345678u},
+        {"vsubcuw", 1408, {0xffffffffu, 0x80000000u, 0x00000000u, 0x7fffffffu}, {0x00000001u, 0x80000000u, 0xffffffffu, 0x00000001u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000001u, 0x00000001u, 0x00000000u, 0x00000001u}, 0, 0, 0x12345678u},
+        {"vaddubs", 512, {0xff017f80u, 0xff017f80u, 0xff017f80u, 0xff017f80u}, {0x01018080u, 0x01018080u, 0x01018080u, 0x01018080u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xff02ffffu, 0xff02ffffu, 0xff02ffffu, 0xff02ffffu}, 1, 0, 0x12345678u},
+        {"vsububs", 1536, {0x010080ffu, 0x010080ffu, 0x010080ffu, 0x010080ffu}, {0x02010101u, 0x02010101u, 0x02010101u, 0x02010101u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00007ffeu, 0x00007ffeu, 0x00007ffeu, 0x00007ffeu}, 1, 0, 0x12345678u},
+        {"vaddsbs", 768, {0x7f807f80u, 0x7f807f80u, 0x7f807f80u, 0x7f807f80u}, {0x01ff8001u, 0x01ff8001u, 0x01ff8001u, 0x01ff8001u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7f80ff81u, 0x7f80ff81u, 0x7f80ff81u, 0x7f80ff81u}, 1, 0, 0x12345678u},
+        {"vaddshs", 832, {0x7fff8000u, 0x7fff8000u, 0x7fff8000u, 0x7fff8000u}, {0x0001ffffu, 0x0001ffffu, 0x0001ffffu, 0x0001ffffu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7fff8000u, 0x7fff8000u, 0x7fff8000u, 0x7fff8000u}, 1, 0, 0x12345678u},
+        {"vaddsws", 896, {0x7fffffffu, 0x80000000u, 0xffffffffu, 0x00000000u}, {0x00000001u, 0xffffffffu, 0x00000001u, 0x80000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7fffffffu, 0x80000000u, 0x00000000u, 0x80000000u}, 1, 0, 0x12345678u},
+        {"vsubsws", 1920, {0x80000000u, 0x7fffffffu, 0x00000000u, 0xffffffffu}, {0x00000001u, 0xffffffffu, 0x80000000u, 0x7fffffffu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x80000000u, 0x7fffffffu, 0x7fffffffu, 0x80000000u}, 1, 0, 0x12345678u},
+        {"vavgsb", 1282, {0x80817ffeu, 0x80817ffeu, 0x80817ffeu, 0x80817ffeu}, {0xff017f01u, 0xff017f01u, 0xff017f01u, 0xff017f01u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xc0c17f00u, 0xc0c17f00u, 0xc0c17f00u, 0xc0c17f00u}, 0, 0, 0x12345678u},
+        {"vavguw", 1154, {0xffffffffu, 0x00000000u, 0xffffffffu, 0x00000001u}, {0xffffffffu, 0x00000001u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xffffffffu, 0x00000001u, 0x80000000u, 0x00000001u}, 0, 0, 0x12345678u},
+        {"vcmpgtsw.", 1926, {0x80000000u, 0x00000001u, 0x7fffffffu, 0x00000000u}, {0x00000000u, 0x00000000u, 0x7fffffffu, 0xffffffffu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0xffffffffu, 0x00000000u, 0xffffffffu}, 0, 0, 0x12345608u},
+        {"vcmpequh.", 1094, {0xabcd0001u, 0xabcd0001u, 0xabcd0001u, 0xabcd0001u}, {0xabcd0002u, 0xabcd0002u, 0xabcd0002u, 0xabcd0002u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xffff0000u, 0xffff0000u, 0xffff0000u, 0xffff0000u}, 0, 0, 0x12345608u},
+        {"vrlb", 4, {0x81ff0180u, 0x81ff0180u, 0x81ff0180u, 0x81ff0180u}, {0x01010101u, 0x01010101u, 0x01010101u, 0x01010101u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x03ff0201u, 0x03ff0201u, 0x03ff0201u, 0x03ff0201u}, 0, 0, 0x12345678u},
+        {"vrlh", 68, {0x80010001u, 0x80010001u, 0x80010001u, 0x80010001u}, {0x00010001u, 0x00010001u, 0x00010001u, 0x00010001u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00030002u, 0x00030002u, 0x00030002u, 0x00030002u}, 0, 0, 0x12345678u},
+        {"vrlw", 132, {0x80000001u, 0x12345678u, 0xffffffffu, 0x00000001u}, {0x00000000u, 0x00000004u, 0x0000001fu, 0x0000001fu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x80000001u, 0x23456781u, 0xffffffffu, 0x80000000u}, 0, 0, 0x12345678u},
+        {"vsrab", 772, {0x807fff01u, 0x807fff01u, 0x807fff01u, 0x807fff01u}, {0x07070101u, 0x07070101u, 0x07070101u, 0x07070101u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xff00ff00u, 0xff00ff00u, 0xff00ff00u, 0xff00ff00u}, 0, 0, 0x12345678u},
+        {"vsrah", 836, {0x80007fffu, 0x80007fffu, 0x80007fffu, 0x80007fffu}, {0x000f000fu, 0x000f000fu, 0x000f000fu, 0x000f000fu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xffff0000u, 0xffff0000u, 0xffff0000u, 0xffff0000u}, 0, 0, 0x12345678u},
+        {"vmsumuhs", 39, {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}, {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}, 1, 1, 0x12345678u},
+        {"vmhaddshs", 32, {0x80008000u, 0x80008000u, 0x80008000u, 0x80008000u}, {0x80008000u, 0x80008000u, 0x80008000u, 0x80008000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7fff7fffu, 0x7fff7fffu, 0x7fff7fffu, 0x7fff7fffu}, 1, 1, 0x12345678u},
+        {"vmhraddshs", 33, {0x00010001u, 0x00010001u, 0x00010001u, 0x00010001u}, {0x40004000u, 0x40004000u, 0x40004000u, 0x40004000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00010001u, 0x00010001u, 0x00010001u, 0x00010001u}, 0, 1, 0x12345678u},
+        {"vmsummbm", 37, {0xff010080u, 0xff010080u, 0xff010080u, 0xff010080u}, {0x02020202u, 0x02020202u, 0x02020202u, 0x02020202u}, {0x00000000u, 0x00000001u, 0x00000002u, 0x00000003u}, {0xffffff00u, 0xffffff01u, 0xffffff02u, 0xffffff03u}, 0, 1, 0x12345678u},
+        {"vpkshus", 270, {0x7fff8000u, 0x7fff8000u, 0x7fff8000u, 0x7fff8000u}, {0x00ff0100u, 0x00ff0100u, 0x00ff0100u, 0x00ff0100u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xff00ff00u, 0xff00ff00u, 0xffffffffu, 0xffffffffu}, 1, 0, 0x12345678u},
+        {"vpkuhus", 142, {0x010000ffu, 0x010000ffu, 0x010000ffu, 0x010000ffu}, {0x00010000u, 0x00010000u, 0x00010000u, 0x00010000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xffffffffu, 0xffffffffu, 0x01000100u, 0x01000100u}, 1, 0, 0x12345678u},
+        {"vupkhsb", 526, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x807f00ffu, 0x807f00ffu, 0x807f00ffu, 0x807f00ffu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xff80007fu, 0x0000ffffu, 0xff80007fu, 0x0000ffffu}, 0, 0, 0x12345678u},
+        {"vupkhpx", 846, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x80017fffu, 0x80017fffu, 0x80017fffu, 0x80017fffu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xff000001u, 0x001f1f1fu, 0xff000001u, 0x001f1f1fu}, 0, 0, 0x12345678u},
+        {"vsum2sws", 1672, {0x7fffffffu, 0x00000001u, 0x80000000u, 0xffffffffu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x7fffffffu, 0x00000000u, 0x80000000u}, 1, 0, 0x12345678u},
+        {"vsum4sbs", 1800, {0x7f7f7f7fu, 0x7f7f7f7fu, 0x7f7f7f7fu, 0x7f7f7f7fu}, {0x7fffffffu, 0x00000000u, 0xffffff00u, 0x80000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7fffffffu, 0x000001fcu, 0x000000fcu, 0x800001fcu}, 1, 0, 0x12345678u},
+        {"vsum4ubs", 1544, {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}, {0xffffffffu, 0x00000000u, 0xfffffc00u, 0x00000001u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xffffffffu, 0x000003fcu, 0xfffffffcu, 0x000003fdu}, 1, 0, 0x12345678u},
+        {"vrfin ties even", 522, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x3f000000u, 0xbf000000u, 0x3fc00000u, 0xc0200000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x80000000u, 0x40000000u, 0xc0000000u}, 0, 0, 0x12345678u, 0, 0},
+        {"vrfin ignores NJ", 522, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x3f000000u, 0xbf000000u, 0x3fc00000u, 0xc0200000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x80000000u, 0x40000000u, 0xc0000000u}, 0, 0, 0x12345678u, 1, 0},
+        {"vaddfp RN and NJ", 10, {0x3f800000u, 0x4b800000u, 0xcb800000u, 0x00800000u}, {0x33800000u, 0x3f800000u, 0xbf800000u, 0x807fffffu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x4b800000u, 0xcb800000u, 0x00000001u}, 0, 0, 0x12345678u, 0, 0},
+        {"vaddfp RN and NJ", 10, {0x3f800000u, 0x4b800000u, 0xcb800000u, 0x00800000u}, {0x33800000u, 0x3f800000u, 0xbf800000u, 0x807fffffu}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x4b800000u, 0xcb800000u, 0x00800000u}, 0, 0, 0x12345678u, 1, 0},
+        {"vaddfp NaN selection", 10, {0x7fc12345u, 0xff812345u, 0x7f800000u, 0xff800000u}, {0x7f811111u, 0x7fc99999u, 0xff800000u, 0x7f800000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7fc12345u, 0xffc12345u, 0x7fc00000u, 0x7fc00000u}, 0, 0, 0x12345678u, 0, 0},
+        {"vmaxfp zero and NaN", 1034, {0x00000000u, 0x80000000u, 0x7fc12345u, 0x7f800001u}, {0x80000000u, 0x00000000u, 0x3f800000u, 0x40000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x00000000u, 0x7fc12345u, 0x7fc00001u}, 0, 0, 0x12345678u, 0, 0},
+        {"vminfp zero and NaN", 1098, {0x00000000u, 0x80000000u, 0x7fc12345u, 0x7f800001u}, {0x80000000u, 0x00000000u, 0x3f800000u, 0x40000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x80000000u, 0x80000000u, 0x7fc12345u, 0x7fc00001u}, 0, 0, 0x12345678u, 0, 0},
+        {"vmaddfp fused and zero", 46, {0x3f800001u, 0x00000000u, 0x80000000u, 0x80000000u}, {0xbf800000u, 0x80000000u, 0x80000000u, 0x80000000u}, {0x3f7ffffeu, 0x40000000u, 0x40000000u, 0xc0000000u}, {0xa8800000u, 0x00000000u, 0x80000000u, 0x00000000u}, 0, 1, 0x12345678u, 0, 0},
+        {"vnmsubfp fused", 47, {0x3f800001u, 0x3f800001u, 0x3f800001u, 0x3f800001u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x3f7ffffeu, 0x3f7ffffeu, 0x3f7ffffeu, 0x3f7ffffeu}, {0x28800000u, 0x28800000u, 0x28800000u, 0x28800000u}, 0, 1, 0x12345678u, 0, 0},
+        {"vctsxs limits and NaN", 970, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7f800000u, 0xff800000u, 0x7fc12345u, 0x4f000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7fffffffu, 0x80000000u, 0x00000000u, 0x7fffffffu}, 1, 0, 0x12345678u, 0, 0},
+        {"vctuxs limits and negative fraction", 906, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7f800000u, 0xff800000u, 0x7fc12345u, 0xbf000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xffffffffu, 0x00000000u, 0x00000000u, 0x00000000u}, 1, 0, 0x12345678u, 0, 0},
+        {"vctsxs scaled fractions", 970, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x3fe00000u, 0xbfe00000u, 0x00000000u, 0x80000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000003u, 0xfffffffdu, 0x00000000u, 0x00000000u}, 0, 0, 0x12345678u, 0, 1},
+        {"vctsxs scale 31", 970, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0xbf800000u, 0x7fc12345u, 0x00000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7fffffffu, 0x80000000u, 0x00000000u, 0x00000000u}, 1, 0, 0x12345678u, 0, 31},
+        {"vcfsx rounded integers", 842, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7fffffffu, 0x80000000u, 0xffffffffu, 0x00000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x4f000000u, 0xcf000000u, 0xbf800000u, 0x00000000u}, 0, 0, 0x12345678u, 0, 0},
+        {"vcfux scale 31", 778, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xffffffffu, 0x80000000u, 0x00000001u, 0x00000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x40000000u, 0x3f800000u, 0x30000000u, 0x00000000u}, 0, 0, 0x12345678u, 0, 31},
+        {"vcmpbfp. mixed and NaN", 1990, {0x00000000u, 0x40000000u, 0xc0000000u, 0x7fc12345u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x80000000u, 0x40000000u, 0xc0000000u}, 0, 0, 0x12345608u, 0, 0},
+        {"vcmpbfp. all within", 1990, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, 0, 0, 0x12345628u, 0, 0},
+        {"vcmpeqfp. unordered", 1222, {0x3f800000u, 0x80000000u, 0x7fc12345u, 0x3f800000u}, {0x3f800000u, 0x00000000u, 0x7fc12345u, 0xbf800000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xffffffffu, 0xffffffffu, 0x00000000u, 0x00000000u}, 0, 0, 0x12345608u, 0, 0},
+        {"vrfip subnormal", 650, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000001u, 0x80000001u, 0x00000000u, 0x80000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x80000000u, 0x00000000u, 0x80000000u}, 0, 0, 0x12345678u, 0, 0},
+        {"vrfim subnormal", 714, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000001u, 0x80000001u, 0x00000000u, 0x80000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0xbf800000u, 0x00000000u, 0x80000000u}, 0, 0, 0x12345678u, 0, 0},
+        {"vrfip subnormal", 650, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000001u, 0x80000001u, 0x00000000u, 0x80000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x80000000u, 0x00000000u, 0x80000000u}, 0, 0, 0x12345678u, 1, 0},
+        {"vrfim subnormal", 714, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000001u, 0x80000001u, 0x00000000u, 0x80000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x80000000u, 0x00000000u, 0x80000000u}, 0, 0, 0x12345678u, 1, 0},
+        {"vrefp exact and zero", 266, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x80000000u, 0x3f800000u, 0xc0000000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7f800000u, 0xff800000u, 0x3f800000u, 0xbf000000u}, 0, 0, 0x12345678u, 0, 0},
+        {"vrsqrtefp exact and invalid", 330, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x80000000u, 0x40800000u, 0xbf800000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x7f800000u, 0xff800000u, 0x3f000000u, 0x7fc00000u}, 0, 0, 0x12345678u, 0, 0},
+        {"vexptefp exact and infinity", 394, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xff800000u, 0x80000000u, 0x00000000u, 0x7f800000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x3f800000u, 0x3f800000u, 0x7f800000u}, 0, 0, 0x12345678u, 0, 0},
+        {"vlogefp exact and invalid", 458, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x3f800000u, 0x40000000u, 0xbf800000u}, {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, {0xff800000u, 0x00000000u, 0x3f800000u, 0x7fc00000u}, 0, 0, 0x12345678u, 0, 0},
+    };
+    // Enumerate every architectural immediate value, with expected lane
+    // constants or exact powers of two independent of either implementation.
+    const uint32 splat_words[] = {0x00112233,0x44556677,0x8899aabb,0xccddeeff};
+    const uint32 splat_values[][16] = {
+        {0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff},
+        {0x0011,0x2233,0x4455,0x6677,0x8899,0xaabb,0xccdd,0xeeff},
+        {0x00112233,0x44556677,0x8899aabb,0xccddeeff}};
+    for (unsigned width = 0; width < 3; ++width) {
+        for (unsigned simm = 0; simm < 32; ++simm) {
+            vector_literal test = {}; test.name = "SIMM full range"; test.xo = 780 + width * 64;
+            test.cr = 0x12345678; test.nj = 1; test.scale = simm;
+            const uint32 value = uint32(simm < 16 ? int(simm) : int(simm) - 32);
+            const uint32 word = width == 0 ? (value & 255) * 0x01010101u : width == 1 ? (value & 65535) * 0x00010001u : value;
+            for (unsigned w = 0; w < 4; ++w) test.out[w] = word;
+            vector_literals.push_back(test);
+        }
+        for (unsigned lane = 0; lane < (16u>>width); ++lane) {
+            vector_literal test = {}; test.name = "splat index full range"; test.xo = 524 + width * 64;
+            test.cr = 0x12345678; test.nj = 1; test.scale = lane;
+            const uint32 value = splat_values[width][lane];
+            for (unsigned w = 0; w < 4; ++w) { test.b[w] = splat_words[w];
+                test.out[w] = width == 0 ? value * 0x01010101u : width == 1 ? value * 0x00010001u : value; }
+            vector_literals.push_back(test);
+        }
+    }
+    for (unsigned shb = 0; shb < 16; ++shb) {
+        vector_literal test = {}; test.name = "vsldoi SHB full range"; test.xo = 44;
+        test.cr = 0x12345678; test.nj = 1; test.scale = shb;
+        for (unsigned w = 0; w < 4; ++w) {
+            test.a[w] = w * 0x04040404u + 0x00010203u;
+            test.b[w] = 0x10111213u + w * 0x04040404u;
+            test.out[w] = (shb + 4 * w) * 0x01010101u + 0x00010203u;
+        }
+        vector_literals.push_back(test);
+    }
+    for (unsigned scale = 0; scale < 32; ++scale)
+    for (unsigned form = 0; form < 8; ++form) {
+        vector_literal test = {}; test.name = "FP conversion UIMM full range";
+        const unsigned xos[] = {842,778,970,906,970,906,970,906}; test.xo = xos[form];
+        test.cr = 0x12345678; test.scale = scale;
+        if (form < 2) {
+            const uint32 inputs[] = {0x40000000,0xc0000000,0x7fffffff,0xffffffff};
+            const uint32 fp[][4] = {{0x4e800000,0xce800000,0x4f000000,0xbf800000}, {0x4e800000,0x4f400000,0x4f000000,0x4f800000}};
+            for (unsigned w = 0; w < 4; ++w) { test.b[w] = inputs[w]; test.out[w] = fp[form][w] - (scale<<23); }
+        } else if (form < 4) {
+            test.b[0] = 0x30000000; test.b[1] = 0xb0000000; test.b[2] = 0x3f800000; test.b[3] = 0xbf000000;
+            test.out[0] = scale == 31 ? 1 : 0;
+            test.out[1] = form == 2 && scale == 31 ? UINT32_MAX : 0;
+            test.out[2] = form == 2 && scale == 31 ? 0x7fffffffu : 1u<<scale;
+            test.out[3] = form == 2 && scale ? 0u - (1u<<(scale-1)) : 0;
+            test.sat = form == 3 || scale == 31;
+        } else if (form < 6) {
+            test.b[0] = 0x7f800000; test.b[1] = 0xff800000; test.b[2] = 0x7fc12345; test.b[3] = 0x80000000;
+            test.out[0] = form == 4 ? 0x7fffffff : UINT32_MAX; test.out[1] = form == 4 ? 0x80000000 : 0; test.sat = 1;
+        } else {
+            // Very large finite inputs must saturate before an integer cast.
+            test.b[0] = 0x7f7fffff; test.b[1] = 0xff7fffff; test.b[2] = 0x7f800001; test.b[3] = 0;
+            test.out[0] = form == 6 ? 0x7fffffff : UINT32_MAX; test.out[1] = form == 6 ? 0x80000000 : 0; test.sat = 1;
+        }
+        vector_literals.push_back(test);
+    }
+    unsigned vector_literal_case = 0;
+    for (const auto &test : vector_literals)
+    for (unsigned vd : {1u, 2u, 3u, 4u})
+    for (unsigned sticky = 0; sticky < 2; ++sticky) {
+        const uint32 start = 0x280000 + 64 * vector_literal_case++;
+        const uint32 op = (4u<<26)|(vd<<21)|(1u<<16)|(2u<<11)|test.xo|(test.va ? 4u<<6 : 0);
+        // Unary unpack/FP encodings reserve vA; conversions use it as UIMM.
+        uint32 encoded = op;
+        if (test.xo == 526 || test.xo == 846 || test.xo == 522 || test.xo == 714 || test.xo == 650 || test.xo == 586 ||
+            test.xo == 266 || test.xo == 330 || test.xo == 394 || test.xo == 458) encoded &= ~(31u<<16);
+        if (test.xo == 842 || test.xo == 778 || test.xo == 970 || test.xo == 906 ||
+            test.xo == 780 || test.xo == 844 || test.xo == 908 || test.xo == 524 || test.xo == 588 || test.xo == 652)
+            encoded = (encoded & ~(31u<<16)) | (test.scale<<16);
+        if (test.xo == 780 || test.xo == 844 || test.xo == 908) encoded &= ~(31u<<11);
+        if (test.xo == 44) encoded = (encoded & ~(31u<<6)) | (test.scale<<6);
+        mmu.reset(); mmu.set_msr(NW_MSR_VEC); nw_jit_set_mode(NW_JIT_ON);
+        nw_jit_fn fn = nw_jit_compile(&encoded, 1, start, start & ~0xfffu, 0, 0); CHECK(fn != NULL);
+        nw_jit_cpu input = {}; input.pc = start; input.msr = NW_MSR_VEC;
+        input.cr = 0x12345678; input.xer = 0xe1234567; input.vscr = (test.nj<<16) | sticky;
+        for (unsigned w = 0; w < 4; ++w) {
+            input.vr[1][w] = test.a[w]; input.vr[2][w] = test.b[w]; input.vr[4][w] = test.c[w];
+        }
+        auto prepare_literal = [&]() {
+            cpu->pc() = start; cpu->last_fetch_pa_ = start; cpu->vscr().set(input.vscr);
+            cpu->cr().set(input.cr); cpu->xer().set(input.xer); cpu->fpscr() = 0;
+            cpu->lr() = cpu->ctr() = 0; cpu->regs().reserve_valid = 0;
+            for (unsigned r = 0; r < 32; ++r) {
+                cpu->gpr(r) = 0; cpu->fpr_dw(r) = 0;
+                for (unsigned w = 0; w < 4; ++w) cpu->vr(r).w[w] = input.vr[r][w];
+            }
+        };
+        for (unsigned engine = 0; engine < 4; ++engine) {
+            nw_jit_cpu result = input;
+            if (engine == 0) {
+                prepare_literal(); instruction(cpu, encoded);
+                result.cr = cpu->cr().get(); result.vscr = cpu->vscr().get(); result.pc = cpu->pc();
+                for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) result.vr[r][w] = cpu->vr(r).w[w];
+            } else if (engine == 1) CHECK(nw_jit_interp_n(&result, &encoded, 1, start) == 0);
+            else if (engine == 2) { nw_jit_cpu_bind(&result); nw_jit_tail_begin(); if (fn) fn(&result); }
+            else {
+                prepare_literal(); result.dec = cpu->dec_;
+                const uint64 misses = nw_jit_verify_misses();
+                if (fn) CHECK(cpu->nw_jit_verify_block(result, fn, &encoded, 1) == 1);
+                CHECK(nw_jit_verify_misses() == misses);
+            }
+            if (result.cr != test.cr || result.vscr != ((test.nj<<16) | sticky | test.sat))
+                fprintf(stderr, "literal %s vd=%u engine=%u CR/VSCR=%08x/%08x\n", test.name, vd, engine, result.cr, result.vscr);
+            CHECK(result.cr == test.cr && result.vscr == ((test.nj<<16) | sticky | test.sat));
+            CHECK(result.pc == start + 4 && !result.fault && result.xer == input.xer);
+            for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) {
+                const uint32 expected = r == vd ? test.out[w] : input.vr[r][w];
+                if (result.vr[r][w] != expected)
+                    fprintf(stderr, "literal %s vd=%u engine=%u r%u.w%u=%08x/%08x\n", test.name, vd, engine, r, w, result.vr[r][w], expected);
+                CHECK(result.vr[r][w] == expected);
+            }
+        }
+    }
+
+    // Literal saturated outputs and SAT set/retained/cleared behavior cannot
+    // be certified solely by matching the interpreter's helper calculations.
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        mmu.reset(); mmu.set_msr(NW_MSR_VEC); nw_jit_set_mode(NW_JIT_VERIFY);
+        nw_jit_cpu input = {}; input.pc = 0x160000 + kind * 64; input.msr = NW_MSR_VEC;
+        input.vscr = 0x10000; input.cr = 0x12345678;
+        for (unsigned w = 0; w < 4; ++w) {
+            input.vr[1][w] = kind == 0 ? 0x7fffffff : 0x80000000;
+            input.vr[2][w] = kind == 0 ? 0 : kind == 1 ? 0x80008000 : 0x7fffffff;
+            if (kind == 1) input.vr[1][w] = 0x80008000;
+        }
+        input.vr[7][3] = 0x10000;
+        const uint32 op = (4u<<26)|(3u<<21)|(1u<<16)|(2u<<11)|(kind == 0 ? 1928u : kind == 1 ? (4u<<6)|41u : 462u);
+        const uint32 ops[] = {op, nw_ppc_mfvscr(5), ((4u<<26)|(6u<<21)|1156u), nw_ppc_mtvscr(7), nw_ppc_mfvscr(8)};
+        nw_jit_fn fn = nw_jit_compile(ops, 5, input.pc, input.pc & ~0xfffu, 0, 0); CHECK(fn != NULL);
+        for (unsigned engine = 0; engine < 2; ++engine) {
+            nw_jit_cpu shadow = input;
+            if (engine == 0) { nw_jit_cpu_bind(&shadow); nw_jit_tail_begin(); if (fn) fn(&shadow); }
+            else {
+                cpu->pc() = input.pc; cpu->last_fetch_pa_ = input.pc; cpu->cr().set(input.cr);
+                cpu->xer().set(0); cpu->vscr().set(input.vscr); cpu->fpscr() = 0;
+                cpu->lr() = cpu->ctr() = 0; cpu->regs().reserve_valid = 0;
+                for (unsigned r = 0; r < 32; ++r) {
+                    cpu->gpr(r) = 0; cpu->fpr_dw(r) = 0;
+                    for (unsigned w = 0; w < 4; ++w) cpu->vr(r).w[w] = input.vr[r][w];
+                }
+                shadow.dec = cpu->dec_;
+                const uint64 misses = nw_jit_verify_misses();
+                if (fn) CHECK(cpu->nw_jit_verify_block(shadow, fn, ops, 5) == 1);
+                CHECK(nw_jit_verify_misses() == misses);
+            }
+            CHECK(shadow.vscr == 0x10000 && shadow.vr[5][3] == 0x10001 && shadow.vr[8][3] == 0x10000);
+            for (unsigned w = 0; w < 4; ++w) {
+                const uint32 expected = kind == 0 ? (w == 3 ? 0x7fffffffu : 0) : kind == 1 ? 0x7fffffffu : w < 2 ? 0x80008000u : 0x7fff7fffu;
+                CHECK(shadow.vr[3][w] == expected);
+            }
+            CHECK(shadow.cr == input.cr && shadow.pc == input.pc + 20 && !shadow.fault);
+        }
+    }
+
     // Independent live verification: destructive I/O executes only in KPX.
     // Poison the live DTLB with a usable RAM pointer: replay must not read it.
     nw_jit_set_mode(NW_JIT_VERIFY);
@@ -234,6 +1694,9 @@ int ppc_core_test_access::run()
         CHECK(shadow.gpr[3] == cpu->gpr(3) && shadow.gpr[5] == cpu->gpr(5));
         CHECK(poison[0] == 0x7f && poison[1] == 0 && poison[2] == 0 && poison[3] == 0);
         CHECK(cpu->nw_verify_trace_ == NULL && shadow.verify_mem == NULL && shadow.host == NULL);
+        // The deliberately poisoned supervisor entry contains a stack pointer;
+        // remove it before this fixture ends and later production stores run.
+        nw_jit_dtlb_drop_page(cpu->gpr(4),NW_JIT_DTLB_FL_RESET);
     }
 
     // Real RAM store/load replay, translated aliases, update/reversed/narrow
@@ -244,6 +1707,1129 @@ int ppc_core_test_access::run()
     CHECK(ram == wanted);
     if (ram == wanted) {
         nw_banks_set(NW_PA_RAM, ram_base, 0x20000);
+        auto vector_start = [&](uint32 start, uint32 ea, bool zero_ra) {
+            nw_jit_cpu input = {}; input.pc = start; input.msr = mmu.msr(); input.dec = cpu->dec_;
+            input.cr = 0x12345678; input.xer = 0xe1234567; input.vscr = 0x10000;
+            for (unsigned r = 0; r < 32; ++r) {
+                input.gpr[r] = 0x12340000u + r;
+                for (unsigned w = 0; w < 4; ++w) input.vr[r][w] = 0x01020304u + 0x10101010u * r + 0x04040404u * w;
+            }
+            input.gpr[0] = 0xdeadbeef; input.gpr[4] = zero_ra ? 0x98765432u : ea;
+            input.gpr[6] = zero_ra ? ea : 0;
+            cpu->pc() = start; cpu->last_fetch_pa_ = start; cpu->cr().set(input.cr); cpu->xer().set(input.xer);
+            cpu->vscr().set(input.vscr); cpu->fpscr() = 0; cpu->lr() = cpu->ctr() = 0;
+            cpu->regs().reserve_valid = 0; cpu->spcflags().init(); cpu->dec_pending_ = false; cpu->dec_tick_div_ = 0;
+            for (unsigned r = 0; r < 32; ++r) {
+                cpu->gpr(r) = input.gpr[r]; cpu->fpr_dw(r) = 0;
+                for (unsigned w = 0; w < 4; ++w) cpu->vr(r).w[w] = input.vr[r][w];
+            }
+            return input;
+        };
+        // Enter the actual interpreter loop and execute one instruction at a
+        // privately mapped high-prefix exception vector. Its device store
+        // requests a stop only after exception entry and handler execution.
+        // Prefix blocks exercise both native-tail and C successor gates.
+        const uint32 vector_page = 0xfff00000u;
+        void *const vector_wanted = (void *)(VMBaseDiff + vector_page);
+        void *const vectors = mmap(vector_wanted, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        CHECK(vectors == vector_wanted);
+        if (vectors == vector_wanted) {
+            extern uint32 RAMBase, RAMSize, ROMBase;
+            const uint32 saved_ram_base = RAMBase, saved_ram_size = RAMSize, saved_rom_base = ROMBase;
+            RAMBase = ram_base; RAMSize = 0x20000;
+            // The synthetic sparse ROM range ends just after the vector page.
+            ROMBase = vector_page - 0x4ff000u;
+            nw_banks_set(NW_PA_ROM, vector_page, 4096);
+            vm_write_memory_4(vector_page + 0xf20, nw_ppc_addi(27,0,0x5a5a));
+            vm_write_memory_4(vector_page + 0x700, nw_ppc_addi(27,0,0x5a5a));
+            vm_write_memory_4(vector_page + 0xf24, nw_ppc_stw(27,30,0));
+            vm_write_memory_4(vector_page + 0x704, nw_ppc_stw(27,30,0));
+            vm_write_memory_4(vector_page + 0x300, nw_ppc_addi(27,0,0x5a5a));
+            vm_write_memory_4(vector_page + 0x304, nw_ppc_stw(27,30,0));
+            device.on_write = ppc_core_test_access::stop_on_device; device.on_write_context = cpu;
+            struct vector_trap { uint32 op, vector, cause; bool vec; unsigned width; bool store; };
+            std::vector<vector_trap> trapped = {
+                {(4u<<26)|(3u<<21)|(1u<<16)|(2u<<11),0xf20,0,false,0,false},
+                {(4u<<26)|(3u<<21)|(1u<<16)|(2u<<11)|10u,0xf20,0,false,0,false},
+                {(4u<<26)|(3u<<21)|1540u,0xf20,0,false,0,false},
+                {(4u<<26)|(2u<<11)|1604u,0xf20,0,false,0,false},
+                {(31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|(6u<<1),0xf20,0,false,0,false},
+                {(31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|(38u<<1),0xf20,0,false,0,false}
+            };
+            for (bool vec : {false,true}) {
+                trapped.push_back({(4u<<26)|2047u,0x700,0x80000,vec,0,false});
+                trapped.push_back({(4u<<26)|(3u<<21)|(1u<<16)|(2u<<11)|522u,0x700,0x80000,vec,0,false});
+            }
+            const struct { unsigned xo, width; bool store; } memory_traps[] = {
+                {7,1,false},{39,2,false},{71,4,false},{103,16,false},{359,16,false},
+                {135,1,true},{167,2,true},{199,4,true},{231,16,true},{487,16,true}
+            };
+            for (const auto &form : memory_traps) for (bool vec : {false,true})
+                trapped.push_back({(31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|(form.xo<<1),
+                    vec ? 0x300u : 0xf20u,0,vec,form.width,form.store});
+            unsigned exception_case = 0;
+            for (int mode : {NW_JIT_OFF,NW_JIT_ON,NW_JIT_VERIFY})
+            for (unsigned prefix = 0; prefix < 2; ++prefix)
+            for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+            for (unsigned translated = 0; translated < 2; ++translated)
+            for (unsigned user = 0; user < 2; ++user)
+            for (unsigned which = 0; which < trapped.size(); ++which) {
+                const vector_trap &trap = trapped[which];
+                if (trap.vector == 0x300 && !translated) continue; // DSI requires data translation.
+                const uint32 start = ram_base + 0x8000 + 64 * exception_case++;
+                CHECK(start + 0x28 < ram_base + 0x20000);
+                mmu.reset();
+                const bool illegal = trap.vector == 0x700;
+                const uint32 msr = ppc32_mmu::MSR_IP | ppc32_mmu::MSR_EE | 0x00001000u | // MSR[ME], retained on exception entry
+                    (user ? ppc32_mmu::MSR_PR : 0) | (trap.vec ? NW_MSR_VEC : 0) |
+                    (translated ? ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR : 0);
+                mmu.set_msr(msr);
+                if (translated) mmu.set_ibat(0, ram_base | 3u, ram_base | 2u);
+                // Unavailable suppresses both missing translations and mapped
+                // destructive devices. Enabled vectors fault before any data access.
+                const uint32 ea = user && trap.vector == 0xf20 ? NW_IO_VIA_PMU_BASE + 15u : 0x6000000fu;
+                if (translated && ea != 0x6000000fu)
+                    mmu.set_dbat(0, (NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 3u, (NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 2u);
+                nw_jit_cpu before = vector_start(start, ea, false);
+                cpu->dar_ = 0x1234567u; cpu->dsisr_ = 0x76543210u;
+                cpu->gpr(30) = before.gpr[30] = NW_IO_VIA_PMU_BASE;
+                const uint32 fault_pc = start + (prefix ? 0x20u : 0);
+                vm_write_memory_4(fault_pc, trap.op);
+                vm_write_memory_4(fault_pc + 4, nw_ppc_addi(28,0,99));
+                if (prefix) {
+                    const uint32 ops[] = {nw_ppc_addi(3,3,7),nw_ppc_b(0x1c,0)};
+                    vm_write_memory_4(start, ops[0]); vm_write_memory_4(start + 4, ops[1]);
+                    nw_jit_set_mode(NW_JIT_ON);
+                    const uint32 key = (translated ? 3u : 0) | (user ? 4u : 0);
+                    CHECK(nw_jit_compile(ops, 2, start, start & ~0xfffu, key, 0) != NULL);
+                    CHECK((nw_jit_compile(&trap.op, 1, fault_pc, fault_pc & ~0xfffu, key, 0) == NULL) == illegal);
+                    nw_jit_itlb_fill(fault_pc, fault_pc);
+                }
+                cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false;
+                const uint64 serial = cpu->exception_serial_;
+                const unsigned writes = device.writes, reads = device.reads;
+                nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+                nw_jit_set_mode(mode);
+                cpu->execute_depth = 1; cpu->execute(start); CHECK(cpu->execute_depth == 1); cpu->execute_depth = 0;
+                const uint32 vec = vector_page + trap.vector;
+                CHECK(cpu->exception_serial_ == serial + 1);
+                if (cpu->pc() != vec + 8 || cpu->gpr(27) != 0x5a5a)
+                    fprintf(stderr, "exception fixture mode=%d translated=%u user=%u which=%u pc=%08x srr=%08x/%08x r27=%08x\n", mode, translated, user, which, cpu->pc(), cpu->srr0_, cpu->srr1_, cpu->gpr(27));
+                CHECK(cpu->pc() == vec + 8 && cpu->srr0_ == fault_pc && cpu->srr1_ == ((msr & ~0x783f0000u) | trap.cause));
+                if (trap.vector == 0x300) {
+                    CHECK(cpu->dar_ == (ea & ~(trap.width - 1u)));
+                    CHECK(cpu->dsisr_ == (0x40000000u | (trap.store ? 0x02000000u : 0)));
+                } else CHECK(cpu->dar_ == 0x1234567u && cpu->dsisr_ == 0x76543210u);
+                CHECK(mmu.msr() == (msr & ~ppc32_mmu::MSR_EXC_CLEAR));
+                CHECK(cpu->cr().get() == before.cr && cpu->xer().get() == before.xer && cpu->vscr().get() == before.vscr && !cpu->fpscr());
+                for (unsigned r = 0; r < 32; ++r) {
+                    CHECK(cpu->gpr(r) == (r == 27 ? 0x5a5au : r == 3 && prefix ? before.gpr[r] + 7 : before.gpr[r])); CHECK(!cpu->fpr_dw(r));
+                    for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == before.vr[r][w]);
+                }
+                CHECK(device.writes == writes + 1 && device.reads == reads && device.value == 0x5a5a);
+                CHECK(!cpu->dec_pending_ && !cpu->spcflags().test(SPCFLAG_CPU_EXEC_RETURN));
+            }
+            CHECK(exception_case == 1200);
+
+            // Pending interrupts precede the instruction's synchronous fault;
+            // masked requests survive it. A negative DEC write must commit
+            // its integer prefix before either DEC delivery or the next fault.
+            for (uint32 vec : {0x500u,0x900u}) {
+                vm_write_memory_4(vector_page + vec,nw_ppc_addi(27,0,0x5a5a));
+                vm_write_memory_4(vector_page + vec + 4,nw_ppc_stw(27,30,0));
+            }
+            const int saved_external = nw_io_ext_irq;
+            CHECK(saved_external == 0);
+            nw_jit_invalidate_all();
+            unsigned event_case = 0;
+            const vector_trap event_traps[] = {trapped[0],trapped[6],trapped[17]};
+            for (int mode : {NW_JIT_OFF,NW_JIT_ON,NW_JIT_VERIFY})
+            for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+            for (unsigned translated = 0; translated < 2; ++translated)
+            for (unsigned user = 0; user < 2; ++user)
+            for (unsigned event = 0; event < 6; ++event)
+            for (const auto &trap : event_traps) {
+                const bool prefix_dec = event >= 4, ee = event == 0 || event == 1 || event == 4;
+                const bool external = event == 1 || event == 3;
+                if (prefix_dec && user) continue; // DEC writes are privileged.
+                const uint32 start = ram_base + 0x8000 + 64 * event_case++;
+                mmu.reset();
+                const uint32 msr = ppc32_mmu::MSR_IP | 0x1000u | ppc32_mmu::MSR_DR |
+                    (ee ? ppc32_mmu::MSR_EE : 0) | (user ? ppc32_mmu::MSR_PR : 0) |
+                    (trap.vec ? NW_MSR_VEC : 0) | (translated ? ppc32_mmu::MSR_IR : 0);
+                mmu.set_msr(msr);
+                if (translated) mmu.set_ibat(0,ram_base | 3u,ram_base | 2u);
+                nw_jit_cpu before = vector_start(start,0x6000000f,false);
+                cpu->gpr(29) = before.gpr[29] = 0x80000000u;
+                cpu->gpr(30) = before.gpr[30] = NW_IO_VIA_PMU_BASE;
+                cpu->dar_ = 0x1234567; cpu->dsisr_ = 0x76543210;
+                const uint32 fault_pc = start + (prefix_dec ? 8 : 0);
+                vm_write_memory_4(fault_pc,trap.op);
+                vm_write_memory_4(fault_pc + 4,nw_ppc_addi(28,0,99));
+                nw_jit_set_mode(NW_JIT_ON);
+                const uint32 key = (translated ? 1u : 0) | 2u | (user ? 4u : 0);
+                if (prefix_dec) {
+                    const uint32 ops[] = {nw_ppc_addi(3,3,7),nw_ppc_mtspr(NW_PPC_SPR_DEC,29)};
+                    vm_write_memory_4(start,ops[0]); vm_write_memory_4(start + 4,ops[1]);
+                    CHECK(nw_jit_compile(ops,2,start,start & ~0xfffu,key,0) != NULL);
+                }
+                CHECK((nw_jit_compile(&trap.op,1,fault_pc,fault_pc & ~0xfffu,key,0) == NULL) == (trap.vector == 0x700));
+                nw_jit_itlb_fill(fault_pc,fault_pc);
+                cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = !prefix_dec;
+                nw_io_ext_irq = external;
+                const uint64 serial = cpu->exception_serial_;
+                const unsigned writes = device.writes, reads = device.reads;
+                nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+                nw_jit_set_mode(mode);
+                cpu->execute_depth = 1; cpu->execute(start); CHECK(cpu->execute_depth == 1); cpu->execute_depth = 0;
+                const uint32 vec = ee ? (external ? 0x500u : 0x900u) : trap.vector;
+                CHECK(cpu->exception_serial_ == serial + 1 && cpu->pc() == vector_page + vec + 8);
+                CHECK(cpu->srr0_ == fault_pc && cpu->srr1_ == ((msr & ~0x783f0000u) | (ee ? 0 : trap.cause)));
+                CHECK(mmu.msr() == (msr & ~ppc32_mmu::MSR_EXC_CLEAR));
+                CHECK(cpu->dec_pending_ == (!ee || external) && cpu->dec_ == (prefix_dec ? 0x80000000u : 1000000u));
+                if (!ee && trap.vector == 0x300)
+                    CHECK(cpu->dar_ == 0x60000000u && cpu->dsisr_ == 0x40000000u);
+                else CHECK(cpu->dar_ == 0x1234567u && cpu->dsisr_ == 0x76543210u);
+                CHECK(cpu->cr().get() == before.cr && cpu->xer().get() == before.xer && cpu->vscr().get() == before.vscr && !cpu->fpscr());
+                for (unsigned r = 0; r < 32; ++r) {
+                    CHECK(cpu->gpr(r) == (r == 27 ? 0x5a5au : r == 3 && prefix_dec ? before.gpr[r] + 7 : before.gpr[r]));
+                    CHECK(!cpu->fpr_dw(r));
+                    for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == before.vr[r][w]);
+                }
+                CHECK(device.writes == writes + 1 && device.reads == reads);
+                nw_io_ext_irq = saved_external;
+            }
+            CHECK(event_case == 360);
+
+            // Instruction translation must precede opcode classification and
+            // any cached successor. The first BAT ends exactly at a page edge;
+            // only its completed prefix may survive the next fetch's fault.
+            vm_write_memory_4(vector_page + 0x400,nw_ppc_addi(27,0,0x5a5a));
+            vm_write_memory_4(vector_page + 0x404,nw_ppc_stw(27,30,0));
+            uint8 htab[65536] = {};
+            mmu.set_physical_memory(htab,sizeof htab);
+            const uint32 fetch_pc = ram_base + 0x20000, fetch_pa = ram_base + 0x4000;
+            unsigned fetch_case = 0;
+            for (int mode : {NW_JIT_OFF,NW_JIT_ON,NW_JIT_VERIFY})
+            for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+            for (unsigned user = 0; user < 2; ++user)
+            for (unsigned fault = 0; fault < 5; ++fault)
+            for (unsigned prefix = 0; prefix < 3; ++prefix)
+            for (unsigned content = 0; content < 3; ++content)
+            for (unsigned event = 0; event < 4; ++event) {
+                ++fetch_case; nw_jit_invalidate_all(); nw_jit_itlb_flush(); mmu.reset(); memset(htab,0,sizeof htab);
+                const bool ee = event >= 2;
+                const uint32 msr = ppc32_mmu::MSR_IP | ppc32_mmu::MSR_IR |
+                    (user ? ppc32_mmu::MSR_PR : 0) | (ee ? ppc32_mmu::MSR_EE : 0);
+                mmu.set_msr(msr); mmu.set_ibat(0,ram_base | 3u,ram_base | 2u);
+                // BAT/PTE protection, segment N, guarded PTE, or absent translation.
+                if (fault == 1) mmu.set_ibat(1,fetch_pc | 3u,ram_base);
+                if (fault == 2) mmu.set_sr(1,0x10000001u);
+                if (fault == 3 || fault == 4) {
+                    mmu.set_sr(1,fault == 3 ? 1u : 0x60000001u);
+                    const unsigned pteg = ((1u ^ ((fetch_pc >> 12) & 0xffffu)) * 64u) & 0xffffu;
+                    nw_be32_store(htab,pteg,0x80000000u | (1u<<7) | ((fetch_pc>>22)&63u));
+                    nw_be32_store(htab,pteg + 4,fetch_pa | (fault == 3 ? 0xau : 0));
+                }
+                const uint32 start = fetch_pc - (prefix == 1 ? 4 : prefix == 2 ? 8 : 0);
+                nw_jit_cpu before = vector_start(start,0x6000000f,false);
+                cpu->gpr(30) = before.gpr[30] = NW_IO_VIA_PMU_BASE;
+                cpu->dar_ = 0x1234567; cpu->dsisr_ = 0x76543210;
+                cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = event != 0;
+                nw_io_ext_irq = event == 3;
+                const uint32 target = content == 0 ? nw_ppc_addi(28,0,99) : content == 1 ? nw_ppc_lvx(3,4,6) : (4u<<26)|2047u;
+                vm_write_memory_4(fetch_pa,target); vm_write_memory_4(fetch_pa + 4,nw_ppc_stw(27,30,0));
+                // A compiled successor exists even though fetch permission does
+                // not. Precompilation must not synthesize an ITLB entry.
+                nw_jit_set_mode(NW_JIT_ON);
+                const uint32 suffix = nw_ppc_addi(28,0,99);
+                CHECK(nw_jit_compile(&suffix,1,fetch_pc,fetch_pa & ~0xfffu,1u | (user ? 4u : 0),0) != NULL);
+                if (prefix) {
+                    uint32 ops[] = {nw_ppc_addi(3,3,7),nw_ppc_b(4,0)};
+                    vm_write_memory_4(start,ops[0]); if (prefix == 2) vm_write_memory_4(start + 4,ops[1]);
+                    CHECK(nw_jit_compile(ops,prefix == 1 ? 1 : 2,start,start & ~0xfffu,1u | (user ? 4u : 0),0) != NULL);
+                }
+                uint32 ignored; CHECK(!nw_jit_itlb_lookup(fetch_pc,&ignored));
+                const uint64 serial = cpu->exception_serial_, misses = nw_jit_verify_misses();
+                const unsigned reads = device.reads, writes = device.writes;
+                nw_jit_set_mode(mode); nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+                cpu->execute_depth = 1; cpu->execute(start); CHECK(cpu->execute_depth == 1); cpu->execute_depth = 0;
+                const uint32 vec = ee ? (event == 3 ? 0x500u : 0x900u) : 0x400u;
+                const uint32 cause = ee ? 0 : fault == 0 ? 0x40000000u : (fault == 1 || fault == 4) ? 0x08000000u : 0x10000000u;
+                CHECK(cpu->exception_serial_ == serial + 1 && cpu->pc() == vector_page + vec + 8);
+                CHECK(cpu->srr0_ == (ee ? start : fetch_pc) && cpu->srr1_ == ((msr & ~0x783f0000u) | cause));
+                CHECK(mmu.msr() == (msr & ~ppc32_mmu::MSR_EXC_CLEAR));
+                CHECK(cpu->dar_ == 0x1234567u && cpu->dsisr_ == 0x76543210u);
+                CHECK(cpu->dec_pending_ == (event == 1 || event == 3));
+                CHECK(cpu->cr().get() == before.cr && cpu->xer().get() == before.xer && cpu->vscr().get() == before.vscr && !cpu->fpscr());
+                for (unsigned r = 0; r < 32; ++r) {
+                    CHECK(cpu->gpr(r) == (r == 27 ? 0x5a5au : r == 3 && prefix && !ee ? before.gpr[r] + 7 : before.gpr[r]));
+                    CHECK(!cpu->fpr_dw(r));
+                    for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == before.vr[r][w]);
+                }
+                CHECK(device.reads == reads && device.writes == writes + 1 && nw_jit_verify_misses() == misses);
+                if (fault == 3 || fault == 4) {
+                    const unsigned pteg = ((1u ^ ((fetch_pc >> 12) & 0xffffu)) * 64u) & 0xffffu;
+                    CHECK(nw_be32_load(htab,pteg + 4) == (fetch_pa | (fault == 3 ? 0xau : 0)));
+                }
+                nw_io_ext_irq = saved_external;
+            }
+            CHECK(fetch_case == 2160);
+            mmu.set_physical_memory(NULL,0);
+
+            // Warm translations through guest_fetch, then change the fetch
+            // context through real mtmsr/rfi or exception-entry paths. Both the
+            // sticky entry and a displaced table entry must reject old context.
+            unsigned fetch_context_case = 0;
+            for (int mode : {NW_JIT_OFF,NW_JIT_ON,NW_JIT_VERIFY})
+            for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+            for (unsigned writer = 0; writer < 5; ++writer)
+            for (unsigned sticky = 0; sticky < 2; ++sticky) {
+                ++fetch_context_case; nw_jit_invalidate_all(); nw_jit_itlb_flush(); mmu.reset();
+                const uint32 msr = ppc32_mmu::MSR_IP | ppc32_mmu::MSR_IR;
+                mmu.set_msr(msr); mmu.set_ibat(0,ram_base | 3u,ram_base | 2u);
+                const uint32 target = writer < 2 ? 0x20000000u : vector_page + (writer == 2 ? 0x300 : writer == 3 ? 0x400 : 0x500);
+                // Valid only for supervisor fetches. Exception-entry tests map
+                // the logical handler to a different physical marker first.
+                mmu.set_ibat(1,(target & 0xfffe0000u) | 2u,ram_base | 2u);
+                const uint32 warm_pa = ram_base | (target & 0x1ffffu);
+                vm_write_memory_4(warm_pa,nw_ppc_addi(28,0,99));
+                vm_write_memory_4(warm_pa + 4,nw_ppc_stw(27,30,0));
+                const uint32 start = ram_base + 0x8000;
+                nw_jit_cpu before = vector_start(start,0x6000000f,false);
+                cpu->gpr(30) = before.gpr[30] = NW_IO_VIA_PMU_BASE;
+                cpu->gpr(29) = before.gpr[29] = msr | ppc32_mmu::MSR_PR;
+                cpu->ctr() = target;
+                cpu->dar_ = 0x1234567; cpu->dsisr_ = 0x76543210;
+                cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks();
+                uint32 fetched; cpu->pc() = target;
+                CHECK(cpu->guest_fetch(&fetched) && fetched == nw_ppc_addi(28,0,99));
+                CHECK(cpu->last_fetch_pa_ == warm_pa);
+                if (!sticky) { cpu->pc() = start; vm_write_memory_4(start,nw_ppc_addi(3,3,7)); CHECK(cpu->guest_fetch(&fetched)); }
+                const uint64 serial = cpu->exception_serial_, misses = nw_jit_verify_misses();
+                const unsigned reads = device.reads, writes = device.writes;
+                nw_jit_set_mode(mode); nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+                uint32 expected_srr0, expected_srr1, expected_vec;
+                if (writer < 2) {
+                    vm_write_memory_4(start,nw_ppc_addi(3,3,7));
+                    vm_write_memory_4(start + 4,writer == 0 ? (31u<<26)|(29u<<21)|(146u<<1) : (19u<<26)|(50u<<1));
+                    vm_write_memory_4(start + 8,0x4e800420u); // bctr after mtmsr
+                    cpu->srr0_ = target; cpu->srr1_ = msr | ppc32_mmu::MSR_PR;
+                    expected_srr0 = target; expected_srr1 = msr | ppc32_mmu::MSR_PR | 0x40000000u; expected_vec = 0x400;
+                    cpu->pc() = start;
+                } else {
+                    cpu->pc() = start;
+                    if (writer == 2) cpu->take_data_dsi(0x60000000u,false,0x40000000u);
+                    else if (writer == 3) cpu->take_isi(0x40000000u);
+                    else cpu->take_external();
+                    expected_srr0 = start; expected_srr1 = msr | (writer == 3 ? 0x40000000u : 0); expected_vec = writer == 2 ? 0x300 : writer == 3 ? 0x400 : 0x500;
+                }
+                cpu->execute_depth = 1; cpu->execute(cpu->pc()); CHECK(cpu->execute_depth == 1); cpu->execute_depth = 0;
+                if (cpu->pc() != vector_page + expected_vec + 8)
+                    fprintf(stderr,"fetch context case=%u mode=%d writer=%u sticky=%u pc=%08x srr=%08x/%08x\n",fetch_context_case,mode,writer,sticky,cpu->pc(),cpu->srr0_,cpu->srr1_);
+                CHECK(cpu->exception_serial_ == serial + 1 && cpu->pc() == vector_page + expected_vec + 8);
+                CHECK(cpu->srr0_ == expected_srr0 && cpu->srr1_ == expected_srr1);
+                CHECK(mmu.msr() == (msr & ~ppc32_mmu::MSR_EXC_CLEAR));
+                CHECK(cpu->dar_ == (writer == 2 ? 0x60000000u : 0x1234567u) && cpu->dsisr_ == (writer == 2 ? 0x40000000u : 0x76543210u));
+                CHECK(cpu->cr().get() == before.cr && cpu->xer().get() == before.xer && cpu->vscr().get() == before.vscr && !cpu->fpscr());
+                for (unsigned r = 0; r < 32; ++r) {
+                    CHECK(cpu->gpr(r) == (r == 27 ? 0x5a5au : r == 3 && writer < 2 ? before.gpr[r] + 7 : before.gpr[r]));
+                    CHECK(!cpu->fpr_dw(r));
+                    for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == before.vr[r][w]);
+                }
+                CHECK(device.reads == reads && device.writes == writes + 1 && nw_jit_verify_misses() == misses);
+            }
+            CHECK(fetch_context_case == 60);
+
+            // Literal encoding masks come from the published X-form diagrams,
+            // independently of the shared production constraint table. All
+            // register numbers and stream IDs stay valid where encoded.
+            const uint32 vx31[] = {6,38,7,39,71,103,359,135,167,199,231,487};
+            std::vector<uint32> invalid31;
+            for (uint32 xo : vx31) invalid31.push_back((31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|(xo<<1)|1u);
+            for (uint32 xo : {342u,374u,822u}) {
+                const uint32 zero = xo == 822 ? 0x019ff801u : 0x01800001u;
+                for (unsigned bit = 0; bit < 26; ++bit)
+                    if (zero & (1u<<bit)) invalid31.push_back((31u<<26)|(xo<<1)|(1u<<bit));
+            }
+            CHECK(invalid31.size() == 31);
+            // These malformed original-AltiVec forms use the allowed program
+            // exception policy in New World. This is not a hardware profile
+            // assertion about all primary-opcode-31 invalid encodings.
+            unsigned invalid31_case = 0;
+            for (int mode : {NW_JIT_OFF,NW_JIT_ON,NW_JIT_VERIFY})
+            for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+            for (unsigned user = 0; user < 2; ++user)
+            for (unsigned vec = 0; vec < 2; ++vec)
+            for (unsigned prefix = 0; prefix < 2; ++prefix)
+            for (uint32 op : invalid31) {
+                ++invalid31_case; nw_jit_invalidate_all(); nw_jit_itlb_flush(); mmu.reset();
+                const uint32 msr = ppc32_mmu::MSR_IP | ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR |
+                    (user ? ppc32_mmu::MSR_PR : 0) | (vec ? NW_MSR_VEC : 0);
+                mmu.set_msr(msr); mmu.set_ibat(0,ram_base | 3u,ram_base | 2u);
+                const uint32 start = ram_base + 0x8000, fault_pc = start + (prefix ? 8 : 0);
+                nw_jit_cpu before = vector_start(start,NW_IO_VIA_PMU_BASE,false);
+                cpu->gpr(30) = before.gpr[30] = NW_IO_VIA_PMU_BASE;
+                mmu.set_dbat(0,(NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 3u,(NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 2u);
+                vm_write_memory_4(fault_pc,op); vm_write_memory_4(fault_pc + 4,nw_ppc_addi(28,0,99));
+                // A safe stop makes an erroneous acceptance terminate too.
+                vm_write_memory_4(fault_pc + 8,nw_ppc_stw(27,30,0));
+                if (prefix) {
+                    vm_write_memory_4(start,nw_ppc_addi(3,3,7)); vm_write_memory_4(start + 4,nw_ppc_b(4,0));
+                }
+                CHECK(cpu->decode(op)->format == powerpc_cpu::INVALID_form && !nw_jit_op_supported(op));
+                nw_jit_cpu rejected = before;
+                CHECK(nw_jit_interp_one(&rejected,op) == -1 && !memcmp(&rejected,&before,sizeof before));
+                nw_jit_set_mode(NW_JIT_ON);
+                CHECK(nw_jit_compile(&op,1,fault_pc,fault_pc & ~0xfffu,3u | (user ? 4u : 0),0) == NULL);
+                cpu->dar_ = 0x1234567; cpu->dsisr_ = 0x76543210;
+                cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks();
+                const uint64 serial = cpu->exception_serial_, misses = nw_jit_verify_misses();
+                const unsigned reads = device.reads, writes = device.writes;
+                nw_jit_set_mode(mode); nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+                cpu->execute_depth = 1; cpu->execute(start); CHECK(cpu->execute_depth == 1); cpu->execute_depth = 0;
+                CHECK(cpu->exception_serial_ == serial + 1 && cpu->pc() == vector_page + 0x708);
+                CHECK(cpu->srr0_ == fault_pc && cpu->srr1_ == ((msr & ~0x783f0000u) | 0x80000u));
+                CHECK(mmu.msr() == (msr & ~ppc32_mmu::MSR_EXC_CLEAR));
+                CHECK(cpu->dar_ == 0x1234567u && cpu->dsisr_ == 0x76543210u);
+                CHECK(cpu->cr().get() == before.cr && cpu->xer().get() == before.xer && cpu->vscr().get() == before.vscr && !cpu->fpscr());
+                for (unsigned r = 0; r < 32; ++r) {
+                    CHECK(cpu->gpr(r) == (r == 27 ? 0x5a5au : r == 3 && prefix ? before.gpr[r] + 7 : before.gpr[r]));
+                    CHECK(!cpu->fpr_dw(r));
+                    for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == before.vr[r][w]);
+                }
+                CHECK(device.reads == reads && device.writes == writes + 1 && nw_jit_verify_misses() == misses);
+            }
+            CHECK(invalid31_case == 1488);
+            // Positive recognition: all 32 values in each register field,
+            // both T/A variants and all four stream IDs (also with dssall).
+            unsigned valid31_case = 0;
+            for (uint32 xo : vx31)
+            for (unsigned field : {21u,16u,11u})
+            for (uint32 reg = 0; reg < 32; ++reg) {
+                const uint32 op = (31u<<26)|(xo<<1)|(reg<<field);
+                CHECK(cpu->decode(op)->format != powerpc_cpu::INVALID_form && nw_jit_op_supported(op)); ++valid31_case;
+            }
+            for (uint32 xo : {342u,374u,822u})
+            for (uint32 transient = 0; transient < 2; ++transient)
+            for (uint32 stream = 0; stream < 4; ++stream) {
+                const uint32 op = (31u<<26)|(transient<<25)|(stream<<21)|(xo<<1)|
+                    (xo == 822 ? 0 : (4u<<16)|(6u<<11));
+                CHECK(cpu->decode(op)->format != powerpc_cpu::INVALID_form && nw_jit_op_supported(op)); ++valid31_case;
+            }
+            CHECK(valid31_case == 1176);
+
+            // Streaming hints in the modeled no-stream implementation and
+            // VRSAVE accesses do not require VEC. Unmapped touch addresses
+            // cannot cause DSI; DR remains enabled as required for dst forms.
+            nw_jit_invalidate_all();
+            unsigned control_case = 0;
+            for (int mode : {NW_JIT_OFF,NW_JIT_ON,NW_JIT_VERIFY})
+            for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+            for (unsigned translated = 0; translated < 2; ++translated)
+            for (unsigned user = 0; user < 2; ++user)
+            for (bool vec : {false,true})
+            for (uint32 save : {0u,0xffffffffu,0x81234567u}) {
+                const uint32 start = ram_base + 0x8000 + 128 * control_case++;
+                mmu.reset();
+                const uint32 msr = ppc32_mmu::MSR_IP | ppc32_mmu::MSR_DR | (vec ? NW_MSR_VEC : 0) |
+                    (translated ? ppc32_mmu::MSR_IR : 0) | (user ? ppc32_mmu::MSR_PR : 0);
+                mmu.set_msr(msr);
+                if (translated) mmu.set_ibat(0,ram_base | 3u,ram_base | 2u);
+                nw_jit_cpu before = vector_start(start,0x6000000f,false);
+                cpu->gpr(29) = before.gpr[29] = save; cpu->vrsave() = ~save;
+                cpu->gpr(30) = before.gpr[30] = NW_IO_VIA_PMU_BASE;
+                mmu.set_dbat(0,(NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 3u,(NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 2u);
+                const uint32 ops[] = {nw_ppc_addi(3,3,7),nw_ppc_mtspr(NW_PPC_SPR_VRSAVE,29),nw_ppc_mfspr(28,NW_PPC_SPR_VRSAVE),
+                    (31u<<26)|(4u<<16)|(6u<<11)|(342u<<1),(31u<<26)|(1u<<25)|(4u<<16)|(6u<<11)|(342u<<1),
+                    (31u<<26)|(4u<<16)|(6u<<11)|(374u<<1),(31u<<26)|(1u<<25)|(4u<<16)|(6u<<11)|(374u<<1),
+                    (31u<<26)|(822u<<1),(31u<<26)|(1u<<25)|(822u<<1),nw_ppc_addi(27,0,0x5a5a),nw_ppc_stw(27,30,0)};
+                for (unsigned i = 0; i < sizeof ops / sizeof ops[0]; ++i) vm_write_memory_4(start + 4 * i,ops[i]);
+                for (unsigned i = 1; i < 9; ++i) CHECK(!powerpc_cpu::is_altivec_insn(ops[i]));
+                const uint64 serial = cpu->exception_serial_;
+                const unsigned writes = device.writes, reads = device.reads;
+                cpu->srr0_ = 0x12345678; cpu->srr1_ = 0x87654321;
+                cpu->dar_ = 0x1234567; cpu->dsisr_ = 0x76543210;
+                cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false;
+                nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+                nw_jit_set_mode(mode);
+                cpu->execute_depth = 1; cpu->execute(start); CHECK(cpu->execute_depth == 1); cpu->execute_depth = 0;
+                if (cpu->exception_serial_ != serial || cpu->pc() != start + sizeof ops)
+                    fprintf(stderr,"control fault case=%u mode=%d tail=%u ir=%u user=%u vec=%u save=%08x pc=%08x srr=%08x/%08x r28=%08x vrsave=%08x\n",control_case,mode,native_tail,translated,user,vec,save,cpu->pc(),cpu->srr0_,cpu->srr1_,cpu->gpr(28),cpu->vrsave());
+                CHECK(cpu->exception_serial_ == serial && cpu->pc() == start + sizeof ops && mmu.msr() == msr);
+                CHECK(cpu->vrsave() == save && cpu->srr0_ == 0x12345678 && cpu->srr1_ == 0x87654321);
+                CHECK(cpu->dar_ == 0x1234567u && cpu->dsisr_ == 0x76543210u);
+                CHECK(cpu->cr().get() == before.cr && cpu->xer().get() == before.xer && cpu->vscr().get() == before.vscr && !cpu->fpscr());
+                for (unsigned r = 0; r < 32; ++r) {
+                    CHECK(cpu->gpr(r) == (r == 27 ? 0x5a5au : r == 28 ? save : r == 3 ? before.gpr[r] + 7 : before.gpr[r]));
+                    CHECK(!cpu->fpr_dw(r));
+                    for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == before.vr[r][w]);
+                }
+                CHECK(device.writes == writes + 1 && device.reads == reads && !cpu->dec_pending_);
+            }
+            CHECK(control_case == 144);
+            cpu->vrsave() = 0; nw_jit_invalidate_all();
+            device.on_write = NULL; device.on_write_context = NULL;
+            nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+            RAMBase = saved_ram_base; RAMSize = saved_ram_size; ROMBase = saved_rom_base;
+            munmap(vectors, 4096); nw_banks_set(NW_PA_ROM, 0, 0);
+            nw_jit_set_mode(NW_JIT_VERIFY);
+        } else if (vectors != MAP_FAILED) munmap(vectors, 4096);
+
+        auto vector_run = [&](nw_jit_cpu input, const uint32 *ops, unsigned n, bool verify) {
+            nw_jit_set_mode(verify ? NW_JIT_VERIFY : NW_JIT_ON);
+            const uint32 key = mmu.msr() & ppc32_mmu::MSR_DR ? 2 : 0;
+            nw_jit_fn fn = nw_jit_compile(ops, n, input.pc, cpu->last_fetch_pa_ & ~0xfffu, key, 0); CHECK(fn != NULL);
+            const uint64 misses = nw_jit_verify_misses();
+            if (fn) CHECK(verify ? cpu->nw_jit_verify_block(input, fn, ops, n) == 1 : cpu->nw_jit_try(ops[0]) == 1);
+            CHECK(nw_jit_verify_misses() == misses);
+            if (!verify) input = *cpu->nw_jc_;
+            nw_jit_set_mode(NW_JIT_VERIFY);
+            return input;
+        };
+        // P6: use the production entry/commit masks, rather than calling the
+        // generated function directly. Literal outcomes also exercise live
+        // exception publication and preservation of an aliased destination.
+        struct scalar_commit_case { unsigned xo; uint64 source, word; uint32 causes, rounded; };
+        const scalar_commit_case scalar_commit[] = {
+            {14,0x3ff8000000000000ULL,2,0x02000000u,0x60000u},
+            {15,0x3ff8000000000000ULL,1,0x02000000u,0x20000u},
+            {14,0x41dfffffffe00000ULL,0x7fffffffu,0x100u,0}, // +2147483647.5
+            {14,0x7ff8123456789abcULL,0xffffffff80000000ULL,0x100u,0},
+            {14,0x7ff0123456789abcULL,0xffffffff80000000ULL,0x01000100u,0},
+            {32,0x7ff8123456789abcULL,0,0x80000u,0},
+            {32,0x7ff0123456789abcULL,0,0x01000000u,0},
+            {0,0x7ff0123456789abcULL,0,0x01000000u,0}
+        };
+        fenv_t scalar_environment; fegetenv(&scalar_environment);
+        unsigned scalar_commit_cases = 0;
+        for (const auto &test : scalar_commit)
+        for (unsigned rc : {0u,1u})
+        for (unsigned alias : {0u,1u})
+        for (unsigned enable : {0u,0x80u,8u})
+        for (unsigned fe : {0u,0x100u,0x800u,0x900u})
+        for (unsigned ip : {0u,0x40u})
+        for (unsigned engine = 0; engine < 3; ++engine) {
+            const bool conversion = test.xo == 14 || test.xo == 15;
+            if (!conversion && (rc || alias)) continue;
+            ++scalar_commit_cases;
+            const uint32 start = ram_base + 0x15000, msr = 0xa000u | fe | ip;
+            nw_jit_invalidate_all(); nw_jit_itlb_flush(); mmu.reset(); mmu.set_msr(msr);
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false;
+            nw_jit_cpu before = vector_start(start,ram_base + 0x14000,false);
+            before.fpscr = cpu->fpscr() = 0x65000u | enable;
+            const unsigned fd = alias ? 1 : 3;
+            for (unsigned r = 0; r < 32; ++r) before.fpr[r] = cpu->fpr_dw(r) = bits(double(r + 32));
+            before.fpr[1] = cpu->fpr_dw(1) = test.source;
+            cpu->srr0_ = 0x12345678; cpu->srr1_ = 0x87654321;
+            const uint32 op = (63u<<26) | ((conversion ? fd : 5u<<2)<<21) |
+                (conversion ? 1u<<11 : (1u<<16)|(2u<<11)) | (test.xo<<1) | rc;
+            const uint32 ops[] = {nw_ppc_addi(3,3,7),op,nw_ppc_addi(7,0,99)};
+            for (unsigned i = 0; i < 3; ++i) vm_write_memory_4(start + 4*i,ops[i]);
+            uint32 causes = test.causes;
+            if (test.xo == 32 && causes == 0x01000000u && !(enable & 0x80u)) causes |= 0x80000u;
+            uint32 fpscr = (conversion ? before.fpscr & ~0x60000u : (before.fpscr & ~0xf000u)|0x1000u) | causes | test.rounded;
+            if (causes) fpscr |= 0x80000000u;
+            if (causes & 0x01080100u) fpscr |= 0x20000000u;
+            if (((fpscr & 0x20000000u) && (enable & 0x80u)) || ((causes & 0x02000000u) && (enable & 8u))) fpscr |= 0x40000000u;
+            const bool except = fe && (fpscr & 0x40000000u), suppressed = conversion && (causes & 0x100u) && (enable & 0x80u);
+            const uint32 expected_cr = conversion ? rc ? (before.cr & ~0x0f000000u)|((fpscr>>4)&0x0f000000u) : before.cr : (before.cr & ~0xf00u)|0x100u;
+            const uint64 serial = cpu->exception_serial_;
+            fesetround(FE_UPWARD); feclearexcept(FE_ALL_EXCEPT); feraiseexcept(FE_DIVBYZERO);
+            const int host_flags = fetestexcept(FE_ALL_EXCEPT);
+            nw_jit_set_host_chain(NULL); nw_jit_set_mode(engine == 0 ? NW_JIT_OFF : engine == 1 ? NW_JIT_ON : NW_JIT_VERIFY);
+            if (!engine) {
+                for (uint32 instruction_op : ops) { instruction(cpu,instruction_op); if (cpu->exception_serial_ != serial) break; }
+            } else (void)vector_run(before,ops,3,engine == 2);
+            CHECK(cpu->exception_serial_ == serial + unsigned(except));
+            CHECK(cpu->pc() == (except ? (ip ? 0xfff00700u : 0x700u) : start + 12));
+            CHECK(mmu.msr() == (except ? msr & ~0x0204ef32u : msr));
+            CHECK(cpu->fpscr() == fpscr && cpu->cr().get() == expected_cr);
+            CHECK(cpu->srr0_ == (except ? start + 4 : 0x12345678u));
+            CHECK(cpu->srr1_ == (except ? (msr & ~0x783f0000u)|0x100000u : 0x87654321u));
+            CHECK(cpu->xer().get() == before.xer && !cpu->lr() && !cpu->ctr() && cpu->vscr().get() == before.vscr);
+            for (unsigned r = 0; r < 32; ++r) {
+                CHECK(cpu->gpr(r) == (r == 3 ? before.gpr[r] + 7 : r == 7 && !except ? 99u : before.gpr[r]));
+                CHECK(cpu->fpr_dw(r) == (conversion && r == fd && !suppressed ? test.word : before.fpr[r]));
+                for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == before.vr[r][w]);
+            }
+            CHECK(fegetround() == FE_UPWARD && fetestexcept(FE_ALL_EXCEPT) == host_flags);
+        }
+        CHECK(scalar_commit_cases == 1656);
+        printf("P6 scalar production commit: %u literal engine cases\n",scalar_commit_cases);
+        fesetenv(&scalar_environment); nw_jit_invalidate_all();
+        nw_jit_set_host_chain(powerpc_cpu::jit_host_chain); nw_jit_set_mode(NW_JIT_VERIFY);
+        // P4: literal system/exception expectations, with an integer prefix
+        // proving instruction-PC ownership and a suffix that must be suppressed.
+        unsigned system_cases = 0;
+        std::vector<uint32> system_ops = {0x4c000064u,0x4c00012cu,0x44000002u};
+        for (unsigned x : {83u,146u,210u,242u,595u,659u,306u,370u,566u,54u,86u,246u,278u,470u,598u,758u,854u,982u})
+            system_ops.push_back((31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|(x<<1));
+        for (unsigned s : {0u,4u,5u,6u,18u,19u,22u,25u,26u,27u,256u,268u,269u,272u,273u,274u,275u,284u,285u,287u,
+                           528u,529u,530u,531u,532u,533u,534u,535u,536u,537u,538u,539u,540u,541u,542u,543u,
+                           928u,935u,936u,937u,938u,939u,940u,941u,942u,955u,1008u,1017u,1023u,777u})
+            for (unsigned x : {339u,467u}) system_ops.push_back((31u<<26)|(3u<<21)|((s&31)<<16)|((s>>5)<<11)|(x<<1));
+        for (unsigned x : {371u}) for (unsigned s : {268u,269u})
+            system_ops.push_back((31u<<26)|(3u<<21)|((s&31)<<16)|((s>>5)<<11)|(x<<1));
+        for (unsigned to = 0; to < 32; ++to) {
+            system_ops.push_back((3u<<26)|(to<<21)|(4u<<16)|0xffffu);
+            system_ops.push_back((31u<<26)|(to<<21)|(4u<<16)|(6u<<11)|(4u<<1));
+        }
+        for (unsigned engine = 0; engine < 3; ++engine)
+        for (unsigned user = 0; user < 2; ++user)
+        for (unsigned ip = 0; ip < 2; ++ip)
+        for (uint32 op : system_ops) {
+            ++system_cases; const unsigned failed_before = failed;
+            const uint32 start = ram_base + 0x15000;
+            nw_jit_invalidate_page(start); nw_jit_itlb_flush(); mmu.reset();
+            const uint32 msr = NW_MSR_VEC | ppc32_mmu::MSR_FP | ppc32_mmu::MSR_EE |
+                               (user ? ppc32_mmu::MSR_PR : 0) | (ip ? ppc32_mmu::MSR_IP : 0);
+            mmu.set_msr(msr);
+            cpu->dec_ = 1000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->tb_offset_ = 0;
+            nw_jit_cpu input = vector_start(start,0xffffffffu,false);
+            input.gpr[3] = cpu->gpr(3) = 0x55667780u;
+            input.gpr[4] = cpu->gpr(4) = (op >> 26) == 3 || ((op >> 26) == 31 && ((op >> 1) & 1023) == 4) ? 0xffffffffu : ram_base + 0x14000;
+            input.gpr[6] = cpu->gpr(6) = 0;
+            cpu->srr0_ = start + 0x103; cpu->srr1_ = ppc32_mmu::MSR_EE | ppc32_mmu::MSR_FP;
+            cpu->fpu_retry_on_ = false; cpu->cache_range.start = cpu->cache_range.end = 0;
+            for (unsigned i = 0; i < 4; ++i) cpu->sprg_[i] = 0;
+            cpu->dar_ = 0x12345678; cpu->dsisr_ = 0x87654321;
+            for (unsigned i = 0; i < 16; ++i) mmu.set_sr(i,0x1000 + i);
+            const uint32 ops[] = {nw_ppc_addi(3,3,7),op,nw_ppc_addi(7,0,99)};
+            for (unsigned i = 0; i < 3; ++i) vm_write_memory_4(start + i * 4,ops[i]);
+            const uint64 serial = cpu->exception_serial_, misses = nw_jit_verify_misses();
+            const unsigned p = op >> 26, x = (op >> 1) & 1023, spr = ((op >> 16) & 31) | (((op >> 11) & 31) << 5);
+            bool privilege = user && ((p == 19 && x == 50) || (p == 31 &&
+                (x == 83 || x == 146 || x == 210 || x == 242 || x == 595 || x == 659 || x == 306 || x == 370 || x == 566 || x == 470)));
+            if (p == 31 && x == 339) privilege = (user && !(spr == 256 || spr == 268 || spr == 269 || spr == 928 || (spr >= 935 && spr <= 942))) || spr == 0 || spr == 4 || spr == 5 || spr == 6;
+            if (p == 31 && x == 467) privilege = (user && spr != 256) || spr == 0 || spr == 287 || spr == 955 || spr == 928 || (spr >= 935 && spr <= 942);
+            // Signed -1 vs 0: LT and unsigned GT; immediate -1 additionally EQ.
+            const unsigned to = (op >> 21) & 31;
+            const bool trap = p == 3 ? bool(to & 4) : p == 31 && x == 4 ? bool(to & 17) : false;
+            const bool exception = privilege || trap || p == 17;
+            nw_jit_set_mode(engine == 2 ? NW_JIT_VERIFY : engine == 1 ? NW_JIT_ON : NW_JIT_OFF);
+            if (!engine) { instruction(cpu,ops[0]); instruction(cpu,op); }
+            else {
+                const uint32 key = user ? 4 : 0;
+                nw_jit_fn fn = nw_jit_compile(ops,2,start,start & ~0xfffu,key,0); CHECK(fn != NULL);
+                if (fn) CHECK(engine == 2 ? cpu->nw_jit_verify_block(input,fn,ops,2) == 1 : cpu->nw_jit_try(ops[0]) == 1);
+            }
+            CHECK(nw_jit_verify_misses() == misses);
+            CHECK(cpu->exception_serial_ == serial + unsigned(exception));
+            const uint32 expected_pc = exception ? (ip ? 0xfff00000u : 0) | (p == 17 ? 0xc00u : 0x700u) :
+                p == 19 && x == 50 ? start + 0x100 : start + 8;
+            CHECK(cpu->pc() == expected_pc && cpu->gpr(7) == input.gpr[7]);
+            CHECK(cpu->cr().get() == input.cr && cpu->xer().get() == input.xer && cpu->ctr() == 0 && cpu->lr() == 0);
+            CHECK(cpu->dar_ == (!exception && p == 31 && x == 467 && spr == 19 ? 0x55667787u : 0x12345678u));
+            CHECK(cpu->dsisr_ == (!exception && p == 31 && x == 467 && spr == 18 ? 0x55667787u : 0x87654321u));
+            if (exception) {
+                CHECK(cpu->srr0_ == start + (p == 17 ? 8 : 4));
+                CHECK(cpu->srr1_ == ((msr & ~0x783f0000u) | (privilege ? 0x40000u : trap ? 0x20000u : 0)));
+                CHECK(mmu.msr() == (msr & ~ppc32_mmu::MSR_EXC_CLEAR));
+                CHECK(cpu->gpr(3) == 0x55667787u);
+            } else {
+                CHECK(mmu.msr() == (p == 31 && x == 146 ? 0x55667787u : p == 19 && x == 50 ? cpu->srr1_ : msr));
+                if (p == 31 && (x == 210 || x == 242)) CHECK(mmu.sr(x == 210 ? 4 : 0) == 0x55667787u);
+                if (p == 31 && (x == 595 || x == 659)) CHECK(cpu->gpr(3) == 0x1000u + (x == 595 ? 4 : 0));
+                if (p == 31 && x == 83) CHECK(cpu->gpr(3) == msr);
+                if (p == 31 && x == 339 && spr == 22) CHECK(cpu->gpr(3) == 1000);
+                if (p == 31 && x == 467 && spr == 22) CHECK(cpu->dec_ == 0x55667787u);
+                if (p == 31 && x == 339 && spr == 777) CHECK(cpu->gpr(3) == 0x55667787u); // unavailable supervisor SPR is NOP
+            }
+            if (failed != failed_before) fprintf(stderr,"P4 case %u engine=%u user=%u ip=%u op=%08x\n",system_cases,engine,user,ip,op);
+        }
+        printf("P4 system observations: %u literal cases\n",system_cases);
+        // A whole cache line must complete before SMC; fault/ROM/I/O paths
+        // perform no partial zeroing and every replay is free of live effects.
+        for (unsigned engine = 0; engine < 3; ++engine)
+        for (unsigned translated = 0; translated < 2; ++translated)
+        for (unsigned outcome = 0; outcome < 5; ++outcome) {
+            const uint32 start = ram_base + 0x15000;
+            nw_jit_invalidate_page(start); mmu.reset();
+            mmu.set_msr(translated ? ppc32_mmu::MSR_DR : 0);
+            if (translated) mmu.set_dbat(0,0x20000002u,ram_base | (outcome == 2 ? 1 : 2));
+            const uint32 dest = ram_base + (outcome == 1 ? 0x15020 : 0x14020);
+            const uint32 ea = outcome == 4 ? NW_IO_VIA_PMU_BASE : translated ? 0x20000000u + (dest - ram_base) : dest;
+            if (translated && outcome == 4) mmu.set_dbat(1,(ea & ~0x1ffffu) | 2u,(ea & ~0x1ffffu) | 2u);
+            nw_jit_cpu input = vector_start(start,ea + 31,false);
+            memset(static_cast<uint8 *>(ram) + (dest - ram_base) - 1,0xa5,34);
+            const uint32 op = (31u<<26)|(4u<<16)|(6u<<11)|(1014u<<1);
+            const uint32 ops[] = {nw_ppc_addi(3,3,7),op,nw_ppc_addi(7,0,99)};
+            for (unsigned i = 0; i < 3; ++i) vm_write_memory_4(start + i * 4,ops[i]);
+            if (outcome == 3) { nw_banks_set(NW_PA_RAM,ram_base,0x14000); nw_banks_set(NW_PA_ROM,ram_base + 0x14000,0x1000); }
+            const uint32 marker = nw_ppc_addi(10,0,1);
+            nw_jit_set_mode(NW_JIT_ON);
+            CHECK(nw_jit_compile(&marker,1,dest,dest & ~0xfffu,0,0) != NULL);
+            nw68_bus bus = {};
+            bus.code = [](void *, uint32_t ea, uint16_t *word, uint32_t *pa) { *word = 0x4e71; *pa = ea; return true; };
+            nw68_instruction nop = {}; nop.operation = NW68_NOP; nop.pc = dest + 0x100;
+            nop.opcode = nop.words[0] = 0x4e71; nop.length = 2; nop.word_count = 1;
+            nw68_state state = {}; state.pc = nop.pc; nw68_frame frame;
+            const uint32 page = dest & ~0xfffu;
+            CHECK(nw68_run(nop,state,bus,0,&page,1,frame) == NW68_EXIT_NATIVE);
+            nw68_instruction cached[NW68_BLOCK_MAX]; unsigned count = 0;
+            CHECK(nw68_cached_block(nop.pc,0,page,nop.opcode,0x4e71,cached,&count));
+            const uint64 misses = nw_jit_verify_misses();
+            uint64 generation = nw68_code_generation();
+            nw_jit_set_mode(engine == 2 ? NW_JIT_VERIFY : engine == 1 ? NW_JIT_ON : NW_JIT_OFF);
+            if (!engine) { instruction(cpu,ops[0]); instruction(cpu,op); }
+            else {
+                nw_jit_fn fn = nw_jit_compile(ops,2,start,start & ~0xfffu,translated ? 2 : 0,0); CHECK(fn != NULL);
+                generation = nw68_code_generation();
+                if (fn) CHECK(engine == 2 ? cpu->nw_jit_verify_block(input,fn,ops,2) == 1 : cpu->nw_jit_try(ops[0]) == 1);
+            }
+            CHECK(nw_jit_verify_misses() == misses && cpu->gpr(7) == input.gpr[7]);
+            const bool fault = translated && outcome == 2, ignored = outcome >= 3;
+            CHECK((nw68_code_generation() != generation) == (!fault && !ignored));
+            CHECK(nw68_cached_block(nop.pc,0,page,nop.opcode,0x4e71,cached,&count) == (fault || ignored));
+            const nw_jit_fn survivor = nw_jit_cache_get(dest & ~0xfffu,dest,0,0,NULL);
+            CHECK((survivor != NULL) == (fault || ignored));
+            CHECK(cpu->pc() == (fault ? 0x300u : start + 8));
+            for (unsigned i = 0; i < 32; ++i) CHECK(vm_read_memory_1(dest + i) == (fault || ignored ? 0xa5 : 0));
+            CHECK(vm_read_memory_1(dest - 1) == 0xa5 && vm_read_memory_1(dest + 32) == 0xa5);
+            if (fault) CHECK(cpu->srr0_ == start + 4 && cpu->dar_ == (ea & ~31u));
+            nw_banks_set(NW_PA_ROM,0,0); nw_banks_set(NW_PA_RAM,ram_base,0x20000);
+        }
+        // P5: every BO/BI/LK, CR predicate and CTR boundary. KPX is separate
+        // from a literal branch oracle; warm both potential successor blocks.
+        unsigned branch_cases = 0;
+        for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+        for (unsigned family = 0; family < 3; ++family)
+        for (unsigned bo = 0; bo < 32; ++bo)
+        for (unsigned bi = 0; bi < 32; ++bi)
+        for (unsigned lk = 0; lk < 2; ++lk)
+        for (unsigned predicate = 0; predicate < 2; ++predicate)
+        for (uint32 count : {0u,1u,2u,0xffffffffu}) {
+            if (family == 2 && !(bo & 4)) continue; // bcctr CTR-decrement forms are architecturally invalid
+            ++branch_cases;
+            const uint32 start = ram_base + 0x15000, target = start + 0x80, fall = start + 8;
+            nw_jit_invalidate_page(start); nw_jit_itlb_flush(); mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_FP | NW_MSR_VEC);
+            nw_jit_cpu input = vector_start(start,ram_base + 0x14000,false);
+            cpu->cr().set(predicate ? (1u << (31 - bi)) : 0);
+            cpu->ctr() = family == 2 ? target | 3 : count; cpu->lr() = target | 3;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks();
+            const uint32 branch = family == 0 ? (16u<<26)|(bo<<21)|(bi<<16)|0x7cu|lk :
+                (19u<<26)|(bo<<21)|(bi<<16)|((family == 1 ? 16u : 528u)<<1)|lk;
+            const uint32 first[] = {nw_ppc_addi(3,3,7),branch};
+            const uint32 second[] = {nw_ppc_addi(20,3,9),0x4c00012cu}; // explicit stop prevents recursive returns
+            for (unsigned i = 0; i < 2; ++i) { vm_write_memory_4(start + i * 4,first[i]); vm_write_memory_4(target + i * 4,second[i]); vm_write_memory_4(fall + i * 4,second[i]); }
+            const uint32 ctr = family == 2 ? target | 3 : (bo & 4) ? count : count - 1;
+            const bool take = ((bo & 4) || ((ctr != 0) != bool(bo & 2))) && ((bo & 16) || predicate == unsigned(bool(bo & 8)));
+            const uint32 chosen = take ? target : fall;
+            nw_jit_set_mode(NW_JIT_ON);
+            CHECK(nw_jit_compile(first,2,start,start & ~0xfffu,0,0) != NULL);
+            CHECK(nw_jit_compile(second,2,target,start & ~0xfffu,0,0) != NULL);
+            CHECK(nw_jit_compile(second,2,fall,start & ~0xfffu,0,0) != NULL);
+            nw_jit_itlb_fill(start,start);
+            nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+            const uint64 hops = nw_jit_chain_hops();
+            CHECK(cpu->nw_jit_try(first[0]) == 1);
+            CHECK(cpu->pc() == chosen + 8 && cpu->gpr(3) == input.gpr[3] + 7 && cpu->gpr(20) == input.gpr[3] + 16);
+            CHECK(cpu->ctr() == ctr && cpu->lr() == (lk ? start + 8 : target | 3));
+            CHECK(cpu->cr().get() == (predicate ? (1u << (31 - bi)) : 0) && cpu->xer().get() == input.xer);
+            CHECK(nw_jit_chain_hops() == hops + 1);
+        }
+        CHECK(branch_cases == 81920);
+        printf("P5 dynamic branches: %u literal successor cases\n",branch_cases);
+        nw_jit_invalidate_all(); nw_jit_itlb_flush();
+        nw_jit_set_host_chain(powerpc_cpu::jit_host_chain); nw_jit_set_mode(NW_JIT_VERIFY);
+
+        // System replay rejects changed requests and malformed observations
+        // before it can reach shared CPU/MMU callbacks or mutable generations.
+        for (unsigned mutation = 0; mutation < 9; ++mutation) {
+            const uint32 start = ram_base + 0x15000, op = (31u<<26)|(3u<<21)|(146u<<1);
+            nw_jit_cpu shadow = {}; shadow.pc = start; shadow.msr = ppc32_mmu::MSR_FP; shadow.gpr[3] = 0x1230;
+            shadow.host = cpu; // a non-null host must still be ignored in replay
+            nw_jit_verify_trace trace;
+            trace.record_system(start,op,0x1230,0,{0,0,NW_SYS_OK});
+            if (mutation == 1) ++trace.accesses[0].pc;
+            if (mutation == 2) trace.accesses[0].ea ^= 0x800;
+            if (mutation == 3) ++trace.accesses[0].width;
+            if (mutation == 4) ++trace.accesses[0].store;
+            if (mutation == 5) trace.accesses[0].kind = nw_jit_verify_trace::memory;
+            if (mutation == 6) trace.accesses[0].fault = NW_SYS_DSI;
+            if (mutation == 7) trace.count = 0;
+            shadow.verify_mem = nw_jit_verify_trace::replay; shadow.verify_context = &trace;
+            shadow.verify_system = mutation == 8 ? NULL : nw_jit_verify_trace::replay_system;
+            const uint32 msr = mmu.msr(), sr = mmu.sr(0), pc = cpu->pc();
+            nw_jit_set_mode(NW_JIT_VERIFY);
+            nw_jit_fn fn = nw_jit_compile(&op,1,start,start & ~0xfffu,0,0); CHECK(fn != NULL);
+            if (fn) fn(&shadow);
+            CHECK(shadow.fault == (mutation ? NW_JIT_FAULT_VERIFY : 0));
+            CHECK(shadow.msr == (mutation ? ppc32_mmu::MSR_FP : 0x1230u));
+            CHECK(mmu.msr() == msr && mmu.sr(0) == sr && cpu->pc() == pc);
+            if (!mutation) CHECK(trace.complete() && shadow.pc == start + 4);
+        }
+
+        // Dirty vector/FP state must survive conditional/LR/CTR chains through
+        // the opposite execution class. Every stop is tested on both paths.
+        unsigned branch_state_cases = 0;
+        for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+        for (unsigned family = 0; family < 3; ++family)
+        for (unsigned vector = 0; vector < 2; ++vector)
+        for (unsigned stop = 0; stop < 6; ++stop) {
+            ++branch_state_cases;
+            const uint32 start = ram_base + 0x15000, second_pc = start + 0x40, third_pc = start + 0x80;
+            nw_jit_invalidate_all(); nw_jit_itlb_flush(); mmu.reset();
+            const uint32 msr = ppc32_mmu::MSR_EE | (stop == 1 ? vector ? NW_MSR_VEC : ppc32_mmu::MSR_FP : ppc32_mmu::MSR_FP | NW_MSR_VEC);
+            mmu.set_msr(msr);
+            nw_jit_cpu before = vector_start(start,ram_base + 0x14000,false);
+            cpu->lr() = second_pc | 3; cpu->ctr() = second_pc | 3;
+            cpu->fpr_dw(1) = bits(1.25); cpu->fpr_dw(2) = bits(2.5);
+            cpu->fpscr() = 0; cpu->vscr().set(0x10000);
+            for (unsigned w = 0; w < 4; ++w) { cpu->vr(1).w[w] = UINT32_MAX; cpu->vr(2).w[w] = 0x01010101; }
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = stop == 2;
+            if (stop == 3) cpu->spcflags().set(SPCFLAG_CPU_HANDLE_INTERRUPT);
+            const uint32 branch = family == 0 ? (16u<<26)|(20u<<21)|0x3cu : (19u<<26)|(20u<<21)|((family == 1 ? 16u : 528u)<<1);
+            const uint32 first[] = {vector ? (4u<<26)|(3u<<21)|(1u<<16)|(2u<<11)|512u : nw_ppc_fadds(3,1,2),branch};
+            const uint32 second[] = {vector ? nw_ppc_fadds(9,1,2) : (4u<<26)|(9u<<21)|(1u<<16)|(2u<<11)|1220u,
+                                    (16u<<26)|(20u<<21)|0x3cu};
+            const uint32 third[] = {vector ? (4u<<26)|(5u<<21)|(3u<<16)|(2u<<11)|1220u : nw_ppc_fadds(5,3,2),0x4c00012cu};
+            for (unsigned i = 0; i < 2; ++i) { vm_write_memory_4(start + 4*i,first[i]); vm_write_memory_4(second_pc + 4*i,second[i]); vm_write_memory_4(third_pc + 4*i,third[i]); }
+            nw_jit_set_mode(NW_JIT_ON);
+            CHECK(nw_jit_compile(first,2,start,start & ~0xfffu,0,0) != NULL);
+            CHECK(nw_jit_compile(second,2,second_pc,start & ~0xfffu,0,0) != NULL);
+            CHECK(nw_jit_compile(third,2,third_pc,start & ~0xfffu,0,0) != NULL);
+            if (stop == 4) nw_jit_cache_put(start & ~0xfffu,second_pc,0,0,NW_JIT_INTERPRET,1);
+            if (stop != 5) nw_jit_itlb_fill(start,start);
+            nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+            const uint64 hops = nw_jit_chain_hops();
+            CHECK(cpu->nw_jit_try(first[0]) == 1);
+            CHECK(cpu->pc() == (stop ? second_pc : third_pc + 8));
+            CHECK(nw_jit_chain_hops() == hops + (stop ? 0 : 2));
+            CHECK(cpu->lr() == (second_pc | 3) && cpu->ctr() == (second_pc | 3));
+            CHECK(cpu->fpscr() == (!vector || !stop ? 0x4000u : 0) && cpu->vscr().get() == (vector ? 0x10001u : 0x10000u));
+            for (unsigned r = 0; r < 32; ++r) {
+                CHECK(cpu->gpr(r) == before.gpr[r]);
+                const uint64 fp = r == 1 ? bits(1.25) : r == 2 ? bits(2.5) :
+                    !vector && r == 3 ? bits(3.75) : !vector && r == 5 && !stop ? bits(6.25) : vector && r == 9 && !stop ? bits(3.75) : 0;
+                CHECK(cpu->fpr_dw(r) == fp);
+                for (unsigned w = 0; w < 4; ++w) {
+                    const uint32 vr = r == 1 ? UINT32_MAX : r == 2 ? 0x01010101 :
+                        vector && r == 3 ? UINT32_MAX : vector && r == 5 && !stop ? 0xfefefefe : !vector && r == 9 && !stop ? 0xfefefefe : before.vr[r][w];
+                    CHECK(cpu->vr(r).w[w] == vr);
+                }
+            }
+            CHECK(cpu->cr().get() == before.cr && cpu->xer().get() == before.xer && mmu.msr() == msr);
+        }
+        CHECK(branch_state_cases == 72);
+        // Repeated indirect self tails are bounded and reuse one native frame.
+        for (unsigned native_tail = 0; native_tail < 2; ++native_tail) {
+            const uint32 start = ram_base + 0x15000;
+            nw_jit_invalidate_all(); nw_jit_itlb_flush(); mmu.reset();
+            vector_start(start,ram_base + 0x14000,false); cpu->lr() = start;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks();
+            const uint32 ops[] = {nw_ppc_addi(3,3,1),nw_ppc_blr()};
+            vm_write_memory_4(start,ops[0]); vm_write_memory_4(start + 4,ops[1]);
+            nw_jit_set_mode(NW_JIT_ON); CHECK(nw_jit_compile(ops,2,start,start & ~0xfffu,0,0) != NULL);
+            nw_jit_itlb_fill(start,start); nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+            const unsigned steps = native_tail ? unsigned(nw_jit_tail_max()) + 1 : 9;
+            for (unsigned repeat = 0; repeat < 1000; ++repeat) {
+                const uint32 before = cpu->gpr(3); const uint64 hops = nw_jit_chain_hops();
+                CHECK(cpu->nw_jit_try(ops[0]) == 1 && cpu->pc() == start);
+                CHECK(cpu->gpr(3) == before + steps && nw_jit_chain_hops() == hops + steps - 1);
+            }
+        }
+        printf("P5 mixed state: %u cases; 2000 bounded indirect loops\n",branch_state_cases);
+        nw_jit_invalidate_all(); nw_jit_itlb_flush();
+
+        // Independent address/LK expectations include absolute, negative and
+        // wrapping branch displacements; replay does not fetch the target.
+        unsigned branch_address_cases = 0;
+        for (unsigned family = 0; family < 4; ++family)
+        for (unsigned aa = 0; aa < (family < 2 ? 2u : 1u); ++aa)
+        for (unsigned lk = 0; lk < 2; ++lk)
+        for (unsigned predicate = 0; predicate < 2; ++predicate)
+        for (int32 disp : {0x40,-0x40,0x7ffc,-0x8000}) {
+            ++branch_address_cases;
+            const uint32 start = ram_base + 0x15000;
+            nw_jit_invalidate_all(); mmu.reset();
+            nw_jit_cpu input = vector_start(start,ram_base + 0x14000,false);
+            input.cr = predicate ? 0x80000000u : 0; cpu->cr().set(input.cr);
+            input.lr = cpu->lr() = uint32(disp) | 3; input.ctr = cpu->ctr() = uint32(disp) | 3;
+            const uint32 op = family == 0 ? (16u<<26)|(12u<<21)|(uint32(disp)&0xfffcu)|(aa<<1)|lk :
+                family == 1 ? (18u<<26)|(uint32(disp)&0x3fffffcu)|(aa<<1)|lk :
+                (19u<<26)|(12u<<21)|((family == 2 ? 16u : 528u)<<1)|lk;
+            vm_write_memory_4(start,op);
+            const nw_jit_cpu result = vector_run(input,&op,1,true);
+            const bool taken = family == 1 || predicate;
+            const uint32 target = family < 2 ? (aa ? uint32(disp) : start + uint32(disp)) : uint32(disp) & ~3u;
+            CHECK(cpu->pc() == (taken ? target : start + 4) && result.pc == cpu->pc());
+            CHECK(cpu->lr() == (lk ? start + 4 : input.lr) && cpu->ctr() == input.ctr);
+        }
+        CHECK(branch_address_cases == 96);
+        nw_jit_invalidate_all(); nw_jit_itlb_flush();
+
+        // Negative control reintroduces the stale VR copy that source history
+        // identifies as the glyph corruption mechanism. The same branch and
+        // generated pixel store must write new pixels with the repaired hook.
+        for (unsigned family = 0; family < 3; ++family)
+        for (unsigned stale = 0; stale < 2; ++stale) {
+            const uint32 start = ram_base + 0x15000, target = start + 0x40, pixels = ram_base + 0x14000;
+            nw_jit_invalidate_all(); nw_jit_itlb_flush(); mmu.reset(); mmu.set_msr(NW_MSR_VEC);
+            nw_jit_cpu before = vector_start(start,pixels,false);
+            for (unsigned w = 0; w < 4; ++w) { cpu->vr(1).w[w] = UINT32_MAX; cpu->vr(2).w[w] = 0x01010101; }
+            cpu->lr() = cpu->ctr() = target;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks();
+            const uint32 branch = family == 0 ? (16u<<26)|(20u<<21)|0x3cu : (19u<<26)|(20u<<21)|((family == 1 ? 16u : 528u)<<1);
+            const uint32 first[] = {(4u<<26)|(3u<<21)|(1u<<16)|(2u<<11)|1220u,branch};
+            const uint32 second[] = {nw_ppc_stvx(3,4,6),0x4c00012cu};
+            for (unsigned i = 0; i < 2; ++i) { vm_write_memory_4(start + 4*i,first[i]); vm_write_memory_4(target + 4*i,second[i]); }
+            nw_jit_set_mode(NW_JIT_ON);
+            CHECK(nw_jit_compile(first,2,start,start & ~0xfffu,0,0) != NULL);
+            CHECK(nw_jit_compile(second,2,target,start & ~0xfffu,0,0) != NULL);
+            nw_jit_itlb_fill(start,start);
+            nw_jit_set_host_chain(stale ? stale_vector_tail : powerpc_cpu::jit_host_chain);
+            CHECK(cpu->nw_jit_try(first[0]) == 1 && cpu->pc() == target + 8);
+            for (unsigned w = 0; w < 4; ++w) {
+                CHECK(vm_read_memory_4(pixels + 4*w) == (stale ? before.vr[3][w] : 0xfefefefe));
+                if (stale) CHECK(vm_read_memory_4(pixels + 4*w) != 0xfefefefe);
+            }
+        }
+        printf("P5 stale-vector negative control: three corrupted pixel transfers reproduced and three repaired controls passed\n");
+        nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+        nw_jit_invalidate_all(); nw_jit_itlb_flush();
+
+        // Octet shifts must work inside dependent blocks, not only as the
+        // final operation. Use logical byte arrays as an independent oracle;
+        // controls outside bits 121:124 must not affect the shift amount.
+        const unsigned octet_aliases[][3] = {{1,2,3},{1,1,3},{1,2,1},{1,2,2},{1,1,1}};
+        unsigned octet_cases = 0;
+        for (unsigned verify = 0; verify < 2; ++verify)
+        for (unsigned translated = 0; translated < 2; ++translated)
+        for (unsigned native_tail = 0; native_tail < (verify ? 1u : 2u); ++native_tail)
+        for (unsigned length : {3u,15u,31u})
+        for (const auto &alias : octet_aliases)
+        for (unsigned control = 0; control < 256; ++control) {
+            const unsigned sh = (control >> 3) & 15;
+            ++octet_cases;
+            mmu.reset(); mmu.set_msr(NW_MSR_VEC | (translated ? ppc32_mmu::MSR_DR : 0));
+            if (translated) mmu.set_dbat(0,0x20000002u,ram_base | 2u);
+            const uint32 start = ram_base + 0x16000;
+            nw_jit_invalidate_page(start);
+            nw_jit_cpu before = vector_start(start,ram_base + 0x4000,false);
+            before.lr = cpu->lr() = start + 0x100;
+            before.vr[alias[2]][3] = (before.vr[alias[2]][3] & ~255u) | control;
+            cpu->vr(alias[2]).w[3] = before.vr[alias[2]][3];
+            uint8 expected[32][16];
+            for (unsigned r = 0; r < 32; ++r) for (unsigned b = 0; b < 16; ++b)
+                expected[r][b] = uint8(before.vr[r][b / 4] >> (24 - 8 * (b % 4)));
+            uint32 ops[32];
+            for (unsigned i = 0; i < length; ++i) {
+                const unsigned d = i % 4 == 1 ? 7 : alias[0];
+                const unsigned a = i % 4 == 2 ? 7 : alias[1];
+                const unsigned b = i % 4 == 1 ? alias[0] : alias[2];
+                const unsigned xo = i % 4 == 0 ? ((i / 4 + sh) % 2 ? 1100 : 1036) :
+                    i % 4 == 1 ? 1220 : i % 4 == 2 ? ((sh << 6) | 44) : 1156;
+                ops[i] = (4u<<26)|(d<<21)|(a<<16)|(b<<11)|xo;
+                CHECK(!nw_jit_op_ends_block(ops[i]));
+                uint8 av[16], bv[16]; memcpy(av,expected[a],16); memcpy(bv,expected[b],16);
+                const unsigned count = xo == 1036 || xo == 1100 ? (bv[15] >> 3) & 15 : sh;
+                for (unsigned j = 0; j < 16; ++j) {
+                    if (xo == 1036) expected[d][j] = j + count < 16 ? av[j + count] : 0;
+                    else if (xo == 1100) expected[d][j] = j >= count ? av[j - count] : 0;
+                    else if (xo == 1220) expected[d][j] = av[j] ^ bv[j];
+                    else if (xo == 1156) expected[d][j] = av[j] | bv[j];
+                    else expected[d][j] = j + count < 16 ? av[j + count] : bv[j + count - 16];
+                }
+                vm_write_memory_4(start + 4 * i,ops[i]);
+            }
+            ops[length] = nw_ppc_blr(); vm_write_memory_4(start + 4 * length,ops[length]);
+            nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+            const nw_jit_cpu result = vector_run(before,ops,length + 1,verify != 0);
+            CHECK(result.pc == before.lr && !result.fault);
+            CHECK(cpu->pc() == before.lr && cpu->cr().get() == before.cr && cpu->xer().get() == before.xer);
+            CHECK(cpu->vscr().get() == before.vscr && !cpu->fpscr());
+            for (unsigned r = 0; r < 32; ++r) {
+                CHECK(cpu->gpr(r) == before.gpr[r] && !cpu->fpr_dw(r));
+                for (unsigned b = 0; b < 16; ++b)
+                    CHECK(uint8(cpu->vr(r).w[b / 4] >> (24 - 8 * (b % 4))) == expected[r][b]);
+            }
+        }
+        CHECK(octet_cases == 23040);
+        nw_jit_invalidate_page(ram_base + 0x16000);
+        nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+        // Let the actual cold-cache builder discover the block, rather than
+        // supplying an explicitly compiled instruction list. Both its class
+        // boundary and 32-op limit must include the shift's dependent suffix.
+        for (unsigned verify = 0; verify < 2; ++verify)
+        for (unsigned right = 0; right < 2; ++right)
+        for (unsigned length : {31u,32u})
+        for (unsigned sh = 0; sh < 16; ++sh) {
+            mmu.reset(); mmu.set_msr(NW_MSR_VEC);
+            const uint32 start = ram_base + 0x16000;
+            nw_jit_invalidate_page(start);
+            nw_jit_cpu before = vector_start(start,ram_base + 0x4000,false);
+            before.vr[2][3] = cpu->vr(2).w[3] = sh << 3;
+            const uint32 first = right ? nw_ppc_vsro(1,1,2) : nw_ppc_vslo(1,1,2);
+            vm_write_memory_4(start,first);
+            for (unsigned i = 1; i < length; ++i)
+                vm_write_memory_4(start + 4 * i,(4u<<26)|(3u<<21)|(1u<<16)|(1u<<11)|1156u);
+            vm_write_memory_4(start + 4 * length,nw_ppc_addi(3,3,1));
+            const uint64 misses = nw_jit_verify_misses();
+            nw_jit_set_mode(verify ? NW_JIT_VERIFY : NW_JIT_ON);
+            CHECK(cpu->nw_jit_try(first) == 1);
+            int n = 0;
+            CHECK(nw_jit_cache_get(start & ~0xfffu,start,0,0,&n) != NULL && n == int(length));
+            CHECK(cpu->pc() == start + 4 * length && cpu->gpr(3) == before.gpr[3]);
+            CHECK(nw_jit_verify_misses() == misses && cpu->vscr().get() == before.vscr);
+            for (unsigned r = 0; r < 32; ++r) for (unsigned b = 0; b < 16; ++b) {
+                const int index = right ? int(b) - int(sh) : int(b) + int(sh);
+                const uint8 expected = r != 1 && r != 3 ? uint8(before.vr[r][b / 4] >> (24 - 8 * (b % 4))) :
+                    index < 0 || index >= 16 ? 0 : uint8(before.vr[1][index / 4] >> (24 - 8 * (index % 4)));
+                CHECK(uint8(cpu->vr(r).w[b / 4] >> (24 - 8 * (b % 4))) == expected);
+            }
+            nw_jit_set_mode(NW_JIT_VERIFY);
+        }
+        nw_jit_invalidate_page(ram_base + 0x16000);
+        // A completed shift is retained on a following DSI; its dependent
+        // suffix is not executed. Exercise real KPX exception entry and replay.
+        for (unsigned verify = 0; verify < 2; ++verify)
+        for (unsigned store = 0; store < 2; ++store)
+        for (unsigned right = 0; right < 2; ++right)
+        for (unsigned sh = 0; sh < 16; ++sh) {
+            mmu.reset(); mmu.set_msr(NW_MSR_VEC | ppc32_mmu::MSR_DR);
+            const uint32 start = ram_base + 0x16000;
+            nw_jit_invalidate_page(start);
+            nw_jit_cpu before = vector_start(start,0x60000000u,false);
+            before.vr[2][3] = cpu->vr(2).w[3] = sh << 3;
+            const uint32 ops[] = {right ? nw_ppc_vsro(1,1,2) : nw_ppc_vslo(1,1,2),
+                (31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|((store ? 231u : 103u)<<1),
+                nw_ppc_vsro(2,1,2)};
+            const uint64 serial = cpu->exception_serial_;
+            vector_run(before,ops,3,verify != 0);
+            CHECK(cpu->exception_serial_ == serial + 1 && cpu->pc() == 0x300);
+            CHECK(cpu->srr0_ == start + 4 && cpu->dar_ == 0x60000000u);
+            CHECK(cpu->cr().get() == before.cr && cpu->xer().get() == before.xer && cpu->vscr().get() == before.vscr);
+            for (unsigned r = 0; r < 32; ++r) for (unsigned b = 0; b < 16; ++b) {
+                const int index = right ? int(b) - int(sh) : int(b) + int(sh);
+                const uint8 expected = r != 1 ? uint8(before.vr[r][b / 4] >> (24 - 8 * (b % 4))) :
+                    index < 0 || index >= 16 ? 0 : uint8(before.vr[1][index / 4] >> (24 - 8 * (index % 4)));
+                CHECK(uint8(cpu->vr(r).w[b / 4] >> (24 - 8 * (b % 4))) == expected);
+            }
+        }
+        nw_jit_invalidate_page(ram_base + 0x16000);
+        // A DSI vector can equal the next sequential PC. Reference replay
+        // must observe exception delivery, not execute a cached suffix there.
+        for (bool store : {false,true}) {
+            mmu.reset(); mmu.set_msr(NW_MSR_VEC | ppc32_mmu::MSR_DR);
+            nw_jit_cpu before = vector_start(0x2fc,0x60000000,false);
+            nw_jit_invalidate_page(0); // The two fixtures replace the same instruction.
+            const uint32 ops[] = {(31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|((store ? 231u : 103u)<<1),nw_ppc_addi(7,0,99)};
+            nw_jit_fn fn = nw_jit_compile(ops,2,before.pc,0,2,0);
+            CHECK(fn != NULL);
+            const uint64 serial = cpu->exception_serial_, misses = nw_jit_verify_misses();
+            if (fn) CHECK(cpu->nw_jit_verify_block(before,fn,ops,2) == 1);
+            CHECK(cpu->exception_serial_ == serial + 1 && cpu->pc() == 0x300);
+            CHECK(cpu->gpr(7) == 0x12340007u && cpu->srr0_ == 0x2fc && cpu->dar_ == 0x60000000u);
+            CHECK(nw_jit_verify_misses() == misses);
+        }
+        struct vector_memory_form { unsigned xo, width; bool store; };
+        const vector_memory_form vector_memory[] = {{7,1,false},{39,2,false},{71,4,false},{103,16,false},{359,16,false},
+            {135,1,true},{167,2,true},{199,4,true},{231,16,true},{487,16,true}};
+        unsigned vector_memory_case = 0;
+        for (unsigned verify = 0; verify < 2; ++verify)
+        for (unsigned translated = 0; translated < 2; ++translated)
+        for (unsigned zero_ra = 0; zero_ra < 2; ++zero_ra)
+        for (const auto &form : vector_memory)
+        for (unsigned offset = 0; offset < 16; ++offset) {
+            mmu.reset(); mmu.set_msr(NW_MSR_VEC | (translated ? ppc32_mmu::MSR_DR : 0));
+            if (translated) mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
+            const uint32 ea = (translated ? 0x20000000u : ram_base) + 0x4000 + offset;
+            const uint32 start = 0x200000 + 64 * vector_memory_case++;
+            const nw_jit_cpu before = vector_start(start, ea, zero_ra);
+            for (unsigned i = 0; i < 16; ++i) vm_write_memory_1(ram_base + 0x4000 + i, 0xa0u + i);
+            const uint32 op = (31u<<26)|(3u<<21)|((zero_ra ? 0u : 4u)<<16)|(6u<<11)|(form.xo<<1);
+            CHECK(nw_jit_op_verify_safe(op));
+            const nw_jit_cpu result = vector_run(before, &op, 1, verify != 0);
+            const unsigned aligned = offset & ~(form.width - 1u);
+            for (unsigned i = 0; i < 16; ++i) {
+                const unsigned word = i / 4, shift = 24 - 8 * (i & 3);
+                const uint8 original = uint8(before.vr[3][word] >> shift);
+                const bool selected = i >= aligned && i < aligned + form.width;
+                const uint8 expected_v = !form.store && selected ? uint8(0xa0 + i) : original;
+                CHECK(uint8(cpu->vr(3).w[word] >> shift) == expected_v);
+                CHECK(vm_read_memory_1(ram_base + 0x4000 + i) == (form.store && selected ? original : uint8(0xa0 + i)));
+            }
+            for (unsigned r = 0; r < 32; ++r) {
+                CHECK(cpu->gpr(r) == before.gpr[r]);
+                if (r != 3) for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == before.vr[r][w]);
+            }
+            CHECK(result.pc == start + 4 && !result.fault && cpu->cr().get() == before.cr && cpu->vscr().get() == before.vscr);
+        }
+        // Protected reads/stores retain vector outputs and suppress a same-class
+        // suffix; full vectors record their 16-byte probe, elements their width.
+        for (unsigned verify = 0; verify < 2; ++verify)
+        for (const auto &form : vector_memory) {
+            mmu.reset(); mmu.set_msr(NW_MSR_VEC | ppc32_mmu::MSR_DR);
+            mmu.set_dbat(0, 0x20000002u, ram_base | (form.store ? 1u : 0u));
+            const uint32 start = 0x220000 + 64 * vector_memory_case++;
+            const nw_jit_cpu before = vector_start(start, 0x2000000f, false);
+            const uint32 ops[] = {(31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|(form.xo<<1), ((4u<<26)|(7u<<21)|(8u<<16)|(9u<<11)|1156u)};
+            const nw_jit_cpu result = vector_run(before, ops, 2, verify != 0);
+            CHECK(result.fault == NW_JIT_FAULT_DSI && result.pc == start);
+            CHECK(result.fault_ea == (0x2000000fu & ~(form.width - 1u)) && result.fault_width == form.width && result.fault_st == form.store);
+            CHECK(cpu->pc() == 0x300 && cpu->srr0_ == start && cpu->dar_ == result.fault_ea);
+            for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == before.vr[r][w]);
+        }
+        for (unsigned verify = 0; verify < 2; ++verify)
+        for (const auto &form : vector_memory) {
+            if (!form.store) continue;
+            mmu.reset(); mmu.set_msr(NW_MSR_VEC);
+            const uint32 start = ram_base + 0x17000 + 64 * (vector_memory_case++ % 32);
+            const nw_jit_cpu before = vector_start(start, start + 0x2f, false);
+            const uint32 ops[] = {(31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|(form.xo<<1), ((4u<<26)|(7u<<21)|(8u<<16)|(9u<<11)|1156u)};
+            const nw_jit_cpu result = vector_run(before, ops, 2, verify != 0);
+            const uint32 ea = (start + 0x2f) & ~(form.width - 1u);
+            CHECK(result.fault == NW_JIT_FAULT_SMC && result.pc == start);
+            CHECK(result.fault_ea == ea + (verify && form.width == 16 ? 12 : 0));
+            CHECK(result.fault_width == (verify && form.width == 16 ? 4u : form.width));
+            for (unsigned i = 0; i < form.width; ++i) {
+                const unsigned lane = (ea + i) & 15;
+                CHECK(vm_read_memory_1(ea + i) == uint8(before.vr[3][lane / 4] >> (24 - 8 * (lane & 3))));
+            }
+            for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(7).w[w] == before.vr[7][w]);
+        }
+        // Destructive devices run only in the reference. Aligned vectors issue
+        // four ordered word transactions; element forms issue one transaction.
+        for (unsigned translated = 0; translated < 2; ++translated)
+        for (const auto &load : vector_memory) {
+            if (load.store) continue;
+            mmu.reset(); mmu.set_msr(NW_MSR_VEC | (translated ? ppc32_mmu::MSR_DR : 0));
+            if (translated) mmu.set_dbat(0, (NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 2u, (NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 2u);
+            device = {}; device.value = 0x01020304;
+            const uint32 start = 0x230000 + 64 * vector_memory_case++;
+            const nw_jit_cpu before = vector_start(start, NW_IO_VIA_PMU_BASE + 15, false);
+            const unsigned store_xo = load.xo == 359 ? 487 : load.xo + 128;
+            const uint32 ops[] = {(31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|(load.xo<<1),
+                                  (31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|(store_xo<<1)};
+            uint8 poison[4096] = {}; poison[0] = 0x7f;
+            nw_jit_dtlb_fill(NW_IO_VIA_PMU_BASE, NW_IO_VIA_PMU_BASE, 1, (uint64)(uintptr)poison, 0, 1);
+            const nw_jit_cpu result = vector_run(before, ops, 2, true);
+            const unsigned count = load.width == 16 ? 4 : 1;
+            CHECK(device.reads == count && device.writes == count && !result.fault);
+            const uint32 last = 0x01020304u + count - 1;
+            CHECK(device.value == (load.width == 1 ? last & 0xffu : load.width == 2 ? last & 0xffffu : last));
+            CHECK(poison[0] == 0x7f && poison[1] == 0);
+        }
+        // Shift-mask formation uses only the logical EA, including r0-as-zero.
+        for (unsigned xo : {6u, 38u})
+        for (unsigned zero_ra = 0; zero_ra < 2; ++zero_ra)
+        for (unsigned offset = 0; offset < 16; ++offset) {
+            mmu.reset(); mmu.set_msr(NW_MSR_VEC);
+            const uint32 start = 0x240000 + 64 * vector_memory_case++;
+            const nw_jit_cpu before = vector_start(start, ram_base + offset, zero_ra != 0);
+            const uint32 op = (31u<<26)|(3u<<21)|((zero_ra ? 0u : 4u)<<16)|(6u<<11)|(xo<<1);
+            CHECK(nw_jit_op_verify_safe(op));
+            const nw_jit_cpu result = vector_run(before, &op, 1, true);
+            for (unsigned i = 0; i < 16; ++i) {
+                const unsigned shift = xo == 6 ? offset : 16 - offset;
+                CHECK(uint8(result.vr[3][i / 4] >> (24 - 8 * (i & 3))) == shift + i);
+            }
+            CHECK(result.vscr == before.vscr && result.pc == start + 4 && !result.fault);
+        }
+        // The older scalar fixtures initialize an all-zero vector status.
+        cpu->vscr().set(0);
         struct memory_pair { unsigned store, load, width; bool indexed, fp; } pairs[] = {
             {36,32,4,false,false}, {37,33,4,false,false}, {38,34,1,false,false},
             {39,35,1,false,false}, {44,40,2,false,false}, {45,41,2,false,false},
@@ -343,6 +2929,232 @@ int ppc_core_test_access::run()
             CHECK(cpu->dar_ == 0x20020000 && shadow.pc == cpu->srr0_ && shadow.gpr[5] == 0);
         }
 
+        // String transfers use independently expected byte packing and a
+        // poisoned suffix. Indexed loads keep RB outside the destination set;
+        // stores cover all seven-bit XER counts, immediate NB=0 means 32.
+        unsigned string_case = 0;
+        auto string_start = [&](uint32 address, uint32 start, uint32 xer) {
+            for (unsigned r = 0; r < 32; ++r) {
+                cpu->gpr(r) = 0xa0b00000u + r * 0x10203u;
+                cpu->fpr_dw(r) = 0; memset(cpu->vr(r).w, 0, 16);
+            }
+            cpu->gpr(31) = address; cpu->gpr(5) = address;
+            cpu->pc() = start; cpu->last_fetch_pa_ = start;
+            cpu->cr().set(0x12345678); cpu->xer().set(xer); cpu->fpscr() = 0;
+            cpu->lr() = 0; cpu->ctr() = 0; cpu->vscr().set(0);
+            nw_jit_cpu shadow = {}; shadow.pc = start; shadow.dec = cpu->dec_;
+            shadow.msr = mmu.msr(); shadow.cr = cpu->cr().get(); shadow.xer = xer;
+            for (unsigned r = 0; r < 32; ++r) shadow.gpr[r] = cpu->gpr(r);
+            return shadow;
+        };
+        for (unsigned translated = 0; translated < 2; ++translated)
+        for (unsigned store = 0; store < 2; ++store)
+        for (unsigned immediate = 0; immediate < 2; ++immediate)
+        for (unsigned encoded = 0; encoded < (immediate ? 32u : store ? 128u : 121u); ++encoded) {
+            mmu.reset(); mmu.set_msr(translated ? ppc32_mmu::MSR_DR : 0);
+            const uint32 logical = translated ? 0x20000000u : ram_base;
+            if (translated) mmu.set_dbat(0, logical | 2u, ram_base | 2u);
+            const unsigned count = immediate && !encoded ? 32 : encoded;
+            const uint32 start = 0x50000 + 64 * string_case++;
+            nw_jit_cpu shadow = string_start(logical + 0x1003, start, 0xa0000000u | encoded);
+            uint32 expected[32]; memcpy(expected, shadow.gpr, sizeof expected);
+            for (unsigned i = 0; i < 132; ++i) vm_write_memory_1(ram_base + 0x1003 + i, 0x30u + i);
+            for (unsigned i = 0; !store && i < count; ++i) {
+                const unsigned r = (1 + i / 4) & 31;
+                if (!(i & 3)) expected[r] = 0;
+                expected[r] |= uint32(uint8(0x30u + i)) << (24 - 8 * (i & 3));
+            }
+            const uint32 op = (31u<<26)|(1u<<21)|
+                (immediate ? (31u<<16)|(encoded<<11)|((store ? 725u : 597u)<<1)
+                           : (31u<<11)|((store ? 661u : 533u)<<1));
+            const uint32 ops[] = {op, nw_ppc_addi(5,0,99)};
+            nw_jit_fn fn = nw_jit_compile(ops, 2, start, start & ~0xfffu, translated ? 2 : 0, 0);
+            CHECK(fn != NULL);
+            const uint64 misses = nw_jit_verify_misses();
+            if (fn) CHECK(cpu->nw_jit_verify_block(shadow, fn, ops, 2) == 1);
+            CHECK(nw_jit_verify_misses() == misses);
+            for (unsigned r = 0; r < 32; ++r) {
+                const uint32 wanted_value = r == 5 ? 99 : expected[r];
+                CHECK(shadow.gpr[r] == wanted_value && cpu->gpr(r) == wanted_value);
+            }
+            CHECK(shadow.cr == 0x12345678 && shadow.xer == (0xa0000000u | encoded));
+            CHECK(shadow.pc == start + 8 && !shadow.fault);
+            for (unsigned i = 0; store && i < count; ++i)
+                CHECK(vm_read_memory_1(ram_base + 0x1003 + i) ==
+                    uint8(expected[(1 + i / 4) & 31] >> (24 - 8 * (i & 3))));
+            CHECK(vm_read_memory_1(ram_base + 0x1003 + count) == uint8(0x30u + count));
+        }
+        // Register wrapping and the immediate partial register are independent
+        // of EA register values. The source/destination runs through r31/r0.
+        for (unsigned store = 0; store < 2; ++store) {
+            mmu.reset(); mmu.set_msr(0);
+            nw_jit_cpu shadow = string_start(ram_base + 0x1200, 0x68000 + store * 64, 0);
+            const uint32 ops[] = {(31u<<26)|(30u<<21)|(5u<<16)|(11u<<11)|((store ? 725u : 597u)<<1)};
+            for (unsigned i = 0; i < 12; ++i) vm_write_memory_1(ram_base + 0x1200 + i, 0x10u + i);
+            const uint32 source[] = {shadow.gpr[30], shadow.gpr[31], shadow.gpr[0]};
+            nw_jit_fn fn = nw_jit_compile(ops, 1, shadow.pc, shadow.pc & ~0xfffu, 0, 0); CHECK(fn != NULL);
+            const uint64 misses = nw_jit_verify_misses();
+            if (fn) CHECK(cpu->nw_jit_verify_block(shadow, fn, ops, 1) == 1);
+            CHECK(nw_jit_verify_misses() == misses);
+            if (!store) {
+                CHECK(shadow.gpr[30] == 0x10111213 && shadow.gpr[31] == 0x14151617 && shadow.gpr[0] == 0x18191a00);
+            } else for (unsigned i = 0; i < 11; ++i)
+                CHECK(vm_read_memory_1(ram_base + 0x1200 + i) == uint8(source[i / 4] >> (24 - 8 * (i & 3))));
+        }
+        // A successful word/halfword followed by a protected subaccess keeps
+        // completed registers/stores, precise EA/width and suppresses suffix.
+        // Includes a three-byte load whose final byte faults: RD stays intact.
+        for (unsigned store = 0; store < 2; ++store)
+        for (unsigned prefix : {1u, 2u, 3u, 4u, 5u, 6u, 7u}) {
+            mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
+            mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
+            mmu.set_dbat(1, 0x20020002u, ram_base + 0x20000u);
+            const uint32 start = 0x69000 + string_case++ * 64;
+            nw_jit_cpu shadow = string_start(0x20020000u - prefix, start, 0);
+            for (unsigned i = 0; i < prefix; ++i) vm_write_memory_1(ram_base + 0x20000 - prefix + i, 0x10u + i);
+            const uint32 before1 = shadow.gpr[1], before2 = shadow.gpr[2], before5 = shadow.gpr[5];
+            const uint32 ops[] = {(31u<<26)|(1u<<21)|(31u<<16)|((prefix + 1)<<11)|((store ? 725u : 597u)<<1), nw_ppc_addi(5,0,99)};
+            nw_jit_fn fn = nw_jit_compile(ops, 2, start, start & ~0xfffu, 2, 0); CHECK(fn != NULL);
+            const uint64 misses = nw_jit_verify_misses();
+            if (fn) CHECK(cpu->nw_jit_verify_block(shadow, fn, ops, 2) == 1);
+            CHECK(nw_jit_verify_misses() == misses);
+            const uint32 fault_ea = 0x20020000u;
+            const uint32 fault_width = 1;
+            CHECK(shadow.fault == NW_JIT_FAULT_DSI && shadow.pc == start);
+            CHECK(shadow.fault_ea == fault_ea && shadow.fault_width == fault_width && shadow.fault_st == store);
+            CHECK(cpu->dar_ == fault_ea && cpu->srr0_ == start && shadow.gpr[5] == before5);
+            CHECK(shadow.gpr[1] == (store || prefix < 4 ? before1 : 0x10111213u));
+            CHECK(shadow.gpr[2] == before2);
+            for (unsigned i = 0; store && i < prefix; ++i)
+                CHECK(vm_read_memory_1(ram_base + 0x20000 - prefix + i) ==
+                    uint8((i < 4 ? before1 : before2) >> (24 - 8 * (i & 3))));
+        }
+        // The next logical BAT maps back to the first physical page, not
+        // to adjacent host memory. Read/write every crossed subaccess afresh.
+        for (unsigned store = 0; store < 2; ++store) {
+            mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
+            mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
+            mmu.set_dbat(1, 0x20020002u, ram_base | 2u);
+            nw_jit_cpu shadow = string_start(0x2001fffdu, 0x7a000 + store * 64, 0);
+            for (unsigned i = 0; i < 7; ++i) vm_write_memory_1(i < 3 ? ram_base + 0x1fffd + i : ram_base + i - 3, 0x11u * (i + 1));
+            vm_write_memory_1(ram_base + 4, 0xa5);
+            const uint32 source[] = {shadow.gpr[1], shadow.gpr[2]};
+            const uint32 ops[] = {(31u<<26)|(1u<<21)|(31u<<16)|(7u<<11)|((store ? 725u : 597u)<<1)};
+            nw_jit_fn fn = nw_jit_compile(ops, 1, shadow.pc, shadow.pc & ~0xfffu, 2, 0); CHECK(fn != NULL);
+            const uint64 misses = nw_jit_verify_misses();
+            if (fn) CHECK(cpu->nw_jit_verify_block(shadow, fn, ops, 1) == 1);
+            CHECK(nw_jit_verify_misses() == misses && !shadow.fault);
+            if (!store) CHECK(shadow.gpr[1] == 0x11223344 && shadow.gpr[2] == 0x55667700);
+            else for (unsigned i = 0; i < 7; ++i)
+                CHECK(vm_read_memory_1(i < 3 ? ram_base + 0x1fffd + i : ram_base + i - 3) == uint8(source[i / 4] >> (24 - 8 * (i & 3))));
+            CHECK(vm_read_memory_1(ram_base + 4) == 0xa5);
+        }
+        for (unsigned fault = 0; fault < 2; ++fault) {
+            mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
+            mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
+            mmu.set_dbat(1, 0x20020002u, ram_base | (fault ? 0u : 2u));
+            nw_jit_cpu shadow = string_start(0x2001fffb, 0x7c000 + fault * 64, 0);
+            const uint32 before2 = shadow.gpr[2], before5 = shadow.gpr[5];
+            for (unsigned i = 0; i < 8; ++i) vm_write_memory_1(i < 5 ? ram_base + 0x1fffb + i : ram_base + i - 5, 0x11u * (i + 1));
+            const uint32 ops[] = {nw_ppc_lswi(1,31,8), nw_ppc_addi(5,0,99)};
+            nw_jit_set_mode(NW_JIT_ON);
+            shadow.host = cpu; nw_jit_cpu_bind(&shadow); nw_jit_tail_begin();
+            nw_jit_fn fn = nw_jit_compile(ops, 2, shadow.pc, shadow.pc & ~0xfffu, 2, 0); CHECK(fn != NULL);
+            if (fn) fn(&shadow);
+            CHECK(shadow.gpr[1] == 0x11223344 && shadow.gpr[2] == (fault ? before2 : 0x55667788));
+            CHECK(shadow.gpr[5] == (fault ? before5 : 99));
+            CHECK(shadow.fault == (fault ? NW_JIT_FAULT_DSI : 0));
+            if (fault) CHECK(shadow.fault_ea == 0x20020000 && shadow.fault_width == 2 && !shadow.fault_st);
+            nw_jit_set_mode(NW_JIT_VERIFY);
+        }
+        // Destructive I/O string reads retain word/halfword/byte widths and
+        // execute once in KPX; replay must perform no second device operation.
+        for (unsigned translated = 0; translated < 2; ++translated) {
+            mmu.reset(); mmu.set_msr(translated ? ppc32_mmu::MSR_DR : 0);
+            if (translated) mmu.set_dbat(0, (NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 2u, (NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 2u);
+            nw_jit_cpu shadow = string_start(NW_IO_VIA_PMU_BASE + 1, 0x7b000 + translated * 64, 0);
+            device.value = 10;
+            const unsigned reads = device.reads, writes = device.writes;
+            const uint32 ops[] = {nw_ppc_lswi(1,31,7), nw_ppc_stswi(1,31,7)};
+            nw_jit_fn fn = nw_jit_compile(ops, 2, shadow.pc, shadow.pc & ~0xfffu, translated ? 2 : 0, 0); CHECK(fn != NULL);
+            const uint64 misses = nw_jit_verify_misses();
+            if (fn) CHECK(cpu->nw_jit_verify_block(shadow, fn, ops, 2) == 1);
+            CHECK(nw_jit_verify_misses() == misses && !shadow.fault);
+            CHECK(device.reads == reads + 3 && device.writes == writes + 7 && device.value == 12);
+            CHECK(shadow.gpr[1] == 10 && shadow.gpr[2] == 0x000b0c00);
+        }
+
+        // A bounded tape overflow keeps the completed reference authoritative
+        // and never repeats the block's destructive device stores.
+        {
+            mmu.reset(); mmu.set_msr(0);
+            const uint32 start = 0x7d000;
+            nw_jit_cpu shadow = string_start(NW_IO_VIA_PMU_BASE + 1, start, 127);
+            uint32 ops[NW_JIT_MAX_BLOCK];
+            for (unsigned i = 0; i < NW_JIT_MAX_BLOCK; ++i)
+                ops[i] = (31u<<26)|(1u<<21)|(31u<<11)|(661u<<1);
+            nw_jit_fn fn = nw_jit_compile(ops, NW_JIT_MAX_BLOCK, start, start & ~0xfffu, 0, 0); CHECK(fn != NULL);
+            const unsigned writes = device.writes;
+            const uint64 misses = nw_jit_verify_misses();
+            if (fn) CHECK(cpu->nw_jit_verify_block(shadow, fn, ops, NW_JIT_MAX_BLOCK) == 1);
+            CHECK(device.writes == writes + 127 * NW_JIT_MAX_BLOCK);
+            CHECK(cpu->pc() == start + 4 * NW_JIT_MAX_BLOCK && shadow.pc == start);
+            CHECK(nw_jit_verify_misses() == misses && cpu->nw_verify_trace_ == NULL && shadow.verify_mem == NULL);
+        }
+        // SMC is a completed substore, not a reason to stop the instruction.
+        // Continue out of the active code page and retain the final SMC EA.
+        for (unsigned translated = 0; translated < 2; ++translated) {
+            mmu.reset(); mmu.set_msr(translated ? ppc32_mmu::MSR_DR : 0);
+            const uint32 logical = translated ? 0x20000000u : ram_base;
+            if (translated) mmu.set_dbat(0, logical | 2u, ram_base | 2u);
+            nw_jit_cpu shadow = string_start(logical + 0xffc, logical + 0x800, 0);
+            cpu->last_fetch_pa_ = ram_base + 0x800;
+            const uint32 ops[] = {nw_ppc_stswi(1,31,12), nw_ppc_addi(5,0,99)};
+            uint32 source[3] = {shadow.gpr[1], shadow.gpr[2], shadow.gpr[3]};
+            nw_jit_fn fn = nw_jit_compile(ops, 2, shadow.pc, ram_base, translated ? 2 : 0, 0); CHECK(fn != NULL);
+            const uint64 misses = nw_jit_verify_misses();
+            if (fn) CHECK(cpu->nw_jit_verify_block(shadow, fn, ops, 2) == 1);
+            CHECK(nw_jit_verify_misses() == misses);
+            CHECK(shadow.fault == NW_JIT_FAULT_SMC && shadow.fault_ea == logical + 0xfff && shadow.fault_width == 1);
+            CHECK(shadow.pc + 4 == cpu->pc() && shadow.gpr[5] != 99);
+            for (unsigned i = 0; i < 12; ++i)
+                CHECK(vm_read_memory_1(ram_base + 0xffc + i) == uint8(source[i / 4] >> (24 - 8 * (i & 3))));
+        }
+
+        // Exercise the production host callbacks too, independently of the
+        // observation tape: completed code writes, later DSI and suffix stops.
+        for (unsigned verify = 0; verify < 2; ++verify)
+        for (unsigned fault = 0; fault < 2; ++fault) {
+            mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
+            mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
+            mmu.set_dbat(1, 0x20020002u, ram_base | (fault ? 0u : 2u));
+            const uint32 start = 0x2001f800u + 64 * (verify * 2 + fault);
+            nw_jit_cpu shadow = string_start(0x2001fffcu, start, 0);
+            cpu->last_fetch_pa_ = ram_base + 0x1f800;
+            const uint32 source[] = {shadow.gpr[1], shadow.gpr[2], shadow.gpr[3]};
+            for (unsigned i = 0; i < 8; ++i) vm_write_memory_1(ram_base + i, 0xa5);
+            const uint32 ops[] = {nw_ppc_stswi(1,31,12), nw_ppc_addi(5,0,99)};
+            nw_jit_fn fn = nw_jit_compile(ops, 2, start, ram_base + 0x1f000, 2, 0); CHECK(fn != NULL);
+            const uint64 misses = nw_jit_verify_misses();
+            if (verify) {
+                if (fn) CHECK(cpu->nw_jit_verify_block(shadow, fn, ops, 2) == 1);
+                CHECK(nw_jit_verify_misses() == misses);
+                if (fault) CHECK(cpu->dar_ == 0x20020000 && cpu->srr0_ == start);
+            } else {
+                nw_jit_set_mode(NW_JIT_ON);
+                shadow.host = cpu; nw_jit_cpu_bind(&shadow); nw_jit_tail_begin();
+                if (fn) fn(&shadow);
+                nw_jit_set_mode(NW_JIT_VERIFY);
+            }
+            CHECK(shadow.fault == (fault ? NW_JIT_FAULT_DSI : NW_JIT_FAULT_SMC));
+            CHECK(shadow.fault_ea == (fault ? 0x20020000u : 0x2001ffffu));
+            CHECK(shadow.fault_width == 1 && shadow.fault_st == 1 && shadow.pc == start);
+            CHECK(shadow.gpr[5] != 99);
+            for (unsigned i = 0; i < 12; ++i)
+                CHECK(vm_read_memory_1(i < 4 ? ram_base + 0x1fffc + i : ram_base + i - 4) ==
+                    (fault && i >= 4 ? 0xa5 : uint8(source[i / 4] >> (24 - 8 * (i & 3)))));
+        }
+
         // Host code publication previously cleared only legacy KPX blocks.
         // A changed instruction can stay in the native PPC cache indefinitely.
         for (unsigned translated = 0; translated < 2; ++translated) {
@@ -364,6 +3176,463 @@ int ppc_core_test_access::run()
             cpu->invalidate_cache_range(logical + 0x500, logical + 0x504);
             CHECK(nw_jit_cache_get(ram_base + 0x1000, logical + 0x1000, key, 0, NULL) == old);
         }
+        // Carry-producing overflow forms followed by a nonoverflowing OE
+        // instruction prove sticky SO, OV replacement and CR0's new SO value
+        // across selective state copying and both production successor paths.
+        for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+        for (unsigned kind = 0; kind < 5; ++kind)
+        for (unsigned pending = 0; pending < 2; ++pending) {
+            const uint32 start = ram_base + 0x18000 + 0x100 * (native_tail * 10 + kind * 2 + pending);
+            mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_EE);
+            nw_jit_cpu before = string_start(ram_base, start, 0x41234567u);
+            // Every first form overflows; its CA differs from the incoming CA.
+            const uint32 a = kind == 2 || kind == 3 ? 0x7fffffffu : 0x80000000u;
+            const unsigned ca = kind == 2 || kind == 4 ? 1u : 0u;
+            const uint32 result = kind == 0 || kind == 2 || kind == 4 ? 0x80000000u : 0x7fffffffu;
+            const unsigned carry = kind == 0 ? ca : kind == 1 || kind == 3;
+            before.gpr[4] = a; cpu->gpr(4) = a;
+            before.xer = 0x41234567u | (ca<<29); cpu->xer().set(before.xer);
+            cpu->cr().set(0x12345678u); cpu->lr() = start + 0xc0;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = pending;
+            cpu->spcflags().init();
+            const uint32 op = (31u<<26)|(3u<<21)|(4u<<16)|(integer_xo[kind]<<1)|0x401u;
+            const uint32 first[] = {nw_ppc_addi(21,20,9), op, nw_ppc_b(0x38,0)};
+            const uint32 second[] = {(31u<<26)|(5u<<21)|(3u<<16)|((carry ? 712u : 714u)<<1)|1u,
+                nw_ppc_addi(22,3,1), nw_ppc_blr()};
+            // subfzeo maps positive -> negative; addzeo with CA=0 preserves
+            // either sign, so the second instruction clears OV without overflow.
+            const uint32 second_result = carry ? ~result + 1u : result;
+            const unsigned second_ca = carry ? result == 0 : 0;
+            const uint32 first_xer = 0xc1234567u | (carry<<29);
+            const uint32 second_xer = 0x81234567u | (second_ca<<29);
+            const uint32 first_cr = ((result & 0x80000000u ? 9u : 5u)<<28) | 0x02345678u;
+            const uint32 second_cr = ((second_result & 0x80000000u ? 9u : 5u)<<28) | 0x02345678u;
+            nw_jit_set_mode(NW_JIT_ON);
+            CHECK(nw_jit_compile(first, 3, start, start & ~0xfffu, 0, 0) != NULL);
+            CHECK(nw_jit_compile(second, 3, start + 0x40, start & ~0xfffu, 0, 0) != NULL);
+            for (unsigned i = 0; i < 3; ++i) {
+                vm_write_memory_4(start + i * 4, first[i]);
+                vm_write_memory_4(start + 0x40 + i * 4, second[i]);
+            }
+            nw_jit_itlb_fill(start, start);
+            nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+            const uint64 hops = nw_jit_chain_hops();
+            CHECK(cpu->nw_jit_try(first[0]) == 1);
+            CHECK(cpu->pc() == start + (pending ? 0x40 : 0xc0));
+            CHECK(nw_jit_chain_hops() == hops + (pending ? 0 : 1));
+            CHECK(nw_jit_tail_n() == (!pending && native_tail ? 3 : 0));
+            CHECK(cpu->xer().get() == (pending ? first_xer : second_xer));
+            CHECK(cpu->cr().get() == (pending ? first_cr : second_cr));
+            for (unsigned r = 0; r < 32; ++r) {
+                uint32 value = before.gpr[r];
+                if (r == 3) value = result;
+                if (r == 21) value = before.gpr[20] + 9;
+                if (!pending && r == 5) value = second_result;
+                if (!pending && r == 22) value = result + 1;
+                CHECK(cpu->gpr(r) == value);
+                CHECK(cpu->fpr_dw(r) == before.fpr[r]);
+                for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == before.vr[r][w]);
+            }
+            CHECK(cpu->dec_pending_ == (pending != 0));
+            cpu->dec_pending_ = false;
+            nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+            nw_jit_set_mode(NW_JIT_VERIFY);
+        }
+        // Octet-shift blocks preserve state across integer predecessors and
+        // successors, with either production chain path and pending gates.
+        for (unsigned right = 0; right < 2; ++right)
+        for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+        for (unsigned stop = 0; stop < 4; ++stop)
+        for (unsigned sh = 0; sh < 16; ++sh) {
+            mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_EE | (stop == 1 ? 0 : NW_MSR_VEC));
+            const uint32 start = ram_base + 0x16000;
+            nw_jit_invalidate_page(start);
+            nw_jit_cpu before = vector_start(start,ram_base + 0x4000,false);
+            before.vr[2][3] = cpu->vr(2).w[3] = sh << 3;
+            cpu->lr() = start + 0xc0;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = stop == 2;
+            if (stop == 3) cpu->spcflags().set(SPCFLAG_CPU_HANDLE_INTERRUPT);
+            const uint32 first[] = {nw_ppc_addi(3,3,7),nw_ppc_b(0x3c,0)};
+            const uint32 second[] = {right ? nw_ppc_vsro(1,1,2) : nw_ppc_vslo(1,1,2),
+                (4u<<26)|(3u<<21)|(1u<<16)|(1u<<11)|1156u,nw_ppc_b(0x38,0)};
+            const uint32 third[] = {nw_ppc_addi(21,20,9),nw_ppc_blr()};
+            nw_jit_set_mode(NW_JIT_ON);
+            CHECK(nw_jit_compile(first,2,start,start & ~0xfffu,0,0) != NULL);
+            CHECK(nw_jit_compile(second,3,start + 0x40,start & ~0xfffu,0,0) != NULL);
+            CHECK(nw_jit_compile(third,2,start + 0x80,start & ~0xfffu,0,0) != NULL);
+            for (unsigned i = 0; i < 2; ++i) {
+                vm_write_memory_4(start + 4 * i,first[i]);
+                vm_write_memory_4(start + 0x80 + 4 * i,third[i]);
+            }
+            for (unsigned i = 0; i < 3; ++i) vm_write_memory_4(start + 0x40 + 4 * i,second[i]);
+            nw_jit_itlb_fill(start,start);
+            nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+            const uint64 hops = nw_jit_chain_hops();
+            CHECK(cpu->nw_jit_try(first[0]) == 1);
+            CHECK(cpu->pc() == start + (stop ? 0x40 : 0xc0));
+            CHECK(nw_jit_chain_hops() == hops + (stop ? 0 : 2));
+            CHECK(nw_jit_tail_n() == (!stop && native_tail ? 5 : 0));
+            CHECK(cpu->cr().get() == before.cr && cpu->xer().get() == before.xer && cpu->vscr().get() == before.vscr);
+            for (unsigned r = 0; r < 32; ++r) {
+                CHECK(cpu->gpr(r) == (r == 3 ? before.gpr[r] + 7 : !stop && r == 21 ? before.gpr[20] + 9 : before.gpr[r]));
+                CHECK(!cpu->fpr_dw(r));
+                for (unsigned b = 0; b < 16; ++b) {
+                    const int index = right ? int(b) - int(sh) : int(b) + int(sh);
+                    const uint8 expected = stop || (r != 1 && r != 3) ? uint8(before.vr[r][b / 4] >> (24 - 8 * (b % 4))) :
+                        index < 0 || index >= 16 ? 0 : uint8(before.vr[1][index / 4] >> (24 - 8 * (index % 4)));
+                    CHECK(uint8(cpu->vr(r).w[b / 4] >> (24 - 8 * (b % 4))) == expected);
+                }
+            }
+            CHECK(cpu->dec_pending_ == (stop == 2));
+            cpu->spcflags().init(); cpu->dec_pending_ = false;
+            nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+            nw_jit_set_mode(NW_JIT_VERIFY);
+        }
+        nw_jit_invalidate_page(ram_base + 0x16000);
+        // Integer -> vector -> integer transitions retain every unselected
+        // register and the saturated VSCR on native and ordinary C successors.
+        // A disabled vector unit or pending event stops before the vector op.
+        for (unsigned fp = 0; fp < 2; ++fp)
+        for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+        for (unsigned stop = 0; stop < 4; ++stop) {
+            mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_EE | (stop == 1 ? 0 : NW_MSR_VEC));
+            const uint32 start = ram_base + 0x15000 + 0x100 * (fp * 8 + native_tail * 4 + stop);
+            nw_jit_cpu before = vector_start(start, ram_base + 0x4000, false);
+            for (unsigned w = 0; w < 4; ++w) {
+                cpu->vr(1).w[w] = before.vr[1][w] = fp ? 0x3fc00000u : 0x7fffffffu;
+                cpu->vr(2).w[w] = before.vr[2][w] = fp ? 0x40000000u : 0;
+            }
+            cpu->fpscr() = before.fpscr = 0x12340003;
+            cpu->lr() = start + 0xc0;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = stop == 2;
+            cpu->spcflags().init();
+            if (stop == 3) cpu->spcflags().set(SPCFLAG_CPU_HANDLE_INTERRUPT);
+            const uint32 first[] = {nw_ppc_addi(3,3,7), nw_ppc_b(0x3c,0)};
+            const uint32 integer_ops[] = {(4u<<26)|(3u<<21)|(1u<<16)|(2u<<11)|1928u,
+                nw_ppc_mfvscr(5),
+                (4u<<26)|(10u<<21)|(1u<<16)|(1u<<11)|(2u<<6)|39u, // vmsumuhs
+                (4u<<26)|(11u<<21)|(1u<<16)|(2u<<11)|270u, // vpkshus
+                (4u<<26)|(12u<<21)|(10u<<16)|(2u<<11)|1670u, // vcmpgtuw.
+                nw_ppc_b(0x2c,0)};
+            const uint32 fp_ops[] = {
+                (4u<<26)|(3u<<21)|(1u<<16)|(2u<<11)|10u, // 1.5 + 2.0 = 3.5
+                (4u<<26)|(10u<<21)|(1u<<16)|(3u<<11)|(2u<<6)|46u, // fused 1.5*2 + 3.5 = 6.5
+                (4u<<26)|(11u<<21)|(10u<<11)|970u, // truncates to 6
+                (4u<<26)|(12u<<21)|(10u<<16)|(1u<<11)|1734u,
+                nw_ppc_mfvscr(5), nw_ppc_b(0x2c,0)};
+            const uint32 *second = fp ? fp_ops : integer_ops;
+            const uint32 third[] = {nw_ppc_addi(21,20,9), nw_ppc_blr()};
+            nw_jit_set_mode(NW_JIT_ON);
+            CHECK(nw_jit_compile(first, 2, start, start & ~0xfffu, 0, 0) != NULL);
+            CHECK(nw_jit_compile(second, 6, start + 0x40, start & ~0xfffu, 0, 0) != NULL);
+            CHECK(nw_jit_compile(third, 2, start + 0x80, start & ~0xfffu, 0, 0) != NULL);
+            for (unsigned i = 0; i < 2; ++i) {
+                vm_write_memory_4(start + i * 4, first[i]);
+                vm_write_memory_4(start + 0x80 + i * 4, third[i]);
+            }
+            for (unsigned i = 0; i < 6; ++i) vm_write_memory_4(start + 0x40 + i * 4, second[i]);
+            nw_jit_itlb_fill(start, start);
+            nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+            const uint64 hops = nw_jit_chain_hops();
+            CHECK(cpu->nw_jit_try(first[0]) == 1);
+            CHECK(cpu->pc() == start + (stop ? 0x40 : 0xc0));
+            CHECK(nw_jit_chain_hops() == hops + (stop ? 0 : 2));
+            CHECK(nw_jit_tail_n() == (!stop && native_tail ? 8 : 0));
+            CHECK(cpu->vscr().get() == (stop || fp ? 0x10000u : 0x10001u));
+            for (unsigned r = 0; r < 32; ++r) {
+                uint32 value = before.gpr[r];
+                if (r == 3) value += 7;
+                if (!stop && r == 21) value = before.gpr[20] + 9;
+                CHECK(cpu->gpr(r) == value); CHECK(cpu->fpr_dw(r) == before.fpr[r]);
+                for (unsigned w = 0; w < 4; ++w) {
+                    uint32 vector = before.vr[r][w];
+                    if (!stop && r == 3) vector = fp ? 0x40600000u : w == 3 ? 0x7fffffffu : 0;
+                    if (!stop && r == 5) vector = w == 3 ? (fp ? 0x10000u : 0x10001u) : 0;
+                    if (!stop && r == 10) vector = fp ? 0x40d00000u : UINT32_MAX;
+                    if (!stop && r == 11) vector = fp ? 6u : w < 2 ? 0xff00ff00u : 0;
+                    if (!stop && r == 12) vector = UINT32_MAX;
+                    CHECK(cpu->vr(r).w[w] == vector);
+                }
+            }
+            CHECK(cpu->cr().get() == (stop ? before.cr : ((before.cr & ~0xf0u) | 0x80u)) && cpu->xer().get() == before.xer);
+            CHECK(cpu->fpscr() == before.fpscr);
+            CHECK(cpu->dec_pending_ == (stop == 2));
+            cpu->spcflags().init(); cpu->dec_pending_ = false;
+            nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+            nw_jit_set_mode(NW_JIT_VERIFY);
+        }
+        cpu->vscr().set(0);
+        // Production selective marshalling and both successor paths. Disable
+        // only the native-tail callback in this private fixture to force the
+        // ordinary C successor loop; the same compiled blocks run both ways.
+        for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+        for (unsigned stop = 0; stop < 4; ++stop) {
+            mmu.reset();
+            mmu.set_msr(ppc32_mmu::MSR_DR | ppc32_mmu::MSR_EE | (stop == 1 ? 0 : ppc32_mmu::MSR_FP));
+            const uint32 start = ram_base + 0x10000 + 0x100 * (native_tail * 4 + stop);
+            nw_jit_cpu before = string_start(ram_base, start, 0x80000000u);
+            cpu->fpr_dw(1) = bits(1.25); cpu->fpr_dw(2) = bits(2.5);
+            for (unsigned r = 3; r < 32; ++r) cpu->fpr_dw(r) = bits(100.0 + r);
+            cpu->lr() = start + 0xc0;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = stop == 2;
+            cpu->spcflags().init();
+            if (stop == 3) cpu->spcflags().set(SPCFLAG_CPU_HANDLE_INTERRUPT);
+            const uint32 first[] = {nw_ppc_addi(3,3,7), nw_ppc_b(0x3c,0)};
+            const uint32 second[] = {nw_ppc_fadds(3,1,2), nw_ppc_b(0x3c,0)};
+            const uint32 third[] = {nw_ppc_addi(21,20,9), nw_ppc_addi(22,3,1), nw_ppc_blr()};
+            nw_jit_set_mode(NW_JIT_ON);
+            CHECK(nw_jit_compile(first, 2, start, start & ~0xfffu, 2, 0) != NULL);
+            CHECK(nw_jit_compile(second, 2, start + 0x40, start & ~0xfffu, 2, 0) != NULL);
+            CHECK(nw_jit_compile(third, 3, start + 0x80, start & ~0xfffu, 2, 0) != NULL);
+            for (unsigned i = 0; i < 2; ++i) {
+                vm_write_memory_4(start + i * 4, first[i]);
+                vm_write_memory_4(start + 0x40 + i * 4, second[i]);
+            }
+            for (unsigned i = 0; i < 3; ++i) vm_write_memory_4(start + 0x80 + i * 4, third[i]);
+            nw_jit_itlb_fill(start, start);
+            nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+            const uint64 hops = nw_jit_chain_hops();
+            CHECK(cpu->nw_jit_try(first[0]) == 1);
+            CHECK(cpu->pc() == start + (stop ? 0x40 : 0xc0));
+            CHECK(nw_jit_chain_hops() == hops + (stop ? 0 : 2));
+            CHECK(nw_jit_tail_n() == (!stop && native_tail ? 5 : 0));
+            CHECK(cpu->nw_jc_->gpr_live == ((1u<<3)|(1u<<20)|(1u<<21)|(1u<<22)));
+            for (unsigned r = 0; r < 32; ++r) {
+                uint32 value = before.gpr[r];
+                if (r == 3) value += 7;
+                if (!stop && r == 21) value = before.gpr[20] + 9;
+                if (!stop && r == 22) value = before.gpr[3] + 8;
+                CHECK(cpu->gpr(r) == value);
+                const uint64 fp = r == 0 ? 0 : r == 1 ? bits(1.25) : r == 2 ? bits(2.5) :
+                                  r == 3 && !stop ? bits(3.75) : bits(100.0 + r);
+                CHECK(cpu->fpr_dw(r) == fp);
+                for (unsigned w = 0; w < 4; ++w) CHECK(cpu->vr(r).w[w] == 0);
+            }
+            CHECK(cpu->cr().get() == 0x12345678 && cpu->xer().get() == 0x80000000u);
+            CHECK(cpu->lr() == start + 0xc0 && cpu->ctr() == 0);
+            CHECK(cpu->dec_pending_ == (stop == 2));
+            cpu->spcflags().init(); cpu->dec_pending_ = false;
+            nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+            nw_jit_set_mode(NW_JIT_VERIFY);
+        }
+        // A fault in a chained string instruction must deliver the live DSI
+        // at the successor PC, preserving the entry and subaccess prefixes.
+        for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+        for (unsigned store = 0; store < 2; ++store) {
+            mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
+            mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
+            mmu.set_dbat(1, 0x20020002u, ram_base);
+            const uint32 start = ram_base + 0x11000 + 0x100 * (native_tail * 2 + store);
+            nw_jit_cpu before = string_start(0x2001fffc, start, 0x80000000);
+            cpu->lr() = start + 0xc0;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false;
+            cpu->spcflags().init();
+            vm_write_memory_4(ram_base + 0x1fffc, 0x11223344);
+            const uint32 first[] = {nw_ppc_addi(3,3,7), nw_ppc_b(0x3c,0)};
+            const uint32 second[] = {(31u<<26)|(30u<<21)|(5u<<16)|(9u<<11)|((store ? 725u : 597u)<<1), nw_ppc_addi(22,0,99), nw_ppc_blr()};
+            nw_jit_set_mode(NW_JIT_ON);
+            CHECK(nw_jit_compile(first, 2, start, start & ~0xfffu, 2, 0) != NULL);
+            CHECK(nw_jit_compile(second, 3, start + 0x40, start & ~0xfffu, 2, 0) != NULL);
+            for (unsigned i = 0; i < 2; ++i) vm_write_memory_4(start + i * 4, first[i]);
+            for (unsigned i = 0; i < 3; ++i) vm_write_memory_4(start + 0x40 + i * 4, second[i]);
+            nw_jit_itlb_fill(start, start);
+            nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+            const uint64 hops = nw_jit_chain_hops();
+            CHECK(cpu->nw_jit_try(first[0]) == 1);
+            CHECK(nw_jit_chain_hops() == hops + 1);
+            CHECK(cpu->pc() == 0x300 && cpu->srr0_ == start + 0x40 && cpu->dar_ == 0x20020000);
+            CHECK((cpu->dsisr_ & 0x02000000u) == (store ? 0x02000000u : 0));
+            CHECK((mmu.msr() & ppc32_mmu::MSR_DR) == 0);
+            CHECK(cpu->nw_jc_->fault_ea == 0x20020000 && cpu->nw_jc_->fault_width == (store ? 1u : 4u));
+            CHECK(cpu->nw_jc_->fault_st == store && cpu->nw_jc_->pc == start + 0x40);
+            for (unsigned r = 0; r < 32; ++r) {
+                uint32 value = before.gpr[r];
+                if (r == 3) value += 7;
+                if (!store && r == 30) value = 0x11223344;
+                CHECK(cpu->gpr(r) == value);
+            }
+            CHECK(vm_read_memory_4(ram_base + 0x1fffc) == (store ? before.gpr[30] : 0x11223344));
+            CHECK(cpu->cr().get() == 0x12345678 && cpu->xer().get() == 0x80000000u);
+            nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+            nw_jit_set_mode(NW_JIT_VERIFY);
+        }
+        // Atomic replay uses physical reservation addresses and ordered
+        // translation probes, including a conditional store that stores nothing.
+        auto atomic_run = [&](const uint32 *ops, unsigned n, bool verify) {
+            nw_jit_cpu shadow = {};
+            shadow.pc = cpu->pc(); shadow.dec = cpu->dec_; shadow.msr = mmu.msr();
+            shadow.cr = cpu->cr().get(); shadow.xer = cpu->xer().get();
+            shadow.lr = cpu->lr(); shadow.ctr = cpu->ctr(); shadow.vscr = cpu->vscr().get();
+            for (unsigned r = 0; r < 32; ++r) {
+                shadow.gpr[r] = cpu->gpr(r); shadow.fpr[r] = cpu->fpr_dw(r);
+                for (unsigned w = 0; w < 4; ++w) shadow.vr[r][w] = cpu->vr(r).w[w];
+            }
+            nw_jit_set_mode(verify ? NW_JIT_VERIFY : NW_JIT_ON);
+            const uint32 key = ((mmu.msr() & ppc32_mmu::MSR_IR) ? 1u : 0u) | ((mmu.msr() & ppc32_mmu::MSR_DR) ? 2u : 0u);
+            nw_jit_fn fn = nw_jit_compile(ops, n, shadow.pc, cpu->last_fetch_pa_ & ~0xfffu, key, 0); CHECK(fn != NULL);
+            const uint64 misses = nw_jit_verify_misses();
+            if (fn) CHECK(verify ? cpu->nw_jit_verify_block(shadow, fn, ops, n) == 1 : cpu->nw_jit_try(ops[0]) == 1);
+            CHECK(nw_jit_verify_misses() == misses);
+            if (verify) {
+                CHECK(shadow.reserve_valid == cpu->regs().reserve_valid && shadow.reserve_ea == cpu->regs().reserve_addr);
+                CHECK(shadow.verify_mem == NULL && shadow.verify_xlate == NULL && shadow.host == NULL);
+            } else shadow = *cpu->nw_jc_;
+            nw_jit_set_mode(NW_JIT_VERIFY);
+            return shadow;
+        };
+        const uint32 reserve_load = (31u<<26)|(3u<<21)|(4u<<16)|(6u<<11)|(20u<<1);
+        const uint32 conditional_store = (31u<<26)|(3u<<21)|(5u<<16)|(6u<<11)|(150u<<1)|1u;
+        unsigned atomic_case = 0;
+        for (unsigned verify = 0; verify < 2; ++verify)
+        for (unsigned translated = 0; translated < 3; ++translated)
+        for (unsigned so = 0; so < 2; ++so)
+        for (unsigned scenario = 0; scenario < 6; ++scenario) {
+            mmu.reset(); mmu.set_msr(translated ? ppc32_mmu::MSR_DR : 0);
+            const uint32 logical = translated ? 0x20000000u : ram_base;
+            const uint32 alias = translated == 2 ? 0x30000000u : logical;
+            if (translated) mmu.set_dbat(0, logical | 2u, ram_base | 2u);
+            if (translated == 2) mmu.set_dbat(1, alias | 2u, ram_base | 2u);
+            const bool code = scenario >= 4, pair = scenario == 0 || scenario == 4;
+            const uint32 start = code ? logical + 0x14800 + 64 * (atomic_case % 8) : 0x90000 + 64 * atomic_case;
+            ++atomic_case;
+            nw_jit_cpu before = string_start(logical + 0x14008, start, so << 31);
+            cpu->gpr(4) = logical + 0x14008; cpu->gpr(5) = alias + 0x14008; cpu->gpr(6) = 0;
+            cpu->cr().set(0xf2345678); cpu->last_fetch_pa_ = code ? ram_base + (start & 0x1ffffu) : start;
+            cpu->regs().reserve_valid = scenario == 2;
+            cpu->regs().reserve_addr = ram_base + 0x1400c;
+            cpu->dec_pending_ = false; cpu->spcflags().init();
+            vm_write_memory_4(ram_base + 0x14008, 0x11223344);
+            uint32 ops[4]; unsigned n = 0;
+            if (pair || scenario == 3) { ops[n++] = reserve_load; ops[n++] = nw_ppc_addi(3,3,7); }
+            if (scenario != 3) ops[n++] = conditional_store;
+            ops[n++] = nw_ppc_addi(7,0,99);
+            const nw_jit_cpu result = atomic_run(ops, n, verify != 0);
+            const bool success = pair;
+            CHECK(cpu->gpr(3) == (pair || scenario == 3 ? 0x1122334bu : before.gpr[3]));
+            CHECK(cpu->gpr(7) == (scenario == 4 ? before.gpr[7] : 99));
+            CHECK(vm_read_memory_4(ram_base + 0x14008) == (success ? 0x1122334bu : 0x11223344u));
+            CHECK(cpu->cr().get() == (scenario == 3 ? 0xf2345678u : ((so | (success ? 2u : 0u)) << 28) | 0x02345678u));
+            CHECK(cpu->xer().get() == (so << 31));
+            CHECK(cpu->regs().reserve_valid == (scenario == 3));
+            CHECK(cpu->regs().reserve_addr == (pair || scenario == 3 ? ram_base + 0x14008 : ram_base + 0x1400c));
+            CHECK(result.fault == (scenario == 4 ? NW_JIT_FAULT_SMC : 0));
+            CHECK(cpu->pc() == start + (scenario == 4 ? 12 : 4 * n));
+            if (scenario == 4) CHECK(result.fault_ea == alias + 0x14008 && result.fault_width == 4 && result.fault_st == 1);
+            if (scenario == 3) {
+                // A reservation survives a block exit; a different logical
+                // address for the same PA must still complete its store.
+                const uint32 next = cpu->pc(); cpu->last_fetch_pa_ = next;
+                const nw_jit_cpu stored = atomic_run(&conditional_store, 1, verify != 0);
+                CHECK(!stored.fault && cpu->pc() == next + 4);
+                CHECK(!cpu->regs().reserve_valid && vm_read_memory_4(ram_base + 0x14008) == 0x1122334b);
+                CHECK(cpu->cr().get() == ((so | 2u) << 28 | 0x02345678u));
+            }
+        }
+        // Failed translations preserve the previous reservation and CR, even
+        // without a reservation; a protected load cannot publish a new one.
+        for (unsigned verify = 0; verify < 2; ++verify)
+        for (unsigned load = 0; load < 2; ++load)
+        for (unsigned valid = 0; valid < 2; ++valid) {
+            mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
+            mmu.set_dbat(0, 0x20000002u, ram_base | (load ? 0u : 1u));
+            const uint32 start = 0xa0000 + 64 * atomic_case++;
+            nw_jit_cpu before = string_start(0x20014008, start, 0x80000000);
+            cpu->gpr(4) = cpu->gpr(5) = 0x20014008; cpu->gpr(6) = 0;
+            cpu->cr().set(0xf2345678); cpu->regs().reserve_valid = valid; cpu->regs().reserve_addr = ram_base + 0x1400c;
+            vm_write_memory_4(ram_base + 0x14008, 0x11223344);
+            const uint32 ops[] = {load ? reserve_load : conditional_store, nw_ppc_addi(7,0,99)};
+            const nw_jit_cpu result = atomic_run(ops, 2, verify != 0);
+            CHECK(result.fault == NW_JIT_FAULT_DSI && result.pc == start);
+            CHECK(result.fault_ea == 0x20014008 && result.fault_width == 4 && result.fault_st == !load);
+            CHECK(cpu->pc() == 0x300 && cpu->dar_ == 0x20014008 && cpu->srr0_ == start);
+            CHECK(cpu->regs().reserve_valid == valid && cpu->regs().reserve_addr == ram_base + 0x1400c);
+            CHECK(cpu->cr().get() == 0xf2345678 && cpu->gpr(3) == before.gpr[3] && cpu->gpr(7) == before.gpr[7]);
+            CHECK(vm_read_memory_4(ram_base + 0x14008) == 0x11223344);
+        }
+        // Destructive device accesses execute only once; production callbacks
+        // must use the device decoder rather than a raw host pointer at the PA.
+        for (unsigned verify = 0; verify < 2; ++verify)
+        for (unsigned translated = 0; translated < 2; ++translated) {
+            mmu.reset(); mmu.set_msr(translated ? ppc32_mmu::MSR_DR : 0);
+            if (translated) mmu.set_dbat(0, (NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 2u, (NW_IO_VIA_PMU_BASE & 0xfffe0000u) | 2u);
+            const uint32 start = 0xb0000 + 64 * atomic_case++;
+            string_start(NW_IO_VIA_PMU_BASE, start, 0x80000000);
+            cpu->gpr(4) = cpu->gpr(5) = NW_IO_VIA_PMU_BASE; cpu->gpr(6) = 0;
+            cpu->regs().reserve_valid = 0; cpu->regs().reserve_addr = 0;
+            device.value = 10; const unsigned reads = device.reads, writes = device.writes;
+            const uint32 ops[] = {reserve_load, nw_ppc_addi(3,3,7), conditional_store};
+            const nw_jit_cpu result = atomic_run(ops, 3, verify != 0);
+            CHECK(!result.fault && cpu->gpr(3) == 17 && device.value == 17);
+            CHECK(device.reads == reads + 1 && device.writes == writes + 1);
+            CHECK(cpu->cr().get() == 0x32345678 && !cpu->regs().reserve_valid);
+        }
+        // Production tails and C successors carry the live reservation through
+        // an aliasing conditional store, permission fault or pending-event stop.
+        for (unsigned native_tail = 0; native_tail < 2; ++native_tail)
+        for (unsigned outcome = 0; outcome < 4; ++outcome) {
+            mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR | ppc32_mmu::MSR_EE);
+            mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
+            mmu.set_dbat(1, 0x30000002u, ram_base | (outcome == 1 ? 1u : 2u));
+            const uint32 start = ram_base + 0x17000 + 0x100 * (native_tail * 4 + outcome);
+            const nw_jit_cpu before = string_start(0x20014008, start, 0x80000000);
+            cpu->gpr(4) = 0x20014008; cpu->gpr(5) = 0x30014008 + (outcome == 3 ? 4 : 0); cpu->gpr(6) = 0;
+            cpu->cr().set(0xf2345678); cpu->regs().reserve_valid = 0; cpu->regs().reserve_addr = 0;
+            cpu->lr() = start + 0xc0;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = outcome == 2;
+            cpu->spcflags().init();
+            vm_write_memory_4(ram_base + 0x14008, 0x11223344); vm_write_memory_4(ram_base + 0x1400c, 0x55667788);
+            const uint32 first[] = {reserve_load, nw_ppc_addi(3,3,7), nw_ppc_b(0x38,0)};
+            const uint32 second[] = {conditional_store, nw_ppc_addi(7,0,99), nw_ppc_blr()};
+            nw_jit_set_mode(NW_JIT_ON);
+            CHECK(nw_jit_compile(first, 3, start, start & ~0xfffu, 2, 0) != NULL);
+            CHECK(nw_jit_compile(second, 3, start + 0x40, start & ~0xfffu, 2, 0) != NULL);
+            for (unsigned i = 0; i < 3; ++i) {
+                vm_write_memory_4(start + i * 4, first[i]); vm_write_memory_4(start + 0x40 + i * 4, second[i]);
+            }
+            nw_jit_itlb_fill(start, start);
+            nw_jit_set_host_chain(native_tail ? powerpc_cpu::jit_host_chain : NULL);
+            const uint64 hops = nw_jit_chain_hops();
+            CHECK(cpu->nw_jit_try(first[0]) == 1);
+            CHECK(nw_jit_chain_hops() == hops + (outcome == 2 ? 0 : 1));
+            CHECK(cpu->gpr(3) == 0x1122334b && cpu->gpr(7) == (outcome == 1 || outcome == 2 ? before.gpr[7] : 99));
+            CHECK(cpu->regs().reserve_valid == (outcome == 1 || outcome == 2) && cpu->regs().reserve_addr == ram_base + 0x14008);
+            CHECK(cpu->cr().get() == (outcome == 1 || outcome == 2 ? 0xf2345678u : outcome == 3 ? 0x12345678u : 0x32345678u));
+            CHECK(vm_read_memory_4(ram_base + 0x14008) == (outcome == 0 ? 0x1122334bu : 0x11223344u));
+            CHECK(vm_read_memory_4(ram_base + 0x1400c) == 0x55667788);
+            CHECK(cpu->pc() == (outcome == 1 ? 0x300 : outcome == 2 ? start + 0x40 : start + 0xc0));
+            if (outcome == 1) CHECK(cpu->dar_ == 0x30014008 && cpu->srr0_ == start + 0x40 && cpu->nw_jc_->fault_width == 4 && cpu->nw_jc_->fault_st == 1);
+            CHECK(cpu->dec_pending_ == (outcome == 2));
+            cpu->dec_pending_ = false;
+            nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+            nw_jit_set_mode(NW_JIT_VERIFY);
+        }
+        // A ROM conditional store follows the existing ignored-store policy:
+        // EQ succeeds, the reservation clears and physical ROM bytes stay put.
+        nw_banks_set(NW_PA_RAM, ram_base, 0x1e000);
+        nw_banks_set(NW_PA_ROM, ram_base + 0x1e000, 0x2000);
+        for (unsigned verify = 0; verify < 2; ++verify) {
+            mmu.reset(); mmu.set_msr(0);
+            string_start(ram_base + 0x1e008, 0xc0000 + verify * 64, 0);
+            cpu->gpr(4) = cpu->gpr(5) = ram_base + 0x1e008; cpu->gpr(6) = 0;
+            cpu->regs().reserve_valid = 0; cpu->regs().reserve_addr = 0;
+            vm_write_memory_4(ram_base + 0x1e008, 0x11223344);
+            const uint32 ops[] = {reserve_load, nw_ppc_addi(3,3,7), conditional_store};
+            const nw_jit_cpu result = atomic_run(ops, 3, verify != 0);
+            CHECK(!result.fault && cpu->gpr(3) == 0x1122334b && !cpu->regs().reserve_valid);
+            CHECK(cpu->cr().get() == 0x22345678 && vm_read_memory_4(ram_base + 0x1e008) == 0x11223344);
+        }
+        nw_banks_set(NW_PA_RAM, ram_base, 0x20000);
+        // Unmapped PA callbacks fail before dereferencing a host pointer or
+        // altering an old reservation, including a conditional-store mismatch.
+        mmu.reset(); mmu.set_msr(0);
+        for (unsigned store = 0; store < 2; ++store) {
+            cpu->regs().reserve_valid = 1; cpu->regs().reserve_addr = ram_base;
+            int fault = 0;
+            if (store) CHECK(powerpc_cpu::jit_host_stwcx(cpu, 0x60000000, 77, 0x1000, &fault) == 0);
+            else CHECK(powerpc_cpu::jit_host_lwarx(cpu, 0x60000000, 0x1000, &fault) == 0);
+            CHECK(fault == NW_JIT_FAULT_DSI && cpu->regs().reserve_valid == 1 && cpu->regs().reserve_addr == ram_base);
+        }
+        cpu->regs().reserve_valid = 0; cpu->regs().reserve_addr = 0;
         munmap(ram, 0x20000);
     } else if (ram != MAP_FAILED) munmap(ram, 0x20000);
 
@@ -381,10 +3650,11 @@ int ppc_core_test_access::run()
         (31u<<26)|(3u<<21)|(20u<<1), // lwarx
         (31u<<26)|(3u<<21)|(150u<<1)|1u, // stwcx.
         (31u<<26)|(3u<<21)|(4u<<16)|(1014u<<1), // dcbz
-        (31u<<26)|(3u<<21)|(597u<<1), // lswi
-        (31u<<26)|(3u<<21)|(725u<<1), // stswi
+        (31u<<26)|(3u<<21)|(1u<<11)|(597u<<1), // stale lswi, empty tape
+        (31u<<26)|(3u<<21)|(1u<<11)|(725u<<1), // stale stswi, empty tape
         (31u<<26)|(3u<<21)|(22u<<16)|(339u<<1), // mfspr DEC
-        (31u<<26)|(3u<<21)|(22u<<16)|(467u<<1) // mtspr DEC
+        (31u<<26)|(3u<<21)|(22u<<16)|(467u<<1), // mtspr DEC
+        (4u<<26)|2047u // invalid VMX must not borrow the live CPU
     };
     unsigned unsafe_case = 0;
     for (uint32 op : unsafe) {
@@ -394,6 +3664,12 @@ int ppc_core_test_access::run()
         shadow.gpr[3] = 0x30; shadow.gpr[4] = 0x8000;
         uint32 ops[] = {op};
         nw_jit_fn fn = nw_jit_compile(ops, 1, shadow.pc, shadow.pc & ~0xfffu, 0, 0);
+        if ((op >> 26) == 4) {
+            CHECK(fn == NULL);
+            CHECK(nw_jit_interp_n(&shadow, ops, 1, shadow.pc) == -1);
+            CHECK(!shadow.fault && trace.count == 0 && trace.cursor == 0);
+            continue;
+        }
         CHECK(fn != NULL);
         nw_jit_dtlb_fill(0x8000, 0x9000, 1, 0, 0);
         uint32 pa = 0; CHECK(nw_jit_dtlb_lookup(0x8000, 0, &pa));
@@ -426,6 +3702,66 @@ int ppc_core_test_access::run()
         CHECK(shadow.fpr[3] == expected && cpu->fpr_dw(3) == expected);
         CHECK(nw_jit_verify_misses() == misses);
     }
+    // Typed observations fail closed on missing/incorrect translations.
+    // A memory event cannot be substituted for a reservation translation, and
+    // a different translated PA must not satisfy an existing reservation.
+    for (unsigned mutation = 0; mutation < 4; ++mutation) {
+        nw_jit_verify_trace trace;
+        if (mutation == 1) trace.record(0xd0000, 0x8000, 4, false, 0x10000000);
+        else trace.record_translation(0xd0000, 0x8000, mutation == 2 ? 8 : 4, false, 0x10000000);
+        trace.record(0xd0000, 0x8000, 4, false, 42);
+        trace.record_translation(0xd0008, 0x9000, 4, true, mutation == 3 ? 0x10000004 : 0x10000000);
+        trace.record(0xd0008, 0x9000, 4, true, 49);
+        uint8 poison[32]; memset(poison, 0x7f, sizeof poison);
+        nw_jit_cpu shadow = {}; shadow.pc = 0xd0000; shadow.gpr[4] = 0x8000; shadow.gpr[5] = 0x9000;
+        shadow.mem = poison; shadow.mem_base = 0x8000; shadow.mem_size = sizeof poison;
+        shadow.verify_mem = nw_jit_verify_trace::replay; shadow.verify_context = &trace;
+        shadow.verify_xlate = nw_jit_verify_trace::replay_translation;
+        const uint32 ops[] = {(31u<<26)|(3u<<21)|(4u<<16)|(20u<<1), nw_ppc_addi(3,3,7),
+                              (31u<<26)|(3u<<21)|(5u<<16)|(150u<<1)|1u};
+        nw_jit_fn fn = nw_jit_compile(ops, 3, 0xd0000 + mutation * 0x40, 0xd0000, 0, 0); CHECK(fn != NULL);
+        // Tape PCs match the freshly compiled fixture for every mutation.
+        for (unsigned i = 0; i < trace.count; ++i) trace.accesses[i].pc += mutation * 0x40;
+        shadow.pc += mutation * 0x40;
+        nw_jit_cpu_bind(&shadow); nw_jit_tail_begin();
+        if (fn) fn(&shadow);
+        CHECK(trace.complete() == (mutation == 0));
+        if (!mutation) CHECK(shadow.gpr[3] == 49 && shadow.cr == 0x20000000 && !shadow.reserve_valid && shadow.reserve_ea == 0x10000000);
+        CHECK(poison[0] == 0x7f && poison[31] == 0x7f);
+    }
+    // Full-vector replay must reject missing or reordered subaccesses,
+    // translation substitutions, wrong widths and altered store values.
+    // Poisoned live DTLB/RAM cannot be used as a substitute for the tape.
+    for (unsigned store = 0; store < 2; ++store)
+    for (unsigned mutation = 0; mutation < 8; ++mutation) {
+        nw_jit_verify_trace trace;
+        const uint32 start = 0xe0000 + 64 * (store * 8 + mutation);
+        if (mutation == 1) trace.record(start, 0x8000, 16, store != 0, 0x10000000);
+        else trace.record_translation(start, mutation == 2 ? 0x8010 : 0x8000,
+            mutation == 3 ? 4 : 16, store != 0, 0x10000000,
+            mutation == 7 ? NW_JIT_FAULT_DSI : 0);
+        if (mutation != 7) for (unsigned w = 0; w < 4; ++w) {
+            if (mutation == 5 && w == 3) continue;
+            trace.record(start, 0x8000 + 4 * (mutation == 4 ? 3 - w : w),
+                mutation == 6 ? 2 : 4, store != 0, 0x01020304u + w + (mutation == 0 && store ? 1 : 0));
+        }
+        uint8 poison[4096]; memset(poison, 0x7f, sizeof poison);
+        nw_jit_dtlb_fill(0x8000, 0x10000000, 1, (uint64)(uintptr)poison, 0, 1);
+        nw_jit_cpu shadow = {}; shadow.pc = start; shadow.gpr[4] = 0x800f;
+        shadow.mem = poison; shadow.mem_base = 0x8000; shadow.mem_size = sizeof poison;
+        shadow.verify_mem = nw_jit_verify_trace::replay; shadow.verify_context = &trace;
+        shadow.verify_xlate = nw_jit_verify_trace::replay_translation;
+        for (unsigned w = 0; w < 4; ++w) shadow.vr[3][w] = 0x01020304u + w;
+        if (store) nw_jit_helper_stvx(&shadow, 3, 4, 0);
+        else nw_jit_helper_lvx(&shadow, 3, 4, 0);
+        const bool valid = mutation == 7 || (!store && mutation == 0);
+        CHECK(trace.complete() == valid);
+        CHECK(shadow.fault == (mutation == 7 ? NW_JIT_FAULT_DSI : mutation && mutation != 0 ? NW_JIT_FAULT_VERIFY : 0));
+        for (unsigned i = 0; i < sizeof poison; ++i) CHECK(poison[i] == 0x7f);
+        if (mutation == 7) CHECK(shadow.fault_ea == 0x8000 && shadow.fault_width == 16 && shadow.fault_st == store);
+        // Failed loads must leave the complete destination unchanged.
+        if (!store && mutation) for (unsigned w = 0; w < 4; ++w) CHECK(shadow.vr[3][w] == 0x01020304u + w);
+    }
     // Mutation checks: wrong address/value/order and missing stores must fail.
     for (unsigned mutation = 0; mutation < 5; ++mutation) {
         nw_jit_verify_trace trace;
@@ -450,9 +3786,11 @@ int ppc_core_test_access::run()
         if (width == 8) { nw_jit_helper_lfd(&shadow, 3, 0, 0x8000); nw_jit_helper_stfd(&shadow, 3, 0, 0x8000); }
         CHECK(trace.complete() && !shadow.fault);
     }
-    CHECK(!nw_jit_op_verify_safe(0x4c000064u)); // rfi
-    CHECK(!nw_jit_op_verify_safe((31u<<26)|(20u<<1))); // lwarx
-    CHECK(!nw_jit_op_verify_safe(4u<<26)); // delegated VMX
+    CHECK(nw_jit_op_verify_safe(0x4c000064u)); // rfi
+    CHECK(nw_jit_op_verify_safe((31u<<26)|(20u<<1))); // lwarx
+    CHECK(nw_jit_op_verify_safe((31u<<26)|(150u<<1)|1u)); // stwcx.
+    CHECK(nw_jit_op_verify_safe((4u<<26)|10u)); // private VMX FP
+    for (unsigned xo : {533u, 597u, 661u, 725u}) CHECK(nw_jit_op_verify_safe((31u<<26)|(xo<<1)));
     nw_jit_set_mode(NW_JIT_ON);
     mmu.reset();
     // Re-enabling EE via rfi exposes the retained DEC request immediately.
@@ -474,7 +3812,7 @@ static int replay_capture(const char *path)
     FILE *file = fopen(path, "r");
     if (!file) { perror(path); return 2; }
     char line[512];
-    if (!fgets(line, sizeof line, file) || strcmp(line, "NW-PPC-VERIFY 1\n")) { fclose(file); return 2; }
+    if (!fgets(line, sizeof line, file) || (strcmp(line, "NW-PPC-VERIFY 1\n") && strcmp(line, "NW-PPC-VERIFY 2\n") && strcmp(line, "NW-PPC-VERIFY 3\n"))) { fclose(file); return 2; }
     nw_jit_cpu input = {}, expected = {};
     nw_jit_verify_trace trace;
     uint32 ops[NW_JIT_MAX_BLOCK] = {};
@@ -489,7 +3827,14 @@ static int replay_capture(const char *path)
         if (sscanf(line, "fault %u %x %u %u", &expected.fault, &expected.fault_ea, &expected.fault_width, &expected.fault_st) == 4) continue;
         if (sscanf(line, "input %x %x %x %x %x %x %x %x", &input.cr, &input.xer, &input.fpscr, &input.lr, &input.ctr, &input.dec, &input.msr, &input.vscr) == 8) continue;
         if (sscanf(line, "reference %x %x %x %x %x %x %x %x pc %x", &expected.cr, &expected.xer, &expected.fpscr, &expected.lr, &expected.ctr, &expected.dec, &expected.msr, &expected.vscr, &expected.pc) == 9) continue;
+        if (sscanf(line, "exception %x %x %x %x", &input.srr0, &input.srr1, &expected.srr0, &expected.srr1) == 4) continue;
         unsigned gi, gr, gj;
+        unsigned iv, ip, rv, rp, nv, np;
+        if (sscanf(line, "reservation %u %x %u %x %u %x", &iv, &ip, &rv, &rp, &nv, &np) == 6) {
+            if (iv > 1 || rv > 1 || nv > 1) { fclose(file); return 2; }
+            input.reserve_valid = iv; input.reserve_ea = ip;
+            expected.reserve_valid = rv; expected.reserve_ea = rp; continue;
+        }
         if (sscanf(line, "gpr %u %x %x %x", &index, &gi, &gr, &gj) == 4) {
             if (index >= 32) { fclose(file); return 2; }
             input.gpr[index] = gi; expected.gpr[index] = gr; continue;
@@ -503,6 +3848,15 @@ static int replay_capture(const char *path)
             input.vr[index][word] = gi; expected.vr[index][word] = gr; continue;
         }
         unsigned pc, ea, width, store, fault;
+        if (sscanf(line, "system %x %x %u %u %u %llx", &pc, &ea, &width, &store, &fault, &a) == 6) {
+            if (trace.count == trace.capacity || fault > NW_SYS_SMC || !nw_jit_op_system(ea)) { fclose(file); return 2; }
+            nw_jit_system_result result = {uint32(a),uint32(a >> 32),fault};
+            trace.record_system(pc,ea,width,store,result); continue;
+        }
+        if (sscanf(line, "translation %x %x %u %u %u %llx", &pc, &ea, &width, &store, &fault, &a) == 6) {
+            if ((width != 4 && width != 16) || store > 1 || a > UINT32_MAX || trace.count == trace.capacity) { fclose(file); return 2; }
+            trace.record_translation(pc, ea, width, store != 0, uint32(a), fault); continue;
+        }
         if (sscanf(line, "access %x %x %u %u %u %llx", &pc, &ea, &width, &store, &fault, &a) == 6) {
             if ((width != 1 && width != 2 && width != 4 && width != 8) || store > 1 || trace.count == trace.capacity) { fclose(file); return 2; }
             trace.record(pc, ea, width, store != 0, a, fault);
@@ -515,6 +3869,8 @@ static int replay_capture(const char *path)
         ((input.msr & ppc32_mmu::MSR_IR) ? 1u : 0u) | ((input.msr & ppc32_mmu::MSR_DR) ? 2u : 0u) | ((input.msr & ppc32_mmu::MSR_PR) ? 4u : 0u), 0);
     if (!fn) return 2;
     input.verify_mem = nw_jit_verify_trace::replay; input.verify_context = &trace;
+    input.verify_xlate = nw_jit_verify_trace::replay_translation;
+    input.verify_system = nw_jit_verify_trace::replay_system;
     nw_jit_cpu_bind(&input); nw_jit_tail_begin(); fn(&input);
     CHECK(trace.complete());
     CHECK((input.fault == NW_JIT_FAULT_SMC ? input.pc + 4 : input.pc) == expected.pc);
@@ -523,7 +3879,9 @@ static int replay_capture(const char *path)
     CHECK(input.ctr == expected.ctr); CHECK(input.dec == expected.dec);
     CHECK(input.msr == expected.msr); CHECK(input.vscr == expected.vscr);
     CHECK(input.fault == expected.fault);
-    if (expected.fault) { CHECK(input.fault_ea == expected.fault_ea); CHECK(input.fault_width == expected.fault_width); CHECK(input.fault_st == expected.fault_st); }
+    CHECK(input.reserve_valid == expected.reserve_valid); CHECK(input.reserve_ea == expected.reserve_ea);
+    if (expected.fault == NW_JIT_FAULT_EXC) { CHECK(input.srr0 == expected.srr0); CHECK(input.srr1 == expected.srr1); }
+    if (expected.fault != NW_JIT_FAULT_EXC && expected.fault) { CHECK(input.fault_ea == expected.fault_ea); CHECK(input.fault_width == expected.fault_width); CHECK(input.fault_st == expected.fault_st); }
     for (unsigned i = 0; i < 32; ++i) {
         CHECK(input.gpr[i] == expected.gpr[i]); CHECK(input.fpr[i] == expected.fpr[i]);
         for (unsigned w = 0; w < 4; ++w) CHECK(input.vr[i][w] == expected.vr[i][w]);
@@ -533,6 +3891,20 @@ static int replay_capture(const char *path)
 }
 
 extern "C" int ppc_test_main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--vmx-policy")) {
+        for (unsigned prim : {4u,31u})
+        for (unsigned low = 0; low < 2048; ++low)
+        for (unsigned field : {21u,16u,11u})
+        for (unsigned value = 0; value < 32; ++value) {
+            const uint32 op = (prim<<26) | low | (value<<field);
+            printf("VMX %08x %d\n", op, nw_jit_op_supported(op));
+        }
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--basic-special-p6")) { powerpc_cpu *cpu=new powerpc_cpu; int status=ppc_core_test_access::basic_special_p6(cpu); printf("P6 basic special tests: %u passed, %u failed\n",passed,failed); return status; }
+    if (argc == 2 && !strcmp(argv[1], "--frsp-p6")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::frsp_p6(cpu); printf("P6 frsp tests: %u passed, %u failed\n",passed,failed); return status; }
+    if (argc == 2 && !strcmp(argv[1], "--scalar-p6")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::scalar_p6(cpu); printf("P6 scalar tests: %u passed, %u failed\n",passed,failed); return status; }
+    if (argc == 2 && !strcmp(argv[1], "--io-publication")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::io_publication(cpu); printf("Raw file-read tests: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 3 && !strcmp(argv[1], "--replay")) return replay_capture(argv[2]);
     return ppc_core_test_access::run();
 }

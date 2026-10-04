@@ -13,13 +13,15 @@ static inline int ppc_native_rounding(unsigned rn)
 }
 
 class ppc_fp_environment {
+    bool active_;
 #if defined(__aarch64__)
     uint64_t control_, status_;
 #else
     fenv_t saved_;
 #endif
 public:
-    explicit ppc_fp_environment(unsigned fpscr) {
+    explicit ppc_fp_environment(unsigned fpscr, bool active = true) : active_(active) {
+        if (!active_) return;
 #if defined(__aarch64__)
         __asm__ volatile("mrs %0, fpcr\n\tmrs %1, fpsr" : "=r"(control_), "=r"(status_) :: "memory");
         // ARM RN order is nearest, +inf, -inf, zero. Disable host traps,
@@ -33,6 +35,7 @@ public:
 #endif
     }
     ~ppc_fp_environment() {
+        if (!active_) return;
 #if defined(__aarch64__)
         __asm__ volatile("msr fpcr, %0\n\tmsr fpsr, %1" :: "r"(control_), "r"(status_) : "memory");
 #else

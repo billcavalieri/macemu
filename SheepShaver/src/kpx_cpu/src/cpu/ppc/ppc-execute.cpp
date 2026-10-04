@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <time.h>
+#include <type_traits>
 #ifdef __MINGW64__
 #include <fenv.h>
 #endif
@@ -462,7 +463,8 @@ void powerpc_cpu::execute_multiply(uint32 opcode)
 
 void powerpc_cpu::record_fpscr(int exceptions)
 {
-    if (exceptions) fpscr() |= 0x80000000u | exceptions;
+    if (uint32(exceptions) & ~fpscr()) fpscr() |= 0x80000000u;
+    fpscr() |= exceptions;
     fpscr() = ppc_fpscr_summaries(fpscr());
 }
 
@@ -482,6 +484,53 @@ void powerpc_cpu::record_fpscr(int exceptions)
 template< class FP, class OP, class RD, class RA, class RB, class RC, class Rc, bool FPSCR >
 void powerpc_cpu::execute_fp_arith(uint32 opcode)
 {
+    const unsigned kind = (opcode >> 1) & 31u;
+    if (FPSCR && ppc32_guest_mmu_enabled() && (kind == 18 || kind == 20 || kind == 21 || kind == 25)) {
+        {
+        const ppc_fp_environment fp_env(fpscr());
+        const double a = RA::get(this, opcode), b = RB::get(this, opcode);
+        const bool nan_a = is_NaN(a), nan_b = is_NaN(b), ai = isinf(a), bi = isinf(b);
+        const bool negative_a = signbit(a), negative_b = signbit(b);
+        uint32 causes = 0;
+        any_register result;
+        if (nan_a || nan_b) {
+            any_register selected; selected.d = nan_a ? a : b;
+            result.j = selected.j | UVAL64(0x0008000000000000);
+            if (is_SNaN(a) || is_SNaN(b)) causes = 0x01000000u;
+        } else if ((kind == 20 || kind == 21) && ai && bi &&
+                   (negative_a != (negative_b != (kind == 20)))) causes = 0x00800000u;
+        else if (kind == 25 && ((ai && b == 0) || (bi && a == 0))) causes = 0x00100000u;
+        else if (kind == 18) {
+            if (ai && bi) causes = 0x00400000u;
+            else if (a == 0 && b == 0) causes = 0x00200000u;
+            else if (!ai && a != 0 && b == 0) causes = 0x04000000u;
+        }
+        if (causes & 0x00f00000u) result.j = UVAL64(0x7ff8000000000000);
+        const bool suppressed = ((causes & 0x01f00000u) && (fpscr() & 0x80u)) ||
+                                ((causes & 0x04000000u) && (fpscr() & 0x10u));
+        // Special arithmetic is exact or undefined; finite FR/FI and newly
+        // raised OX/UX/XX remain a separate, unqualified arithmetic milestone.
+        const bool exact_special = ai || bi || ((kind == 20 || kind == 21) ? a == 0 && b == 0 : a == 0 || b == 0);
+        if (nan_a || nan_b || causes || exact_special) fpscr() &= ~0x60000u;
+        record_fpscr(causes);
+        if (!suppressed) {
+            if (!(nan_a || nan_b || (causes & 0x00f00000u))) {
+                const FP rounded = op_apply<double, OP, RA, RB, RC>::apply(a, b, 0);
+                result.d = rounded;
+                fp_classify(rounded);
+            } else fpscr() = (fpscr() & ~0x1f000u) | 0x11000u;
+            // Do not round propagated NaNs to single: arithmetic retains the
+            // whole selected FPR payload in both precision forms.
+            RD::set(this, opcode, result.d);
+        }
+        } // Program exception entry observes the caller's FP environment.
+        if (Rc::test(opcode)) record_cr1();
+        if ((fpscr() & 0x40000000u) && (ppc32_guest_mmu().msr() & 0x900u)) {
+            take_program(0x00100000u); return;
+        }
+        increment_pc(4); return;
+    }
+
 	const ppc_fp_environment fp_env(fpscr());
 	const double a = RA::get(this, opcode);
 	const double b = RB::get(this, opcode);
@@ -851,38 +900,29 @@ void powerpc_cpu::execute_load_string(uint32 opcode)
 		nb = 32;
 
 	int rd = rD_field::extract(opcode);
-	int i;
-	for (i = 0; nb - i >= 4; i += 4, rd = (rd + 1) & 0x1f) {
-		uint32 pa;
-		if (!guest_data_xlate(ea + i, 4, false, &pa))
-			return;
-		gpr(rd) = pa_read_4(pa, pc());
-	}
-	switch (nb - i) {
-	case 1: {
-		uint32 pa;
-		if (!guest_data_xlate(ea + i, 1, false, &pa))
-			return;
-		gpr(rd) = pa_read_1(pa, pc()) << 24;
-		break;
-	}
-	case 2: {
-		uint32 pa;
-		if (!guest_data_xlate(ea + i, 2, false, &pa))
-			return;
-		gpr(rd) = pa_read_2(pa, pc()) << 16;
-		break;
-	}
-	case 3: {
-		uint32 pa;
-		if (!guest_data_xlate(ea + i, 2, false, &pa))
-			return;
-		uint32 hi = pa_read_2(pa, pc());
-		if (!guest_data_xlate(ea + i + 2, 1, false, &pa))
-			return;
-		gpr(rd) = (hi << 16) + (pa_read_1(pa, pc()) << 8);
-		break;
-	}
+	for (int i = 0; i < nb; rd = (rd + 1) & 31) {
+		const unsigned bytes = (nb - i >= 4) ? 4 : nb - i;
+		uint32 value = 0;
+		for (unsigned b = 0; b < bytes;) {
+			const uint32 address = ea + i + b;
+			const unsigned available = 4096 - (address & 4095);
+			// Preserve ordinary word/halfword reads, but never translate only
+			// the start of a read spanning a different page's permissions/PA.
+			const unsigned width = bytes - b >= 4 && available >= 4 ? 4 :
+			                       bytes - b >= 2 && available >= 2 ? 2 : 1;
+			uint32 pa;
+			if (!guest_data_xlate(address, width, false, &pa)) return;
+			uint32 part;
+			if (width == 4) part = VERIFY_PA_READ(pa, 4);
+			else if (width == 2) part = VERIFY_PA_READ(pa, 2);
+			else part = VERIFY_PA_READ(pa, 1);
+			value |= part << (8 * (4 - b - width));
+			b += width;
+		}
+		// Retain completed earlier registers; a fault within this register
+		// does not expose an unfinished result.
+		gpr(rd) = value;
+		i += bytes;
 	}
 
 	increment_pc(4);
@@ -905,7 +945,7 @@ void powerpc_cpu::execute_store_string(uint32 opcode)
 		uint32 pa;
 		if (!guest_data_xlate(ea + i, 1, true, &pa))
 			return;
-		pa_write_1(pa, gpr(rs) >> sh, pc());
+		VERIFY_PA_WRITE(pa, 1, gpr(rs) >> sh);
 		sh -= 8;
 		if (sh < 0) {
 			sh = 24;
@@ -927,9 +967,9 @@ void powerpc_cpu::execute_lwarx(uint32 opcode)
 {
 	const uint32 ea = RA::get(this, opcode) + operand_RB::get(this, opcode);
 	uint32 pa;
-	if (!guest_data_xlate(ea, 4, false, &pa))
+	if (!guest_data_xlate(ea, 4, false, &pa, true))
 		return;
-	uint32 reserve_data = pa_read_4(pa, pc());
+	uint32 reserve_data = VERIFY_PA_READ(pa, 4);
 	regs().reserve_valid = 1;
 	regs().reserve_addr = pa;
 #if KPX_MAX_CPUS != 1
@@ -944,16 +984,16 @@ void powerpc_cpu::execute_stwcx(uint32 opcode)
 {
 	const uint32 ea = RA::get(this, opcode) + operand_RB::get(this, opcode);
 	uint32 pa;
-	if (!guest_data_xlate(ea, 4, true, &pa))
+	if (!guest_data_xlate(ea, 4, true, &pa, true))
 		return;
 	cr().clear(0);
 	if (regs().reserve_valid) {
 		if (regs().reserve_addr == pa
 #if KPX_MAX_CPUS != 1
-			&& regs().reserve_data == pa_read_4(pa, pc())
+			&& regs().reserve_data == VERIFY_PA_READ(pa, 4)
 #endif
 			) {
-			pa_write_4(pa, operand_RS::get(this, opcode), pc());
+			VERIFY_PA_WRITE(pa, 4, operand_RS::get(this, opcode));
 			cr().set(0, standalone_CR_EQ_field::mask());
 		}
 		regs().reserve_valid = 0;
@@ -971,6 +1011,7 @@ void powerpc_cpu::execute_stwcx(uint32 opcode)
 template< bool OC >
 void powerpc_cpu::execute_fp_compare(uint32 opcode)
 {
+	{
 	const ppc_fp_environment fp_env(fpscr());
 	const double a = operand_fp_RA::get(this, opcode);
 	const double b = operand_fp_RB::get(this, opcode);
@@ -989,7 +1030,6 @@ void powerpc_cpu::execute_fp_compare(uint32 opcode)
 	FPSCR_FPCC_field::insert(fpscr(), c);
 	cr().set(crfd, c);
 	// Update FPSCR exception bits
-#if PPC_ENABLE_FPU_EXCEPTIONS
 	int exceptions = 0;
 	if (is_SNaN(a) || is_SNaN(b)) {
 		exceptions |= FPSCR_VXSNAN_field::mask();
@@ -998,9 +1038,12 @@ void powerpc_cpu::execute_fp_compare(uint32 opcode)
 	}
 	else if (OC && (is_QNaN(a) || is_QNaN(b)))
 		exceptions |= FPSCR_VXVC_field::mask();
-	record_fpscr(exceptions);
-#endif
+	if (ppc32_guest_mmu_enabled() || PPC_ENABLE_FPU_EXCEPTIONS) record_fpscr(exceptions);
+	}
 
+    if (ppc32_guest_mmu_enabled() && (fpscr() & 0x40000000u) && (ppc32_guest_mmu().msr() & 0x900u)) {
+        take_program(0x00100000u); return;
+    }
 	increment_pc(4);
 }
 
@@ -1014,64 +1057,36 @@ void powerpc_cpu::execute_fp_compare(uint32 opcode)
 template< class RN, class Rc >
 void powerpc_cpu::execute_fp_int_convert(uint32 opcode)
 {
-	const ppc_fp_environment fp_env(fpscr());
-	const double b = operand_fp_RB::get(this, opcode);
-	const uint32 r = RN::get(this, opcode);
-	any_register d;
-
-#if PPC_ENABLE_FPU_EXCEPTIONS
-	int exceptions = 0;
-	if (is_NaN(b)) {
-		exceptions |= FPSCR_VXCVI_field::mask();
-		if (is_SNaN(b))
-			exceptions |= FPSCR_VXSNAN_field::mask();
-	}
-	if (isinf(b))
-		exceptions |= FPSCR_VXCVI_field::mask();
-
-	feclearexcept(FE_ALL_EXCEPT);
-	febarrier();
-#endif
-
-	// Convert to integer word if operand fits bounds
-	if (b >= -(double)0x80000000 && b <= (double)0x7fffffff) {
-#if defined mathlib_lrint
-		int old_round = fegetround();
-		fesetround(ppc_native_rounding(r));
-		d.j = (int32)mathlib_lrint(b);
-		fesetround(old_round);
-#else
-		switch (r) {
-		case 0: d.j = (int32)op_frin::apply(b); break; // near
-		case 1: d.j = (int32)op_friz::apply(b); break; // zero
-		case 2: d.j = (int32)op_frip::apply(b); break; // +inf
-		case 3: d.j = (int32)op_frim::apply(b); break; // -inf
-		}
-#endif
-	}
-
-	// NOTE: this catches infinity and NaN operands
-	else if (b > 0)
-		d.j = 0x7fffffff;
-	else
-		d.j = (int32)0x80000000u; // sign-extend the chosen integer-word representation
-	// Update FPSCR exception bits
-#if PPC_ENABLE_FPU_EXCEPTIONS
-	febarrier();
-	int raised = fetestexcept(FE_ALL_EXCEPT);
-	if (raised & FE_UNDERFLOW)
-		exceptions |= FPSCR_UX_field::mask();
-	if (raised & FE_INEXACT)
-		exceptions |= FPSCR_XX_field::mask();
-	record_fpscr(exceptions);
-#endif
-	// Set CR1 (FX, FEX, VX, VOX) if instruction has Rc set
-	if (Rc::test(opcode))
-		record_cr1();
-
-	// Commit result to output operand
-	operand_fp_RD::set(this, opcode, d.d);
-	increment_pc(4);
+    {
+    const uint32 rn = RN::get(this, opcode);
+    const ppc_fp_environment fp_env(rn);
+    const double input = operand_fp_RB::get(this, opcode);
+    const bool nan = is_NaN(input), signaling = is_SNaN(input);
+    const double rounded = nan || isinf(input) ? input : nearbyint(input);
+    const bool invalid = nan || rounded < -2147483648.0 || rounded > 2147483647.0;
+    const bool track = ppc32_guest_mmu_enabled() || PPC_ENABLE_FPU_EXCEPTIONS;
+    int exceptions = 0;
+    if (track) fpscr() &= ~(FPSCR_FR_field::mask() | FPSCR_FI_field::mask());
+    if (invalid) {
+        exceptions = FPSCR_VXCVI_field::mask();
+        if (signaling) exceptions |= FPSCR_VXSNAN_field::mask();
+    } else if (rounded != input) {
+        if (track) fpscr() |= FPSCR_FI_field::mask();
+        exceptions = FPSCR_XX_field::mask();
+        if (track && fabs(rounded) > fabs(input)) fpscr() |= FPSCR_FR_field::mask();
+    }
+    if (track) record_fpscr(exceptions);
+    if (!(track && invalid && FPSCR_VE_field::test(fpscr()))) {
+        any_register output;
+        output.j = invalid ? nan || input < 0 ? int32(0x80000000u) : int32(0x7fffffffu) : int64(rounded);
+        operand_fp_RD::set(this, opcode, output.d);
+    }
+    }
+    if (Rc::test(opcode)) record_cr1();
+    if (ppc32_guest_mmu_enabled() && (fpscr() & 0x40000000u) && (ppc32_guest_mmu().msr() & 0x900u)) {
+        take_program(0x00100000u); return;
+    }
+    increment_pc(4);
 }
 
 /**
@@ -1122,6 +1137,68 @@ void powerpc_cpu::fp_classify(FP x)
 template< class Rc >
 void powerpc_cpu::execute_fp_round(uint32 opcode)
 {
+    if (ppc32_guest_mmu_enabled()) {
+        {
+        const ppc_fp_environment fp_env(fpscr());
+        const double input = operand_fp_RB::get(this,opcode);
+        any_register source; source.d = input;
+        const bool negative = signbit(input), nan = is_NaN(input), signaling = is_SNaN(input);
+        uint32 causes = 0, classification = 0;
+        any_register result; result.d = input;
+        bool suppressed = false;
+        if (nan) {
+            fpscr() &= ~0x60000u;
+            if (signaling) { causes = 0x01000000u; suppressed = (fpscr() & 0x80u) != 0; }
+            result.j = (source.j | UVAL64(0x0008000000000000)) & ~UVAL64(0x1fffffff);
+            classification = 17;
+        } else if (isinf(input)) classification = negative ? 9 : 5;
+        else if (input == 0) { fpscr() &= ~0x60000u; classification = negative ? 18 : 2; }
+        else {
+            // Numeric rounding is independent of the JIT's integer-significand
+            // kernel. Scaling remains within double's exponent range even for
+            // the smallest subnormal and the enabled +/-192 adjustments.
+            int exponent;
+            const double magnitude = fabs(input);
+            const double fraction = frexp(input,&exponent);
+            const bool tiny = magnitude < 0x1p-126, enabled_underflow = tiny && (fpscr() & 0x20u);
+            const int scale = tiny && !enabled_underflow ? 149 : 24-exponent;
+            const double scaled = tiny && !enabled_underflow ? ldexp(input,149) : ldexp(fraction,24);
+            const double rounded = nearbyint(scaled);
+            const bool inexact = rounded != scaled, increment = fabs(rounded) > fabs(scaled);
+            fpscr() &= ~0x60000u;
+            if (inexact) { fpscr() |= 0x20000u; causes |= 0x02000000u; }
+            if (increment) fpscr() |= 0x40000u;
+            if (tiny && (enabled_underflow || inexact)) causes |= 0x08000000u;
+            // Compare before rescaling so rounding DBL_MAX cannot overflow
+            // the host and destroy the enabled-overflow adjusted significand.
+            const bool overflow = !tiny && (exponent > 128 || (exponent == 128 && fabs(rounded) == 0x1p24));
+            if (overflow) causes |= 0x10000000u;
+            if (overflow && !(fpscr() & 0x40u)) {
+                const unsigned rn = fpscr() & 3u;
+                const bool infinity = rn == 0 || (rn == 2 && !negative) || (rn == 3 && negative);
+                result.d = copysign(infinity ? INFINITY : 0x1.fffffep127,input);
+                fpscr() = (fpscr() & ~0x40000u) | 0x20000u; // undefined FR profile: zero
+                causes |= 0x02000000u;
+                classification = infinity ? negative ? 9 : 5 : negative ? 8 : 4;
+            } else {
+                result.d = ldexp(rounded,-scale + (enabled_underflow ? 192 : overflow ? -192 : 0));
+                classification = result.d == 0 ? negative ? 18 : 2 :
+                    tiny && !enabled_underflow && fabs(result.d) < 0x1p-126 ? negative ? 24 : 20 : negative ? 8 : 4;
+            }
+        }
+        record_fpscr(causes);
+        if (!suppressed) {
+            operand_fp_RD::set(this,opcode,result.d);
+            fpscr() = (fpscr() & ~0x1f000u) | (classification << 12);
+        }
+        } // Restore host rounding and flags before publishing the exception.
+        if (Rc::test(opcode)) record_cr1();
+        if ((fpscr() & 0x40000000u) && (ppc32_guest_mmu().msr() & 0x900u)) {
+            take_program(0x00100000u); return;
+        }
+        increment_pc(4); return;
+    }
+
 	const ppc_fp_environment fp_env(fpscr());
 	const double b = operand_fp_RB::get(this, opcode);
 
@@ -1158,6 +1235,7 @@ void powerpc_cpu::execute_fp_round(uint32 opcode)
 	// Commit result to output operand
 	operand_fp_RD::set(this, opcode, (double)d);
 	increment_pc(4);
+
 }
 
 /**
@@ -1318,6 +1396,9 @@ void powerpc_cpu::execute_mffs(uint32 opcode)
 
 void powerpc_cpu::execute_mfmsr(uint32 opcode)
 {
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
 	uint32 msr = 0xf072;
 	if (ppc32_guest_mmu_enabled())
 		msr = ppc32_guest_mmu().msr();
@@ -1327,6 +1408,9 @@ void powerpc_cpu::execute_mfmsr(uint32 opcode)
 
 void powerpc_cpu::execute_mtmsr(uint32 opcode)
 {
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
 	if (ppc32_guest_mmu_enabled()) {
 		const uint32 msr = operand_RS::get(this, opcode);
 		const uint32 old = ppc32_guest_mmu().msr();
@@ -1334,6 +1418,7 @@ void powerpc_cpu::execute_mtmsr(uint32 opcode)
 #ifdef SHEEPSHAVER
 		nw_log_msr_dr(msr);
 		nw_log_msr_write("mtmsr", pc(), msr);
+		nw_jit_itlb_note_msr(old, msr);
 #endif
 		if ((old ^ msr) & 0x00000030u)
 			nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_MTMSR);
@@ -1343,6 +1428,9 @@ void powerpc_cpu::execute_mtmsr(uint32 opcode)
 
 void powerpc_cpu::execute_mfsr(uint32 opcode)
 {
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
 	uint32 d = 0;
 	if (ppc32_guest_mmu_enabled())
 		d = ppc32_guest_mmu().sr(rA_field::extract(opcode) & 0xfu);
@@ -1352,6 +1440,9 @@ void powerpc_cpu::execute_mfsr(uint32 opcode)
 
 void powerpc_cpu::execute_mtsr(uint32 opcode)
 {
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
 	if (ppc32_guest_mmu_enabled()) {
 		const unsigned i = rA_field::extract(opcode) & 0xfu;
 		const uint32 val = operand_RS::get(this, opcode);
@@ -1367,6 +1458,9 @@ void powerpc_cpu::execute_mtsr(uint32 opcode)
 
 void powerpc_cpu::execute_mfsrin(uint32 opcode)
 {
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
 	uint32 d = 0;
 	if (ppc32_guest_mmu_enabled()) {
 		const uint32 ea = operand_RB::get(this, opcode);
@@ -1378,6 +1472,9 @@ void powerpc_cpu::execute_mfsrin(uint32 opcode)
 
 void powerpc_cpu::execute_mtsrin(uint32 opcode)
 {
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
 	if (ppc32_guest_mmu_enabled()) {
 		const uint32 ea = operand_RB::get(this, opcode);
 		const unsigned i = (ea >> 28) & 0xfu;
@@ -1394,6 +1491,9 @@ void powerpc_cpu::execute_mtsrin(uint32 opcode)
 
 void powerpc_cpu::execute_rfi(uint32 opcode)
 {
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
 	(void)opcode;
 	if (ppc32_guest_mmu_enabled()) {
 		finish_fpu_rfi();
@@ -1402,10 +1502,11 @@ void powerpc_cpu::execute_rfi(uint32 opcode)
 #ifdef SHEEPSHAVER
 		nw_log_msr_dr(srr1_);
 		nw_log_msr_write("rfi", srr0_, srr1_);
+		nw_jit_itlb_note_msr(old, srr1_);
 		nw_log_emu_rfi(srr0_, srr1_, cr().get(), sprg(0));
 #endif
 		nw_jit_dtlb_flush_if_pr(old, srr1_, NW_JIT_DTLB_FL_RFI);
-		pc() = srr0_;
+		pc() = srr0_ & ~3u;
 		return;
 	}
 	increment_pc(4);
@@ -1413,6 +1514,9 @@ void powerpc_cpu::execute_rfi(uint32 opcode)
 
 void powerpc_cpu::execute_tlbie(uint32 opcode)
 {
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
 	if (ppc32_guest_mmu_enabled()) {
 		const uint32 ea = operand_RB::get(this, opcode);
 		ppc32_guest_mmu().tlbie(ea);
@@ -1424,6 +1528,9 @@ void powerpc_cpu::execute_tlbie(uint32 opcode)
 
 void powerpc_cpu::execute_tlbia(uint32 opcode)
 {
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
 	(void)opcode;
 	if (ppc32_guest_mmu_enabled()) {
 		ppc32_guest_mmu().tlbia();
@@ -1435,6 +1542,9 @@ void powerpc_cpu::execute_tlbia(uint32 opcode)
 
 void powerpc_cpu::execute_tlbsync(uint32 opcode)
 {
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
 	(void)opcode;
 	increment_pc(4);
 }
@@ -1445,7 +1555,11 @@ void powerpc_cpu::execute_mfspr(uint32 opcode)
 	const uint32 spr = SPR::get(this, opcode);
 	uint32 d;
 	if (ppc32_guest_mmu_enabled()) {
-		switch (mfspr_guest(spr, &d)) {
+		const spr_access_result result = mfspr_guest(spr, &d);
+#ifdef SHEEPSHAVER
+		nw_verify_system_status_ = result == SPR_ACCESS_NOP ? NW_SYS_NOP : result == SPR_ACCESS_EXC ? NW_SYS_PRIV : NW_SYS_OK;
+#endif
+		switch (result) {
 		case SPR_ACCESS_OK:
 			operand_RD::set(this, opcode, d);
 			/* fall through */
@@ -1484,7 +1598,11 @@ void powerpc_cpu::execute_mtspr(uint32 opcode)
 	const uint32 s = operand_RS::get(this, opcode);
 
 	if (ppc32_guest_mmu_enabled()) {
-		if (mtspr_guest(spr, s) != SPR_ACCESS_EXC)
+		const spr_access_result result = mtspr_guest(spr, s);
+#ifdef SHEEPSHAVER
+		nw_verify_system_status_ = result == SPR_ACCESS_NOP ? NW_SYS_NOP : result == SPR_ACCESS_EXC ? NW_SYS_PRIV : NW_SYS_OK;
+#endif
+		if (result != SPR_ACCESS_EXC)
 			increment_pc(4);
 		return;
 	}
@@ -1590,6 +1708,14 @@ void powerpc_cpu::execute_icbi(uint32 opcode)
 	increment_pc(4);
 }
 
+void powerpc_cpu::execute_dcbi(uint32 opcode)
+{
+	if (ppc32_guest_mmu_enabled() && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR)) {
+		take_program(0x00040000u); return;
+	}
+	increment_pc(4); // no data-cache model
+}
+
 void powerpc_cpu::execute_isync(uint32 opcode)
 {
 	execute_invalidate_cache_range();
@@ -1603,7 +1729,7 @@ void powerpc_cpu::execute_isync(uint32 opcode)
 template< class RA, class RB >
 void powerpc_cpu::execute_dcbz(uint32 opcode)
 {
-	uint32 ea = RA::get(this, opcode) + RB::get(this, opcode);
+	uint32 ea = (RA::get(this, opcode) + RB::get(this, opcode)) & ~31u;
 	uint32 pa;
 	if (!guest_data_xlate(ea, 32, true, &pa))
 		return;
@@ -1611,7 +1737,10 @@ void powerpc_cpu::execute_dcbz(uint32 opcode)
 		const uint32 base = pa - (pa % 32);
 		vm_memset(base, 0, 32);
 #ifdef SHEEPSHAVER
+		nw_verify_system_store_pa_ = base;
 		nw_fb_damage_store(base, 32);
+		nw_jit_invalidate_page_src(base, NW_JIT_FL_STORE);
+		invalidate_cache();
 #endif
 	}
 	increment_pc(4);
@@ -1644,26 +1773,28 @@ void powerpc_cpu::execute_vector_load(uint32 opcode)
 	case 1:
 		if (!guest_data_xlate(ea, 1, false, &pa))
 			return;
-		VD::set_element(vD, (ea & 0x0f), pa_read_1(pa, pc()));
+		VD::set_element(vD, (ea & 0x0f), VERIFY_PA_READ(pa, 1));
 		break;
 	case 2:
 		if (!guest_data_xlate(ea & ~1, 2, false, &pa))
 			return;
-		VD::set_element(vD, ((ea >> 1) & 0x07), pa_read_2(pa, pc()));
+		VD::set_element(vD, ((ea >> 1) & 0x07), VERIFY_PA_READ(pa, 2));
 		break;
 	case 4:
 		if (!guest_data_xlate(ea & ~3, 4, false, &pa))
 			return;
-		VD::set_element(vD, ((ea >> 2) & 0x03), pa_read_4(pa, pc()));
+		VD::set_element(vD, ((ea >> 2) & 0x03), VERIFY_PA_READ(pa, 4));
 		break;
 	case 8:
 		ea &= ~15;
-		if (!guest_data_xlate(ea, 16, false, &pa))
+		if (!guest_data_xlate(ea, 16, false, &pa, true))
 			return;
-		vD.w[0] = pa_read_4(pa +  0, pc());
-		vD.w[1] = pa_read_4(pa +  4, pc());
-		vD.w[2] = pa_read_4(pa +  8, pc());
-		vD.w[3] = pa_read_4(pa + 12, pc());
+		for (unsigned i = 0; i < 4; ++i) {
+#ifdef SHEEPSHAVER
+			if (nw_verify_trace_) nw_verify_ea_ = ea + i * 4;
+#endif
+			vD.w[i] = VERIFY_PA_READ(pa + i * 4, 4);
+		}
 		break;
 	}
 	increment_pc(4);
@@ -1679,26 +1810,28 @@ void powerpc_cpu::execute_vector_store(uint32 opcode)
 	case 1:
 		if (!guest_data_xlate(ea, 1, true, &pa))
 			return;
-		pa_write_1(pa, VS::get_element(vS, (ea & 0x0f)), pc());
+		VERIFY_PA_WRITE(pa, 1, VS::get_element(vS, (ea & 0x0f)));
 		break;
 	case 2:
 		if (!guest_data_xlate(ea & ~1, 2, true, &pa))
 			return;
-		pa_write_2(pa, VS::get_element(vS, ((ea >> 1) & 0x07)), pc());
+		VERIFY_PA_WRITE(pa, 2, VS::get_element(vS, ((ea >> 1) & 0x07)));
 		break;
 	case 4:
 		if (!guest_data_xlate(ea & ~3, 4, true, &pa))
 			return;
-		pa_write_4(pa, VS::get_element(vS, ((ea >> 2) & 0x03)), pc());
+		VERIFY_PA_WRITE(pa, 4, VS::get_element(vS, ((ea >> 2) & 0x03)));
 		break;
 	case 8:
 		ea &= ~15;
-		if (!guest_data_xlate(ea, 16, true, &pa))
+		if (!guest_data_xlate(ea, 16, true, &pa, true))
 			return;
-		pa_write_4(pa +  0, vS.w[0], pc());
-		pa_write_4(pa +  4, vS.w[1], pc());
-		pa_write_4(pa +  8, vS.w[2], pc());
-		pa_write_4(pa + 12, vS.w[3], pc());
+		for (unsigned i = 0; i < 4; ++i) {
+#ifdef SHEEPSHAVER
+			if (nw_verify_trace_) nw_verify_ea_ = ea + i * 4;
+#endif
+			VERIFY_PA_WRITE(pa + i * 4, 4, vS.w[i]);
+		}
 		break;
 	}
 	increment_pc(4);
@@ -1716,9 +1849,41 @@ void powerpc_cpu::execute_vector_store(uint32 opcode)
  *		C1		If recording CR6, do we check for '1' bits in vD?
  **/
 
+template<class T> static T vector_fp_input(T x, bool) { return x; }
+static float vector_fp_input(float x, bool nj) {
+	uint32 bits; memcpy(&bits, &x, 4);
+	if (nj && (bits & 0x7f800000u) == 0) bits &= 0x80000000u;
+	memcpy(&x, &bits, 4); return x;
+}
+template<class T> static uint32 vector_fp_nan_bits(T) { return 0; }
+template<class T> static bool vector_fp_negative(T) { return false; }
+static bool vector_fp_negative(float x) { return x < 0; }
+static uint32 vector_fp_nan_bits(float x) {
+	uint32 bits; memcpy(&bits, &x, 4);
+	return (bits & 0x7fffffffu) > 0x7f800000u ? bits : 0;
+}
+template<class T, class A, class B, class C>
+static T vector_fp_result(T x, A, B, C, bool) { return x; }
+template<class A, class B, class C>
+static float vector_fp_result(float x, A a, B b, C c, bool nj) {
+	// AltiVec selects A, then B, then C, even when a later NaN signals.
+	const uint32 an = vector_fp_nan_bits(a), bn = vector_fp_nan_bits(b), cn = vector_fp_nan_bits(c);
+	uint32 bits; memcpy(&bits, &x, 4);
+	if (an || bn || cn) bits = (an ? an : bn ? bn : cn) | 0x00400000u;
+	else if ((bits & 0x7fffffffu) > 0x7f800000u) bits = 0x7fc00000u;
+	if (nj && !(bits & 0x7f800000u)) bits &= 0x80000000u;
+	memcpy(&x, &bits, 4); return x;
+}
+
 template< class OP, class VD, class VA, class VB, class VC, class Rc, int C1 >
 void powerpc_cpu::execute_vector_arith(uint32 opcode)
 {
+	const bool fp = std::is_same<typename VA::element_type, float>::value ||
+		std::is_same<typename VB::element_type, float>::value ||
+		std::is_same<typename VC::element_type, float>::value ||
+		std::is_same<typename VD::element_type, float>::value;
+	const ppc_fp_environment fp_env(0, fp);
+	const bool nj = fp && (vscr().get() & 0x10000u) && (opcode & 2047u) != 522;
 	typename VA::type const & vA = VA::const_ref(this, opcode);
 	typename VB::type const & vB = VB::const_ref(this, opcode);
 	typename VC::type const & vC = VC::const_ref(this, opcode);
@@ -1726,10 +1891,14 @@ void powerpc_cpu::execute_vector_arith(uint32 opcode)
 	const int n_elements = 16 / VD::element_size;
 
 	for (int i = 0; i < n_elements; i++) {
-		const typename VA::element_type a = VA::get_element(vA, i);
-		const typename VB::element_type b = VB::get_element(vB, i);
-		const typename VC::element_type c = VC::get_element(vC, i);
+		const typename VA::element_type a = vector_fp_input(VA::get_element(vA, i), nj);
+		const typename VB::element_type b = vector_fp_input(VB::get_element(vB, i), nj);
+		const typename VC::element_type c = vector_fp_input(VC::get_element(vC, i), nj);
 		typename VD::element_type d = op_apply<typename VD::element_type, OP, VA, VB, VC>::apply(a, b, c);
+		// Preserve saturation for negative unsigned-conversion fractions
+		// that would otherwise truncate to zero before VD sees the value.
+		if (fp && (opcode & 2047u) == 906 && vector_fp_negative(b)) d = -1;
+		d = vector_fp_result(d, a, b, c, nj);
 		if (VD::saturate(d))
 			vscr().set_sat(1);
 		VD::set_element(vD, i, d);

@@ -281,7 +281,7 @@ const powerpc_cpu::instr_info_t powerpc_cpu::powerpc_ii_table[] = {
 	  X_form, 31, 86, CFLOW_NORMAL
 	},
 	{ "dcbi",
-	  EXECUTE_0(nop),
+	  EXECUTE_0(dcbi),
 	  PPC_I(DCBI),
 	  X_form, 31, 470, CFLOW_NORMAL
 	},

@@ -153,9 +153,9 @@ DEFINE_OP2(fsubs, float, x - y);
 DEFINE_OP1(exp2, float, exp2f(x));
 DEFINE_OP1(log2, float, log2f(x));
 DEFINE_OP1(fres, float, 1 / x);
-DEFINE_OP1(frsqrte, float, 1 / sqrt(x));
+DEFINE_OP1(frsqrte, float, float(1.0 / sqrt(double(x))));
 DEFINE_OP1(frsim, float, floorf(x));
-DEFINE_OP1(frsin, float, roundf(x));
+DEFINE_OP1(frsin, float, nearbyintf(x));
 DEFINE_OP1(frsip, float, ceilf(x));
 DEFINE_OP1(frsiz, float, truncf(x));
 
@@ -194,12 +194,13 @@ struct op_mhraddsh {
 
 struct op_cvt_fp2si {
 	static inline int64 apply(uint32 a, float b) {
-		// Delegate saturation to upper level
-		if (mathlib_isinf(b))
-			return ((int64)(b < 0 ? 0x80000000 : 0x7fffffff)) << 32;
 		if (mathlib_isnan(b))
 			return 0;
-		return (int64)(b * (1U << a));
+		const double scaled = ldexp(double(b), int(a));
+		// Preserve a saturating sentinel without an undefined FP-to-int cast.
+		if (scaled >= 9223372036854775808.0) return INT64_MAX;
+		if (scaled <= -9223372036854775808.0) return INT64_MIN;
+		return int64(scaled);
 	}
 };
 
@@ -225,7 +226,8 @@ struct op_max<float> {
 			return a;
 		if (mathlib_isnan(b))
 			return b;
-		return a > b ? a : b;
+		if (a == 0 && b == 0) return signbit(a) && signbit(b) ? -0.0f : 0.0f;
+		return a >= b ? a : b;
 	}
 };
 
@@ -244,7 +246,8 @@ struct op_min<float> {
 			return a;
 		if (mathlib_isnan(b))
 			return b;
-		return a < b ? a : b;
+		if (a == 0 && b == 0) return signbit(a) || signbit(b) ? -0.0f : 0.0f;
+		return a <= b ? a : b;
 	}
 };
 
@@ -293,8 +296,8 @@ struct op_cmpbfp {
 };
 
 DEFINE_OP3(vsel, uint32, ((y & z) | (x & ~z)));
-DEFINE_OP3(vmaddfp, float, ((x * z) + y));
-DEFINE_OP3(vnmsubfp, float, -((x * z) - y));
+DEFINE_OP3(vmaddfp, float, fmaf(x, z, y));
+DEFINE_OP3(vnmsubfp, float, -fmaf(x, z, -y));
 DEFINE_OP3(mladduh, uint32, ((x * y) + z) & 0xffff);
 DEFINE_OP2(addcuw, uint32, ((uint64)x + (uint64)y) >> 32);
 DEFINE_OP2(subcuw, uint32, (~((int64)x - (int64)y) >> 32) & 1);

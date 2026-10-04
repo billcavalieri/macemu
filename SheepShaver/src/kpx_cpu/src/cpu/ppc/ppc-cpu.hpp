@@ -34,6 +34,7 @@
 #endif
 #include "cpu/ppc/ppc-instructions.hpp"
 #include "cpu/ppc/ppc-mmu.hpp"
+#include "cpu/ppc/ppc-vmx-encoding.hpp"
 #include <vector>
 
 #ifdef SHEEPSHAVER
@@ -275,6 +276,7 @@ private:
 	uint32 last_fetch_pa_;
 	struct nw_jit_cpu *nw_jc_;
 	nw_jit_verify_trace *nw_verify_trace_;
+	uint32 nw_verify_system_status_ = 0, nw_verify_system_store_pa_ = 0xffffffffu;
 	uint32 nw_verify_ea_;
 	uint64 nw_verify_read(uint32 pa, unsigned width);
 	void nw_verify_write(uint32 pa, unsigned width, uint64 value);
@@ -379,7 +381,8 @@ public:
 	uint32 debug_cr() const { return cr().get(); }
 	bool guest_mmu_enabled() const { return ppc32_guest_mmu_enabled(); }
 	bool guest_fetch(uint32 *opcode);
-	bool guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa);
+	bool guest_data_xlate(uint32 ea, unsigned width, bool is_store, uint32 *pa,
+	                      bool observe_translation = false);
 	bool guest_data_probe(uint32 ea, unsigned width, bool is_store, uint32 *pa,
 			      int *via_bat = 0, bool record_access = true);
 #ifdef SHEEPSHAVER
@@ -404,11 +407,13 @@ public:
 	static uint32 jit_host_lwz_pa(void *host, uint32 pa, uint32 pc, int *fault);
 	static void jit_host_stw_pa(void *host, uint32 pa, uint32 val, uint32 pc, int *fault);
 	static uint32 jit_host_mfspr(void *host, uint32 spr, uint32 guest_pc, int *status);
+	static void jit_host_system(void *, nw_jit_cpu *, uint32, uint32, uint32, struct nw_jit_system_result *);
 	static void jit_host_isync(void *host);
 	static void jit_host_mtmsr(void *host, uint32 msr);
 	static void jit_host_mtsr(void *host, uint32 sr, uint32 val);
 	static uint32 jit_host_mfsr(void *host, uint32 sr);
 	static void jit_host_trap(void *host, struct nw_jit_cpu *cpu);
+	static void jit_host_fp_exception(void *host, struct nw_jit_cpu *cpu);
 	static void jit_host_sc(void *host, uint32 guest_pc);
 	static void jit_host_mtspr(void *host, uint32 spr, uint32 val);
 	static uint32 jit_host_dec(void *host, uint32 val, uint32 pc, int write, int *status);
@@ -496,6 +501,9 @@ private:
 
 	// Get instruction info for opcode
 	const instr_info_t *decode(uint32 opcode) {
+#ifdef SHEEPSHAVER
+        if (ppc32_guest_mmu_enabled() && !ppc_vmx_reserved_zero(opcode)) return &ii_table[0];
+#endif
 		return &ii_table[ii_index_table[get_ii_index(opcode)]];
 	}
 
@@ -590,6 +598,7 @@ private:
 	void execute_tlbie(uint32 opcode);
 	void execute_tlbia(uint32 opcode);
 	void execute_tlbsync(uint32 opcode);
+	void execute_dcbi(uint32 opcode);
 	template< class SPR >
 	void execute_mfspr(uint32 opcode);
 	template< class TBR >

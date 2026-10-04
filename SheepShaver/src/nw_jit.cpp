@@ -25,6 +25,8 @@
 #include "nw_io.h"
 #include "nw_boot_contract.h"
 #include "cpu/ppc/ppc-fp-environment.hpp"
+#include "nw_jit_vmx_fp.h"
+#include "cpu/ppc/ppc-vmx-encoding.hpp"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +34,7 @@
 #include <math.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include "nw_jit_vmx_integer.h"
 #ifdef __APPLE__
 #include <libkern/OSCacheControl.h>
 #include <pthread.h>
@@ -131,8 +134,8 @@ void nw_jit_helper_stswx(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t ea, uint3
 void nw_jit_helper_vmsumshm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc, int sat);
 void nw_jit_helper_vmladduhm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc);
 void nw_jit_helper_vsubshs(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb);
-void nw_jit_helper_addze(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rc);
-void nw_jit_helper_subfze(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rc);
+void nw_jit_helper_addze(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t flags);
+void nw_jit_helper_subfze(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t flags);
 void nw_jit_helper_mullwo(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rb, uint32_t rc);
 void nw_jit_helper_divw(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rb, uint32_t rc);
 void nw_jit_helper_divwo(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rb, uint32_t rc);
@@ -151,8 +154,8 @@ void nw_jit_helper_mtsrin(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t rb);
 void nw_jit_helper_mfsrin(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t rb);
 void nw_jit_helper_lwbrx(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ea);
 void nw_jit_helper_sc(struct nw_jit_cpu *cpu);
-void nw_jit_helper_addme(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rc);
-void nw_jit_helper_subfme(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rc);
+void nw_jit_helper_addme(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t flags);
+void nw_jit_helper_subfme(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t flags);
 void nw_jit_helper_orc(struct nw_jit_cpu *cpu, uint32_t ra, uint32_t rs, uint32_t rb, uint32_t rc);
 void nw_jit_helper_mcrxr(struct nw_jit_cpu *cpu, uint32_t crfd);
 void nw_jit_helper_mfsr(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t sr);
@@ -250,6 +253,7 @@ static uint32_t g_skip_raw_op, g_skip_raw_pc;
 static char g_skip_raw_nm[24];
 static unsigned g_skip_raw_seen;
 static nw_jit_host_trap g_host_trap;
+static nw_jit_host_trap g_host_fp_exception;
 static nw_jit_host_sc g_host_sc;
 static nw_jit_host_mtspr g_host_mtspr;
 static nw_jit_host_lvx g_host_lvx;
@@ -520,6 +524,126 @@ static uint64_t verify_memory(struct nw_jit_cpu *cpu, uint32_t ea,
     return value;
 }
 
+static nw_jit_host_system g_host_system;
+void nw_jit_set_host_system(nw_jit_host_system fn) { g_host_system = fn; }
+
+int nw_jit_op_system(uint32_t op)
+{
+    const unsigned p = op >> 26, x = (op >> 1) & 1023;
+    if (p == 3 || p == 17) return 1;
+    if (p == 19) return x == 50 || x == 150;
+    if (p != 31) return 0;
+    if (x == 339 || x == 467) {
+        const unsigned spr = ((op >> 16) & 31) | ((op >> 6) & 992);
+        return spr != 1 && spr != 8 && spr != 9;
+    }
+    switch (x) {
+    case 4: case 83: case 146: case 210: case 242: case 595: case 659:
+    case 306: case 370: case 566: case 371: case 982: case 1014:
+    case 54: case 86: case 246: case 278: case 470: case 598: case 758:
+    case 854: return 1;
+    default: return 0;
+    }
+}
+
+void nw_jit_system_operands(const nw_jit_cpu *c, uint32_t op, uint32_t *a, uint32_t *b)
+{
+    const unsigned p = op >> 26, x = (op >> 1) & 1023;
+    const unsigned d = (op >> 21) & 31, ra = (op >> 16) & 31, rb = (op >> 11) & 31;
+    *a = *b = 0;
+    if (p == 3 || (p == 31 && x == 4)) {
+        *a = c->gpr[ra]; *b = p == 3 ? uint32_t(int32_t(int16_t(op))) : c->gpr[rb];
+    } else if (p == 31) {
+        if (x == 339 || x == 371 || x == 467) {
+            *a = ra | (rb << 5); if (x == 467) *b = c->gpr[d];
+        } else if (x == 146) *a = c->gpr[d];
+        else if (x == 210 || x == 595) { *a = ra & 15; if (x == 210) *b = c->gpr[d]; }
+        else if (x == 242 || x == 659) { *a = c->gpr[rb] >> 28; if (x == 242) *b = c->gpr[d]; }
+        else if (x == 306) *a = c->gpr[rb];
+        else if (x == 54 || x == 86 || x == 246 || x == 278 || x == 470 ||
+                 x == 758 || x == 982 || x == 1014)
+            *a = (ra ? c->gpr[ra] : 0) + c->gpr[rb];
+    }
+    if (p == 31 && x == 1014) *a &= ~31u;
+}
+
+static bool system_spr_user_read(unsigned s)
+{
+    return s == 1 || s == 8 || s == 9 || s == 256 || s == 268 || s == 269 ||
+           s == 928 || (s >= 935 && s <= 942);
+}
+static void nw_jit_helper_system(nw_jit_cpu *c, uint32_t op)
+{
+    // The standalone emitter API also supports legacy synthetic host callbacks.
+    // A real New World CPU installs the typed service; private replay always
+    // requires its observation and can never enter this compatibility branch.
+    if (!c->verify_mem && !g_host_system) { (void)nw_jit_interp_one(c,op); return; }
+    if (c->host && !c->verify_mem && g_host_msr) c->msr = g_host_msr(c->host);
+    uint32_t a, b; nw_jit_system_operands(c, op, &a, &b);
+    const unsigned p = op >> 26, x = (op >> 1) & 1023, d = (op >> 21) & 31;
+    bool priv = false;
+    if (p == 19 && x == 50) priv = true;
+    if (p == 31) {
+        priv = x == 83 || x == 146 || x == 210 || x == 242 || x == 595 ||
+               x == 659 || x == 306 || x == 370 || x == 566 || x == 470;
+        if (x == 339) priv = !system_spr_user_read(a);
+        if (x == 467) priv = a != 1 && a != 8 && a != 9 && a != 256;
+    }
+    priv = priv && (c->msr & 0x4000u);
+    // The selected MPC7400 register model faults on these unavailable/read-only SPRs.
+    if (p == 31 && x == 339 && (a == 0 || a == 4 || a == 5 || a == 6)) priv = true;
+    if (p == 31 && x == 467 && (a == 0 || a == 287 || a == 955 || a == 928 || (a >= 935 && a <= 942))) priv = true;
+    const unsigned to = d;
+    const bool trap = (p == 3 || (p == 31 && x == 4)) &&
+        (((to & 16) && int32_t(a) < int32_t(b)) || ((to & 8) && int32_t(a) > int32_t(b)) ||
+         ((to & 4) && a == b) || ((to & 2) && a < b) || ((to & 1) && a > b));
+    nw_jit_system_result r = {0, 0, priv ? NW_SYS_PRIV : trap ? NW_SYS_TRAP : p == 17 ? NW_SYS_SC : NW_SYS_OK};
+    const unsigned predicted = r.status;
+    if (c->verify_mem) {
+        if (!c->verify_system || c->verify_system(c->verify_context, c->pc, op, a, b, &r)) {
+            c->fault = NW_JIT_FAULT_VERIFY; return;
+        }
+    } else if (c->host && g_host_system) g_host_system(c->host, c, op, a, b, &r);
+    else {
+        // Standalone register-only fixtures; host-owned services fail closed.
+        if (p == 31 && x == 83) r.value = c->msr;
+        else if (p == 31 && (x == 595 || x == 659)) r.value = c->sr[a & 15];
+        else if (p == 19 && x == 50) { r.value = c->srr0; r.aux = c->srr1; }
+        else if (p == 31 && (x == 210 || x == 242 || x == 146)) {}
+        else { c->fault = NW_JIT_FAULT_VERIFY; return; }
+    }
+    if ((predicted != NW_SYS_OK && r.status != predicted) ||
+        (predicted == NW_SYS_OK && (r.status == NW_SYS_PRIV || r.status == NW_SYS_TRAP || r.status == NW_SYS_SC))) {
+        c->fault = NW_JIT_FAULT_VERIFY; return;
+    }
+    if ((r.status == NW_SYS_NOP && !(p == 31 && (x == 339 || x == 467))) ||
+        ((r.status == NW_SYS_DSI || r.status == NW_SYS_SMC) && !(p == 31 && x == 1014)) ||
+        (predicted == NW_SYS_OK && p == 31 && x == 83 && r.value != c->msr)) {
+        c->fault = NW_JIT_FAULT_VERIFY; return;
+    }
+    if (predicted != NW_SYS_OK) {
+        c->srr0 = c->pc + (predicted == NW_SYS_SC ? 4u : 0u);
+        c->srr1 = (c->msr & ~0x783f0000u) | (predicted == NW_SYS_PRIV ? 0x40000u : predicted == NW_SYS_TRAP ? 0x20000u : 0);
+        c->msr &= ~0x0204ef32u;
+        c->pc = (c->srr1 & 0x40u ? 0xfff00000u : 0) | (predicted == NW_SYS_SC ? 0xc00u : 0x700u);
+        c->fault = NW_JIT_FAULT_EXC; return;
+    }
+    if (r.status == NW_SYS_DSI || r.status == NW_SYS_SMC) {
+        c->fault = r.status == NW_SYS_DSI ? NW_JIT_FAULT_DSI : NW_JIT_FAULT_SMC;
+        c->fault_ea = a; c->fault_width = 32; c->fault_st = 1; return;
+    }
+    if (p == 31 && (x == 339 || x == 371 || x == 83 || x == 595 || x == 659)) {
+        if (r.status != NW_SYS_NOP) c->gpr[d] = r.value;
+        if (a == 22 && x == 339 && r.status == NW_SYS_OK) c->dec = r.value;
+    }
+    if (p == 31 && x == 467 && a == 22 && r.status == NW_SYS_OK) { c->dec = b; c->dec_wr = 0; }
+    if (p == 31 && x == 146) c->msr = a;
+    if (p == 31 && (x == 210 || x == 242)) c->sr[a & 15] = b;
+    if (p == 19 && x == 50) { c->pc = r.value & ~3u; c->msr = r.aux; c->srr1 = r.aux; }
+    else c->pc += 4;
+    if ((p == 19 && x == 150) || (p == 31 && (x == 598 || x == 854 || x == 566))) __sync_synchronize();
+}
+
 /* Guard the compiled helper itself, too: stale code can contain an operation
  * absent from the current reference allowlist. It must never flush live caches
  * or reach a shared callback while replaying. */
@@ -659,10 +783,23 @@ void nw_jit_helper_mtspr(struct nw_jit_cpu *cpu, uint32_t spr, uint32_t val)
 
 void nw_jit_helper_lvx(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t ra, uint32_t rb)
 {
-	if (verify_forbidden(cpu)) return;
 	uint32_t ea = (ra ? cpu->gpr[ra] : 0u) + cpu->gpr[rb];
 	ea &= ~15u;
 	vd &= 31u;
+	if (cpu->verify_mem) {
+		uint32_t pa = 0;
+		const uint32_t fault = cpu->verify_xlate ? cpu->verify_xlate(cpu->verify_context, cpu->pc, ea, 16, false, &pa) : NW_JIT_FAULT_VERIFY;
+		if (fault) { record_memory_exit(cpu, fault, ea, 16, false); return; }
+		uint32_t words[4];
+		for (unsigned i = 0; i < 4; ++i) {
+			uint64_t value = 0;
+			const uint32_t f = cpu->verify_mem(cpu->verify_context, cpu->pc, ea + i * 4, 4, false, &value);
+			if (f) { record_memory_exit(cpu, f, ea + i * 4, 4, false); return; }
+			words[i] = uint32_t(value);
+		}
+		memcpy(cpu->vr[vd], words, sizeof words);
+		return;
+	}
 	if (g_host_lvx && cpu->host) {
 		int fault = 0;
 		uint32_t value[4] = {};
@@ -685,10 +822,24 @@ void nw_jit_helper_lvx(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t ra, uint32_
 
 void nw_jit_helper_stvx(struct nw_jit_cpu *cpu, uint32_t vs, uint32_t ra, uint32_t rb)
 {
-	if (verify_forbidden(cpu)) return;
 	uint32_t ea = (ra ? cpu->gpr[ra] : 0u) + cpu->gpr[rb];
 	ea &= ~15u;
 	vs &= 31u;
+	if (cpu->verify_mem) {
+		uint32_t pa = 0;
+		const uint32_t fault = cpu->verify_xlate ? cpu->verify_xlate(cpu->verify_context, cpu->pc, ea, 16, true, &pa) : NW_JIT_FAULT_VERIFY;
+		if (fault) { record_memory_exit(cpu, fault, ea, 16, true); return; }
+		bool smc = false;
+		uint32_t smc_ea = 0;
+		for (unsigned i = 0; i < 4; ++i) {
+			uint64_t value = cpu->vr[vs][i];
+			const uint32_t f = cpu->verify_mem(cpu->verify_context, cpu->pc, ea + i * 4, 4, true, &value);
+			if (f == NW_JIT_FAULT_SMC) { smc = true; smc_ea = ea + i * 4; }
+			else if (f) { record_memory_exit(cpu, f, ea + i * 4, 4, true); return; }
+		}
+		if (smc) record_memory_exit(cpu, NW_JIT_FAULT_SMC, smc_ea, 4, true);
+		return;
+	}
 	if (g_host_stvx && cpu->host) {
 		int fault = 0;
 		g_host_stvx(cpu->host, ea, cpu->vr[vs], cpu->pc, &fault);
@@ -812,9 +963,9 @@ static uint64_t fpr_from_f32(float f)
 }
 
 /* kpx fp_classify: FPSCR FPRF bits 15–19 (mask 0x1f000). */
-static void nw_jit_fpscr_fprf(struct nw_jit_cpu *cpu, float x)
+static void nw_jit_fpscr_fprf(struct nw_jit_cpu *cpu, float x, bool commit = false)
 {
-	if (cpu->fpscr & 0x80u)	/* VE: kpx skips classify */
+	if (!commit && (cpu->fpscr & 0x80u))	/* Legacy, unqualified arithmetic profile. */
 		return;
 	uint32_t c = cpu->fpscr & ~0x1f000u;
 	if (x != x) {
@@ -834,9 +985,9 @@ static void nw_jit_fpscr_fprf(struct nw_jit_cpu *cpu, float x)
 	cpu->fpscr = c;
 }
 
-static void nw_jit_fpscr_fprf_d(struct nw_jit_cpu *cpu, double x)
+static void nw_jit_fpscr_fprf_d(struct nw_jit_cpu *cpu, double x, bool commit = false)
 {
-	if (cpu->fpscr & 0x80u)
+	if (!commit && (cpu->fpscr & 0x80u))
 		return;
 	uint32_t c = cpu->fpscr & ~0x1f000u;
 	if (x != x) {
@@ -907,51 +1058,77 @@ void nw_jit_helper_stfs(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ea)
 		record_memory_exit(cpu, NW_JIT_FAULT_SMC, ea, 4, true);
 }
 
+// Basic arithmetic special results are resolved from raw FPR bits before
+// host arithmetic (and before a single-precision conversion loses NaN bits).
+static int nw_jit_fp_basic_special(struct nw_jit_cpu *, uint32_t, uint32_t, uint32_t, uint32_t);
+static void nw_fp_record(struct nw_jit_cpu *, uint32_t);
+static void nw_fp_exception(struct nw_jit_cpu *);
+
 void nw_jit_helper_fadds(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
 	nw_help_note(NW_HELP_FADDS);
-	double a, b;
-	memcpy(&a, &cpu->fpr[fa & 31u], 8);
-	memcpy(&b, &cpu->fpr[fb & 31u], 8);
-	const float r = (float)(a + b);
-	cpu->fpr[fd & 31u] = fpr_from_f32(r);
-	nw_jit_fpscr_fprf(cpu, r);
+	if (nw_jit_fp_basic_special(cpu, 21, fd, fa, fb)) return;
+	{
+		const ppc_fp_environment fp_env(cpu->fpscr);
+		double a, b;
+		memcpy(&a, &cpu->fpr[fa & 31u], 8);
+		memcpy(&b, &cpu->fpr[fb & 31u], 8);
+		const float r = (float)(a + b);
+		cpu->fpr[fd & 31u] = fpr_from_f32(r);
+		nw_jit_fpscr_fprf(cpu, r, true);
+	} // Restore host FP state before a program exception callback.
+	nw_fp_record(cpu, 0);
+	nw_fp_exception(cpu);
 }
 
 void nw_jit_helper_fsubs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
 	nw_help_note(NW_HELP_FSUBS);
-	double a, b;
-	memcpy(&a, &cpu->fpr[fa & 31u], 8);
-	memcpy(&b, &cpu->fpr[fb & 31u], 8);
-	const float r = (float)(a - b);
-	cpu->fpr[fd & 31u] = fpr_from_f32(r);
-	nw_jit_fpscr_fprf(cpu, r);
+	if (nw_jit_fp_basic_special(cpu, 20, fd, fa, fb)) return;
+	{
+		const ppc_fp_environment fp_env(cpu->fpscr);
+		double a, b;
+		memcpy(&a, &cpu->fpr[fa & 31u], 8);
+		memcpy(&b, &cpu->fpr[fb & 31u], 8);
+		const float r = (float)(a - b);
+		cpu->fpr[fd & 31u] = fpr_from_f32(r);
+		nw_jit_fpscr_fprf(cpu, r, true);
+	} // Restore host FP state before a program exception callback.
+	nw_fp_record(cpu, 0);
+	nw_fp_exception(cpu);
 }
 
 void nw_jit_helper_fdivs(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
-	double a, b;
-	memcpy(&a, &cpu->fpr[fa & 31u], 8);
-	memcpy(&b, &cpu->fpr[fb & 31u], 8);
-	const float r = (float)(a / b);
-	cpu->fpr[fd & 31u] = fpr_from_f32(r);
-	nw_jit_fpscr_fprf(cpu, r);
+	if (nw_jit_fp_basic_special(cpu, 18, fd, fa, fb)) return;
+	{
+		const ppc_fp_environment fp_env(cpu->fpscr);
+		double a, b;
+		memcpy(&a, &cpu->fpr[fa & 31u], 8);
+		memcpy(&b, &cpu->fpr[fb & 31u], 8);
+		const float r = (float)(a / b);
+		cpu->fpr[fd & 31u] = fpr_from_f32(r);
+		nw_jit_fpscr_fprf(cpu, r, true);
+	} // Restore host FP state before a program exception callback.
+	nw_fp_record(cpu, 0);
+	nw_fp_exception(cpu);
 }
 
 void nw_jit_helper_fmuls(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
 	nw_help_note(NW_HELP_FMULS);
-	double a, c;
-	memcpy(&a, &cpu->fpr[fa & 31u], 8);
-	memcpy(&c, &cpu->fpr[fc & 31u], 8);
-	const float r = (float)(a * c);
-	cpu->fpr[fd & 31u] = fpr_from_f32(r);
-	nw_jit_fpscr_fprf(cpu, r);
+	if (nw_jit_fp_basic_special(cpu, 25, fd, fa, fc)) return;
+	{
+		const ppc_fp_environment fp_env(cpu->fpscr);
+		double a, c;
+		memcpy(&a, &cpu->fpr[fa & 31u], 8);
+		memcpy(&c, &cpu->fpr[fc & 31u], 8);
+		const float r = (float)(a * c);
+		cpu->fpr[fd & 31u] = fpr_from_f32(r);
+		nw_jit_fpscr_fprf(cpu, r, true);
+	} // Restore host FP state before a program exception callback.
+	nw_fp_record(cpu, 0);
+	nw_fp_exception(cpu);
 }
 
 void nw_jit_helper_fmadds(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc, uint32_t fb)
@@ -1105,18 +1282,14 @@ void nw_jit_helper_vpkswss(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uin
 	uint16_t h[8];
 	for (int i = 0; i < 4; i++) {
 		int32_t x = (int32_t)cpu->vr[va][i];
-		if (x > 32767)
-			x = 32767;
-		else if (x < -32768)
-			x = -32768;
+		if (x > 32767) { x = 32767; cpu->vscr |= 1u; }
+		else if (x < -32768) { x = -32768; cpu->vscr |= 1u; }
 		h[i] = (uint16_t)(int16_t)x;
 	}
 	for (int i = 0; i < 4; i++) {
 		int32_t x = (int32_t)cpu->vr[vb][i];
-		if (x > 32767)
-			x = 32767;
-		else if (x < -32768)
-			x = -32768;
+		if (x > 32767) { x = 32767; cpu->vscr |= 1u; }
+		else if (x < -32768) { x = -32768; cpu->vscr |= 1u; }
 		h[i + 4] = (uint16_t)(int16_t)x;
 	}
 	for (int w = 0; w < 4; w++)
@@ -1166,47 +1339,155 @@ static double f64_from_fpr(uint64_t j)
 	return d;
 }
 
+static bool nw_fp_nan(uint64_t bits)
+{
+    return (bits & UINT64_C(0x7fffffffffffffff)) > UINT64_C(0x7ff0000000000000);
+}
+static bool nw_fp_snan(uint64_t bits)
+{
+    return nw_fp_nan(bits) && !(bits & UINT64_C(0x0008000000000000));
+}
+static void nw_fp_record(struct nw_jit_cpu *cpu, uint32_t causes)
+{
+    if (causes & ~cpu->fpscr) cpu->fpscr |= 0x80000000u;
+    cpu->fpscr = ppc_fpscr_summaries(cpu->fpscr | causes);
+}
+static void nw_fp_exception(struct nw_jit_cpu *cpu)
+{
+    if (!(cpu->fpscr & 0x40000000u)) return;
+    if (cpu->host && !cpu->verify_mem && g_host_msr) cpu->msr = g_host_msr(cpu->host);
+    if (!(cpu->msr & 0x900u)) return;
+    const uint32_t old = cpu->msr;
+    // Both imprecise modes are serviced immediately, as permitted by the ISA.
+    if (cpu->host && !cpu->verify_mem && g_host_fp_exception)
+        g_host_fp_exception(cpu->host, cpu);
+    cpu->srr0 = cpu->pc;
+    cpu->srr1 = (old & ~0x783f0000u) | 0x00100000u;
+    cpu->msr = old & ~0x0204ef32u;
+    cpu->pc = ((old & 0x40u) ? 0xfff00000u : 0) | 0x700u;
+    cpu->fault = NW_JIT_FAULT_EXC;
+}
+// A then B is the PowerPC NaN priority; B is FRC for multiply. Return
+// whether the operation was completed without entering host FP arithmetic.
+static int nw_jit_fp_basic_special(struct nw_jit_cpu *cpu, uint32_t kind,
+                                   uint32_t fd, uint32_t fa, uint32_t fb)
+{
+    const uint64_t a = cpu->fpr[fa & 31u], b = cpu->fpr[fb & 31u];
+    const uint64_t sign = UINT64_C(0x8000000000000000), inf = UINT64_C(0x7ff0000000000000);
+    const uint64_t aa = a & ~sign, bb = b & ~sign, product_sign = (a ^ b) & sign;
+    const bool ai = aa == inf, bi = bb == inf, az = aa == 0, bz = bb == 0;
+    uint64_t result;
+    uint32_t causes = 0;
+    if (nw_fp_nan(a) || nw_fp_nan(b)) {
+        result = (nw_fp_nan(a) ? a : b) | UINT64_C(0x0008000000000000);
+        if (nw_fp_snan(a) || nw_fp_snan(b)) causes = 0x01000000u;
+    } else if (kind == 20 || kind == 21) {
+        const uint64_t effective_b = b ^ (kind == 20 ? sign : 0);
+        if (ai && bi && ((a ^ effective_b) & sign)) causes = 0x00800000u; // VXISI
+        else if (ai || bi) result = ai ? a : effective_b;
+        else if (az && bz) {
+            result = ((a ^ effective_b) & sign) ? ((cpu->fpscr & 3u) == 3 ? sign : 0) : a;
+        } else return 0;
+    } else if (kind == 25) {
+        if ((ai && bz) || (bi && az)) causes = 0x00100000u; // VXIMZ
+        else if (ai || bi) result = product_sign | inf;
+        else if (az || bz) result = product_sign;
+        else return 0;
+    } else {
+        if (ai && bi) causes = 0x00400000u; // VXIDI
+        else if (az && bz) causes = 0x00200000u; // VXZDZ
+        else if (ai) result = product_sign | inf; // Infinity/zero does not raise ZX.
+        else if (bz) { result = product_sign | inf; causes = 0x04000000u; }
+        else if (bi || az) result = product_sign;
+        else return 0;
+    }
+    if (causes & 0x00f00000u) result = UINT64_C(0x7ff8000000000000);
+    cpu->fpscr &= ~0x00060000u; // NaN, invalid, zero-divide and exact special results.
+    const bool suppressed = ((causes & 0x01f00000u) && (cpu->fpscr & 0x80u)) ||
+                            ((causes & 0x04000000u) && (cpu->fpscr & 0x10u));
+    nw_fp_record(cpu, causes);
+    if (!suppressed) {
+        cpu->fpr[fd & 31u] = result;
+        const uint32_t classification = nw_fp_nan(result) ? 17 : (result & ~sign) == inf ?
+            (result & sign) ? 9 : 5 : (result & sign) ? 18 : 2;
+        cpu->fpscr = (cpu->fpscr & ~0x1f000u) | (classification << 12);
+    }
+    nw_fp_exception(cpu);
+    return 1;
+}
+
+// This also follows an inline compare: the ARM comparison owns CR/FPCC,
+// while raw operand bits own signaling and ordered/unordered exception policy.
+static void nw_jit_fp_compare_status(struct nw_jit_cpu *cpu, uint32_t op)
+{
+    const uint64_t a = cpu->fpr[(op >> 16) & 31u], b = cpu->fpr[(op >> 11) & 31u];
+    uint32_t causes = 0;
+    if (nw_fp_snan(a) || nw_fp_snan(b)) {
+        causes = 0x01000000u;
+        if (((op >> 1) & 1023u) == 32 && !(cpu->fpscr & 0x80u)) causes |= 0x00080000u;
+    } else if (((op >> 1) & 1023u) == 32 && (nw_fp_nan(a) || nw_fp_nan(b))) causes = 0x00080000u;
+    nw_fp_record(cpu, causes);
+    nw_fp_exception(cpu);
+}
+static void nw_fp_compare(struct nw_jit_cpu *cpu, uint32_t crfd, uint32_t fa, uint32_t fb, bool ordered)
+{
+    {
+    const ppc_fp_environment fp_env(cpu->fpscr);
+    const uint64_t ab = cpu->fpr[fa & 31u], bb = cpu->fpr[fb & 31u];
+    const double a = f64_from_fpr(ab), b = f64_from_fpr(bb);
+    const uint32_t f = nw_fp_nan(ab) || nw_fp_nan(bb) ? 1u : a < b ? 8u : a > b ? 4u : 2u;
+    const unsigned sh = 28 - 4 * (crfd & 7u);
+    cpu->cr = (cpu->cr & ~(0xfu << sh)) | (f << sh);
+    cpu->fpscr = (cpu->fpscr & ~0xf000u) | (f << 12);
+    } // Restore the caller's FP environment before publishing an exception.
+    nw_jit_fp_compare_status(cpu, (63u << 26) | ((fa & 31u) << 16) | ((fb & 31u) << 11) | (ordered ? 64u : 0u));
+}
 void nw_jit_helper_fcmpo(struct nw_jit_cpu *cpu, uint32_t crfd, uint32_t fa, uint32_t fb)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
-	const double a = f64_from_fpr(cpu->fpr[fa & 31u]);
-	const double b = f64_from_fpr(cpu->fpr[fb & 31u]);
-	uint32_t f;
-	if (a != a || b != b)
-		f = 1;
-	else if (a < b)
-		f = 8;
-	else if (a > b)
-		f = 4;
-	else
-		f = 2;
-	const int sh = 28 - 4 * (int)(crfd & 7u);
-	cpu->cr = (cpu->cr & ~(0xfu << sh)) | (f << sh);
-	cpu->fpscr = (cpu->fpscr & ~0xf000u) | ((f & 0xfu) << 12);	/* FPCC */
+    nw_fp_compare(cpu, crfd, fa, fb, true);
+}
+static void nw_jit_helper_fcmpu(struct nw_jit_cpu *cpu, uint32_t crfd, uint32_t fa, uint32_t fb)
+{
+    nw_fp_compare(cpu, crfd, fa, fb, false);
 }
 
 void nw_jit_helper_fsub(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
-	const double r = f64_from_fpr(cpu->fpr[fa & 31u]) - f64_from_fpr(cpu->fpr[fb & 31u]);
-	cpu->fpr[fd & 31u] = bits_from_f64(r);
-	nw_jit_fpscr_fprf_d(cpu, r);
+	if (nw_jit_fp_basic_special(cpu, 20, fd, fa, fb)) return;
+	{
+		const ppc_fp_environment fp_env(cpu->fpscr);
+		const double r = f64_from_fpr(cpu->fpr[fa & 31u]) - f64_from_fpr(cpu->fpr[fb & 31u]);
+		cpu->fpr[fd & 31u] = bits_from_f64(r);
+		nw_jit_fpscr_fprf_d(cpu, r, true);
+	} // Restore host FP state before a program exception callback.
+	nw_fp_record(cpu, 0);
+	nw_fp_exception(cpu);
 }
 
 void nw_jit_helper_fadd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
-	const double r = f64_from_fpr(cpu->fpr[fa & 31u]) + f64_from_fpr(cpu->fpr[fb & 31u]);
-	cpu->fpr[fd & 31u] = bits_from_f64(r);
-	nw_jit_fpscr_fprf_d(cpu, r);
+	if (nw_jit_fp_basic_special(cpu, 21, fd, fa, fb)) return;
+	{
+		const ppc_fp_environment fp_env(cpu->fpscr);
+		const double r = f64_from_fpr(cpu->fpr[fa & 31u]) + f64_from_fpr(cpu->fpr[fb & 31u]);
+		cpu->fpr[fd & 31u] = bits_from_f64(r);
+		nw_jit_fpscr_fprf_d(cpu, r, true);
+	} // Restore host FP state before a program exception callback.
+	nw_fp_record(cpu, 0);
+	nw_fp_exception(cpu);
 }
 
 void nw_jit_helper_fmul(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
-	const double r = f64_from_fpr(cpu->fpr[fa & 31u]) * f64_from_fpr(cpu->fpr[fc & 31u]);
-	cpu->fpr[fd & 31u] = bits_from_f64(r);
-	nw_jit_fpscr_fprf_d(cpu, r);
+	if (nw_jit_fp_basic_special(cpu, 25, fd, fa, fc)) return;
+	{
+		const ppc_fp_environment fp_env(cpu->fpscr);
+		const double r = f64_from_fpr(cpu->fpr[fa & 31u]) * f64_from_fpr(cpu->fpr[fc & 31u]);
+		cpu->fpr[fd & 31u] = bits_from_f64(r);
+		nw_jit_fpscr_fprf_d(cpu, r, true);
+	} // Restore host FP state before a program exception callback.
+	nw_fp_record(cpu, 0);
+	nw_fp_exception(cpu);
 }
 
 void nw_jit_helper_fmadd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc, uint32_t fb)
@@ -1220,19 +1501,89 @@ void nw_jit_helper_fmadd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint3
 
 void nw_jit_helper_fdiv(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
-	const double r = f64_from_fpr(cpu->fpr[fa & 31u]) / f64_from_fpr(cpu->fpr[fb & 31u]);
-	cpu->fpr[fd & 31u] = bits_from_f64(r);
-	nw_jit_fpscr_fprf_d(cpu, r);
+	if (nw_jit_fp_basic_special(cpu, 18, fd, fa, fb)) return;
+	{
+		const ppc_fp_environment fp_env(cpu->fpscr);
+		const double r = f64_from_fpr(cpu->fpr[fa & 31u]) / f64_from_fpr(cpu->fpr[fb & 31u]);
+		cpu->fpr[fd & 31u] = bits_from_f64(r);
+		nw_jit_fpscr_fprf_d(cpu, r, true);
+	} // Restore host FP state before a program exception callback.
+	nw_fp_record(cpu, 0);
+	nw_fp_exception(cpu);
 }
 
 void nw_jit_helper_frsp(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
-	const double b = f64_from_fpr(cpu->fpr[fb & 31u]);
-	const float r = (float)b;
-	cpu->fpr[fd & 31u] = fpr_from_f32(r);
-	nw_jit_fpscr_fprf(cpu, r);
+    // Round an integer significand; do not depend on host NaN conversion,
+    // underflow detection or the host's single-precision exponent range.
+    const uint64_t raw = cpu->fpr[fb & 31u], sign = raw & UINT64_C(0x8000000000000000);
+    const uint64_t abs = raw & UINT64_C(0x7fffffffffffffff);
+    const unsigned biased = unsigned(abs >> 52), rn = cpu->fpscr & 3u;
+    uint64_t result = raw;
+    uint32_t causes = 0, classification = 0;
+    bool suppressed = false;
+    if (nw_fp_nan(raw)) {
+        cpu->fpscr &= ~0x00060000u;
+        if (nw_fp_snan(raw)) { causes = 0x01000000u; suppressed = (cpu->fpscr & 0x80u) != 0; }
+        result = (raw | UINT64_C(0x0008000000000000)) & ~UINT64_C(0x1fffffff);
+        classification = 17;
+    } else if (biased == 2047) {
+        // The frsp infinity model leaves FR/FI unchanged.
+        classification = sign ? 9 : 5;
+    } else if (!abs) {
+        cpu->fpscr &= ~0x00060000u;
+        classification = sign ? 18 : 2;
+    } else {
+        int exponent = biased ? int(biased) - 1023 : -1022;
+        uint64_t sig = (abs & UINT64_C(0x000fffffffffffff)) | (biased ? UINT64_C(0x0010000000000000) : 0);
+        while (!(sig & UINT64_C(0x0010000000000000))) { sig <<= 1; --exponent; }
+        const bool tiny = exponent < -126, enabled_underflow = tiny && (cpu->fpscr & 0x20u);
+        const unsigned shift = tiny && !enabled_underflow ? unsigned(-97 - exponent) : 29u;
+        uint64_t units = shift < 64 ? sig >> shift : 0;
+        const uint64_t remainder = shift < 64 ? sig & ((UINT64_C(1) << shift) - 1) : sig;
+        const bool inexact = remainder != 0;
+        const bool increment = rn == 0 ? shift < 64 && (remainder > (UINT64_C(1) << (shift - 1)) ||
+            (remainder == (UINT64_C(1) << (shift - 1)) && (units & 1))) :
+            rn == 2 ? inexact && !sign : rn == 3 ? inexact && sign : false;
+        units += increment;
+        cpu->fpscr &= ~0x00060000u;
+        if (inexact) { cpu->fpscr |= 0x00020000u; causes |= 0x02000000u; }
+        if (increment) cpu->fpscr |= 0x00040000u;
+        if (tiny && (enabled_underflow || inexact)) causes |= 0x08000000u;
+        if (tiny && !enabled_underflow) {
+            if (!units) { result = sign; classification = sign ? 18 : 2; }
+            else {
+                unsigned high = 0; for (uint64_t u = units; u >>= 1; ) ++high;
+                result = sign | (uint64_t(int(high) - 149 + 1023) << 52) |
+                    ((units << (52 - high)) & UINT64_C(0x000fffffffffffff));
+                classification = high == 23 ? sign ? 8 : 4 : sign ? 24 : 20;
+            }
+        } else {
+            if (units == UINT64_C(0x01000000)) { units >>= 1; ++exponent; }
+            if (enabled_underflow) exponent += 192;
+            const bool overflow = !tiny && exponent > 127;
+            if (overflow) causes |= 0x10000000u;
+            if (overflow && !(cpu->fpscr & 0x40u)) {
+                const bool infinity = rn == 0 || (rn == 2 && !sign) || (rn == 3 && sign);
+                result = sign | (infinity ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x47efffffe0000000));
+                // FR is undefined for disabled overflow: choose zero consistently.
+                cpu->fpscr = (cpu->fpscr & ~0x00040000u) | 0x00020000u;
+                causes |= 0x02000000u;
+                classification = infinity ? sign ? 9 : 5 : sign ? 8 : 4;
+            } else {
+                if (overflow) exponent -= 192;
+                result = sign | (uint64_t(exponent + 1023) << 52) |
+                    ((units << 29) & UINT64_C(0x000fffffffffffff));
+                classification = sign ? 8 : 4;
+            }
+        }
+    }
+    nw_fp_record(cpu, causes);
+    if (!suppressed) {
+        cpu->fpr[fd & 31u] = result;
+        cpu->fpscr = (cpu->fpscr & ~0x0001f000u) | (classification << 12);
+    }
+    nw_fp_exception(cpu);
 }
 
 void nw_jit_helper_mffs(struct nw_jit_cpu *cpu, uint32_t fd)
@@ -1250,22 +1601,54 @@ void nw_jit_helper_fnmsub(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint
 	nw_jit_fpscr_fprf_d(cpu, r);
 }
 
+static void nw_fp_convert_word(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb, unsigned rn)
+{
+    // Integer significand rounding is independent of host FP state and KPX's
+    // numerical reference implementation. Check range after rounding.
+    const uint64_t raw = cpu->fpr[fb & 31u], abs = raw & UINT64_C(0x7fffffffffffffff);
+    const bool negative = raw >> 63;
+    const unsigned exponent = unsigned(abs >> 52);
+    const uint64_t significand = (abs & UINT64_C(0x000fffffffffffff)) | (exponent ? UINT64_C(0x0010000000000000) : 0);
+    uint64_t magnitude = 0;
+    bool inexact = false, increment = false;
+    bool invalid = exponent == 2047 || exponent > 1054;
+    if (!invalid) {
+        const int e = exponent ? int(exponent) - 1023 : -1022;
+        const unsigned shift = unsigned(52 - e); // e <= 31: shift always positive
+        if (shift < 64) {
+            magnitude = significand >> shift;
+            const uint64_t remainder = significand & ((UINT64_C(1) << shift) - 1);
+            inexact = remainder != 0;
+            const uint64_t half = UINT64_C(1) << (shift - 1);
+            increment = rn == 0 ? remainder > half || (remainder == half && (magnitude & 1)) :
+                        rn == 2 ? inexact && !negative : rn == 3 ? inexact && negative : false;
+        } else {
+            inexact = significand != 0;
+            increment = (rn == 2 && !negative || rn == 3 && negative) && inexact;
+        }
+        magnitude += increment;
+        invalid = magnitude > (negative ? UINT64_C(0x80000000) : UINT64_C(0x7fffffff));
+    }
+    uint32_t causes = 0;
+    cpu->fpscr &= ~0x00060000u; // replace, never accumulate FR/FI
+    if (invalid) {
+        causes = 0x00000100u | (nw_fp_snan(raw) ? 0x01000000u : 0u);
+        magnitude = negative || nw_fp_nan(raw) ? UINT64_C(0x80000000) : UINT64_C(0x7fffffff);
+    } else {
+        if (increment) cpu->fpscr |= 0x00040000u;
+        if (inexact) { cpu->fpscr |= 0x00020000u; causes = 0x02000000u; }
+    }
+    nw_fp_record(cpu, causes);
+    if (!(invalid && (cpu->fpscr & 0x80u))) {
+        const uint32_t word = invalid ? uint32_t(magnitude) : negative ? 0u - uint32_t(magnitude) : uint32_t(magnitude);
+        // The undefined upper word retains the established sign-extension policy.
+        cpu->fpr[fd & 31u] = uint64_t(int64_t(int32_t(word)));
+    }
+    nw_fp_exception(cpu);
+}
 void nw_jit_helper_fctiwz(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
-	const double d = f64_from_fpr(cpu->fpr[fb & 31u]);
-	int32_t i;
-	if (isnan(d))
-		i = (int32_t)0x80000000u;
-	else if (d >= 2147483647.0)
-		i = 0x7fffffff;
-	else if (d <= -2147483648.0)
-		i = (int32_t)0x80000000;
-	else
-		i = (int32_t)d;
-	/* The ISA leaves the upper word unspecified. Match KPX's sign extension
-	 * so engine transitions and full-width stores preserve one representation. */
-	cpu->fpr[fd & 31u] = (uint64_t)(int64_t)i;
+    nw_fp_convert_word(cpu, fd, fb, 1);
 }
 
 void nw_jit_helper_lvsl(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t ea, int sl)
@@ -1633,6 +2016,16 @@ void nw_jit_fprf_fd(struct nw_jit_cpu *cpu, uint32_t fd)
 	nw_jit_fpscr_fprf(cpu, f32_from_fpr(cpu->fpr[fd & 31u]));
 }
 
+static void nw_jit_fp_basic_finish(struct nw_jit_cpu *cpu, uint32_t fd)
+{
+    {
+    const ppc_fp_environment fp_env(cpu->fpscr);
+    nw_jit_fpscr_fprf(cpu, f32_from_fpr(cpu->fpr[fd & 31u]), true);
+    }
+    nw_fp_record(cpu, 0);
+    nw_fp_exception(cpu);
+}
+
 void nw_jit_helper_vsel(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc)
 {
 	nw_vxo_note(42u | ((vc & 31u) << 6));
@@ -1816,16 +2209,17 @@ void nw_jit_helper_vsumsws(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uin
 	int64_t s = (int32_t)cpu->vr[vb][3];
 	for (int i = 0; i < 4; i++)
 		s += (int32_t)cpu->vr[va][i];
-	if (s > 2147483647ll)
-		s = 2147483647ll;
-	else if (s < -2147483648ll)
-		s = -2147483648ll;
+	if (s > 2147483647ll) { s = 2147483647ll; cpu->vscr |= 1u; }
+	else if (s < -2147483648ll) { s = -2147483648ll; cpu->vscr |= 1u; }
 	cpu->vr[vd][0] = cpu->vr[vd][1] = cpu->vr[vd][2] = 0;
 	cpu->vr[vd][3] = (uint32_t)(int32_t)s;
 }
 
 void nw_jit_helper_vmx(struct nw_jit_cpu *cpu, uint32_t op)
 {
+	if (cpu->verify_mem && !ppc_vmx_reserved_zero(op)) { verify_forbidden(cpu); return; }
+	if (nw_vmx_integer(cpu, op)) { nw_vxo_note(op & 0x7ffu); return; }
+	if (nw_vmx_fp(cpu, op)) { nw_vxo_note(op & 0x7ffu); return; }
 	if (verify_forbidden(cpu)) return;
 	nw_vxo_note(op & 0x7ffu);
 	if (g_host_vmx && cpu->host)
@@ -1859,8 +2253,19 @@ void nw_jit_helper_tlbie(struct nw_jit_cpu *cpu, uint32_t ea)
 
 void nw_jit_helper_lwarx(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ea)
 {
-	if (verify_forbidden(cpu)) return;
 	rd &= 31u;
+	if (cpu->verify_mem) {
+		if (!cpu->verify_xlate) { verify_forbidden(cpu); return; }
+		uint32_t pa = 0;
+		const uint32_t fault = cpu->verify_xlate(cpu->verify_context, cpu->pc, ea, 4, false, &pa);
+		record_memory_exit(cpu, fault, ea, 4, false);
+		if (fault) return;
+		const uint32_t value = nw_jit_helper_lwz(cpu, ea);
+		if (cpu->fault) return;
+		cpu->gpr[rd] = value;
+		cpu->reserve_valid = 1; cpu->reserve_ea = pa;
+		return;
+	}
 	if (g_host_lwarx && cpu->host) {
 		int fault = 0;
 		const uint32_t v = g_host_lwarx(cpu->host, ea, cpu->pc, &fault);
@@ -1896,8 +2301,22 @@ void nw_jit_helper_lwarx(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ea)
 
 void nw_jit_helper_stwcx(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t ea)
 {
-	if (verify_forbidden(cpu)) return;
 	uint32_t cr0 = (cpu->xer >> 31) & 1u; /* SO */
+	if (cpu->verify_mem) {
+		if (!cpu->verify_xlate) { verify_forbidden(cpu); return; }
+		uint32_t pa = 0;
+		const uint32_t fault = cpu->verify_xlate(cpu->verify_context, cpu->pc, ea, 4, true, &pa);
+		record_memory_exit(cpu, fault, ea, 4, true);
+		if (fault) return;
+		if (cpu->reserve_valid && cpu->reserve_ea == pa) {
+			nw_jit_helper_stw(cpu, ea, cpu->gpr[rs & 31u]);
+			if (cpu->fault && cpu->fault != NW_JIT_FAULT_SMC) return;
+			cr0 |= 2u;
+		}
+		cpu->reserve_valid = 0;
+		cpu->cr = (cpu->cr & 0x0fffffffu) | (cr0 << 28);
+		return;
+	}
 	if (g_host_stwcx && cpu->host) {
 		int fault = 0;
 		const int eq = g_host_stwcx(cpu->host, ea, cpu->gpr[rs & 31u], cpu->pc, &fault);
@@ -1937,49 +2356,50 @@ void nw_jit_helper_stwcx(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t ea)
 
 void nw_jit_helper_lswx(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ea, uint32_t nb)
 {
-	if (verify_forbidden(cpu)) return;
-	int r = (int)(rd & 31u);
-	unsigned n = nb & 0x7fu;
-	unsigned i = 0;
-	while (n - i >= 4u) {
-		uint32_t v = 0;
-		for (int b = 0; b < 4; b++) {
-			v = (v << 8) | (nw_jit_helper_lb(cpu, ea + i + (unsigned)b) & 0xffu);
-			if (cpu->fault)
-				return;
+	unsigned r = rd & 31u;
+	const unsigned n = nb & 0x7fu;
+	for (unsigned i = 0; i < n; r = (r + 1) & 31u) {
+		const unsigned end = i + (n - i < 4 ? n - i : 4);
+		uint32_t value = 0;
+		unsigned shift = 32;
+		while (i < end) {
+			const uint32_t address = ea + i;
+			const unsigned page_left = 4096u - (address & 4095u);
+			const unsigned width = end - i >= 4 && page_left >= 4 ? 4 :
+			                       end - i >= 2 && page_left >= 2 ? 2 : 1;
+			const uint32_t part = width == 4 ? nw_jit_helper_lwz(cpu, address) :
+			                      width == 2 ? nw_jit_helper_lh(cpu, address) :
+			                                   nw_jit_helper_lb(cpu, address);
+			if (cpu->fault) return;
+			shift -= width * 8;
+			value |= part << shift;
+			i += width;
 		}
-		cpu->gpr[r] = v;
-		i += 4;
-		r = (r + 1) & 31;
-	}
-	if (n > i) {
-		uint32_t v = 0;
-		const unsigned left = n - i;
-		for (unsigned b = 0; b < left; b++) {
-			v |= (nw_jit_helper_lb(cpu, ea + i + b) & 0xffu) << (24 - 8 * (int)b);
-			if (cpu->fault)
-				return;
-		}
-		cpu->gpr[r] = v;
+		cpu->gpr[r] = value;
 	}
 }
 
 void nw_jit_helper_stswx(struct nw_jit_cpu *cpu, uint32_t rs, uint32_t ea, uint32_t nb)
 {
-	if (verify_forbidden(cpu)) return;
 	int r = (int)(rs & 31u);
 	int sh = 24;
 	const unsigned n = nb & 0x7fu;
+	bool smc = false;
+	uint32_t smc_ea = 0;
 	for (unsigned i = 0; i < n; i++) {
 		nw_jit_helper_stb(cpu, ea + i, cpu->gpr[r] >> sh);
-		if (cpu->fault)
-			return;
+		if (cpu->fault == NW_JIT_FAULT_SMC) {
+			// The byte was committed. Finish the instruction, retaining a
+			// later precise DSI if it occurs, then stop before the suffix.
+			smc = true; smc_ea = cpu->fault_ea; cpu->fault = 0;
+		} else if (cpu->fault) return;
 		sh -= 8;
 		if (sh < 0) {
 			sh = 24;
 			r = (r + 1) & 31;
 		}
 	}
+	if (smc) record_memory_exit(cpu, NW_JIT_FAULT_SMC, smc_ea, 1, true);
 }
 
 void nw_jit_helper_vmsumshm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, uint32_t vb, uint32_t vc, int sat)
@@ -1994,10 +2414,8 @@ void nw_jit_helper_vmsumshm(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t va, ui
 		int64_t s = (int64_t)a0 * (int64_t)b0 + (int64_t)a1 * (int64_t)b1 +
 			    (int32_t)cpu->vr[vc][w];
 		if (sat) {
-			if (s > 2147483647ll)
-				s = 2147483647ll;
-			else if (s < -2147483648ll)
-				s = -2147483648ll;
+			if (s > 2147483647ll) { s = 2147483647ll; cpu->vscr |= 1u; }
+			else if (s < -2147483648ll) { s = -2147483648ll; cpu->vscr |= 1u; }
 		}
 		cpu->vr[vd][w] = (uint32_t)(int32_t)s;
 	}
@@ -3070,7 +3488,7 @@ static void nw_jit_summary_write_file(void)
 		};
 		static const char *const help_class[NW_HELP_N] = {
 			"INLINE_READY", "INLINE_READY", "INLINE_READY", "INLINE_READY",
-			"INLINE_READY", "BLOCKED", "BLOCKED", "NEEDS_NEON"
+			"INLINE_READY", "PRIVATE_HELPER", "PRIVATE_HELPER", "NEEDS_NEON"
 		};
 		for (int i = 0; i < NW_HELP_N; i++)
 			fprintf(f, "helper %s %s n=%llu\n", help_name[i], help_class[i],
@@ -3165,6 +3583,11 @@ void nw_jit_set_host_trap(nw_jit_host_trap fn)
 	g_host_trap = fn;
 }
 
+void nw_jit_set_host_fp_exception(nw_jit_host_trap fn)
+{
+    g_host_fp_exception = fn;
+}
+
 void nw_jit_set_host_sc(nw_jit_host_sc fn)
 {
 	g_host_sc = fn;
@@ -3231,6 +3654,7 @@ void *nw_jit_helper_chain(struct nw_jit_cpu *cpu, uint32_t chain_pc, uint32_t cu
 {
 	if (g_mode != NW_JIT_ON || !cpu || cpu->fault)
 		return NULL;
+	if (chain_pc == NW_JIT_CHAIN_DYNAMIC) chain_pc = cpu->pc;
 	if (!chain_pc || cpu->pc != chain_pc)
 		return NULL;
 	if (g_tail_hops >= NW_JIT_TAIL_MAX)
@@ -3610,7 +4034,8 @@ void nw_jit_itlb_drop_page(uint32_t ea)
 
 void nw_jit_itlb_note_msr(uint32_t old_msr, uint32_t new_msr)
 {
-	if ((old_msr ^ new_msr) & 0x00000020u)	/* IR */
+	/* Instruction mappings and execute permissions depend on IR and PR. */
+	if ((old_msr ^ new_msr) & 0x00004020u)
 		nw_jit_itlb_flush();
 }
 
@@ -3747,8 +4172,32 @@ static int spr_is_mfspr_ext(uint32_t spr)
 	       (spr >= NW_PPC_SPR_SPRG0 && spr <= NW_PPC_SPR_SPRG3);
 }
 
+static int nw_vmx_op_supported(uint32_t op)
+{
+    if (!ppc_vmx_reserved_zero(op)) return 0;
+    {
+        // All original AltiVec calculations have private implementations.
+        // Recognition is positive; unknown VMX must never borrow a live CPU.
+        if (nw_vmx_integer_descriptor(op)) return 1;
+        if (nw_vmx_fp_kind(op)) return 1;
+        const unsigned vxo = op & 2047u, va = op & 63u;
+        if (va == 34 || va == 40 || va == 41 || va == 42 || va == 43 ||
+            (va == 44 && !(op & (1u << 10)))) return 1;
+        switch (vxo) {
+        case 0: case 1156: case 1028: case 1092: case 1220: case 1024:
+        case 324: case 134: case 1158: case 6: case 1030: case 770:
+        case 708: case 644: case 908: case 452: case 1036: case 1100:
+        case 780: case 1604: case 1540: case 516: case 260: case 844:
+        case 652: case 524: case 12: case 268: case 140: case 396:
+        case 1928: case 128: case 900: case 462: case 1856: return 1;
+        }
+        return 0;
+    }
+}
+
 int nw_jit_op_supported(uint32_t op)
 {
+	if (!ppc_vmx_reserved_zero(op)) return 0;
 	const int prim = (int)(op >> 26);
 	const int rd = (int)((op >> 21) & 0x1f);
 	const int xo = (int)((op >> 1) & 0x3ff);
@@ -3866,8 +4315,8 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* and */
 	if (prim == 31 && xo == 26)
 		return 1;	/* cntlzw */
-	if (prim == 31 && xo == 104)
-		return 1;	/* neg */
+	if (prim == 31 && (xo == 104 || xo == 616))
+		return 1;	/* neg / nego */
 	if (prim == 24)
 		return 1;	/* ori */
 	if (prim == 25)
@@ -3892,14 +4341,14 @@ int nw_jit_op_supported(uint32_t op)
 		return 1;	/* icbi */
 	if (prim == 31 && xo == 306)
 		return 1;	/* tlbie */
-	if (prim == 31 && xo == 202)
-		return 1;	/* addze */
-	if (prim == 31 && xo == 200)
-		return 1;	/* subfze */
-	if (prim == 31 && xo == 234)
-		return 1;	/* addme */
-	if (prim == 31 && xo == 232)
-		return 1;	/* subfme */
+	if (prim == 31 && (xo == 202 || xo == 714))
+		return 1;	/* addze / addzeo */
+	if (prim == 31 && (xo == 200 || xo == 712))
+		return 1;	/* subfze / subfzeo */
+	if (prim == 31 && (xo == 234 || xo == 746))
+		return 1;	/* addme / addmeo */
+	if (prim == 31 && (xo == 232 || xo == 744))
+		return 1;	/* subfme / subfmeo */
 	if (prim == 31 && xo == 412)
 		return 1;	/* orc */
 	if (prim == 31 && xo == 512)
@@ -4005,7 +4454,7 @@ int nw_jit_op_supported(uint32_t op)
 	if (prim == 31 && (xo == 6 || xo == 38))
 		return 1;	/* lvsl / lvsr */
 	if (prim == 4)
-		return 1;	/* AltiVec: named helpers or kpx helper_vmx */
+		return nw_vmx_op_supported(op);
 	if (prim == 31 && xo == 235)
 		return 1;	/* mullw */
 	if (prim == 31 && xo == 747)
@@ -4064,12 +4513,14 @@ int nw_jit_op_supported(uint32_t op)
 }
 
 /* Positive allowlist: adding a production opcode does not automatically grant
- * it access to the live verifier. Privileged/timer/VMX/atomic/string effects
+ * it access to the live verifier. Privileged/timer/VMX effects
  * need their own observations before they can enter this path. */
 int nw_jit_op_verify_safe(uint32_t op)
 {
     if (!nw_jit_op_supported(op)) return 0;
+    if (nw_jit_op_system(op)) return 1;
     const unsigned prim = op >> 26, xo = (op >> 1) & 1023;
+    if (prim == 4) return 1; // Production VMX policy is already private and constrained.
     if (prim == 7 || prim == 8 || (prim >= 10 && prim <= 16) || prim == 18 ||
         prim == 20 || prim == 21 || prim == 23 || (prim >= 24 && prim <= 29) ||
         (prim >= 32 && prim <= 55) || prim == 59 || prim == 63) return 1;
@@ -4088,12 +4539,14 @@ int nw_jit_op_verify_safe(uint32_t op)
         case 266: case 284: case 316: case 412: case 444: case 459: case 476:
         case 491: case 512: case 520: case 522: case 536: case 552: case 648:
         case 650: case 747: case 778: case 792: case 824: case 922: case 954:
-        case 971: case 1003:
+        case 971: case 1003: case 616: case 714: case 712: case 746: case 744:
         case 23: case 55: case 87: case 119: case 151: case 183: case 215:
         case 247: case 279: case 311: case 343: case 375: case 407: case 439:
         case 534: case 790: case 662: case 918:
         case 535: case 567: case 599: case 631: case 663: case 695: case 727:
-        case 759: return 1;
+        case 759: case 533: case 597: case 661: case 725: case 20: case 150:
+        case 6: case 38: case 7: case 39: case 71: case 103: case 359:
+        case 135: case 167: case 199: case 231: case 487: return 1;
         }
     }
     return 0;
@@ -4605,9 +5058,10 @@ void nw_jit_pc_hot_dump(const char *why)
 
 int nw_jit_op_ends_block(uint32_t op)
 {
+    if ((op >> 26) == 31 && ((op >> 1) & 1023) == 467 && nw_jit_op_system(op) &&
+        (((op >> 16) & 31) | ((op >> 6) & 992)) != 256) return 1;
 	const int prim = (int)(op >> 26);
 	const int xo = (int)((op >> 1) & 0x3ff);
-	const int vxo = (int)(op & 0x7ff);
 	return prim == 16 || prim == 18 || prim == 17 ||
 	       (prim == 19 && (xo == 16 || xo == 528 || xo == 150 || xo == 50)) ||
 	       (prim == 31 && xo == 146) ||
@@ -4618,8 +5072,7 @@ int nw_jit_op_ends_block(uint32_t op)
 	       (prim == 31 && xo == 242) ||
 	       (prim == 31 && (xo == 339 || xo == 467) && spr_num(op) == NW_PPC_SPR_DEC) ||
 	       (prim == 31 && xo == 339 &&
-		!spr_is_user(spr_num(op)) && !spr_is_mfspr_ext(spr_num(op))) ||
-	       (prim == 4 && (vxo == 1036 || vxo == 1100)); /* vslo / vsro: keep one-op; A/B Starting Up lock */
+		!spr_is_user(spr_num(op)) && !spr_is_mfspr_ext(spr_num(op)));
 }
 
 uint32_t nw_jit_op_gpr_mask(uint32_t op)
@@ -5960,6 +6413,15 @@ static void record_ov_sub(struct nw_jit_cpu *cpu, uint32_t a, uint32_t b)
 		cpu->xer |= 0xc0000000u;
 }
 
+/* Three-operand carry forms must include the incoming CA in the signed sum.
+ * Check its full width before truncation; replace OV and retain sticky SO. */
+static void record_ov_wide(struct nw_jit_cpu *cpu, int64_t sum)
+{
+	cpu->xer &= ~0x40000000u;
+	if (sum < INT32_MIN || sum > INT32_MAX)
+		cpu->xer |= 0xc0000000u;
+}
+
 static uint32_t mtcrf_mask(uint32_t op)
 {
 	const uint32_t crm = (op >> 12) & 0xffu;
@@ -6003,27 +6465,31 @@ static void record_cr0(struct nw_jit_cpu *cpu, int32_t v)
 	cpu->cr = (cpu->cr & 0x0fffffffu) | (cr0 << 28);
 }
 
-void nw_jit_helper_addze(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rc)
+void nw_jit_helper_addze(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t flags)
 {
 	const uint32_t a = cpu->gpr[ra & 31u];
 	const uint32_t ca = (cpu->xer >> 29) & 1u;
 	record_ca(cpu, a, ca);
+	if (flags & 0x400u)
+		record_ov_wide(cpu, (int64_t)(int32_t)a + ca);
 	cpu->gpr[rd & 31u] = a + ca;
-	if (rc)
+	if (flags & 1u)
 		record_cr0(cpu, (int32_t)cpu->gpr[rd & 31u]);
 }
 
-void nw_jit_helper_subfze(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rc)
+void nw_jit_helper_subfze(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t flags)
 {
 	const uint32_t a = ~cpu->gpr[ra & 31u];
 	const uint32_t ca = (cpu->xer >> 29) & 1u;
 	record_ca(cpu, a, ca);
+	if (flags & 0x400u)
+		record_ov_wide(cpu, (int64_t)(int32_t)a + ca);
 	cpu->gpr[rd & 31u] = a + ca;
-	if (rc)
+	if (flags & 1u)
 		record_cr0(cpu, (int32_t)cpu->gpr[rd & 31u]);
 }
 
-void nw_jit_helper_addme(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rc)
+void nw_jit_helper_addme(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t flags)
 {
 	const uint32_t a = cpu->gpr[ra & 31u];
 	const uint32_t ca = (cpu->xer >> 29) & 1u;
@@ -6032,12 +6498,14 @@ void nw_jit_helper_addme(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint3
 		cpu->xer |= 0x20000000u;
 	else
 		cpu->xer &= ~0x20000000u;
+	if (flags & 0x400u)
+		record_ov_wide(cpu, (int64_t)(int32_t)a - 1 + ca);
 	cpu->gpr[rd & 31u] = (uint32_t)s;
-	if (rc)
+	if (flags & 1u)
 		record_cr0(cpu, (int32_t)cpu->gpr[rd & 31u]);
 }
 
-void nw_jit_helper_subfme(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t rc)
+void nw_jit_helper_subfme(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint32_t flags)
 {
 	const uint32_t a = ~cpu->gpr[ra & 31u];
 	const uint32_t ca = (cpu->xer >> 29) & 1u;
@@ -6046,8 +6514,10 @@ void nw_jit_helper_subfme(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t ra, uint
 		cpu->xer |= 0x20000000u;
 	else
 		cpu->xer &= ~0x20000000u;
+	if (flags & 0x400u)
+		record_ov_wide(cpu, (int64_t)(int32_t)a - 1 + ca);
 	cpu->gpr[rd & 31u] = (uint32_t)s;
-	if (rc)
+	if (flags & 1u)
 		record_cr0(cpu, (int32_t)cpu->gpr[rd & 31u]);
 }
 
@@ -6105,7 +6575,6 @@ void nw_jit_helper_tlbia(struct nw_jit_cpu *cpu)
 
 void nw_jit_helper_lve(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t ra, uint32_t rb, uint32_t sz)
 {
-	if (verify_forbidden(cpu)) return;
 	uint32_t ea = (ra ? cpu->gpr[ra & 31u] : 0u) + cpu->gpr[rb & 31u];
 	vd &= 31u;
 	if (sz == 2)
@@ -6137,7 +6606,6 @@ void nw_jit_helper_lve(struct nw_jit_cpu *cpu, uint32_t vd, uint32_t ra, uint32_
 
 void nw_jit_helper_stve(struct nw_jit_cpu *cpu, uint32_t vs, uint32_t ra, uint32_t rb, uint32_t sz)
 {
-	if (verify_forbidden(cpu)) return;
 	uint32_t ea = (ra ? cpu->gpr[ra & 31u] : 0u) + cpu->gpr[rb & 31u];
 	vs &= 31u;
 	if (sz == 2)
@@ -6196,20 +6664,7 @@ void nw_jit_helper_fsel(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32
 
 void nw_jit_helper_fctiw(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fb)
 {
-	const ppc_fp_environment fp_env(cpu->fpscr);
-	const double d = f64_from_fpr(cpu->fpr[fb & 31u]);
-	int32_t i;
-	if (isnan(d))
-		i = (int32_t)0x80000000u;
-	else if (d >= 2147483647.0)
-		i = 0x7fffffff;
-	else if (d <= -2147483648.0)
-		i = (int32_t)0x80000000;
-	else
-		i = (int32_t)nearbyint(d);
-	/* The ISA leaves the upper word unspecified. Match KPX's sign extension
-	 * so engine transitions and full-width stores preserve one representation. */
-	cpu->fpr[fd & 31u] = (uint64_t)(int64_t)i;
+    nw_fp_convert_word(cpu, fd, fb, cpu->fpscr & 3u);
 }
 
 void nw_jit_helper_cr1(struct nw_jit_cpu *cpu)
@@ -6844,6 +7299,8 @@ void nw_jit_helper_mfspr(struct nw_jit_cpu *cpu, uint32_t rd, uint32_t spr)
 
 int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 {
+	if (nw_jit_op_system(op) && (cpu->verify_mem || g_host_system)) { nw_jit_helper_system(cpu, op); return cpu->fault || nw_jit_op_ends_block(op) ? 1 : 0; }
+	if (!ppc_vmx_reserved_zero(op)) return -1;
 	const uint32_t pc = cpu->pc;
 	const int prim = (int)(op >> 26);
 	const int rd = (int)((op >> 21) & 0x1f);
@@ -7391,8 +7848,11 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 0;
 	}
-	if (prim == 31 && xo == 104) {
-		cpu->gpr[rd] = 0u - cpu->gpr[ra];
+	if (prim == 31 && (xo == 104 || xo == 616)) {
+		const uint32_t a = cpu->gpr[ra];
+		if (xo == 616)
+			record_ov_sub(cpu, a, 0);
+		cpu->gpr[rd] = 0u - a;
 		if (op & 1)
 			record_cr0(cpu, (int32_t)cpu->gpr[rd]);
 		cpu->pc = pc + 4;
@@ -7659,12 +8119,14 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 			return -1;
 		if (op & 1)
 			nw_jit_helper_cr1(cpu);
+		if ((axo == 18 || axo == 20 || axo == 21 || axo == 25) && cpu->fault) return 1;
 		cpu->pc = pc + 4;
 		return 0;
 	}
 	if (prim == 63 && (xo == 32 || xo == 0)) {
-		nw_jit_helper_fcmpo(cpu, (uint32_t)((op >> 23) & 7u),
+		(xo == 32 ? nw_jit_helper_fcmpo : nw_jit_helper_fcmpu)(cpu, (uint32_t)((op >> 23) & 7u),
 				    (uint32_t)ra, (uint32_t)rb);
+		if (cpu->fault) return 1;
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -7733,6 +8195,7 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		nw_jit_helper_frsp(cpu, (uint32_t)rd, (uint32_t)rb);
 		if (op & 1)
 			nw_jit_helper_cr1(cpu);
+		if (cpu->fault) return 1;
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -7747,6 +8210,7 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		nw_jit_helper_fctiwz(cpu, (uint32_t)rd, (uint32_t)rb);
 		if (op & 1)
 			nw_jit_helper_cr1(cpu);
+		if (cpu->fault) return 1;
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -7754,6 +8218,7 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		nw_jit_helper_fctiw(cpu, (uint32_t)rd, (uint32_t)rb);
 		if (op & 1)
 			nw_jit_helper_cr1(cpu);
+		if (cpu->fault) return 1;
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -7784,6 +8249,7 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 			return -1;
 		if (op & 1)
 			nw_jit_helper_cr1(cpu);
+		if ((axo == 18 || axo == 20 || axo == 21 || axo == 25) && cpu->fault) return 1;
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -7794,6 +8260,7 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		return 0;
 	}
 	if (prim == 4) {
+		if (!nw_jit_op_supported(op)) return -1;
 		const int vxo = (int)(op & 0x7ff);
 		const int vaxo = (int)(op & 0x3f);
 		const int vc = (int)((op >> 6) & 0x1f);
@@ -8136,33 +8603,13 @@ int nw_jit_interp_one(struct nw_jit_cpu *cpu, uint32_t op)
 		cpu->pc = pc + 4;
 		return 1;
 	}
-	if (prim == 31 && xo == 202) {
-		const uint32_t a = cpu->gpr[ra];
-		const uint32_t ca = (cpu->xer >> 29) & 1u;
-		record_ca(cpu, a, ca);
-		cpu->gpr[rd] = a + ca;
-		if (op & 1)
-			record_cr0(cpu, (int32_t)cpu->gpr[rd]);
-		cpu->pc = pc + 4;
-		return 0;
-	}
-	if (prim == 31 && xo == 200) {
-		const uint32_t a = ~cpu->gpr[ra];
-		const uint32_t ca = (cpu->xer >> 29) & 1u;
-		record_ca(cpu, a, ca);
-		cpu->gpr[rd] = a + ca;
-		if (op & 1)
-			record_cr0(cpu, (int32_t)cpu->gpr[rd]);
-		cpu->pc = pc + 4;
-		return 0;
-	}
-	if (prim == 31 && xo == 234) {
-		nw_jit_helper_addme(cpu, (uint32_t)rd, (uint32_t)ra, op & 1u);
-		cpu->pc = pc + 4;
-		return 0;
-	}
-	if (prim == 31 && xo == 232) {
-		nw_jit_helper_subfme(cpu, (uint32_t)rd, (uint32_t)ra, op & 1u);
+	if (prim == 31 && (xo == 202 || xo == 714 || xo == 200 || xo == 712 ||
+	                   xo == 234 || xo == 746 || xo == 232 || xo == 744)) {
+		const unsigned base = xo & 511u;
+		if (base == 202) nw_jit_helper_addze(cpu, rd, ra, op & 0x401u);
+		else if (base == 200) nw_jit_helper_subfze(cpu, rd, ra, op & 0x401u);
+		else if (base == 234) nw_jit_helper_addme(cpu, rd, ra, op & 0x401u);
+		else nw_jit_helper_subfme(cpu, rd, ra, op & 0x401u);
 		cpu->pc = pc + 4;
 		return 0;
 	}
@@ -9884,8 +10331,40 @@ static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int 
 	 * made iTunes lose text and audio. It does not name a dest
 	 * alias or an FPSCR mismatch. NW_JIT_FP_INLINE=1 turns the
 	 * sequence back on; unset stays on the helper. */
-	const int fast = nw_fp_inline_on();
+	// frsp needs adjusted exponent results and bit-exact NaN projection;
+	// generated blocks call its integer-significand kernel in either mode.
+	const int fast = nw_fp_inline_on() && kind != 100;
 	(void)is_cmp;
+	const bool basic = kind == 18 || kind == 20 || kind == 21 || kind == 25;
+	uint32_t *special_done = NULL;
+	if (fast && basic) {
+		// Normal finite operands cannot need special-result policy. Inspect
+		// exponents before calling C; zero/subnormal and all-ones fields use
+		// the raw-bit kernel. Subnormals may return to ordinary arithmetic.
+		uint32_t *special[4];
+		const int sources[] = {ra, kind == 25 ? fc : rb};
+		for (int i = 0; i < 2; ++i) {
+			if (!emit_w(e, a64_ldr_w(W8, X19, fpr_off(sources[i]) + 4)) ||
+			    !emit_w(e, a64_ubfx(W8, W8, 20, 11))) return 0;
+			special[2*i] = e->p;
+			if (!emit_w(e, a64_cbz(W8, 0)) || !emit_w(e, a64_cmp_imm(W8, 2047))) return 0;
+			special[2*i+1] = e->p;
+			if (!emit_w(e, a64_b_cond(0, 0))) return 0;
+		}
+		uint32_t *finite = e->p;
+		if (!emit_w(e, a64_b(0))) return 0;
+		for (int i = 0; i < 4; ++i)
+			*special[i] = (i & 1) ? a64_b_cond(0, (int)(e->p - special[i])) : a64_cbz(W8, (int)(e->p - special[i]));
+		if (!emit_w(e, 0xaa1303e0u) || !emit_imm32(e, W1, kind) ||
+		    !emit_imm32(e, W2, rd) || !emit_imm32(e, W3, ra) ||
+		    !emit_imm32(e, W4, kind == 25 ? fc : rb) ||
+		    !emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_fp_basic_special) ||
+		    !emit_w(e, 0xd63f0120u) || !emit_w(e, a64_orr_reg(W8, 31, W0)) ||
+		    !emit_w(e, 0xaa1303e0u)) return 0;
+		special_done = e->p;
+		if (!emit_w(e, a64_cbnz(W8, 0))) return 0;
+		*finite = a64_b((int)(e->p - finite));
+	}
 	uint32_t *slow = NULL;
 	if (fast && !unary) {
 		if (!emit_w(e, a64_ldr_w(W8, X19, (uint32_t)offsetof(struct nw_jit_cpu, fpscr))))
@@ -9970,6 +10449,9 @@ static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int 
 			return 0;
 		if (!emit_w(e, a64_str_w(W9, X19, (uint32_t)offsetof(struct nw_jit_cpu, cr))))
 			return 0;
+		if (!emit_w(e, 0xaa1303e0u) || !emit_imm32(e, W1, op) ||
+		    !emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_fp_compare_status) ||
+		    !emit_w(e, 0xd63f0120u) || !emit_w(e, 0xaa1303e0u)) return 0;
 	} else if (fast) {
 		/* fmuls is fra*frc. fmadds is fra*frc+frb. The rest use fra, frb. */
 		const int two = (kind == 18 || kind == 20 || kind == 21 || kind == 25 || kind == 100);
@@ -10006,7 +10488,7 @@ static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int 
 			return 0;
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
-		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_fprf_fd))
+		if (!emit_imm64(e, X9, (uint64_t)(uintptr_t)(basic ? nw_jit_fp_basic_finish : nw_jit_fprf_fd)))
 			return 0;
 		if (!emit_w(e, 0xd63f0120u))
 			return 0;
@@ -10035,7 +10517,7 @@ static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int 
 		else if (kind == 101) { fn = (void *)nw_jit_helper_fabs; narg = 2; }
 		else if (kind == 102) { fn = (void *)nw_jit_helper_fneg; narg = 2; }
 		else if (kind == 103) { fn = (void *)nw_jit_helper_fmr; narg = 2; }
-		else if (kind == 104) { fn = (void *)nw_jit_helper_fcmpo; narg = 3; }
+		else if (kind == 104) { fn = (void *)(((op >> 1) & 1023u) == 32 ? nw_jit_helper_fcmpo : nw_jit_helper_fcmpu); narg = 3; }
 		if (!fn)
 			return 0;
 		if (!emit_imm32(e, W1, is_cmp ? (uint32_t)((op >> 23) & 7u) : (uint32_t)rd))
@@ -10077,6 +10559,7 @@ static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int 
 		if (over)
 			*over = a64_b((int)(e->p - over));
 	}
+	if (special_done) *special_done = a64_cbnz(W8, (int)(e->p - special_done));
 	return emit_maybe_cr1(e, op);
 }
 
@@ -10100,9 +10583,8 @@ static uint32_t vr_off(int r)
 	return (uint32_t)offsetof(struct nw_jit_cpu, vr) + (uint32_t)(r & 31) * 16u;
 }
 
-/* NEON for the bitwise and per-lane arithmetic ops. vslo/vsro stay
- * helpers: a multi-op block of those locked Starting Up. vperm and
- * vmrghb stay helpers until a count says they are hot. */
+/* NEON for bitwise, permutation and selected per-lane arithmetic ops.
+ * vslo/vsro use the alias-safe private helpers within ordinary blocks. */
 static int emit_av_body(struct emit *e, int vxo, int vd, int va, int vb)
 {
 	uint32_t opw = 0;
@@ -10495,6 +10977,12 @@ static int emit_wake_log(struct emit *e, uint32_t pc)
 
 static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 {
+	if (nw_jit_op_system(op)) {
+		if (!emit_set_pc(e, pc) || !emit_w(e, 0xaa1303e0u) || !emit_imm32(e, W1, op) ||
+		    !emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_system) || !emit_w(e, 0xd63f0120u) || !emit_w(e, 0xaa1303e0u)) return 0;
+		return nw_jit_op_ends_block(op) ? emit_ret(e) : emit_fault_check(e);
+	}
+	if (!ppc_vmx_reserved_zero(op)) return 0;
 	if (!emit_wake_log(e, pc))
 		return 0;
 	const int prim = (int)(op >> 26);
@@ -10769,7 +11257,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 				return 0;
 			if (!emit_set_pc(e, (uint32_t)(pc + disp)))
 				return 0;
-			if (!emit_ret(e))
+			if (!emit_chain_epilogue(e, NW_JIT_CHAIN_DYNAMIC))
 				return 0;
 			int32_t off = (int32_t)(e->p - cb);
 			*cb = ((bo & ~1) == NW_PPC_BO_TRUE) ? a64_cbz(W8, off) : a64_cbnz(W8, off);
@@ -10790,7 +11278,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		if (!emit_w(e, 0xd63f0120u))
 			return 0;
-		return emit_ret(e);
+		return emit_chain_epilogue(e, NW_JIT_CHAIN_DYNAMIC);
 	}
 	if (prim == 18) {
 		const int32_t disp = (((int32_t)(op << 6)) >> 6) & ~3;
@@ -10803,9 +11291,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		}
 		if (!emit_set_pc(e, target))
 			return 0;
-		if ((op & 1) == 0)
-			return emit_chain_epilogue(e, target);
-		return emit_ret(e);
+		return emit_chain_epilogue(e, target);
 	}
 	if (prim == 19 && xo == 0) {
 		if (!emit_imm32(e, W1, (op >> 23) & 7u))
@@ -11064,7 +11550,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
 		if (is_last)
-			return emit_ret(e);
+			return emit_chain_epilogue(e, NW_JIT_CHAIN_DYNAMIC);
 		if (!emit_w(e, a64_ldr_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, pc))))
 			return 0;
 		if (!emit_imm32(e, W9, pc + 4))
@@ -11074,7 +11560,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		uint32_t *cb = e->p;
 		if (!emit_w(e, a64_b_cond(0, 0)))	/* EQ: not taken, skip ret */
 			return 0;
-		if (!emit_ret(e))
+		if (!emit_chain_epilogue(e, NW_JIT_CHAIN_DYNAMIC))
 			return 0;
 		*cb = a64_b_cond(0, (int)(e->p - cb));
 		return 1;
@@ -11774,10 +12260,12 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return emit_cr0_from_w8(e);
 		return 1;
 	}
-	if (prim == 31 && xo == 104) {
+	if (prim == 31 && (xo == 104 || xo == 616)) {
 		if (!emit_load_gpr(e, W8, ra))
 			return 0;
-		if (!emit_w(e, a64_sub_reg(W8, 31, W8)))	/* 0 - rA */
+		if (!emit_w(e, (xo == 616 ? a64_subs_reg(W8, 31, W8) : a64_sub_reg(W8, 31, W8))))	/* 0 - rA */
+			return 0;
+		if (xo == 616 && !emit_xer_ov_from_vs(e))
 			return 0;
 		if (!emit_store_gpr(e, W8, rd))
 			return 0;
@@ -12022,8 +12510,9 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	if (prim == 59) {
 		const int axo = (int)((op >> 1) & 0x1f);
 		const int fc = (int)((op >> 6) & 0x1f);
-		if (axo == 18 || axo == 20 || axo == 21 || axo == 25 ||
-		    axo == 28 || axo == 29 || axo == 30 || axo == 31)
+		if (axo == 18 || axo == 20 || axo == 21 || axo == 25)
+			return emit_set_pc(e, pc) && emit_fp_inline(e, axo, rd, ra, rb, fc, op) && emit_fault_check(e);
+		if (axo == 28 || axo == 29 || axo == 30 || axo == 31)
 			return emit_fp_inline(e, axo, rd, ra, rb, fc, op);
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
@@ -12079,7 +12568,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		return emit_maybe_cr1(e, op);
 	}
 	if (prim == 63 && (xo == 32 || xo == 0))
-		return emit_fp_inline(e, 104, rd, ra, rb, 0, op);
+		return emit_set_pc(e, pc) && emit_fp_inline(e, 104, rd, ra, rb, 0, op) && emit_fault_check(e);
 	if (prim == 63 && xo == 711) {
 		if (!emit_imm32(e, W1, (op >> 17) & 0xffu))
 			return 0;
@@ -12102,7 +12591,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	if (prim == 63 && xo == 72)
 		return emit_fp_inline(e, 103, rd, ra, rb, 0, op);
 	if (prim == 63 && xo == 12)
-		return emit_fp_inline(e, 100, rd, ra, rb, 0, op);
+		return emit_set_pc(e, pc) && emit_fp_inline(e, 100, rd, ra, rb, 0, op) && emit_fault_check(e);
 	if (prim == 63 && xo == 583) {
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
@@ -12117,6 +12606,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		return emit_maybe_cr1(e, op);
 	}
 	if (prim == 63 && xo == 15) {
+		if (!emit_set_pc(e, pc)) return 0;
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
 		if (!emit_imm32(e, W2, (uint32_t)rb))
@@ -12129,9 +12619,10 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
-		return emit_maybe_cr1(e, op);
+		return emit_maybe_cr1(e, op) && emit_fault_check(e);
 	}
 	if (prim == 63 && xo == 14) {
+		if (!emit_set_pc(e, pc)) return 0;
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
 		if (!emit_imm32(e, W2, (uint32_t)rb))
@@ -12144,7 +12635,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
-		return emit_maybe_cr1(e, op);
+		return emit_maybe_cr1(e, op) && emit_fault_check(e);
 	}
 	if (prim == 63 && xo == 136) {
 		if (!emit_imm32(e, W1, (uint32_t)rd))
@@ -12224,6 +12715,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 	if (prim == 63) {
 		const int axo = (int)((op >> 1) & 0x1f);
 		const int fc = (int)((op >> 6) & 0x1f);
+		const bool basic = axo == 18 || axo == 20 || axo == 21 || axo == 25;
+		if (basic && !emit_set_pc(e, pc)) return 0;
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
 		if (axo == 26) {
@@ -12282,7 +12775,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
-		return emit_maybe_cr1(e, op);
+		return emit_maybe_cr1(e, op) && (!basic || emit_fault_check(e));
 	}
 	if (prim == 31 && (xo == 6 || xo == 38)) {
 		if (!emit_ra_or_0(e, W8, ra))
@@ -12306,6 +12799,7 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		return 1;
 	}
 	if (prim == 4) {
+		if (!nw_jit_op_supported(op)) return 0;
 		const int vxo = (int)(op & 0x7ff);
 		const int vaxo = (int)(op & 0x3f);
 		const int vc = (int)((op >> 6) & 0x1f);
@@ -12616,12 +13110,12 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return 1;
 	}
-	if (prim == 31 && xo == 202) {
+	if (prim == 31 && (xo == 202 || xo == 714)) {
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
 		if (!emit_imm32(e, W2, (uint32_t)ra))
 			return 0;
-		if (!emit_imm32(e, W3, op & 1u))
+		if (!emit_imm32(e, W3, op & 0x401u))
 			return 0;
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
@@ -12633,12 +13127,12 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return 1;
 	}
-	if (prim == 31 && xo == 200) {
+	if (prim == 31 && (xo == 200 || xo == 712)) {
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
 		if (!emit_imm32(e, W2, (uint32_t)ra))
 			return 0;
-		if (!emit_imm32(e, W3, op & 1u))
+		if (!emit_imm32(e, W3, op & 0x401u))
 			return 0;
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
@@ -12650,12 +13144,12 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return 1;
 	}
-	if (prim == 31 && xo == 234) {
+	if (prim == 31 && (xo == 234 || xo == 746)) {
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
 		if (!emit_imm32(e, W2, (uint32_t)ra))
 			return 0;
-		if (!emit_imm32(e, W3, op & 1u))
+		if (!emit_imm32(e, W3, op & 0x401u))
 			return 0;
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
@@ -12667,12 +13161,12 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return 1;
 	}
-	if (prim == 31 && xo == 232) {
+	if (prim == 31 && (xo == 232 || xo == 744)) {
 		if (!emit_imm32(e, W1, (uint32_t)rd))
 			return 0;
 		if (!emit_imm32(e, W2, (uint32_t)ra))
 			return 0;
-		if (!emit_imm32(e, W3, op & 1u))
+		if (!emit_imm32(e, W3, op & 0x401u))
 			return 0;
 		if (!emit_w(e, 0xaa1303e0u))
 			return 0;
@@ -12879,10 +13373,8 @@ static uint32_t block_chain_pc(const uint32_t *ops, int n, uint32_t guest_pc)
 			return disp;
 		return last_pc + disp;
 	}
-	/* Not-taken bc falls through. The taken target and bclr/bcctr
-	 * stay unchained: those hops smeared glyphs or blacked the screen. */
-	if (prim == 16)
-		return last_pc + 4u;
+    if (prim == 16 || prim == 18 || (prim == 19 && (((last >> 1) & 1023) == 16 || ((last >> 1) & 1023) == 528)))
+        return NW_JIT_CHAIN_DYNAMIC;
 	if (is_term(last) || nw_jit_op_ends_block(last))
 		return 0;
 	return guest_pc + (uint32_t)n * 4u;

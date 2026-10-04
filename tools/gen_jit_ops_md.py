@@ -52,7 +52,7 @@ RA_UPDATE = {
 }
 L_COMPARE = {"cmp", "cmpi", "cmpl", "cmpli"}
 W1_BRANCH = {"b", "bclr", "bcctr"}
-ENDS_RESTRICT = {"vslo", "vsro"}
+ENDS_RESTRICT = set()
 NAMED_EMIT_ALIAS = {
     "lvxl": "lvx",
     "stvxl": "stvx",
@@ -75,8 +75,24 @@ def encode_spr_field(spr: int) -> int:
     return ((spr & 0x1F) << 5) | ((spr >> 5) & 0x1F)
 
 
+def vmx_zero_fields(prim=4):
+    global _vmx_zero_fields
+    if '_vmx_zero_fields' not in globals():
+        fields = ROOT / 'SheepShaver/src/kpx_cpu/src/cpu/ppc/ppc-vmx-encoding.hpp'
+        _vmx_zero_fields = {}
+        for primary, table, count in [(4, 'ppc_vmx_zero_fields', 20), (31, 'ppc_vmx31_zero_fields', 15)]:
+            body = re.search(r'\b' + table + r'\[\] = \{(.*?)\n\};', fields.read_text(), re.S).group(1)
+            rows = [(int(xo), int(select, 16), int(mask, 16)) for xo, select, mask in
+                    re.findall(r'\{(\d+)u, 0x([0-9a-f]+)u, 0x([0-9a-f]+)u\}', body)]
+            if len(rows) != count: raise ValueError('Missing VMX encoding constraints')
+            _vmx_zero_fields[primary] = rows
+    return _vmx_zero_fields.get(prim, [])
+
+
 def nw_jit_op_supported(op: int) -> int:
     prim = (op >> 26) & 0x3F
+    for xo_zero, select, mask in vmx_zero_fields(prim):
+        if op & select == xo_zero and op & mask: return 0
     rd = (op >> 21) & 0x1F
     xo = (op >> 1) & 0x3FF
     if prim in (14, 12, 13):
@@ -193,7 +209,7 @@ def nw_jit_op_supported(op: int) -> int:
         return 1
     if prim == 31 and xo == 26:
         return 1
-    if prim == 31 and xo == 104:
+    if prim == 31 and xo in (104, 616):
         return 1
     if prim == 24:
         return 1
@@ -219,13 +235,13 @@ def nw_jit_op_supported(op: int) -> int:
         return 1
     if prim == 31 and xo == 306:
         return 1
-    if prim == 31 and xo == 202:
+    if prim == 31 and xo in (202, 714):
         return 1
-    if prim == 31 and xo == 200:
+    if prim == 31 and xo in (200, 712):
         return 1
-    if prim == 31 and xo == 234:
+    if prim == 31 and xo in (234, 746):
         return 1
-    if prim == 31 and xo == 232:
+    if prim == 31 and xo in (232, 744):
         return 1
     if prim == 31 and xo == 412:
         return 1
@@ -330,7 +346,18 @@ def nw_jit_op_supported(op: int) -> int:
     if prim == 31 and xo in (6, 38):
         return 1
     if prim == 4:
-        return 1
+        global _vmx_policy
+        if '_vmx_policy' not in globals():
+            entries = parse_decode_table(DECODE.read_text())
+            vx = {e['xo'] for e in entries if e['prim'] == 4 and e['form'] == 'VX_form'}
+            for e in entries:
+                if e['prim'] == 4 and e['form'] == 'VXR_form': vx.update([e['xo'], e['xo'] | 1024])
+            va = {e['xo'] for e in entries if e['prim'] == 4 and e['form'] == 'VA_form'}
+            zero = vmx_zero_fields()
+            _vmx_policy = vx, va, zero
+        vx, va, zero = _vmx_policy
+        if any(op & select == xo and op & mask for xo, select, mask in zero): return 0
+        return int(op & 2047 in vx or op & 63 in va)
     if prim == 31 and xo == 235:
         return 1
     if prim == 31 and xo == 747:
@@ -389,6 +416,8 @@ def nw_jit_op_ends_block(op: int) -> bool:
     prim = (op >> 26) & 0x3F
     xo = (op >> 1) & 0x3FF
     vxo = op & 0x7FF
+    if prim == 31 and xo == 467 and spr_num(op) not in (1, 8, 9, 256):
+        return True
     if prim in (16, 18, 17):
         return True
     if prim == 19 and xo in (16, 528, 150, 50):
@@ -397,11 +426,11 @@ def nw_jit_op_ends_block(op: int) -> bool:
         return True
     if prim == 31 and xo == 339:
         spr = spr_num(op)
-        user = spr in (22, 8, 9, 1)  # DEC, LR, CTR, XER
+        if spr == 22:  # DEC reads own a timing boundary in the C policy
+            return True
+        user = spr in (8, 9, 1)  # LR, CTR, XER
         ext = spr in (268, 269, 287, 256) or (272 <= spr <= 275)
         return not user and not ext
-    if prim == 4 and vxo in (1036, 1100):
-        return True
     return False
 
 
@@ -547,7 +576,7 @@ def scan_nw_jit(text: str) -> dict:
     }
 
 
-def encode_op(e: dict, *, rd=4, ra=3, rb=2, rc=0, aa=0, spr=None, l_bit=0, bo=None) -> int:
+def encode_op(e: dict, *, rd=4, ra=3, rb=2, rc=0, oe=0, aa=0, spr=None, l_bit=0, bo=None) -> int:
     form, prim, xo = e["form"], e["prim"], e["xo"]
     op = (prim & 0x3F) << 26
     rd_f = rd
@@ -565,6 +594,8 @@ def encode_op(e: dict, *, rd=4, ra=3, rb=2, rc=0, aa=0, spr=None, l_bit=0, bo=No
         op |= (rd_f << 21) | (ra << 16) | (rb << 11) | (xo & 0x3F)
     elif form in ("X_form", "XO_form", "XFX_form", "XFL_form", "XL_form"):
         op |= (rd_f << 21) | (ra << 16) | (rb << 11) | ((xo & 0x3FF) << 1) | (rc & 1)
+        if form == "XO_form":
+            op |= (oe & 1) << 10
         if spr is not None:
             op = (op & ~0x1FF800) | (encode_spr_field(spr) << 11)
     elif form in ("D_form", "B_form", "M_form"):
@@ -581,6 +612,8 @@ def encode_op(e: dict, *, rd=4, ra=3, rb=2, rc=0, aa=0, spr=None, l_bit=0, bo=No
         pass
     else:
         op |= (rd_f << 21) | (ra << 16) | (rb << 11) | ((xo & 0x3FF) << 1) | (rc & 1)
+    for xo, select, mask in vmx_zero_fields(prim):
+        if op & select == xo: op &= ~mask
     return op & 0xFFFFFFFF
 
 
@@ -635,6 +668,9 @@ def classify(e: dict, scan: dict) -> dict:
     reps.append(("base", base))
     if e["form"] in ("X_form", "XO_form", "A_form", "XFL_form", "VX_form", "VXR_form", "VA_form"):
         reps.append(("Rc=1", encode_op(e, rc=1)))
+    if e["form"] == "XO_form" and "OE_BIT_G" in e["execute"]:
+        reps.append(("OE=1", encode_op(e, oe=1)))
+        reps.append(("OE=1/Rc=1", encode_op(e, oe=1, rc=1)))
     if name in RA_UPDATE or "true, true" in e["execute"] or ", true, false)" in e["execute"] and "RA," in e["execute"]:
         reps.append(("RA≠0", encode_op(e, ra=1)))
         reps.append(("RA=0", encode_op(e, ra=0)))
@@ -713,6 +749,12 @@ def classify(e: dict, scan: dict) -> dict:
 
     rc0 = results.get("base")
     rc1 = results.get("Rc=1")
+    if "OE=1" in results:
+        for tag in ("OE=1", "OE=1/Rc=1"):
+            (gates_ok if results[tag] else gates_fail).append(tag)
+        if not results["OE=1"] or not results["OE=1/Rc=1"]:
+            caveats.append("Overflow-enabled form(s) fall back; OE=0 support is incomplete coverage.")
+            mill_hole = True
     # FP Rc gate from C: most FP require !(op & 1), except fcmpo/fcmpu
     if name not in ("fcmpo", "fcmpu") and (e["prim"] in (59, 63) or name.startswith("f") or name in {"mffs", "mtfsf"}):
         if rc0 and rc1 is False:
@@ -736,13 +778,13 @@ def classify(e: dict, scan: dict) -> dict:
         mill_hole = True
 
     if name == "mfspr":
-        caveats.append("Supported; non-user SPR ends block via helper.")
+        caveats.append("Typed system reads; block boundaries depend on SPR.")
     if name == "mtspr":
-        caveats.append("Supported; guest helper for non-user.")
+        caveats.append("Typed system writes; non-user except VRSAVE ends block.")
     if name in ("mtmsr", "mtsr", "mtsrin", "tlbie", "tlbia", "icbi"):
         caveats.append("ends_block.")
     if name == "rfi":
-        caveats.append("Block-end helper + ret.")
+        caveats.append("Typed system return; private PC/MSR restore; ends block.")
 
     named = name_mentioned(name, scan)
     extra = []
@@ -840,6 +882,8 @@ def assign_wave(e: dict, c: dict) -> str:
             return "W2"
         return "W8"
     if c["status"] == "partial":
+        if "OE=1" in c["fail"] or "OE=1/Rc=1" in c["fail"]:
+            return "W2"
         if "Rc=1" in c["fail"]:
             return "W4"
         if e.get("family") == "fp" and form_only:
@@ -943,10 +987,10 @@ def main() -> int:
     lines.append("| Mark | Meaning |")
     lines.append("|------|---------|")
     lines.append(
-        "| `[x]` | **done** — representative encoding(s) pass the allowlist; no known form caveat; AltiVec name referenced in `nw_jit.cpp` |"
+        "| `[x]` | **accepted** — sampled encodings pass the allowlist, including applicable OE/Rc combinations; independent conformance is tracked above |"
     )
     lines.append(
-        "| `[~]` | **partial** — allowlisted with a form caveat (Rc, RA≠0, BO, AA, ends_block), or AltiVec XO hit without a named emit reference |"
+        "| `[~]` | **partial** — sampled form rejected (OE, Rc, RA, BO, AA) or an explicit execution/form caveat remains |"
     )
     lines.append(
         "| `[ ]` | **todo** — not in `nw_jit_op_supported` (falls to interpreter / `skip_unsup`) |"
@@ -955,13 +999,21 @@ def main() -> int:
     lines.append("")
     lines.append("**Wave** follows the mill-everything plan (W1 hot partials → W7 AltiVec FP → W8 sweep).")
     lines.append("")
-    lines.append("A checked box means the JIT **will attempt** the op. It is not a forever VERIFY sign-off.")
+    lines.append("The generated opcode marks describe dispatch coverage. Acceptance does not establish architectural correctness, independent verification, direct ARM64 emission, or unrestricted chaining. The separate qualification ledger records that work.")
     lines.append("")
+    # Keep the human-maintained qualification ledger across regeneration.
+    # The generated opcode rows describe dispatch coverage, not conformance.
+    existing = OUT.read_text() if OUT.exists() else ""
+    begin = "<!-- PPC-JIT-REVISIT-BEGIN -->"
+    end = "<!-- PPC-JIT-REVISIT-END -->"
+    if begin in existing and end in existing:
+        lines.extend(existing[existing.index(begin):existing.index(end) + len(end)].splitlines())
+        lines.append("")
     lines.append("## Summary")
     lines.append("")
     lines.append("| Status | Count |")
     lines.append("|--------|------:|")
-    for key, label in (("done", "done"), ("partial", "partial"), ("todo", "todo"), ("exclude", "exclude")):
+    for key, label in (("done", "accepted"), ("partial", "partial"), ("todo", "todo"), ("exclude", "exclude")):
         lines.append(f"| {label} | {status_count[key]} |")
     lines.append(f"| **total** | **{len(rows)}** |")
     lines.append("")
@@ -1013,7 +1065,7 @@ def main() -> int:
         lines.append("")
 
     done = sorted(e["name"] for e in rows if e["class"]["status"] == "done")
-    lines.append("## Already done (checked)")
+    lines.append("## Accepted names (dispatch coverage)")
     lines.append("")
     lines.append("Quick list of `[x]` names for scanning:")
     lines.append("")
@@ -1040,7 +1092,7 @@ def main() -> int:
 
     OUT.write_text("\n".join(lines) if lines[-1] == "" else "\n".join(lines) + "\n")
     print(
-        f"wrote {OUT} names={len(rows)} done={status_count['done']} "
+        f"wrote {OUT} names={len(rows)} accepted={status_count['done']} "
         f"partial={status_count['partial']} todo={status_count['todo']} "
         f"exclude={status_count['exclude']}"
     )

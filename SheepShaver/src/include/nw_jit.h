@@ -34,7 +34,7 @@
  *
  * 4b: powerpc_cpu::execute consults the cache. NW_JIT_FALLBACK never
  * runs compiled code. NW_JIT_VERIFY compiles the same N-insn block the
- * live path would, runs it on a shadow CPU, then kpx interprets; the
+ * live path would, records kpx first and replays on an isolated shadow; the
  * guest follows kpx. NW_JIT_ON copy-out commits the shadow; mtspr DEC
  * goes through the same 0→1 / tb_base path as kpx mtspr_oea. 4c: the
  * cache is keyed by phys_page, so mtsr/BAT/SDR1/tlbie do not flush-all
@@ -43,7 +43,13 @@
  * takes the exception with SRR0 = the faulting PC (same as kpx).
  */
 enum { NW_JIT_MAX_BLOCK = 32 };
+#define NW_JIT_CHAIN_DYNAMIC UINT32_C(0xffffffff)
 
+/* A system service returns observed reads/outcomes, never a replacement CPU
+ * state. Replay validates the opcode and both independently computed operands. */
+struct nw_jit_system_result { uint32_t value, aux, status; };
+enum { NW_SYS_OK, NW_SYS_NOP, NW_SYS_PRIV, NW_SYS_TRAP, NW_SYS_SC,
+       NW_SYS_DSI, NW_SYS_SMC };
 struct nw_jit_cpu {
 	uint32_t gpr[32];
 	uint32_t vr[32][4];	/* AltiVec, big-endian word order */
@@ -63,7 +69,7 @@ struct nw_jit_cpu {
 	uint32_t fault_st;	/* 1 if the faulting access was a store */
 	uint32_t dec_wr;	/* 1 if this block executed mtspr DEC */
 	uint32_t reserve_valid;
-	uint32_t reserve_ea;
+	uint32_t reserve_ea; /* standalone EA; private replay PA; live CPU owns its reservation */
 	uint8_t *mem;
 	uint32_t mem_base;
 	uint32_t mem_size;
@@ -93,8 +99,21 @@ struct nw_jit_cpu {
 	void *verify_context;
 	uint32_t (*verify_mem)(void *, uint32_t pc, uint32_t ea, unsigned width,
 	                       bool store, uint64_t *value);
+	uint32_t (*verify_xlate)(void *, uint32_t pc, uint32_t ea, unsigned width,
+	                         bool store, uint32_t *pa);
 
+	uint32_t srr0, srr1; /* private exception state, compared after system exits */
+	uint32_t (*verify_system)(void *, uint32_t pc, uint32_t opcode,
+	                         uint32_t a, uint32_t b, nw_jit_system_result *);
 };
+
+/* Typed observations cover modeled SPR/MMU/cache services. Native code owns
+ * operand formation, privilege/trap predicates, PC/MSR and exception entry. */
+int nw_jit_op_system(uint32_t opcode);
+void nw_jit_system_operands(const nw_jit_cpu *, uint32_t opcode, uint32_t *, uint32_t *);
+typedef void (*nw_jit_host_system)(void *, nw_jit_cpu *, uint32_t opcode,
+                                  uint32_t a, uint32_t b, nw_jit_system_result *);
+void nw_jit_set_host_system(nw_jit_host_system);
 
 typedef void (*nw_jit_fn)(struct nw_jit_cpu *cpu);
 
@@ -267,6 +286,8 @@ void nw_jit_itunes_log(uint64_t frames);
 void nw_jit_invalidate_page(uint32_t phys_page);
 void nw_jit_invalidate_page_src(uint32_t phys_page, int src);
 void nw_jit_invalidate_range_src(uint32_t pa, uint32_t nbytes, int src);
+/* Raw host I/O may fill guest RAM without using the memory accessors. */
+void nw_jit_host_memory_written(const void *buffer, uint32_t nbytes);
 void nw_jit_invalidate_all(void);
 void nw_jit_invalidate_all_src(int src);
 void nw_jit_set_code_pages(uint32_t ram_base, uint32_t ram_size,
@@ -363,6 +384,9 @@ typedef uint32_t (*nw_jit_host_mfsr)(void *host, uint32_t sr);
 void nw_jit_set_host_mfsr(nw_jit_host_mfsr fn);
 typedef void (*nw_jit_host_trap)(void *host, struct nw_jit_cpu *cpu);
 void nw_jit_set_host_trap(nw_jit_host_trap fn);
+/* Publish a native scalar-FP program exception to the architectural CPU.
+ * Private replay computes the entry state without calling this service. */
+void nw_jit_set_host_fp_exception(nw_jit_host_trap fn);
 typedef void (*nw_jit_host_sc)(void *host, uint32_t guest_pc);
 void nw_jit_set_host_sc(nw_jit_host_sc fn);
 typedef void (*nw_jit_host_mtspr)(void *host, uint32_t spr, uint32_t val);
