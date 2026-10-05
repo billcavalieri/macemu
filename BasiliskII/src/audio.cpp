@@ -440,6 +440,57 @@ static void sb_hold_flush(void)
 		sb_hold_cur ^= 1;
 }
 
+/* Stop, Pause and Remove that arrive from inside GetSourceData (the end of a
+ * movie does this from its own callback) must not enter the Apple Mixer, but
+ * dropping them leaves the mixer holding a source QuickTime then frees. Keep the
+ * parameter block and give the call to the mixer once the pull has unwound.
+ * NW_SB_NODEFER=1 restores the old behaviour (A/B). */
+enum { SB_DEFER_MAX = 4, SB_DEFER_BYTES = 64 };
+static uint32 sb_defer_mem;
+static int sb_defer_n;
+
+static bool sb_defer_on(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		const char *e = getenv("NW_SB_NODEFER");
+		on = !(e && e[0] == '1');
+	}
+	return on != 0;
+}
+
+static void sb_defer_store(uint32 params)
+{
+	if (!sb_defer_on() || sb_defer_mem == 0 || sb_defer_n >= SB_DEFER_MAX)
+		return;
+	uint32 base = sb_defer_mem + (uint32)sb_defer_n * SB_DEFER_BYTES;
+	for (int i = 0; i < SB_DEFER_BYTES; i++)
+		WriteMacInt8(base + i, ReadMacInt8(params + i));
+	sb_defer_n++;
+}
+
+static void sb_defer_flush(void)
+{
+	if (sb_defer_n == 0 || audio_data == 0 || AudioStatus.mixer == 0) {
+		sb_defer_n = 0;
+		return;
+	}
+	int n = sb_defer_n;
+	sb_defer_n = 0;
+	for (int i = 0; i < n; i++) {
+		uint32 base = sb_defer_mem + (uint32)i * SB_DEFER_BYTES;
+		printf("NW-BOOT G1: audio-deferred sel=%d\n", (int)(int16)ReadMacInt16(base + cp_what));
+		fflush(stdout);
+		M68kRegisters r;
+		memset(&r, 0, sizeof r);
+		r.a[0] = AudioStatus.mixer;
+		r.a[1] = base;
+		sb_in_mixer++;
+		Execute68k(audio_data + adatDelegateCall, &r);
+		sb_in_mixer--;
+	}
+}
+
 static void sb_tm_prime(void)
 {
 	if (!sb_tm_installed || sb_tm_armed || sb_in_tick)
@@ -469,6 +520,7 @@ static void sb_tm_install(void)
 		sb_tm = SheepMem::Reserve(SIZEOF_TMTask);
 		sb_hold_mem[0] = SheepMem::Reserve(SB_HOLD_SLOT);
 		sb_hold_mem[1] = SheepMem::Reserve(SB_HOLD_SLOT);
+		sb_defer_mem = SheepMem::Reserve(SB_DEFER_MAX * SB_DEFER_BYTES);
 	}
 	for (uint32 i = 0; i < SIZEOF_TMTask; i += 2)
 		WriteMacInt16(sb_tm + i, 0);
@@ -554,7 +606,10 @@ static void sb_prime_pull(void)
 			break;
 		if (sb_hold_on)
 			sb_hold_flush();
-		if (!sb_pull())
+		sb_defer_flush();
+		bool got = sb_pull();
+		sb_defer_flush();
+		if (!got)
 			break;
 	}
 	nw_jit_pull_set(0);
@@ -616,9 +671,12 @@ int32 AudioSheepBlasterTick(uint32 *task)
 			break;
 		if (sb_hold_on)
 			sb_hold_flush();
+		sb_defer_flush();
 		int before = nw_sheepblaster_pending();
 		uint64 t0 = GetTicks_usec();
-		if (!sb_pull()) {
+		bool got = sb_pull();
+		sb_defer_flush();
+		if (!got) {
 			spent += GetTicks_usec() - t0;
 			break;
 		}
@@ -704,9 +762,16 @@ int32 AudioDispatch(uint32 params, uint32 globals)
 		bool probe = selector == kComponentOpenSelect ||
 			selector == kComponentCloseSelect ||
 			selector == kSoundComponentGetInfoSelect;
-		if (!probe && n_other < 20) {
+		bool tear = selector == kSoundComponentStopSourceSelect || selector == kSoundComponentRemoveSourceSelect ||
+			selector == kSoundComponentPauseSourceSelect;
+		if (!probe && (n_other < 20 || tear)) {
 			n_other++;
+#if defined(SHEEPSHAVER)
+			printf("NW-BOOT G1: audio-sel other #%d sel=%d in_tick=%d in_mixer=%d hold_on=%d hold_lock=%d run=%d src=%d\n",
+			       n_other, (int)selector, (int)sb_in_tick, sb_in_mixer, sb_hold_on, sb_hold_lock, (int)sb_run, sb_sources);
+#else
 			printf("NW-BOOT G1: audio-sel other #%d sel=%d\n", n_other, (int)selector);
+#endif
 			fflush(stdout);
 		} else if (n_sel < 8) {
 			n_sel++;
@@ -1021,8 +1086,10 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 				/* Stop from inside GetSourceData must not enter the
 				 * mixer again. That reentry bus-errored QuickTime
 				 * (error type 1, pc 0x00000c0c) right after RemoveSource. */
-				if (sb_in_tick)
+				if (sb_in_tick) {
+					sb_defer_store(params);
 					return noErr;
+				}
 			} else
 #endif
 			if (AudioStatus.num_sources > 0)
@@ -1108,8 +1175,10 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 			D(bug(" StopSource\n"));
 #if defined(SHEEPSHAVER)
 			sb_run = false;
-			if (sb_in_tick)
+			if (sb_in_tick) {
+				sb_defer_store(params);
 				return noErr;
+			}
 #endif
 			goto delegate;
 
@@ -1117,8 +1186,10 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 			D(bug(" PauseSource\n"));
 #if defined(SHEEPSHAVER)
 			sb_run = false;
-			if (sb_in_tick)
+			if (sb_in_tick) {
+				sb_defer_store(params);
 				return noErr;
+			}
 #endif
 delegate:	// Delegate call to Apple Mixer
 			D(bug(" delegating call to Apple Mixer\n"));
