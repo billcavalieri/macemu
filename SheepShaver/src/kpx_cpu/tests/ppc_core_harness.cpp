@@ -960,7 +960,7 @@ int ppc_core_test_access::fp_fast_sweep(powerpc_cpu *cpu)
         double per_op[2] = {0, 0};
         for (unsigned v = 0; v < 2; ++v) {
             if (v) nw_jit_legacy |= NW_JIT_LEGACY_FP; else nw_jit_legacy &= ~NW_JIT_LEGACY_FP;
-            const uint32 pcb = base + 0x400 + v * 0x400;
+            const uint32 pcb = base + 0x1400 + v * 0x100;	/* page 1, like all code here; stores go to page 0 */
             nw_jit_fn fn = nw_jit_compile(ops,10,pcb,pcb,0,0);
             CHECK(fn != NULL); if (!fn) continue;
             nw_jit_cpu st = {};
@@ -992,10 +992,11 @@ int ppc_core_test_access::fp_fast_sweep(powerpc_cpu *cpu)
             CHECK(fn != NULL); if (!fn) continue;
             nw_jit_cpu st = {};
             st.pc = pcb; st.msr = 0x2000u | ppc32_mmu::MSR_DR; st.host = cpu; st.gpr[3] = base + 0x200; nw_jit_cpu_bind(&st);
-            for (unsigned warm = 0; warm < 4; ++warm) { st.pc = pcb; nw_jit_tail_begin(); fn(&st); }
-            const unsigned runs = 2000000;
+            for (unsigned warm = 0; warm < 4; ++warm) { st.pc = pcb; st.fault = 0; nw_jit_tail_begin(); fn(&st); }
+            if (getenv("PPC_FP_SWEEP_TRACE")) fprintf(stderr, "mem bench v=%u: fault=%u fault_ea=%08x pc=%08x\n", v, st.fault, st.fault_ea, st.pc);
+            const unsigned runs = getenv("PPC_FP_BENCH_RUNS") ? unsigned(strtoul(getenv("PPC_FP_BENCH_RUNS"),NULL,10)) : 2000000;
             struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
-            for (unsigned i = 0; i < runs; ++i) { st.pc = pcb; nw_jit_tail_begin(); fn(&st); }
+            for (unsigned i = 0; i < runs; ++i) { st.pc = pcb; st.fault = 0; nw_jit_tail_begin(); fn(&st); }
             clock_gettime(CLOCK_MONOTONIC, &t1);
             mem_op[v] = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / (double(runs) * 8);
         }
