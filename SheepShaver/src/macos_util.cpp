@@ -272,8 +272,11 @@ uint32 FindLibSymbol(const char *lib_str, const char *sym_str)
 		r.a[3] = err.addr();
 		Execute68k(proc1, &r);
 		D(bug(" GetSharedLibrary: ret %d, connection ID %ld, main %p\n", (int16)r.d[0], conn_id.value(), main_addr.value()));
-		if (r.d[0])
+		if (r.d[0]) {
+			if (ROMType == ROMTYPE_NEWWORLD)
+				printf("NW-BOOT G1: GetSharedLibrary %s -> %d (68k)\n", lib.value() + 1, (int)(int16)r.d[0]);
 			return 0;
+		}
 	
 		// Find symbol
 		static const uint8 proc2_template[] = {
@@ -295,8 +298,11 @@ uint32 FindLibSymbol(const char *lib_str, const char *sym_str)
 		Execute68k(proc2, &r);
 		D(bug(" FindSymbol1: ret %d, sym_addr %p, sym_class %ld\n", (int16)r.d[0], sym_addr.value(), sym_class.value()));
 //!! CloseConnection()?
-		if (r.d[0])
+		if (r.d[0]) {
+			if (ROMType == ROMTYPE_NEWWORLD)
+				printf("NW-BOOT G1: FindSymbol %s in %s -> %d (68k)\n", sym.value() + 1, lib.value() + 1, (int)(int16)r.d[0]);
 			return 0;
+		}
 		else
 			return sym_addr.value();
 
@@ -322,6 +328,37 @@ uint32 FindLibSymbol(const char *lib_str, const char *sym_str)
 		else
 			return sym_addr.value();
 	}
+}
+
+/*
+ *  Same lookup, always through the native CFM entry points (GetSharedLibrary and
+ *  FindSymbol called as PowerPC code). The 68k CFMDispatch route in FindLibSymbol()
+ *  answers cfragNoLibraryErr for every library on New World when it runs inside an
+ *  EMUL_OP routine, so callers there use this one. Returns 0 when not found.
+ */
+uint32 FindLibSymbolNative(const char *lib_str, const char *sym_str)
+{
+	if (gsl_tvect == 0 || fs_tvect == 0)
+		return 0;
+	SheepVar32 conn_id = 0;
+	SheepVar32 main_addr = 0;
+	SheepArray<256> err;
+	WriteMacInt8(err.addr(), 0);
+	SheepVar32 sym_addr = 0;
+	SheepVar32 sym_class = 0;
+	SheepString lib(lib_str);
+	SheepString sym(sym_str);
+	int16 res = GetSharedLibrary(lib.addr(), FOURCC('p','w','p','c'), 1, conn_id.addr(), main_addr.addr(), err.addr());
+	if (res) {
+		printf("SheepForce: GetSharedLibrary %s -> %d\n", lib.value() + 1, (int)res);
+		return 0;
+	}
+	res = FindSymbol(conn_id.value(), sym.addr(), sym_addr.addr(), sym_class.addr());
+	if (res) {
+		printf("SheepForce: FindSymbol %s in %s -> %d\n", sym.value() + 1, lib.value() + 1, (int)res);
+		return 0;
+	}
+	return sym_addr.value();
 }
 
 

@@ -22,6 +22,7 @@
 #include "sheepforce.h"
 #include "video.h"
 #include "cpu_emulation.h"
+#include "nqd_blit_ops.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -36,16 +37,25 @@ static id<MTLCommandQueue> g_queue;
 static id<MTLLibrary> g_lib;
 static id<MTLRenderPipelineState> g_present_pipe;
 static id<MTLComputePipelineState> g_fill_pipe;
+static id<MTLComputePipelineState> g_fillspans_pipe;
+static id<MTLComputePipelineState> g_filltile_pipe;
 static id<MTLComputePipelineState> g_inv_pipe;
 static id<MTLComputePipelineState> g_blit_pipe;
-static id<MTLRenderPipelineState> g_tri_pipe;
+static id<MTLComputePipelineState> g_gather_pipe;
 static CAMetalLayer *g_layer;
 static NSView *g_view;
 static id<MTLBuffer> g_pal;
 static id<MTLBuffer> g_fb;
 static id<MTLBuffer> g_meta;
 static id<MTLCommandBuffer> g_pending;
+/* Tiny QuickDraw operations are batched into one open command buffer and one compute encoder.
+ * It is committed when the CPU needs the result, before a present, or when it gets long. */
+static id<MTLCommandBuffer> g_open_cb;
+static id<MTLComputeCommandEncoder> g_open_enc;
+static unsigned g_open_count;
+static const unsigned kOpenBatchMax = 128;
 static id<MTLBuffer> g_src;
+static id<MTLBuffer> g_scr;	/* GPU-only copy of an overlapping blit's source */
 static int g_flight_x, g_flight_y, g_flight_w, g_flight_h;
 static bool g_flight_on;
 static uint8 *g_fb_host;
@@ -65,74 +75,207 @@ static NSString *SheepForceShaderSource(void)
 	"using namespace metal;\n"
 	"struct VOut { float4 p [[position]]; float2 uv; };\n"
 	"vertex VOut sf_vs(uint id [[vertex_id]]) {\n"
-	"  float2 q[3] = { float2(-1.0,-1.0), float2(3.0,-1.0), float2(-1.0,3.0) };\n"
-	"  VOut o; o.p = float4(q[id], 0.0, 1.0);\n"
-	"  o.uv = float2(q[id].x * 0.5 + 0.5, 1.0 - (q[id].y * 0.5 + 0.5));\n"
-	"  return o;\n"
+	"float2 q[3] = { float2(-1.0,-1.0), float2(3.0,-1.0), float2(-1.0,3.0) };\n"
+	"VOut o;\n"
+	"o.p = float4(q[id], 0.0, 1.0);\n"
+	"o.uv = float2(q[id].x * 0.5 + 0.5, 1.0 - (q[id].y * 0.5 + 0.5));\n"
+	"return o;\n"
 	"}\n"
 	"static float4 pal_rgb(constant uchar4 *pal, uint i) {\n"
-	"  uchar4 p = pal[i];\n"
-	"  return float4(float(p.z) / 255.0, float(p.y) / 255.0, float(p.x) / 255.0, 1.0);\n"
+	"uchar4 p = pal[i];\n"
+	"return float4(float(p.z) / 255.0, float(p.y) / 255.0, float(p.x) / 255.0, 1.0);\n"
 	"}\n"
 	"fragment float4 sf_fs(VOut in [[stage_in]], constant uchar4 *pal [[buffer(0)]],\n"
-	"    device const uchar *pix [[buffer(2)]], constant uint *meta [[buffer(3)]]) {\n"
-	"  uint w = meta[0], h = meta[1], row = meta[2], depth = meta[3], off = meta[4];\n"
-	"  uint x = min(uint(in.uv.x * float(w)), w - 1u);\n"
-	"  uint y = min(uint(in.uv.y * float(h)), h - 1u);\n"
-	"  if (depth == 1u) {\n"
-	"    uint byte = pix[off + y * row + (x >> 3)];\n"
-	"    uint bit = 0x80u >> (x & 7u);\n"
-	"    return pal_rgb(pal, (byte & bit) ? 1u : 0u);\n"
-	"  }\n"
-	"  if (depth == 2u) {\n"
-	"    uint byte = pix[off + y * row + (x >> 2)];\n"
-	"    uint shift = (3u - (x & 3u)) * 2u;\n"
-	"    return pal_rgb(pal, (byte >> shift) & 3u);\n"
-	"  }\n"
-	"  if (depth == 4u) {\n"
-	"    uint byte = pix[off + y * row + (x >> 1)];\n"
-	"    uint i = ((x & 1u) == 0u) ? (byte >> 4) : (byte & 15u);\n"
-	"    return pal_rgb(pal, i);\n"
-	"  }\n"
-	"  if (depth == 8u) {\n"
-	"    return pal_rgb(pal, pix[off + y * row + x]);\n"
-	"  }\n"
-	"  if (depth == 16u) {\n"
-	"    uint a = off + y * row + x * 2u;\n"
-	"    uint v = (uint(pix[a]) << 8) | uint(pix[a + 1]);\n"
-	"    return float4(float((v >> 10) & 31u) / 31.0, float((v >> 5) & 31u) / 31.0, float(v & 31u) / 31.0, 1.0);\n"
-	"  }\n"
-	"  uint a = off + y * row + x * 4u;\n"
-	"  return float4(float(pix[a + 1]) / 255.0, float(pix[a + 2]) / 255.0, float(pix[a + 3]) / 255.0, 1.0);\n"
+	"device const uchar *pix [[buffer(2)]], constant uint *meta [[buffer(3)]]) {\n"
+	"uint w = meta[0], h = meta[1], row = meta[2], depth = meta[3], off = meta[4];\n"
+	"uint x = min(uint(in.uv.x * float(w)), w - 1u);\n"
+	"uint y = min(uint(in.uv.y * float(h)), h - 1u);\n"
+	"if (depth == 1u) {\n"
+	"uint byte = pix[off + y * row + (x >> 3)];\n"
+	"uint bit = 0x80u >> (x & 7u);\n"
+	"return pal_rgb(pal, (byte & bit) ? 1u : 0u);\n"
+	"}\n"
+	"if (depth == 2u) {\n"
+	"uint byte = pix[off + y * row + (x >> 2)];\n"
+	"uint shift = (3u - (x & 3u)) * 2u;\n"
+	"return pal_rgb(pal, (byte >> shift) & 3u);\n"
+	"}\n"
+	"if (depth == 4u) {\n"
+	"uint byte = pix[off + y * row + (x >> 1)];\n"
+	"uint i = ((x & 1u) == 0u) ? (byte >> 4) : (byte & 15u);\n"
+	"return pal_rgb(pal, i);\n"
+	"}\n"
+	"if (depth == 8u) {\n"
+	"return pal_rgb(pal, pix[off + y * row + x]);\n"
+	"}\n"
+	"if (depth == 16u) {\n"
+	"uint a = off + y * row + x * 2u;\n"
+	"uint v = (uint(pix[a]) << 8) | uint(pix[a + 1]);\n"
+	"return float4(float((v >> 10) & 31u) / 31.0, float((v >> 5) & 31u) / 31.0, float(v & 31u) / 31.0, 1.0);\n"
+	"}\n"
+	"uint a = off + y * row + x * 4u;\n"
+	"return float4(float(pix[a + 1]) / 255.0, float(pix[a + 2]) / 255.0, float(pix[a + 3]) / 255.0, 1.0);\n"
 	"}\n"
 	"struct FillU { uint x, y, w, h, row, bpp, color; };\n"
 	"kernel void sf_fill(device uchar *pix [[buffer(0)]], constant FillU &u [[buffer(1)]],\n"
-	"    uint2 gid [[thread_position_in_grid]]) {\n"
-	"  if (gid.x >= u.w || gid.y >= u.h) return;\n"
-	"  device uchar *d = pix + (u.y + gid.y) * u.row + (u.x + gid.x) * u.bpp;\n"
-	"  for (uint i = 0; i < u.bpp; i++) d[i] = (uchar)((u.color >> (8u * i)) & 0xffu);\n"
+	"uint2 gid [[thread_position_in_grid]]) {\n"
+	"if (gid.x >= u.w || gid.y >= u.h) return;\n"
+	"device uchar *d = pix + (u.y + gid.y) * u.row + (u.x + gid.x) * u.bpp;\n"
+	"for (uint i = 0; i < u.bpp; i++) d[i] = (uchar)((u.color >> (8u * i)) & 0xffu);\n"
+	"}\n"
+	"struct SpanU { uint x, y, w, h, row, fore, back, pat0, pat1; int ox, oy; };\n"
+	"kernel void sf_fillspans(device uchar *pix [[buffer(0)]], constant SpanU &u [[buffer(1)]],\n"
+	"device const int *row_start [[buffer(2)]], device const int *runs [[buffer(3)]],\n"
+	"uint2 gid [[thread_position_in_grid]]) {\n"
+	"if (gid.x >= u.w || gid.y >= u.h) return;\n"
+	"int a = row_start[gid.y], b = row_start[gid.y + 1];\n"
+	"bool in = false;\n"
+	"for (int i = a; i < b; i++)\n"
+	"if (int(gid.x) >= runs[2 * i] && int(gid.x) < runs[2 * i + 1]) { in = true; break; }\n"
+	"if (!in) return;\n"
+	"uint tx = uint(int(gid.x) + u.ox) & 7u, ty = uint(int(gid.y) + u.oy) & 7u;\n"
+	"uint byte = ty < 4u ? ((u.pat0 >> (8u * (3u - ty))) & 0xffu) : ((u.pat1 >> (8u * (7u - ty))) & 0xffu);\n"
+	"uint c = ((byte >> (7u - tx)) & 1u) ? u.fore : u.back;\n"
+	"device uchar *d = pix + (u.y + gid.y) * u.row + (u.x + gid.x) * 4u;\n"
+	"for (uint i = 0; i < 4u; i++) d[i] = (uchar)((c >> (8u * i)) & 0xffu);\n"
+	"}\n"
+	"struct TileU { uint x, y, w, h, row, tw, th, ox, oy; };\n"
+	"kernel void sf_filltile(device uchar *pix [[buffer(0)]], constant TileU &u [[buffer(1)]],\n"
+	"device const int *row_start [[buffer(2)]], device const int *runs [[buffer(3)]],\n"
+	"device const uint *tile [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {\n"
+	"if (gid.x >= u.w || gid.y >= u.h) return;\n"
+	"int a = row_start[gid.y], b = row_start[gid.y + 1];\n"
+	"bool in = false;\n"
+	"for (int i = a; i < b; i++)\n"
+	"if (int(gid.x) >= runs[2 * i] && int(gid.x) < runs[2 * i + 1]) { in = true; break; }\n"
+	"if (!in) return;\n"
+	"uint c = tile[((gid.y + u.oy) % u.th) * u.tw + ((gid.x + u.ox) % u.tw)];\n"
+	"device uchar *d = pix + (u.y + gid.y) * u.row + (u.x + gid.x) * 4u;\n"
+	"for (uint i = 0; i < 4u; i++) d[i] = (uchar)((c >> (8u * i)) & 0xffu);\n"
 	"}\n"
 	"kernel void sf_inv(device uchar *pix [[buffer(0)]], constant FillU &u [[buffer(1)]],\n"
-	"    uint2 gid [[thread_position_in_grid]]) {\n"
-	"  if (gid.x >= u.w || gid.y >= u.h) return;\n"
-	"  device uchar *d = pix + (u.y + gid.y) * u.row + (u.x + gid.x) * u.bpp;\n"
-	"  for (uint i = 0; i < u.bpp; i++) d[i] = ~d[i];\n"
+	"uint2 gid [[thread_position_in_grid]]) {\n"
+	"if (gid.x >= u.w || gid.y >= u.h) return;\n"
+	"device uchar *d = pix + (u.y + gid.y) * u.row + (u.x + gid.x) * u.bpp;\n"
+	"for (uint i = 0; i < u.bpp; i++) d[i] = ~d[i];\n"
 	"}\n"
-	"struct BlitU { uint w, h, dst_row, src_row, bpp, dst_off, src_off; };\n"
+	"struct BlitU { uint w, h, dst_row, src_row, sbpp, dbpp, dst_off, src_off, mode, back; };\n"
+	"static uint qd_fetch(device const uchar *s, uint sbpp, constant uint *pal) {\n"
+	"if (sbpp == 1u) return pal[s[0]];\n"
+	"if (sbpp == 2u) {\n"
+	"uint v = (uint(s[0]) << 8) | uint(s[1]);\n"
+	"uint r = ((v >> 10) & 31u) * 8u, g = ((v >> 5) & 31u) * 8u, b = (v & 31u) * 8u;\n"
+	"return (r << 8) | (g << 16) | (b << 24);\n"
+	"}\n"
+	"return uint(s[0]) | (uint(s[1]) << 8) | (uint(s[2]) << 16) | (uint(s[3]) << 24);\n"
+	"}\n"
+	"static uint qd_bytes(uint a, uint b, uint op) {\n"
+	"uint r = 0u;\n"
+	"for (uint i = 1u; i < 4u; i++) {\n"
+	"int x = int((a >> (8u * i)) & 0xffu), y = int((b >> (8u * i)) & 0xffu), v;\n"
+	"if (op == 0u) v = (x + y) & 0xff;\n"
+	"else if (op == 1u) v = (x - y) & 0xff;\n"
+	"else if (op == 2u) v = max(x, y);\n"
+	"else v = min(x, y);\n"
+	"r |= uint(v) << (8u * i);\n"
+	"}\n"
+	"return r;\n"
+	"}\n"
+	"static uint qd_op(uint mode, uint s, uint d) {\n"
+	"switch (mode) {\n"
+	"case 0u: return s;\n"
+	"case 1u: return d | s;\n"
+	"case 2u: return d ^ s;\n"
+	"case 3u: return d & ~s;\n"
+	"case 4u: return ~s;\n"
+	"case 5u: return d | ~s;\n"
+	"case 6u: return d ^ ~s;\n"
+	"case 7u: return d & s;\n"
+	"case 34u: return qd_bytes(d, s, 0u);\n"
+	"case 37u: return qd_bytes(d, s, 2u);\n"
+	"case 38u: return qd_bytes(d, s, 1u);\n"
+	"case 39u: return qd_bytes(d, s, 3u);\n"
+	"}\n"
+	"return s;\n"
+	"}\n"
 	"kernel void sf_blit(device uchar *dst [[buffer(0)]], device const uchar *src [[buffer(1)]],\n"
-	"    constant BlitU &u [[buffer(2)]], uint2 gid [[thread_position_in_grid]]) {\n"
-	"  if (gid.x >= u.w || gid.y >= u.h) return;\n"
-	"  device uchar *d = dst + u.dst_off + gid.y * u.dst_row + gid.x * u.bpp;\n"
-	"  device const uchar *s = src + u.src_off + gid.y * u.src_row + gid.x * u.bpp;\n"
-	"  for (uint i = 0; i < u.bpp; i++) d[i] = s[i];\n"
+	"constant BlitU &u [[buffer(2)]], constant uint *pal [[buffer(3)]],\n"
+	"uint2 gid [[thread_position_in_grid]]) {\n"
+	"if (gid.x >= u.w || gid.y >= u.h) return;\n"
+	"device uchar *d = dst + u.dst_off + gid.y * u.dst_row + gid.x * u.dbpp;\n"
+	"device const uchar *s = src + u.src_off + gid.y * u.src_row + gid.x * u.sbpp;\n"
+	"if (u.dbpp != 4u) {\n"
+	"for (uint i = 0; i < u.dbpp; i++) d[i] = s[i];\n"
+	"return;\n"
 	"}\n"
-	"struct TriV { float4 p [[position]]; float4 color; };\n"
-	"vertex TriV sf_tri_vs(uint id [[vertex_id]], constant packed_float2 *xy [[buffer(0)]],\n"
-	"    constant float4 &color [[buffer(1)]]) {\n"
-	"  float2 n = xy[id];\n"
-	"  TriV o; o.p = float4(n.x * 2.0 - 1.0, 1.0 - n.y * 2.0, 0.0, 1.0); o.color = color; return o;\n"
+	"uint sp = qd_fetch(s, u.sbpp, pal);\n"
+	"uint dp = uint(d[0]) | (uint(d[1]) << 8) | (uint(d[2]) << 16) | (uint(d[3]) << 24);\n"
+	"if (u.mode == 36u) {\n"
+	"if (((sp ^ u.back) & 0xffffff00u) == 0u) return;\n"
 	"}\n"
-	"fragment float4 sf_tri_fs(TriV in [[stage_in]]) { return in.color; }\n";
+	"uint r = qd_op(u.mode, sp, dp);\n"
+	"d[0] = uchar(r & 0xffu);\n"
+	"d[1] = uchar((r >> 8) & 0xffu);\n"
+	"d[2] = uchar((r >> 16) & 0xffu);\n"
+	"d[3] = uchar((r >> 24) & 0xffu);\n"
+	"}\n"
+	"struct GatherU { uint wbytes, h, src_row, src_off; };\n"
+	"kernel void sf_gather(device const uchar *src [[buffer(0)]], device uchar *scr [[buffer(1)]],\n"
+	"constant GatherU &u [[buffer(2)]], uint2 gid [[thread_position_in_grid]]) {\n"
+	"if (gid.x >= u.wbytes || gid.y >= u.h) return;\n"
+	"scr[gid.y * u.wbytes + gid.x] = src[u.src_off + gid.y * u.src_row + gid.x];\n"
+	"}\n"
+	"struct RaveV { float x, y, z, invW, r, g, b, a, uow, vow, kdr, kdg, kdb, ksr, ksg, ksb, uow2, vow2, invW2, pad; };\n"
+	"struct RaveU { float w, h; };\n"
+	"struct RaveOut { float4 p [[position]]; float4 c; float3 uvw; float3 kd; float3 ks; float3 uvw2; };\n"
+	"vertex RaveOut sf_rave_vs(uint id [[vertex_id]], constant RaveV *v [[buffer(0)]], constant RaveU &u [[buffer(1)]]) {\n"
+	"RaveV a = v[id];\n"
+	"RaveOut o;\n"
+	"o.p = float4(a.x / u.w * 2.0 - 1.0, 1.0 - a.y / u.h * 2.0, a.z, 1.0);\n"
+	"o.c = float4(a.r, a.g, a.b, a.a);\n"
+	"o.uvw = float3(a.uow, a.vow, a.invW);\n"
+	"o.kd = float3(a.kdr, a.kdg, a.kdb);\n"
+	"o.ks = float3(a.ksr, a.ksg, a.ksb);\n"
+	"o.uvw2 = float3(a.uow2, a.vow2, a.invW2);\n"
+	"return o;\n"
+	"}\n"
+	"struct RaveF { float4 fog; float fogStart, fogEnd, fogDensity, fogMax; uint fogMode, texOp, textured, mtOp; float mtFactor; uint mtOn, pad1, pad2; };\n"
+	"fragment float4 sf_rave_fs(RaveOut in [[stage_in]], constant RaveF &f [[buffer(0)]],\n"
+	"texture2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]],\n"
+	"texture2d<float> tex2 [[texture(1)]], sampler smp2 [[sampler(1)]]) {\n"
+	"float4 c = in.c;\n"
+	"if (f.textured != 0u) {\n"
+	"float2 uv = in.uvw.xy / in.uvw.z;\n"
+	"float4 t = tex.sample(smp, uv);\n"
+	"if (f.mtOn != 0u) {\n"
+	"float4 t2 = tex2.sample(smp2, in.uvw2.xy / in.uvw2.z);\n"
+	"if (f.mtOp == 0u) t = float4(min(t.rgb + t2.rgb, float3(1.0)), t.a);\n"
+	"else if (f.mtOp == 1u) t = t * t2;\n"
+	"else if (f.mtOp == 2u) t = mix(t, t2, t2.a);\n"
+	"else t = mix(t, t2, f.mtFactor);\n"
+	"}\n"
+	"if ((f.texOp & 4u) != 0u) {\n"
+	"t.rgb = t.a * t.rgb + (1.0 - t.a) * c.rgb;\n"
+	"t.a = c.a;\n"
+	"} else {\n"
+	"t.a = t.a * c.a;\n"
+	"}\n"
+	"if ((f.texOp & 1u) != 0u) t.rgb = min(t.rgb * in.kd, float3(1.0));\n"
+	"if ((f.texOp & 2u) != 0u) t.rgb = min(t.rgb + in.ks, float3(1.0));\n"
+	"c = t;\n"
+	"}\n"
+	"if (f.fogMode >= 2u && in.uvw.z > 0.0) {\n"
+	"float w = 1.0 / in.uvw.z;\n"
+	"if (f.fogMax > 0.0) w = min(w, f.fogMax);\n"
+	"float k;\n"
+	"if (f.fogMode == 2u) k = (f.fogEnd - w) / (f.fogEnd - f.fogStart);\n"
+	"else if (f.fogMode == 3u) k = exp(-f.fogDensity * w);\n"
+	"else k = exp(-(f.fogDensity * w) * (f.fogDensity * w));\n"
+	"k = clamp(k, 0.0, 1.0);\n"
+	"c.rgb = mix(f.fog.rgb, c.rgb, k);\n"
+	"}\n"
+	"return c;\n"
+	"}\n";
 }
 
 static bool SheepForceMakePipes(void)
@@ -144,10 +287,11 @@ static bool SheepForceMakePipes(void)
 	id<MTLFunction> fs = [g_lib newFunctionWithName:@"sf_fs"];
 	id<MTLFunction> fill = [g_lib newFunctionWithName:@"sf_fill"];
 	id<MTLFunction> inv = [g_lib newFunctionWithName:@"sf_inv"];
+	id<MTLFunction> fillspans = [g_lib newFunctionWithName:@"sf_fillspans"];
+	id<MTLFunction> filltile = [g_lib newFunctionWithName:@"sf_filltile"];
 	id<MTLFunction> blit = [g_lib newFunctionWithName:@"sf_blit"];
-	id<MTLFunction> tvs = [g_lib newFunctionWithName:@"sf_tri_vs"];
-	id<MTLFunction> tfs = [g_lib newFunctionWithName:@"sf_tri_fs"];
-	if (!vs || !fs || !fill || !inv || !blit || !tvs || !tfs)
+	id<MTLFunction> gather = [g_lib newFunctionWithName:@"sf_gather"];
+	if (!vs || !fs || !fill || !inv || !blit || !gather || !fillspans || !filltile)
 		return false;
 	MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
 	pd.vertexFunction = vs;
@@ -156,13 +300,16 @@ static bool SheepForceMakePipes(void)
 	g_present_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
 	g_fill_pipe = [g_dev newComputePipelineStateWithFunction:fill error:&err];
 	g_inv_pipe = [g_dev newComputePipelineStateWithFunction:inv error:&err];
+	g_fillspans_pipe = [g_dev newComputePipelineStateWithFunction:fillspans error:&err];
+	g_filltile_pipe = [g_dev newComputePipelineStateWithFunction:filltile error:&err];
 	g_blit_pipe = [g_dev newComputePipelineStateWithFunction:blit error:&err];
-	MTLRenderPipelineDescriptor *td = [[MTLRenderPipelineDescriptor alloc] init];
-	td.vertexFunction = tvs;
-	td.fragmentFunction = tfs;
-	td.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-	g_tri_pipe = [g_dev newRenderPipelineStateWithDescriptor:td error:&err];
-	return g_present_pipe != nil && g_fill_pipe != nil && g_tri_pipe != nil;
+	g_gather_pipe = [g_dev newComputePipelineStateWithFunction:gather error:&err];
+	/* A missing accelerator pipeline only disables its hook; present and tri gate startup. */
+	if (!g_fill_pipe || !g_inv_pipe || !g_blit_pipe || !g_gather_pipe || !g_fillspans_pipe || !g_filltile_pipe)
+		printf("SheepForce: QuickDraw pipeline missing (fill %d inv %d blit %d gather %d fillspans %d filltile %d): %s\n",
+		       g_fill_pipe != nil, g_inv_pipe != nil, g_blit_pipe != nil, g_gather_pipe != nil, g_fillspans_pipe != nil, g_filltile_pipe != nil,
+		       err ? err.localizedDescription.UTF8String : "");
+	return g_present_pipe != nil && g_fill_pipe != nil;
 }
 
 static bool SheepForceLoadLibrary(void)
@@ -194,23 +341,69 @@ static bool flight_hits(int x, int y, int w, int h)
 		&& y < g_flight_y + g_flight_h && g_flight_y < y + h;
 }
 
+/* Every GPU write since the last wait stays in flight until a CPU access waits
+ * on g_pending, so the tracked rectangle is the union of all of them, not just
+ * the latest. A write that cannot be located marks the whole surface in flight. */
 static void note_flight(uint8 *dest, int rowbytes, int width_bytes, int height)
 {
 	uint8 *base = SheepForcePageHost(0);
-	g_flight_on = false;
-	if (!base || !dest || dest < base || rowbytes < 1 || width_bytes < 1 || height < 1)
+	int x = 0, y = 0, w = 1 << 28, h = 1 << 28;
+	if (base && dest && dest >= base && rowbytes >= 1 && width_bytes >= 1 && height >= 1) {
+		uint32 off = (uint32)(dest - base);
+		x = (int)(off % (uint32)rowbytes);
+		y = (int)(off / (uint32)rowbytes);
+		w = width_bytes;
+		h = height;
+	}
+	if (g_flight_on) {
+		int x1 = g_flight_x + g_flight_w, y1 = g_flight_y + g_flight_h;
+		if (x < g_flight_x) g_flight_x = x;
+		if (y < g_flight_y) g_flight_y = y;
+		if (x + w > x1) x1 = x + w;
+		if (y + h > y1) y1 = y + h;
+		g_flight_w = x1 - g_flight_x;
+		g_flight_h = y1 - g_flight_y;
+	} else {
+		g_flight_x = x;
+		g_flight_y = y;
+		g_flight_w = w;
+		g_flight_h = h;
+		g_flight_on = true;
+	}
+}
+
+/* Submit the open batch (if any) to the GPU. It becomes the pending command buffer. */
+static void SheepForceCommitOpen(void)
+{
+	if (!g_open_cb)
 		return;
-	uint32 off = (uint32)(dest - base);
-	g_flight_x = (int)(off % (uint32)rowbytes);
-	g_flight_y = (int)(off / (uint32)rowbytes);
-	g_flight_w = width_bytes;
-	g_flight_h = height;
-	g_flight_on = true;
+	[g_open_enc endEncoding];
+	[g_open_cb commit];
+	g_pending = g_open_cb;
+	g_open_cb = nil;
+	g_open_enc = nil;
+	g_open_count = 0;
+}
+
+/* The encoder to append the next operation to; nil if Metal is not ready. */
+static id<MTLComputeCommandEncoder> SheepForceOpenEncoder(void)
+{
+	if (g_open_cb && g_open_count >= kOpenBatchMax)
+		SheepForceCommitOpen();
+	if (!g_open_cb) {
+		if (!g_queue)
+			return nil;
+		g_open_cb = [g_queue commandBuffer];
+		g_open_enc = [g_open_cb computeCommandEncoder];
+		g_open_count = 0;
+	}
+	g_open_count++;
+	return g_open_enc;
 }
 
 void SheepForceFlushCPU(uint8 *dest, int rowbytes, int width_bytes, int height)
 {
-	if (!g_pending)
+	if (!g_pending && !g_open_cb)
 		return;
 	if (dest && rowbytes > 0) {
 		uint8 *base = SheepForcePageHost(0);
@@ -222,14 +415,10 @@ void SheepForceFlushCPU(uint8 *dest, int rowbytes, int width_bytes, int height)
 		if (!flight_hits(x, y, width_bytes, height))
 			return;
 	}
+	SheepForceCommitOpen();
 	[g_pending waitUntilCompleted];
 	g_pending = nil;
 	g_flight_on = false;
-}
-
-static void SheepForceTrack(id<MTLCommandBuffer> cb)
-{
-	g_pending = cb;
 }
 
 static void on_main(void (^block)(void))
@@ -332,9 +521,11 @@ void SheepForceShutdown(void)
 	g_meta = nil;
 	g_src = nil;
 	g_pending = nil;
+	g_open_cb = nil;
+	g_open_enc = nil;
+	g_open_count = 0;
 	g_flight_on = false;
 	g_present_pipe = nil;
-	g_tri_pipe = nil;
 	g_lib = nil;
 	g_queue = nil;
 	g_dev = nil;
@@ -408,27 +599,37 @@ static void SheepForceDispatch(id<MTLComputePipelineState> pipe, const void *uni
 {
 	if (!pipe || w == 0 || h == 0 || !SheepForceBindFB())
 		return;
-	id<MTLCommandBuffer> cb = [g_queue commandBuffer];
-	id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+	id<MTLComputeCommandEncoder> enc = SheepForceOpenEncoder();
+	if (!enc)
+		return;
 	[enc setComputePipelineState:pipe];
 	[enc setBuffer:g_fb offset:0 atIndex:0];
 	[enc setBytes:uni length:uni_len atIndex:1];
 	NSUInteger tw = pipe.threadExecutionWidth > 0 ? pipe.threadExecutionWidth : 16;
 	[enc dispatchThreads:MTLSizeMake(w, h, 1) threadsPerThreadgroup:MTLSizeMake(tw, 1, 1)];
-	[enc endEncoding];
-	[cb commit];
-	SheepForceTrack(cb);
 	g_dirty = true;
+}
+
+/* True when a rows x row-stride rectangle starting at byte offset off lies inside the framebuffer buffer. */
+static bool fb_span_ok(uint32 off, int row, int wbytes, int h)
+{
+	if (!g_fb || row < 1 || wbytes < 1 || h < 1 || wbytes > row)
+		return false;
+	uint64_t end = (uint64_t)off + (uint64_t)row * (uint64_t)(h - 1) + (uint64_t)wbytes;
+	return end <= (uint64_t)g_fb.length;
 }
 
 bool SheepForceTryFill(uint8 *dest, int bpp, int rowbytes, int width_bytes, int height, uint32 color)
 {
 	uint8 *base = SheepForcePageHost(0);
-	if (!g_dev || !base || bpp < 1 || height <= 0 || width_bytes < bpp || dest < base)
+	if (!g_dev || !g_fill_pipe || !base || bpp < 1 || height <= 0 || width_bytes < bpp || dest < base
+	    || rowbytes < 1)
 		return false;
 	if (!SheepForceBindFB() || !g_fb_nocopy)
 		return false;
 	uint32 off = (uint32)(dest - base);
+	if (!fb_span_ok(off, rowbytes, width_bytes, height))
+		return false;
 	struct { uint x, y, w, h, row, bpp, color; } u;
 	u.x = (uint)((off % (uint32)rowbytes) / (uint32)bpp);
 	u.y = (uint)(off / (uint32)rowbytes);
@@ -445,11 +646,13 @@ bool SheepForceTryFill(uint8 *dest, int bpp, int rowbytes, int width_bytes, int 
 bool SheepForceTryInvert(uint8 *dest, int bpp, int rowbytes, int width_bytes, int height)
 {
 	uint8 *base = SheepForcePageHost(0);
-	if (!g_dev || !base || bpp < 1 || height <= 0 || dest < base)
+	if (!g_dev || !g_inv_pipe || !base || bpp < 1 || height <= 0 || dest < base || rowbytes < 1)
 		return false;
 	if (!SheepForceBindFB() || !g_fb_nocopy)
 		return false;
 	uint32 off = (uint32)(dest - base);
+	if (!fb_span_ok(off, rowbytes, width_bytes, height))
+		return false;
 	struct { uint x, y, w, h, row, bpp, color; } u;
 	u.x = (uint)((off % (uint32)rowbytes) / (uint32)bpp);
 	u.y = (uint)(off / (uint32)rowbytes);
@@ -463,67 +666,217 @@ bool SheepForceTryInvert(uint8 *dest, int bpp, int rowbytes, int width_bytes, in
 	return true;
 }
 
-bool SheepForceTryBlit(uint8 *dest, const uint8 *src, int bpp, int dst_row, int src_row, int width_bytes, int height)
+bool SheepForceTryFillSpans(const SheepForceSpanFill *op)
 {
 	uint8 *base = SheepForcePageHost(0);
-	if (!g_dev || !g_blit_pipe || !base || !src || !dest || bpp < 1 || height <= 0
-	    || width_bytes < bpp || dest < base || dst_row < width_bytes || src_row < width_bytes)
+	if (!g_dev || !g_fillspans_pipe || !base || !op || !op->dest || op->dest < base || op->width < 1 ||
+	    op->height < 1 || op->rowbytes < 4 || !op->row_start || !op->runs)
 		return false;
 	if (!SheepForceBindFB() || !g_fb_nocopy)
 		return false;
-	uint32 fb_bytes = SheepForcePageBytes() * (uint32)SheepForcePageCount();
-	bool src_in = src >= base && (uint32)(src - base) < fb_bytes;
+	const uint32 off = (uint32)(op->dest - base);
+	if (!fb_span_ok(off, op->rowbytes, op->width * 4, op->height))
+		return false;
+	if (op->row_start[0] != 0 || op->row_start[op->height] < 0)
+		return false;
+	const size_t nruns = (size_t)op->row_start[op->height];
+	struct { uint x, y, w, h, row, fore, back, pat0, pat1; int ox, oy; } u;
+	u.x = (uint)((off % (uint32)op->rowbytes) / 4u);
+	u.y = (uint)(off / (uint32)op->rowbytes);
+	u.w = (uint)op->width;
+	u.h = (uint)op->height;
+	u.row = (uint)op->rowbytes;
+	u.fore = op->fore;
+	u.back = op->back;
+	u.pat0 = (uint)op->pat[0] << 24 | (uint)op->pat[1] << 16 | (uint)op->pat[2] << 8 | (uint)op->pat[3];
+	u.pat1 = (uint)op->pat[4] << 24 | (uint)op->pat[5] << 16 | (uint)op->pat[6] << 8 | (uint)op->pat[7];
+	u.ox = op->pat_ox;
+	u.oy = op->pat_oy;
+	if (nruns == 0)
+		return true;			/* clipped away entirely: nothing to draw */
+	id<MTLComputeCommandEncoder> enc = SheepForceOpenEncoder();
+	if (!enc)
+		return false;
+	note_flight(op->dest, op->rowbytes, op->width * 4, op->height);
+	[enc setComputePipelineState:g_fillspans_pipe];
+	[enc setBuffer:g_fb offset:0 atIndex:0];
+	[enc setBytes:&u length:sizeof u atIndex:1];
+	const size_t rs_bytes = (size_t)(op->height + 1) * sizeof(int32_t), run_bytes = nruns * 2 * sizeof(int32_t);
+	if (rs_bytes <= 4096)
+		[enc setBytes:op->row_start length:rs_bytes atIndex:2];
+	else
+		[enc setBuffer:[g_dev newBufferWithBytes:op->row_start length:rs_bytes options:MTLResourceStorageModeShared] offset:0 atIndex:2];
+	if (run_bytes <= 4096)
+		[enc setBytes:op->runs length:run_bytes atIndex:3];
+	else
+		[enc setBuffer:[g_dev newBufferWithBytes:op->runs length:run_bytes options:MTLResourceStorageModeShared] offset:0 atIndex:3];
+	NSUInteger tw = g_fillspans_pipe.threadExecutionWidth > 0 ? g_fillspans_pipe.threadExecutionWidth : 16;
+	[enc dispatchThreads:MTLSizeMake(u.w, u.h, 1) threadsPerThreadgroup:MTLSizeMake(tw, 1, 1)];
+	g_dirty = true;
+	return true;
+}
+
+bool SheepForceTryFillTile(const SheepForceTileFill *op)
+{
+	uint8 *base = SheepForcePageHost(0);
+	if (!g_dev || !g_filltile_pipe || !base || !op || !op->dest || op->dest < base || op->width < 1 || op->height < 1 ||
+	    op->rowbytes < 4 || !op->row_start || !op->runs || !op->tile || op->tile_w < 1 || op->tile_h < 1 ||
+	    op->tile_w > 4096 || op->tile_h > 4096)
+		return false;
+	if (!SheepForceBindFB() || !g_fb_nocopy)
+		return false;
+	const uint32 off = (uint32)(op->dest - base);
+	if (!fb_span_ok(off, op->rowbytes, op->width * 4, op->height))
+		return false;
+	if (op->row_start[0] != 0 || op->row_start[op->height] < 0)
+		return false;
+	const size_t nruns = (size_t)op->row_start[op->height];
+	if (nruns == 0)
+		return true;			/* clipped away entirely */
+	struct { uint x, y, w, h, row, tw, th, ox, oy; } u;
+	u.x = (uint)((off % (uint32)op->rowbytes) / 4u);
+	u.y = (uint)(off / (uint32)op->rowbytes);
+	u.w = (uint)op->width;
+	u.h = (uint)op->height;
+	u.row = (uint)op->rowbytes;
+	u.tw = (uint)op->tile_w;
+	u.th = (uint)op->tile_h;
+	u.ox = (uint)(op->tile_ox % op->tile_w);
+	u.oy = (uint)(op->tile_oy % op->tile_h);
+	id<MTLComputeCommandEncoder> enc = SheepForceOpenEncoder();
+	if (!enc)
+		return false;
+	note_flight(op->dest, op->rowbytes, op->width * 4, op->height);
+	[enc setComputePipelineState:g_filltile_pipe];
+	[enc setBuffer:g_fb offset:0 atIndex:0];
+	[enc setBytes:&u length:sizeof u atIndex:1];
+	const size_t rs_bytes = (size_t)(op->height + 1) * sizeof(int32_t), run_bytes = nruns * 2 * sizeof(int32_t);
+	const size_t tile_bytes = (size_t)op->tile_w * (size_t)op->tile_h * sizeof(uint32_t);
+	if (rs_bytes <= 4096)
+		[enc setBytes:op->row_start length:rs_bytes atIndex:2];
+	else
+		[enc setBuffer:[g_dev newBufferWithBytes:op->row_start length:rs_bytes options:MTLResourceStorageModeShared] offset:0 atIndex:2];
+	if (run_bytes <= 4096)
+		[enc setBytes:op->runs length:run_bytes atIndex:3];
+	else
+		[enc setBuffer:[g_dev newBufferWithBytes:op->runs length:run_bytes options:MTLResourceStorageModeShared] offset:0 atIndex:3];
+	if (tile_bytes <= 4096)
+		[enc setBytes:op->tile length:tile_bytes atIndex:4];
+	else
+		[enc setBuffer:[g_dev newBufferWithBytes:op->tile length:tile_bytes options:MTLResourceStorageModeShared] offset:0 atIndex:4];
+	NSUInteger tw = g_filltile_pipe.threadExecutionWidth > 0 ? g_filltile_pipe.threadExecutionWidth : 16;
+	[enc dispatchThreads:MTLSizeMake(u.w, u.h, 1) threadsPerThreadgroup:MTLSizeMake(tw, 1, 1)];
+	g_dirty = true;
+	return true;
+}
+
+/* Which blits the kernel implements exactly; nqd_blit_ops.h is shared with the CPU fallback. */
+static bool blit_supported(const SheepForceBlitOp *op)
+{
+	if (op->width <= 0 || op->height <= 0 || op->dst_row < 1 || op->src_row < 1)
+		return false;
+	if (!nqd_blit_mode_ok(op->mode, op->dbpp, op->sbpp))
+		return false;
+	return op->sbpp != 1 || op->dbpp != 4 || op->pal != NULL;
+}
+
+bool SheepForceTryBlit(const SheepForceBlitOp *op)
+{
+	uint8 *base = SheepForcePageHost(0);
+	if (!g_dev || !g_blit_pipe || !base || !op || !op->src || !op->dest || op->dest < base
+	    || !blit_supported(op))
+		return false;
+	if (!SheepForceBindFB() || !g_fb_nocopy)
+		return false;
+	const int dwb = op->width * op->dbpp, swb = op->width * op->sbpp;
+	const uint32 d0 = (uint32)(op->dest - base);
+	if (!fb_span_ok(d0, op->dst_row, dwb, op->height))
+		return false;
+	uint32 fb_bytes = (uint32)g_fb.length;
+	bool src_in = op->src >= base && (uint32)(op->src - base) < fb_bytes;
+	uint32 s0 = src_in ? (uint32)(op->src - base) : 0;
+	if (src_in && !fb_span_ok(s0, op->src_row, swb, op->height))
+		return false;
+	bool overlap = false;
 	if (src_in) {
-		uint32 s0 = (uint32)(src - base);
-		uint32 d0 = (uint32)(dest - base);
-		uint32 sbytes = (uint32)src_row * (uint32)(height - 1) + (uint32)width_bytes;
-		uint32 dbytes = (uint32)dst_row * (uint32)(height - 1) + (uint32)width_bytes;
-		if (s0 < d0 + dbytes && d0 < s0 + sbytes)
-			return false;
+		uint32 sbytes = (uint32)op->src_row * (uint32)(op->height - 1) + (uint32)swb;
+		uint32 dbytes = (uint32)op->dst_row * (uint32)(op->height - 1) + (uint32)dwb;
+		overlap = s0 < d0 + dbytes && d0 < s0 + sbytes;
 	}
-	struct { uint w, h, dst_row, src_row, bpp, dst_off, src_off; } u;
-	u.w = (uint)(width_bytes / bpp);
-	u.h = (uint)height;
-	u.dst_row = (uint)dst_row;
-	u.bpp = (uint)bpp;
-	u.dst_off = (uint)(dest - base);
+	struct { uint w, h, dst_row, src_row, sbpp, dbpp, dst_off, src_off, mode, back; } u;
+	u.w = (uint)op->width;
+	u.h = (uint)op->height;
+	u.dst_row = (uint)op->dst_row;
+	u.sbpp = (uint)op->sbpp;
+	u.dbpp = (uint)op->dbpp;
+	u.dst_off = d0;
+	u.mode = (uint)op->mode;
+	u.back = op->back_word;
 	id<MTLBuffer> src_buf = g_fb;
+	id<MTLBuffer> gather_to = nil;
 	if (src_in) {
-		u.src_off = (uint)(src - base);
-		u.src_row = (uint)src_row;
+		u.src_off = s0;
+		u.src_row = (uint)op->src_row;
+		if (overlap) {
+			if (!g_gather_pipe)
+				return false;
+			size_t need = (size_t)swb * (size_t)op->height;
+			if (!g_scr || g_scr.length < need) {
+				g_scr = [g_dev newBufferWithLength:need options:MTLResourceStorageModePrivate];
+				if (!g_scr)
+					return false;
+			}
+			gather_to = g_scr;
+			src_buf = g_scr;
+			u.src_off = 0;
+			u.src_row = (uint)swb;
+		}
 	} else {
-		/* One staging buffer. The previous icon is still reading it. */
-		if (g_pending) {
+		/* One staging buffer. The previous icon is still reading it, so everything
+		 * queued so far has to finish before it is overwritten. */
+		if (g_pending || g_open_cb) {
+			SheepForceCommitOpen();
 			[g_pending waitUntilCompleted];
 			g_pending = nil;
 			g_flight_on = false;
 		}
-		size_t need = (size_t)width_bytes * (size_t)height;
+		size_t need = (size_t)swb * (size_t)op->height;
 		if (!g_src || g_src.length < need) {
 			g_src = [g_dev newBufferWithLength:need options:MTLResourceStorageModeShared];
 			if (!g_src)
 				return false;
 		}
 		uint8 *packed = (uint8 *)g_src.contents;
-		for (int y = 0; y < height; y++)
-			memcpy(packed + (size_t)y * (size_t)width_bytes,
-			       src + (size_t)y * (size_t)src_row, (size_t)width_bytes);
+		for (int y = 0; y < op->height; y++)
+			memcpy(packed + (size_t)y * (size_t)swb,
+			       op->src + (size_t)y * (size_t)op->src_row, (size_t)swb);
 		src_buf = g_src;
 		u.src_off = 0;
-		u.src_row = (uint)width_bytes;
+		u.src_row = (uint)swb;
 	}
-	note_flight(dest, dst_row, width_bytes, height);
-	id<MTLCommandBuffer> cb = [g_queue commandBuffer];
-	id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+	note_flight(op->dest, op->dst_row, dwb, op->height);
+	id<MTLComputeCommandEncoder> enc = SheepForceOpenEncoder();
+	if (!enc)
+		return false;
+	if (gather_to) {
+		struct { uint wbytes, h, src_row, src_off; } gu = { (uint)swb, (uint)op->height, (uint)op->src_row, s0 };
+		[enc setComputePipelineState:g_gather_pipe];
+		[enc setBuffer:g_fb offset:0 atIndex:0];
+		[enc setBuffer:gather_to offset:0 atIndex:1];
+		[enc setBytes:&gu length:sizeof gu atIndex:2];
+		NSUInteger gw = g_gather_pipe.threadExecutionWidth > 0 ? g_gather_pipe.threadExecutionWidth : 16;
+		[enc dispatchThreads:MTLSizeMake(gu.wbytes, gu.h, 1) threadsPerThreadgroup:MTLSizeMake(gw, 1, 1)];
+	}
+	uint32 zero_pal[256];
+	if (!op->pal)
+		memset(zero_pal, 0, sizeof zero_pal);
 	[enc setComputePipelineState:g_blit_pipe];
 	[enc setBuffer:g_fb offset:0 atIndex:0];
 	[enc setBuffer:src_buf offset:0 atIndex:1];
 	[enc setBytes:&u length:sizeof u atIndex:2];
+	[enc setBytes:(op->pal ? op->pal : zero_pal) length:256 * sizeof(uint32) atIndex:3];
 	NSUInteger tw = g_blit_pipe.threadExecutionWidth > 0 ? g_blit_pipe.threadExecutionWidth : 16;
 	[enc dispatchThreads:MTLSizeMake(u.w, u.h, 1) threadsPerThreadgroup:MTLSizeMake(tw, 1, 1)];
-	[enc endEncoding];
-	[cb commit];
-	SheepForceTrack(cb);
 	g_dirty = true;
 	return true;
 }
@@ -543,6 +896,7 @@ bool SheepForcePresent(int x, int y, int w, int h)
 	}
 	if (!SheepForceBindFB() || !g_fb || !g_meta)
 		return false;
+	SheepForceCommitOpen();
 	g_presented = NULL;
 	g_presented_bytes = 0;
 	const int gw = SheepForceWidth();
@@ -573,6 +927,26 @@ bool SheepForcePresent(int x, int y, int w, int h)
 		if (base && pb >= 64 && off + pb <= (uint32)g_fb.length) {
 			g_presented = base + off;
 			g_presented_bytes = pb;
+		}
+	}
+	/* Debug: with SHEEPFORCE_DUMP=<file.ppm> the visible page is written out every 10 s,
+	 * so a run can be checked without capturing the screen. */
+	static const char *dump_path = getenv("SHEEPFORCE_DUMP");
+	static CFAbsoluteTime last_dump;
+	if (dump_path && depth == 32 && g_presented && g_presented_bytes >= (uint32)(row * gh)) {
+		CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+		if (now - last_dump > 10.0) {
+			last_dump = now;
+			SheepForceFlushCPU(NULL, 0, 0, 0);
+			if (FILE *f = fopen(dump_path, "wb")) {
+				fprintf(f, "P6\n%d %d\n255\n", gw, gh);
+				for (int yy = 0; yy < gh; yy++)
+					for (int xx = 0; xx < gw; xx++) {
+						const uint8 *px = g_presented + (size_t)yy * row + (size_t)xx * 4;
+						fputc(px[1], f); fputc(px[2], f); fputc(px[3], f);
+					}
+				fclose(f);
+			}
 		}
 	}
 	id<CAMetalDrawable> drawable = [g_layer nextDrawable];
@@ -616,12 +990,20 @@ uint32 SheepForcePresentedHash(int *have)
 	 * Sixteen rows of the guest mapping stayed constant for a whole
 	 * movie that was on screen; an 8-bit movie can also move by the
 	 * color table alone. */
-	uint32 hash = 2166136261u;
+	/* The same sampled bytes (every 16th), folded by four independent FNV lanes so the multiplies overlap;
+	 * the value is only ever compared for equality (movie frame detection), so its exact bits are free to change. */
+	uint32 h0 = 2166136261u, h1 = 2166136261u + 1u, h2 = 2166136261u + 2u, h3 = 2166136261u + 3u;
 	const uint8 *p = g_presented;
-	for (uint32 i = 0; i < g_presented_bytes; i += 16) {
-		hash ^= p[i];
-		hash *= 16777619u;
+	uint32 i = 0;
+	for (; i + 64 <= g_presented_bytes; i += 64) {
+		h0 = (h0 ^ p[i]) * 16777619u;
+		h1 = (h1 ^ p[i + 16]) * 16777619u;
+		h2 = (h2 ^ p[i + 32]) * 16777619u;
+		h3 = (h3 ^ p[i + 48]) * 16777619u;
 	}
+	for (; i < g_presented_bytes; i += 16)
+		h0 = (h0 ^ p[i]) * 16777619u;
+	uint32 hash = ((h0 * 31u + h1) * 31u + h2) * 31u + h3;
 	if (g_pal && g_pal.length >= 1024) {
 		const uint8 *pal = (const uint8 *)g_pal.contents;
 		for (int i = 0; i < 1024; i += 4) {
@@ -632,108 +1014,7 @@ uint32 SheepForcePresentedHash(int *have)
 	return hash;
 }
 
-static void SheepForceMac32ToBGRA(uint8 *dst, const uint8 *src, int width, int height, int src_row, int dst_row)
-{
-	for (int y = 0; y < height; y++) {
-		const uint8 *s = src + y * src_row;
-		uint8 *d = dst + y * dst_row;
-		for (int x = 0; x < width; x++) {
-			d[0] = s[3];
-			d[1] = s[2];
-			d[2] = s[1];
-			d[3] = 255;
-			s += 4;
-			d += 4;
-		}
-	}
-}
-
-static void SheepForceBGRAToMac32(uint8 *dst, const uint8 *src, int width, int height, int dst_row, int src_row)
-{
-	for (int y = 0; y < height; y++) {
-		uint8 *d = dst + y * dst_row;
-		const uint8 *s = src + y * src_row;
-		for (int x = 0; x < width; x++) {
-			d[0] = 0;
-			d[1] = s[2];
-			d[2] = s[1];
-			d[3] = s[0];
-			s += 4;
-			d += 4;
-		}
-	}
-}
-
-int SheepForceRaveTriangle(uint8 *pixmap, int width, int height, int rowbytes, int depth_bits,
-			   float x0, float y0, float x1, float y1, float x2, float y2,
-			   uint8_t r, uint8_t g, uint8_t b)
-{
-	if (!g_dev || !g_tri_pipe || !pixmap || width <= 0 || height <= 0 || depth_bits != 32)
-		return -1;
-	if (rowbytes < width * 4)
-		return -1;
-	SheepForceFlushCPU(NULL, 0, 0, 0);
-	const int bgra_row = width * 4;
-	uint8 *bgra = (uint8 *)malloc((size_t)bgra_row * (size_t)height);
-	if (!bgra)
-		return -1;
-	SheepForceMac32ToBGRA(bgra, pixmap, width, height, rowbytes, bgra_row);
-	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
-	td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-	id<MTLTexture> tex = [g_dev newTextureWithDescriptor:td];
-	[tex replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:bgra bytesPerRow:bgra_row];
-	float xy[6] = { x0 / width, y0 / height, x1 / width, y1 / height, x2 / width, y2 / height };
-	float color[4] = { r / 255.f, g / 255.f, b / 255.f, 1.f };
-	id<MTLBuffer> xb = [g_dev newBufferWithBytes:xy length:sizeof xy options:MTLResourceStorageModeShared];
-	id<MTLBuffer> cbuff = [g_dev newBufferWithBytes:color length:sizeof color options:MTLResourceStorageModeShared];
-	MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-	rp.colorAttachments[0].texture = tex;
-	rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
-	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-	id<MTLCommandBuffer> cb = [g_queue commandBuffer];
-	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-	[enc setRenderPipelineState:g_tri_pipe];
-	[enc setVertexBuffer:xb offset:0 atIndex:0];
-	[enc setVertexBuffer:cbuff offset:0 atIndex:1];
-	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-	[enc endEncoding];
-	[cb commit];
-	[cb waitUntilCompleted];
-	[tex getBytes:bgra bytesPerRow:bgra_row fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
-	SheepForceBGRAToMac32(pixmap, bgra, width, height, rowbytes, bgra_row);
-	free(bgra);
-	g_dirty = true;
-	return 0;
-}
-
-void SheepForceRaveSync(void)
-{
-	SheepForceSync();
-}
-
-int32 SheepForceRaveDispatch(uint32 mac_params)
-{
-	if (!mac_params)
-		return -1;
-	SheepForceRaveCall c;
-	c.pixmap = ReadMacInt32(mac_params + 0);
-	c.width = (int16)ReadMacInt16(mac_params + 4);
-	c.height = (int16)ReadMacInt16(mac_params + 6);
-	c.rowbytes = (int16)ReadMacInt16(mac_params + 8);
-	c.depth = (int16)ReadMacInt16(mac_params + 10);
-	c.selector = (int16)ReadMacInt16(mac_params + 12);
-	if (c.selector == 2) {
-		SheepForceRaveSync();
-		return 0;
-	}
-	if (c.selector != 1 || c.pixmap == 0)
-		return -1;
-	uint8 *pix = Mac2HostAddr(c.pixmap);
-	float xyv[6];
-	memcpy(xyv, Mac2HostAddr(mac_params + 14), sizeof xyv);
-	float x0 = xyv[0], y0 = xyv[1], x1 = xyv[2], y1 = xyv[3], x2 = xyv[4], y2 = xyv[5];
-	uint8 r = ReadMacInt8(mac_params + 38);
-	uint8 g = ReadMacInt8(mac_params + 39);
-	uint8 b = ReadMacInt8(mac_params + 40);
-	return SheepForceRaveTriangle(pix, c.width, c.height, c.rowbytes, c.depth, x0, y0, x1, y1, x2, y2, r, g, b);
-}
+/* Used by sheepforce_rave.mm. */
+id<MTLDevice> SheepForceMetalDevice(void) { return g_dev; }
+id<MTLCommandQueue> SheepForceMetalQueue(void) { return g_queue; }
+id<MTLLibrary> SheepForceMetalLibrary(void) { return g_lib; }

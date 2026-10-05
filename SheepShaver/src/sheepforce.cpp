@@ -34,6 +34,16 @@ bool SheepForceEnabled(void)
 	return PrefsFindBool("sheepforce");
 }
 
+bool SheepForceQDEnabled(void)
+{
+	return SheepForceEnabled() && PrefsFindBool("sheepforce_qd");
+}
+
+bool SheepForceRaveEnabled(void)
+{
+	return SheepForceEnabled() && PrefsFindBool("sheepforce_rave");
+}
+
 int SheepForcePageCount(void)
 {
 	return SheepForceEnabled() ? 2 : 1;
@@ -132,20 +142,14 @@ uint32 SheepForcePresentedHash(int *have)
 }
 bool SheepForceTryFill(uint8 *, int, int, int, int, uint32) { return false; }
 bool SheepForceTryInvert(uint8 *, int, int, int, int) { return false; }
-bool SheepForceTryBlit(uint8 *, const uint8 *, int, int, int, int, int) { return false; }
-int SheepForceRaveTriangle(uint8 *pixmap, int width, int height, int rowbytes, int depth_bits,
-			   float x0, float y0, float x1, float y1, float x2, float y2,
-			   uint8_t r, uint8_t g, uint8_t b)
-{
-	(void)pixmap; (void)width; (void)height; (void)rowbytes; (void)depth_bits;
-	(void)x0; (void)y0; (void)x1; (void)y1; (void)x2; (void)y2;
-	(void)r; (void)g; (void)b;
-	return -1;
-}
-void SheepForceRaveSync(void) {}
-int32 SheepForceRaveDispatch(uint32 mac_params)
-{
-	(void)mac_params;
-	return -1;
-}
+bool SheepForceTryBlit(const SheepForceBlitOp *) { return false; }
+bool SheepForceTryFillSpans(const SheepForceSpanFill *) { return false; }
+bool SheepForceTryFillTile(const SheepForceTileFill *) { return false; }
+void *SheepForceRaveTexNew(int, const int *, const int *, const uint8 *const *) { return NULL; }
+void SheepForceRaveTexDelete(void *) {}
+void *SheepForceRaveCtxNew(int, int, bool) { return NULL; }
+void SheepForceRaveCtxDelete(void *) {}
+void SheepForceRaveCtxClear(void *, const float *, bool, float, int) {}
+void SheepForceRaveCtxDraw(void *, const RaveBatch *, const RaveVertex *) {}
+bool SheepForceRaveCtxResolve(void *, uint8 *, int, int, int, int, int, int, const uint8 *) { return false; }
 #endif

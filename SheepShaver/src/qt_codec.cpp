@@ -28,8 +28,11 @@
 #include "sheepforce.h"
 #include "emul_op.h"
 #include "main.h"
+#include "macos_util.h"
+#include "xlowmem.h"
 
 #include <string.h>
+#include <time.h>
 #include <stdlib.h>
 
 static uint16 rd16(const uint8 *p)
@@ -334,16 +337,160 @@ int QtCodecRegister(void)
 	return 1;
 }
 
-int32 SheepForceRaveGuest(uint32 selector_word, uint32 params)
+
+
+/*
+ * Passive discovery for the RAVE manager: it is not resident until a guest program
+ * uses QuickDraw 3D, and CFM does not know it under any library name we guessed. Called
+ * every few seconds from the probe hook; prints the strings around the first sighting of
+ * the manager's export names in guest RAM (they include the library names).
+ */
+bool SheepForceRaveScanRAM(void)
 {
-	int16 sel = (int16)(selector_word & 0xffff);
-	if (sel == -3)
+	static bool done;
+	static const char *needles[] = {"QARegisterEngine", "QADrawContextNew", "QAEngineGestalt"};
+	if (done || !RAMBaseHost)
+		return done;
+	for (unsigned ni = 0; ni < 3; ni++) {
+		const size_t nl = strlen(needles[ni]);
+		const uint8 *ram = RAMBaseHost;
+		const size_t size = (size_t)RAMSize;
+		size_t found = 0;
+		for (size_t off = 0; off + nl < size && found < 4;) {
+			const uint8 *hit = (const uint8 *)memchr(ram + off, needles[ni][0], size - nl - off);
+			if (!hit)
+				break;
+			off = (size_t)(hit - ram);
+			if (memcmp(ram + off, needles[ni], nl) == 0) {
+				found++;
+				done = true;
+				printf("SheepForce probe: RAVE '%s' in guest RAM at %08x:", needles[ni], (unsigned)off);
+				size_t from = off >= 1400 ? off - 1400 : 0;
+				for (size_t k = from; k < off + nl + 400 && k < size; k++) {
+					uint8 c = ram[k];
+					putchar(c >= 32 && c < 127 ? c : '.');
+				}
+				putchar('\n');
+			}
+			off++;
+		}
+	}
+	if (done)
+		fflush(stdout);
+	return done;
+}
+
+/* Runs inside a native op, so FindLibSymbol takes its native CFM route. */
+static bool rave_probe_found;
+
+/* Runs inside a native op, so FindLibSymbol takes its native CFM route. */
+void SheepForceRaveRegisterNative(void)
+{
+	/* Register our engine with the guest's RAVE manager (a CFM library that loads on demand), prove
+	 * it works with a draw through the manager's own context calls, and take it out of use again
+	 * if that fails. */
+	if (SheepForceRaveEnabled()) {
+		static const char lib[] = "\x19QuickDraw\xaa 3D Accelerator";
+		static const char sym[] = "\x10QARegisterEngine";
+		static const char sym2[] = "\x14QARegisterDrawMethod";
+		uint32 reg = FindLibSymbol(lib, sym);
+		uint32 reg_draw = FindLibSymbol(lib, sym2);
+		if (reg && reg_draw) {
+			SheepForceRaveRegisterEngine(reg, reg_draw);
+			if (!SheepForceRaveSelfTest())
+				SheepForceRaveDisableEngine();
+		} else {
+			printf("SheepForce: RAVE manager not found; engine not registered\n");
+		}
+	}
+	if (!PrefsFindBool("sheepforce_probe"))
+		return;
+	/* The manager's CFM name is the "QuickDraw(TM) 3D Accelerator" the engines import from
+	 * (0xAA is the trademark sign in MacRoman); a few other spellings follow. */
+	static const char *libs[] = {
+		"QuickDraw\xaa 3D Accelerator", "QuickDraw 3D Accelerator", "QuickDraw\xaa 3D RAVE",
+		"QuickDraw 3D RAVE", "RAVE", "QuickDraw\xaa 3D", "QuickDraw 3D", "QuickDraw3D",
+	};
+	uint32 reg = 0, first = 0, next = 0, gestalt = 0, check = 0;
+	char lib[64], sym[64];
+	for (unsigned i = 0; i < sizeof libs / sizeof libs[0] && !reg; i++) {
+		lib[0] = (char)strlen(libs[i]);
+		memcpy(lib + 1, libs[i], (size_t)(uint8)lib[0] + 1);
+		sym[0] = 16;
+		memcpy(sym + 1, "QARegisterEngine", 17);
+		reg = FindLibSymbol(lib, sym);
+		printf("SheepForce probe: FindLibSymbol(\"%s\", QARegisterEngine) = %08x\n", libs[i], (unsigned)reg);
+		if (reg) {
+			static const struct { const char *name; uint32 *dst; } more[] = { {"QADeviceGetFirstEngine", &first},
+				{"QADeviceGetNextEngine", &next}, {"QAEngineGestalt", &gestalt}, {"QAEngineCheckDevice", &check} };
+			for (unsigned m = 0; m < 4; m++) {
+				sym[0] = (char)strlen(more[m].name);
+				memcpy(sym + 1, more[m].name, (size_t)(uint8)sym[0] + 1);
+				*more[m].dst = FindLibSymbol(lib, sym);
+				printf("SheepForce probe:   %s = %08x\n", more[m].name, (unsigned)*more[m].dst);
+			}
+		}
+	}
+	fflush(stdout);
+	if (!reg || !first || !gestalt)
+		return;
+	rave_probe_found = true;
+	/* Ask the manager which engines it already has for the main display. */
+	typedef uint32 (*fn1)(uint32);
+	typedef uint32 (*fn2)(uint32, uint32);
+	typedef int32 (*fn3)(uint32, uint32, uint32);
+	SheepVar dev(24);
+	for (int i = 0; i < 24; i += 4)
+		WriteMacInt32(dev.addr() + (uint32)i, 0);
+	WriteMacInt32(dev.addr() + 0, 1);			/* kQADeviceGDevice */
+	WriteMacInt32(dev.addr() + 4, ReadMacInt32(0x8a4));	/* MainDevice */
+	uint32 eng = CallMacOS1(fn1, first, dev.addr());
+	for (int n = 0; eng && n < 8; n++) {
+		SheepVar buf(256);
+		SheepVar32 val = 0;
+		WriteMacInt32(buf.addr(), 0);
+		printf("SheepForce probe: engine %08x:", (unsigned)eng);
+		static const struct { uint32 sel; const char *name; } gs[] = {
+			{2, "vendor"}, {3, "engineID"}, {0, "optional"}, {15, "optional2"}, {1, "fast"}, {16, "multitex"} };
+		for (unsigned g = 0; g < sizeof gs / sizeof gs[0]; g++) {
+			WriteMacInt32(val.addr(), 0);
+			int32 err = CallMacOS3(fn3, gestalt, eng, gs[g].sel, val.addr());
+			printf(" %s=%08x%s", gs[g].name, (unsigned)val.value(), err ? "(err)" : "");
+		}
+		int32 err = CallMacOS3(fn3, gestalt, eng, 6, buf.addr());
+		printf(" name='%s'%s", err ? "?" : (const char *)Mac2HostAddr(buf.addr()), err ? "(err)" : "");
+		if (check) {
+			int32 ok = CallMacOS2(fn2, check, eng, dev.addr());
+			printf(" checkDevice=%d", (int)ok);
+		}
+		printf("\n");
+		fflush(stdout);
+		if (!next)
+			break;
+		eng = CallMacOS2(fn2, next, dev.addr(), eng);
+	}
+}
+
+/*
+ * Called from the event-loop idle patch while the probe is on. Waits until a guest program
+ * has loaded the RAVE manager (the RAM scan sees its export names), then runs the lookups once
+ * from a native op. Returns 1 while it still wants the idle hooks.
+ */
+int SheepForceRaveProbeTick(void)
+{
+	static unsigned tries;
+	static time_t last;
+	if (!PrefsFindBool("sheepforce_probe") || rave_probe_found || tries >= 4)
+		return 0;
+	time_t now = time(NULL);
+	if (now - last < 20)
 		return 1;
-	if (sel == -1 || sel == -2 || sel == -4 || sel == -5 || sel == 2)
-		return sel == -4 ? 1 : 0;
-	if (sel == 1)
-		return SheepForceRaveDispatch(params);
-	return -50;
+	last = now;
+	if (!SheepForceRaveScanRAM())
+		return 1;
+	tries++;
+	ExecuteNative(NATIVE_RAVE_REGISTER);
+	return rave_probe_found ? 0 : 1;
 }
 
 int SheepForceRaveRegister(void)
@@ -354,46 +501,8 @@ int SheepForceRaveRegister(void)
 	if (once)
 		return 0;
 	once = 1;
-	static const uint8 glue_template[] = {
-		0x4e, 0x56, 0x00, 0x00,
-		0x48, 0xe7, 0x80, 0x18,
-		0x26, 0x6e, 0x00, 0x0c,
-		0x28, 0x6e, 0x00, 0x08,
-		0xfe, 0x00,
-		0x2d, 0x40, 0x00, 0x10,
-		0x4c, 0xdf, 0x18, 0x01,
-		0x4e, 0x5e,
-		0x4e, 0x74, 0x00, 0x08
-	};
-	uint8 glue[sizeof glue_template];
-	memcpy(glue, glue_template, sizeof glue);
-	glue[16] = (uint8)(M68K_EMUL_OP_RAVE >> 8);
-	glue[17] = (uint8)(M68K_EMUL_OP_RAVE & 0xff);
-	uint32 entry = SheepProc(glue, sizeof glue);
-	SheepVar cd(20);
-	WriteMacInt32(cd.addr() + 0, 0x7261766c); /* ravl */
-	WriteMacInt32(cd.addr() + 4, 0x7368666f); /* shfo */
-	WriteMacInt32(cd.addr() + 8, 0x5368466f);
-	WriteMacInt32(cd.addr() + 12, 0);
-	WriteMacInt32(cd.addr() + 16, 0);
-	uint8 stub[48];
-	int n = 0;
-	auto emit16 = [&](uint16 v) { stub[n++] = (uint8)(v >> 8); stub[n++] = (uint8)v; };
-	auto emit32 = [&](uint32 v) { emit16((uint16)(v >> 16)); emit16((uint16)v); };
-	emit16(0x598f);
-	emit16(0x2f3c); emit32(cd.addr());
-	emit16(0x2f3c); emit32(entry);
-	emit16(0x3f3c); emit16(1);
-	emit16(0x2f3c); emit32(0);
-	emit16(0x2f3c); emit32(0);
-	emit16(0x2f3c); emit32(0);
-	emit16(0x7001);
-	emit16(0xa82a);
-	emit16(0x201f);
-	emit16(0x4e75);
-	M68kRegisters rr;
-	memset(&rr, 0, sizeof rr);
-	Execute68k(SheepProc(stub, n), &rr);
-	printf("SheepForce: RAVE engine component %08x\n", (unsigned)rr.d[0]);
+	/* A RAVE engine registers with the guest's RAVE manager through QARegisterEngine (see rave.cpp),
+	 * not as a Component, so there is nothing to register on the 68k side. */
+	ExecuteNative(NATIVE_RAVE_REGISTER);
 	return 1;
 }

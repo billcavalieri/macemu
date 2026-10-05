@@ -50,6 +50,12 @@ prefs_desc common_prefs_items[] = {
 	{"frameskip", TYPE_INT32, false,    "number of frames to skip in refreshed video modes"},
 	{"gfxaccel", TYPE_BOOLEAN, false,   "turn on QuickDraw acceleration"},
 	{"sheepforce", TYPE_BOOLEAN, false, "SheepForce Metal display"},
+	{"sheepforce_qd", TYPE_BOOLEAN, false, "SheepForce Metal QuickDraw acceleration (needs sheepforce)"},
+	{"sheepforce_rave", TYPE_BOOLEAN, false, "SheepForce Metal RAVE engine (needs sheepforce)"},
+	{"sheepforce_fillmask", TYPE_BOOLEAN, false, "accelerate QuickDraw solid pattern fills clipped by regions (hook 3); experimental, off until verified live"},
+	{"sheepforce_fillmask_tiles", TYPE_BOOLEAN, false, "also take pixel-pattern (desktop pattern) fills in the code-3 hook; needs sheepforce_fillmask; experimental"},
+	{"sheepforce_lines", TYPE_BOOLEAN, false, "accelerate QuickDraw line/frame rectangles (hook 5); on by default, set false to bisect"},
+	{"sheepforce_probe", TYPE_BOOLEAN, false, "log which unplanted QuickDraw accelerator hook codes the ROM calls"},
 	{"qtcodec", TYPE_BOOLEAN, false,  "host Cinepak and Sorenson Video decode"},
 	{"nocdrom", TYPE_BOOLEAN, false,    "don't install CD-ROM driver"},
 	{"nonet", TYPE_BOOLEAN, false,      "don't use Ethernet"},
@@ -98,6 +104,12 @@ void AddPrefsDefaults(void)
 	PrefsAddInt32("frameskip", 8);
 	PrefsAddBool("gfxaccel", true);
 	PrefsAddBool("sheepforce", false);
+	PrefsAddBool("sheepforce_qd", true);
+	PrefsAddBool("sheepforce_rave", true);
+	PrefsAddBool("sheepforce_lines", true);
+	PrefsAddBool("sheepforce_fillmask", false);
+	PrefsAddBool("sheepforce_fillmask_tiles", false);
+	PrefsAddBool("sheepforce_probe", false);
 	PrefsAddBool("qtcodec", false);
 	PrefsAddBool("nocdrom", false);
 	PrefsAddBool("nonet", false);

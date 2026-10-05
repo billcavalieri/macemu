@@ -61,6 +61,11 @@ uint32 NativeOpcode(int selector)
 	case NATIVE_NQD_BITBLT_HOOK:
 	case NATIVE_NQD_FILLRECT_HOOK:
 	case NATIVE_NQD_UNKNOWN_HOOK:
+	case NATIVE_NQD_LINES_HOOK:
+	case NATIVE_NQD_FILLMASK_HOOK:
+	case NATIVE_NQD_FILLMASK:
+	case NATIVE_NQD_PROBE_HOOK:
+	case NATIVE_RAVE_METHOD:
 	case NATIVE_NQD_BITBLT:
 	case NATIVE_NQD_INVRECT:
 	case NATIVE_NQD_FILLRECT:
@@ -68,6 +73,7 @@ uint32 NativeOpcode(int selector)
 		break;
   	case NATIVE_PATCH_NAME_REGISTRY:
   	case NATIVE_VIDEO_INSTALL_ACCEL:
+  	case NATIVE_RAVE_REGISTER:
   	case NATIVE_VIDEO_VBL:
   	case NATIVE_VIDEO_DO_DRIVER_IO:
 	case NATIVE_ETHER_AO_GET_HWADDR:
@@ -326,6 +332,9 @@ bool ThunksInit(void)
 	DEFINE_NATIVE_OP(NATIVE_NQD_BITBLT_HOOK, NQD_bitblt_hook);
 	DEFINE_NATIVE_OP(NATIVE_NQD_FILLRECT_HOOK, NQD_fillrect_hook);
 	DEFINE_NATIVE_OP(NATIVE_NQD_UNKNOWN_HOOK, NQD_unknown_hook);
+	DEFINE_NATIVE_OP(NATIVE_NQD_LINES_HOOK, NQD_lines_hook);
+	DEFINE_NATIVE_OP(NATIVE_NQD_FILLMASK_HOOK, NQD_fillmask_hook);
+	DEFINE_NATIVE_OP(NATIVE_NQD_FILLMASK, NQD_fillmask);
 	DEFINE_NATIVE_OP(NATIVE_NQD_BITBLT, NQD_bitblt);
 	DEFINE_NATIVE_OP(NATIVE_NQD_INVRECT, NQD_invrect);
 	DEFINE_NATIVE_OP(NATIVE_NQD_FILLRECT, NQD_fillrect);
@@ -367,6 +376,30 @@ uint32 NativeTVECT(int selector)
 	const uint32 tvect = native_op[selector].tvect;
 	assert(tvect != 0);
 	return tvect;
+}
+
+
+/*
+ *  Return a guest TVECT that runs a native op with a slot number in r0
+ */
+
+uint32 NativeSlotTVECT(int selector, int slot)
+{
+#if EMULATED_PPC
+	assert(selector < NATIVE_OP_MAX && slot >= 0 && slot < 0x8000);
+	uint32 base = Mac_sysalloc(24);
+	if (base == 0)
+		return 0;
+	WriteMacInt32(base + 0, base + 8);
+	WriteMacInt32(base + 4, 0);						// Fake TOC
+	WriteMacInt32(base + 8, 0x38000000 | (uint32)slot);	// li r0,slot
+	WriteMacInt32(base + 12, NativeOpcode(selector));
+	WriteMacInt32(base + 16, POWERPC_BLR);
+	return base;
+#else
+	(void)selector; (void)slot;
+	return 0;
+#endif
 }
 
 

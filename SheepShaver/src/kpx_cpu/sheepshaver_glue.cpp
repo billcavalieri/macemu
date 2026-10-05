@@ -33,6 +33,7 @@
 #include "cpu/ppc/ppc-operations.hpp"
 #include "cpu/ppc/ppc-instructions.hpp"
 #include "thunks.h"
+#include "sheepforce.h"
 #include "nw_boot_contract.h"
 #include "nw_devices.h"
 #include "nw_io.h"
@@ -458,6 +459,23 @@ int sheepshaver_cpu::compile1(codegen_context_t & cg_context)
 			dg.gen_load_T0_GPR(3);
 			dg.gen_invoke_T0_ret_T0((uint32 (*)(uint32))NQD_unknown_hook);
 			dg.gen_store_T0_GPR(3);
+			status = COMPILE_CODE_OK;
+			break;
+		case NATIVE_NQD_LINES_HOOK:
+			dg.gen_load_T0_GPR(3);
+			dg.gen_invoke_T0_ret_T0((uint32 (*)(uint32))NQD_lines_hook);
+			dg.gen_store_T0_GPR(3);
+			status = COMPILE_CODE_OK;
+			break;
+		case NATIVE_NQD_FILLMASK_HOOK:
+			dg.gen_load_T0_GPR(3);
+			dg.gen_invoke_T0_ret_T0((uint32 (*)(uint32))NQD_fillmask_hook);
+			dg.gen_store_T0_GPR(3);
+			status = COMPILE_CODE_OK;
+			break;
+		case NATIVE_NQD_FILLMASK:
+			dg.gen_load_T0_GPR(3);
+			dg.gen_invoke_T0((void (*)(uint32))NQD_fillmask);
 			status = COMPILE_CODE_OK;
 			break;
 		case NATIVE_NQD_BITBLT:
@@ -1342,6 +1360,24 @@ void sheepshaver_cpu::execute_native_op(uint32 selector)
 	case NATIVE_VIDEO_INSTALL_ACCEL:
 		VideoInstallAccel();
 		break;
+	case NATIVE_RAVE_REGISTER:
+		SheepForceRaveRegisterNative();
+		break;
+	case NATIVE_RAVE_METHOD: {
+		/* A RAVE callback called by the guest; the slot is in r0 (see NativeSlotTVECT). */
+		RaveGuestCall call;
+		for (int i = 0; i < 8; i++)
+			call.r[i] = gpr(3 + i);
+		for (int i = 0; i < 13; i++)
+			call.f[i] = fpr(1 + i);
+		call.sp = gpr(1);
+		RaveGuestResult res;
+		SheepForceRaveMethod(gpr(0), &call, &res);
+		gpr(3) = res.r3;
+		if (res.is_float)
+			fpr(1) = res.f1;
+		break;
+	}
 	case NATIVE_VIDEO_VBL:
 		if (ROMType == ROMTYPE_NEWWORLD) {
 			/* the display node's interrupt handler: returns kIsrIsComplete
@@ -1393,6 +1429,18 @@ void sheepshaver_cpu::execute_native_op(uint32 selector)
 		break;
 	case NATIVE_NQD_UNKNOWN_HOOK:
 		gpr(3) = NQD_unknown_hook(gpr(3));
+		break;
+	case NATIVE_NQD_LINES_HOOK:
+		gpr(3) = NQD_lines_hook(gpr(3));
+		break;
+	case NATIVE_NQD_FILLMASK_HOOK:
+		gpr(3) = NQD_fillmask_hook(gpr(3));
+		break;
+	case NATIVE_NQD_FILLMASK:
+		NQD_fillmask(gpr(3));
+		break;
+	case NATIVE_NQD_PROBE_HOOK:
+		gpr(3) = NQD_probe_hook(gpr(3), gpr(0));
 		break;
 	case NATIVE_NQD_BITBLT_HOOK:
 		gpr(3) = NQD_bitblt_hook(gpr(3));

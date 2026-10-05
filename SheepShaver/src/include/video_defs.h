@@ -404,10 +404,14 @@ enum {
 	ACCL_BITBLT,
 	ACCL_BLTMASK,
 	ACCL_FILLRECT,
-	ACCL_FILLMASK
-	// 4: bitblt
-	// 5: lines
-	// 6: fill
+	ACCL_FILLMASK,
+	ACCL_LINES = 5		// measured, see below: solid pen-colour rectangles (frames, rules)
+	// The ROM also calls hook codes 4, 5 and 6 (measured with the sheepforce_probe
+	// pref, not documented): 5 draws solid 1-pixel-high or -wide rectangles in the
+	// pen colour (lines), 4 and 6 draw patterned fills / pixel-pattern blits, and
+	// 3 fills with the desktop pattern. Codes 1 and 3 above are real too. Only 0 and 2
+	// are planted; the others stay with the ROM until their parameter layout is
+	// verified. See NQD_probe_hook in gfxaccel.cpp.
 };
 
 #endif

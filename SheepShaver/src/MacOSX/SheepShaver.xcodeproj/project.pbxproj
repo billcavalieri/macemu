@@ -115,7 +115,9 @@
 		A10F9210BC10000000000084 /* prefs.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CE8B14A99EF0000B1711 /* prefs.cpp */; };
 		A1B2C3D4E5F60718293A4B02 /* sheepforce.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B01 /* sheepforce.cpp */; };
 		A1B2C3D4E5F60718293A4B04 /* qt_codec.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */; };
+		A1B2C3D4E5F60718293A4B21 /* rave.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B20 /* rave.cpp */; };
 		A1B2C3D4E5F60718293A4B06 /* sheepforce_metal.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B05 /* sheepforce_metal.mm */; };
+		A1B2C3D4E5F60718293A4B23 /* sheepforce_rave.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B22 /* sheepforce_rave.mm */; };
 		A1B2C3D4E5F60718293A4B08 /* SheepForce.metal in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B07 /* SheepForce.metal */; };
 		A1B2C3D4E5F60718293A4B0A /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B09 /* QuartzCore.framework */; };
 		A1BEEF0120CF7E6D00FBE901 /* video_macos.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1BEEF0020CF7E6D00FBE901 /* video_macos.mm */; };
@@ -403,7 +405,9 @@
 		A10F9210BC10000000000071 /* nw_jit.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_jit.cpp; path = ../nw_jit.cpp; sourceTree = SOURCE_ROOT; };
 		A10F9210BC10000000000081 /* nw_68k_jit.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_68k_jit.cpp; path = ../nw_68k_jit.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B01 /* sheepforce.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = sheepforce.cpp; path = ../sheepforce.cpp; sourceTree = SOURCE_ROOT; };
+		A1B2C3D4E5F60718293A4B20 /* rave.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = rave.cpp; path = ../rave.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = qt_codec.cpp; path = ../qt_codec.cpp; sourceTree = SOURCE_ROOT; };
+		A1B2C3D4E5F60718293A4B22 /* sheepforce_rave.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = sheepforce_rave.mm; sourceTree = "<group>"; };
 		A1B2C3D4E5F60718293A4B05 /* sheepforce_metal.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = sheepforce_metal.mm; sourceTree = "<group>"; };
 		A1B2C3D4E5F60718293A4B07 /* SheepForce.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = SheepForce.metal; sourceTree = "<group>"; };
 		A1B2C3D4E5F60718293A4B09 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
@@ -563,6 +567,7 @@
 				0856CD8D14A99EEF000B1711 /* gfxaccel.cpp */,
 				A1B2C3D4E5F60718293A4B01 /* sheepforce.cpp */,
 				A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */,
+				A1B2C3D4E5F60718293A4B20 /* rave.cpp */,
 				0856CD8E14A99EEF000B1711 /* include */,
 				0856CDB114A99EEF000B1711 /* kpx_cpu */,
 				0856CE0514A99EEF000B1711 /* macos_util.cpp */,
@@ -860,6 +865,7 @@
 				0873A80014AC515D004F12B7 /* utils_macosx.h */,
 				0873A80114AC515D004F12B7 /* utils_macosx.mm */,
 				A1B2C3D4E5F60718293A4B05 /* sheepforce_metal.mm */,
+				A1B2C3D4E5F60718293A4B22 /* sheepforce_rave.mm */,
 				A1BEEF0020CF7E6D00FBE901 /* video_macos.mm */,
 				A1BEEF4020CF7E6D00FBE903 /* VMLibraryView.swift */,
 				A1BEEF4120CF7E6D00FBE903 /* VMSettingsView.swift */,
@@ -1243,7 +1249,9 @@
 				0856CFF414A99EF0000B1711 /* gfxaccel.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B02 /* sheepforce.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B04 /* qt_codec.cpp in Sources */,
+				A1B2C3D4E5F60718293A4B21 /* rave.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B06 /* sheepforce_metal.mm in Sources */,
+				A1B2C3D4E5F60718293A4B23 /* sheepforce_rave.mm in Sources */,
 				A1B2C3D4E5F60718293A4B08 /* SheepForce.metal in Sources */,
 				0856D00914A99EF0000B1711 /* macos_util.cpp in Sources */,
 				A10F9210BC10000000000012 /* nw_boot_contract.cpp in Sources */,

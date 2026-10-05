@@ -108,3 +108,8 @@ rom-disasm.txt
 research-score/rom-disasm*
 research-score/**/rom-disasm*.md
 research-score/**/rom-disasm*.txt
+
+# Apple's RAVE SDK headers are an external requirement (set RAVE_SDK_DIR); never commit them.
+RAVE.h
+RAVESystem.h
+external/RAVE-SDK/

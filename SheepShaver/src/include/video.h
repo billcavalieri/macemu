@@ -164,6 +164,11 @@ extern int NQD_copybits_expand(uint32 srcBits, uint32 dstBits, uint32 srcRect,
 			       uint32 dstRect, int16 mode, uint32 maskRgn);
 extern bool NQD_fillrect_hook(uint32);
 extern bool NQD_unknown_hook(uint32);
+extern bool NQD_lines_hook(uint32);
+extern bool NQD_fillmask_hook(uint32);
+extern void NQD_fillmask(uint32);
+extern void NQD_fillmask_report(void);
+extern bool NQD_probe_hook(uint32 p, uint32 code);	// debug: logs the ROM calling an unplanted hook code
 extern void NQD_bitblt(uint32);
 extern void NQD_invrect(uint32);
 extern void NQD_fillrect(uint32);

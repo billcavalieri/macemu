@@ -61,12 +61,18 @@ enum {
   NATIVE_NQD_BITBLT_HOOK,
   NATIVE_NQD_FILLRECT_HOOK,
   NATIVE_NQD_UNKNOWN_HOOK,
+  NATIVE_NQD_LINES_HOOK,
+  NATIVE_NQD_FILLMASK_HOOK,
+  NATIVE_NQD_FILLMASK,
   NATIVE_NQD_BITBLT,
   NATIVE_NQD_INVRECT,
   NATIVE_NQD_FILLRECT,
   NATIVE_NAMED_CHECK_LOAD_INVOC,
   NATIVE_GET_NAMED_RESOURCE,
   NATIVE_GET_1_NAMED_RESOURCE,
+  NATIVE_NQD_PROBE_HOOK,
+  NATIVE_RAVE_REGISTER,
+  NATIVE_RAVE_METHOD,
   NATIVE_OP_MAX
 };
 
@@ -83,6 +89,11 @@ extern uint32 NativeOpcode(int selector);
 
 // Return the native function descriptor (TVECT)
 extern uint32 NativeTVECT(int selector);
+
+// Return a fresh guest TVECT that runs native op `selector` with `slot` in r0
+// (li r0,slot; <native op>; blr). One native op can then serve many entry
+// points, which matters because the native-op field only has 64 values.
+extern uint32 NativeSlotTVECT(int selector, int slot);
 
 // Return the native function address
 extern uint32 NativeFunction(int selector);

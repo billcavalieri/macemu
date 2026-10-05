@@ -41,8 +41,8 @@
 
 extern int32 QtCodecDispatch(uint32 selector_word, uint32 params);
 extern int QtCodecRegister(void);
-extern int32 SheepForceRaveGuest(uint32 selector_word, uint32 params);
 extern int SheepForceRaveRegister(void);
+extern int SheepForceRaveProbeTick(void);
 #include "ether.h"
 #include "serial.h"
 #include "clip.h"
@@ -373,6 +373,8 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 					;
 				else if (SheepForceRaveRegister())
 					;
+				else if (SheepForceRaveProbeTick())
+					;
 				else {
 					nw_components_done = true;
 					nw_components_remove_hooks();
@@ -519,9 +521,6 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 			r->d[0] = QtCodecDispatch(r->a[3], r->a[4]);
 			break;
 
-		case OP_RAVE:
-			r->d[0] = SheepForceRaveGuest(r->a[3], r->a[4]);
-			break;
 
 		case OP_SHEEPBLASTER: {		// AWACS `link a6,#0`, then the original body
 			uint32 sp = r->a[7];
