@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <atomic>
 #include "nw_io.h"
 #include "nw_jit.h"
 
@@ -48,6 +49,17 @@ struct nw_bank {
 };
 static struct nw_bank g_banks[NW_BANKS_MAX];
 static int g_nbanks;
+
+/* nw_pa_kind() is asked for every guest access the 68k layer previews, and each answer is a range scan. Banks are
+ * page-granular, so a small direct-mapped cache of (page -> kind) answers nearly all of them. Entries pack
+ * (page + 1) << 8 | kind into one word so a reader on another thread never sees a torn pair. */
+static std::atomic<uint64_t> g_kind_cache[256];
+static bool g_kind_cache_ok = true;
+static void kind_cache_clear(void)
+{
+	for (unsigned i = 0; i < 256; i++)
+		g_kind_cache[i].store(0, std::memory_order_relaxed);
+}
 
 static uint32_t g_fb_base;
 static uint32_t g_fb_rowbytes;
@@ -90,6 +102,8 @@ void nw_io_reset(void)
 	g_log_count = 0;
 	g_npages = 0;
 	g_nbanks = 0;
+	kind_cache_clear();
+	g_kind_cache_ok = true;
 	fb_damage_reset();
 }
 
@@ -97,6 +111,9 @@ void nw_banks_set(int kind, uint32_t base, uint32_t size)
 {
 	if (kind <= NW_PA_NONE || kind == NW_PA_IO || size == 0)
 		return;
+	if ((base | size) & 0xfffu)
+		g_kind_cache_ok = false;	/* a sub-page bank: answer every query from the table */
+	kind_cache_clear();
 	for (int i = 0; i < g_nbanks; i++) {
 		if (g_banks[i].kind == kind) {
 			g_banks[i].base = base;
@@ -112,7 +129,7 @@ void nw_banks_set(int kind, uint32_t base, uint32_t size)
 	g_nbanks++;
 }
 
-int nw_pa_kind(uint32_t pa)
+static int nw_pa_kind_scan(uint32_t pa)
 {
 	if (nw_io_range(pa))
 		return NW_PA_IO;
@@ -123,19 +140,23 @@ int nw_pa_kind(uint32_t pa)
 	return NW_PA_NONE;
 }
 
+int nw_pa_kind(uint32_t pa)
+{
+	if (!g_kind_cache_ok)
+		return nw_pa_kind_scan(pa);
+	const uint64_t page = (uint64_t)(pa >> 12) + 1;
+	std::atomic<uint64_t> &slot = g_kind_cache[(pa >> 12) & 255u];
+	const uint64_t v = slot.load(std::memory_order_relaxed);
+	if ((v >> 8) == page)
+		return (int)(v & 0xffu);
+	const int k = nw_pa_kind_scan(pa);
+	slot.store((page << 8) | (uint64_t)k, std::memory_order_relaxed);
+	return k;
+}
+
 int nw_pa_writable(uint32_t pa)
 {
-	switch (nw_pa_kind(pa)) {
-	case NW_PA_RAM:
-	case NW_PA_SHEEP:
-	case NW_PA_FB:
-	case NW_PA_LOWMEM:
-	case NW_PA_KDP:
-	case NW_PA_BOOTINFO:
-		return 1;
-	default:
-		return 0;
-	}
+	return nw_kind_writable(nw_pa_kind(pa));
 }
 
 static const char *bank_name(int kind)

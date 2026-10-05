@@ -332,6 +332,17 @@ struct nw_jit_dtlb_ent {
 	uint32_t bat_gen;	/* DBAT generation at fill; miss if any DBAT changed */
 	uint32_t pad2;
 };
+/* Runtime kill switches for the October 2026 host-performance changes. Set NW_JIT_LEGACY to a comma list of
+ * clock, sync, load, index, xlate, fp (or all) to run the previous behaviour of each, for A/B tests in one binary. */
+enum {
+	NW_JIT_LEGACY_CLOCK = 1u,	/* decrementer sampled on every jit_events_pending() call */
+	NW_JIT_LEGACY_SYNC  = 2u,	/* GPR/FPR commit and pull test all 32 registers */
+	NW_JIT_LEGACY_LOAD  = 4u,	/* byte/halfword loads do not use or fill the data TLB */
+	NW_JIT_LEGACY_INDEX = 8u,	/* invalidation scans the whole cache instead of the per-page index */
+	NW_JIT_LEGACY_XLATE = 16u,	/* the 68k layer's load previews always run the full MMU translation */
+	NW_JIT_LEGACY_FP    = 32u	/* single-precision FP arithmetic always calls the out-of-line helpers */
+};
+extern unsigned nw_jit_legacy;
 void nw_jit_dtlb_flush(void);
 void nw_jit_dtlb_flush_src(int src);
 void nw_jit_dtlb_flush_if_pr(uint32_t old_msr, uint32_t new_msr, int src);
@@ -342,6 +353,13 @@ void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host, int
 		     int via_bat = 0);
 int nw_jit_dtlb_lookup(uint32_t ea, int is_store, uint32_t *pa);
 int nw_jit_dtlb_lookup_pr(uint32_t ea, int is_store, uint32_t *pa, int pr);
+/* 1 if a recorded read translation was already done for the live entry covering ea; otherwise marks the entry
+ * (if there is one) and returns 0, and the caller does the recorded translation. */
+int nw_jit_dtlb_take_rec(uint32_t ea, int pr);
+/* 1 (and the physical address) if the live entry for ea was filled and then marked by a full recorded store
+ * translation; a writable flag from a load fill does not count. */
+int nw_jit_dtlb_store_rec(uint32_t ea, int pr, uint32_t *pa);
+void nw_jit_dtlb_mark_store_rec(uint32_t ea, int pr);
 uint64_t nw_jit_dtlb_hits(void);
 uint64_t nw_jit_dtlb_misses(void);
 uint64_t nw_jit_mtsr_total(void);

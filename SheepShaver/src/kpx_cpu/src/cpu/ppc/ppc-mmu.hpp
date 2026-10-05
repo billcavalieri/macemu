@@ -203,8 +203,10 @@ struct ppc32_hotints_dsi {
 	}
 };
 
-ppc32_mmu &ppc32_guest_mmu();
+extern ppc32_mmu ppc32_guest_mmu_instance;
+extern bool ppc32_guest_mmu_enabled_flag;
+static inline ppc32_mmu &ppc32_guest_mmu() { return ppc32_guest_mmu_instance; }
 void ppc32_guest_mmu_enable(bool on);
-bool ppc32_guest_mmu_enabled();
+static inline bool ppc32_guest_mmu_enabled() { return ppc32_guest_mmu_enabled_flag; }
 
 #endif /* PPC_MMU_H */

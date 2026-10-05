@@ -26,6 +26,7 @@
 #include "nw_boot_contract.h"
 #include "cpu/ppc/ppc-fp-environment.hpp"
 #include "nw_jit_vmx_fp.h"
+#include "nw_jit_fp_multiply.h"
 #include "cpu/ppc/ppc-vmx-encoding.hpp"
 
 #include <stdio.h>
@@ -39,6 +40,7 @@
 #include <libkern/OSCacheControl.h>
 #include <pthread.h>
 #include <time.h>
+#include <vector>
 #endif
 #if defined(__aarch64__)
 #include <arm_neon.h>
@@ -181,6 +183,28 @@ void nw_jit_helper_mtfsb(struct nw_jit_cpu *cpu, uint32_t crbd, uint32_t setbit)
 void nw_jit_helper_mtfsfi(struct nw_jit_cpu *cpu, uint32_t crfd, uint32_t imm);
 void *nw_jit_helper_chain(struct nw_jit_cpu *cpu, uint32_t chain_pc, uint32_t cur_class);
 
+#ifndef NW_JIT_INDEX_CHECK
+#define NW_JIT_INDEX_CHECK 0
+#endif
+static unsigned nw_parse_legacy(void)
+{
+	const char *e = getenv("NW_JIT_LEGACY");
+	unsigned m = 0;
+	if (!e)
+		return 0;
+	if (strstr(e, "all"))
+		m = NW_JIT_LEGACY_CLOCK | NW_JIT_LEGACY_SYNC | NW_JIT_LEGACY_LOAD | NW_JIT_LEGACY_INDEX | NW_JIT_LEGACY_XLATE | NW_JIT_LEGACY_FP;
+	if (strstr(e, "clock")) m |= NW_JIT_LEGACY_CLOCK;
+	if (strstr(e, "sync")) m |= NW_JIT_LEGACY_SYNC;
+	if (strstr(e, "load")) m |= NW_JIT_LEGACY_LOAD;
+	if (strstr(e, "index")) m |= NW_JIT_LEGACY_INDEX;
+	if (strstr(e, "xlate")) m |= NW_JIT_LEGACY_XLATE;
+	if (strstr(e, "fp")) m |= NW_JIT_LEGACY_FP;
+	fprintf(stderr, "NW_JIT_LEGACY=%s (mask %u)\n", e, m);
+	return m;
+}
+unsigned nw_jit_legacy = nw_parse_legacy();
+
 enum { NW_JIT_CODE_SIZE = 64 << 20, NW_JIT_CACHE = 262144, NW_JIT_PROBE = 16 };
 enum { NW_JIT_USED_EMPTY = 0, NW_JIT_USED_LIVE = 1, NW_JIT_USED_TOMB = 2 };
 enum { NW_JIT_BANKS = 16, NW_JIT_BANK_SIZE = NW_JIT_CODE_SIZE / NW_JIT_BANKS };
@@ -213,6 +237,15 @@ static size_t g_code_used;
 static struct nw_jit_entry g_cache[NW_JIT_CACHE];
 static uint8_t g_pagebit_ram[(NW_JIT_RAM_PAGES + 7) / 8];
 static uint8_t g_pagebit_rom[(NW_JIT_ROM_PAGES + 7) / 8];
+/* Per-page index of the cache slots created for that physical page. An invalidation visits only the page's blocks
+ * instead of scanning every slot (that scan was 7.5% of a Release boot: 23,651 scans of 262,144 slots, ~320 us each,
+ * to kill ~5 blocks apiece). The lists are append-only and lazily validated: a listed slot is acted on only if it is
+ * still live for that page, so a slot that was tombstoned elsewhere (bank invalidation, compaction, eviction) or
+ * reused for another page is simply skipped. A list is dropped only right after every live entry for its page has
+ * been killed, and on resets. Build with -DNW_JIT_INDEX_CHECK=1 to cross-check each indexed invalidation against the
+ * full scan. */
+static std::vector<uint32_t> g_page_slots[NW_JIT_RAM_PAGES + NW_JIT_ROM_PAGES];
+static uint32_t g_page_slots_cap[NW_JIT_RAM_PAGES + NW_JIT_ROM_PAGES];	/* size that triggers a compaction; 0 = default */
 static uint32_t g_ram_base, g_ram_size, g_rom_base, g_rom_size;
 static uint64_t g_flush;
 static uint64_t g_flush_src[NW_JIT_FL_N];	/* entries dropped, by cause */
@@ -1063,6 +1096,7 @@ void nw_jit_helper_stfs(struct nw_jit_cpu *cpu, uint32_t fs, uint32_t ea)
 static int nw_jit_fp_basic_special(struct nw_jit_cpu *, uint32_t, uint32_t, uint32_t, uint32_t);
 static void nw_fp_record(struct nw_jit_cpu *, uint32_t);
 static void nw_fp_exception(struct nw_jit_cpu *);
+static void nw_jit_fp_multiply_finite(struct nw_jit_cpu *, uint32_t, uint32_t, uint32_t, bool);
 
 void nw_jit_helper_fadds(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fb)
 {
@@ -1118,6 +1152,10 @@ void nw_jit_helper_fmuls(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint3
 {
 	nw_help_note(NW_HELP_FMULS);
 	if (nw_jit_fp_basic_special(cpu, 25, fd, fa, fc)) return;
+	if (nw_fp_single_operand(cpu->fpr[fa & 31u]) && nw_fp_single_operand(cpu->fpr[fc & 31u])) {
+		nw_jit_fp_multiply_finite(cpu, fd, fa, fc, true);
+		return;
+	}
 	{
 		const ppc_fp_environment fp_env(cpu->fpscr);
 		double a, c;
@@ -1416,6 +1454,16 @@ static int nw_jit_fp_basic_special(struct nw_jit_cpu *cpu, uint32_t kind,
     return 1;
 }
 
+static void nw_jit_fp_multiply_finite(struct nw_jit_cpu *cpu, uint32_t fd,
+                                      uint32_t fa, uint32_t fc, bool single)
+{
+    const nw_fp_product result = nw_fp_multiply(cpu->fpr[fa & 31u], cpu->fpr[fc & 31u], single, cpu->fpscr);
+    cpu->fpscr = (cpu->fpscr & ~0x7f000u) | result.rounded | (result.classification << 12);
+    nw_fp_record(cpu, result.causes);
+    cpu->fpr[fd & 31u] = result.value;
+    nw_fp_exception(cpu);
+}
+
 // This also follows an inline compare: the ARM comparison owns CR/FPCC,
 // while raw operand bits own signaling and ordered/unordered exception policy.
 static void nw_jit_fp_compare_status(struct nw_jit_cpu *cpu, uint32_t op)
@@ -1480,14 +1528,7 @@ void nw_jit_helper_fadd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32
 void nw_jit_helper_fmul(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc)
 {
 	if (nw_jit_fp_basic_special(cpu, 25, fd, fa, fc)) return;
-	{
-		const ppc_fp_environment fp_env(cpu->fpscr);
-		const double r = f64_from_fpr(cpu->fpr[fa & 31u]) * f64_from_fpr(cpu->fpr[fc & 31u]);
-		cpu->fpr[fd & 31u] = bits_from_f64(r);
-		nw_jit_fpscr_fprf_d(cpu, r, true);
-	} // Restore host FP state before a program exception callback.
-	nw_fp_record(cpu, 0);
-	nw_fp_exception(cpu);
+	nw_jit_fp_multiply_finite(cpu, fd, fa, fc, false);
 }
 
 void nw_jit_helper_fmadd(struct nw_jit_cpu *cpu, uint32_t fd, uint32_t fa, uint32_t fc, uint32_t fb)
@@ -2525,6 +2566,49 @@ static void pagebit_clear(uint32_t phys_page)
 	bits[i >> 3] &= (uint8_t)~(1u << (i & 7u));
 }
 
+static std::vector<uint32_t> *page_slots(uint32_t phys_page, unsigned *which)
+{
+	uint8_t *bits;
+	unsigned i;
+	if (!page_bit_index(phys_page, &bits, &i))
+		return NULL;
+	const unsigned k = (bits == g_pagebit_rom ? (unsigned)NW_JIT_RAM_PAGES : 0u) + i;
+	if (which)
+		*which = k;
+	return &g_page_slots[k];
+}
+
+static void page_slots_clear_all(void)
+{
+	for (size_t k = 0; k < sizeof(g_page_slots) / sizeof(g_page_slots[0]); k++) {
+		if (!g_page_slots[k].empty())
+			std::vector<uint32_t>().swap(g_page_slots[k]);
+		g_page_slots_cap[k] = 0;
+	}
+}
+
+/* Record that cache slot 'slot' now holds a block of 'phys_page'. */
+static void page_slots_add(uint32_t phys_page, int slot)
+{
+	unsigned k;
+	std::vector<uint32_t> *v = page_slots(phys_page, &k);
+	if (!v)
+		return;
+	const uint32_t cap = g_page_slots_cap[k] ? g_page_slots_cap[k] : 256u;
+	if (v->size() >= cap) {
+		/* Drop slots that are no longer live for this page; then allow the list to grow before the next pass. */
+		size_t out = 0;
+		for (size_t j = 0; j < v->size(); j++) {
+			const struct nw_jit_entry &e = g_cache[(*v)[j]];
+			if (e.used == NW_JIT_USED_LIVE && e.phys_page == (phys_page & ~0xfffu))
+				(*v)[out++] = (*v)[j];
+		}
+		v->resize(out);
+		g_page_slots_cap[k] = (uint32_t)(out * 2 > 256 ? out * 2 : 256);
+	}
+	v->push_back((uint32_t)slot);
+}
+
 static int page_may_have_code(uint32_t phys_page)
 {
 	switch (nw_pa_kind(phys_page)) {
@@ -2550,6 +2634,7 @@ void nw_jit_set_code_pages(uint32_t ram_base, uint32_t ram_size,
 	g_rom_size = rom_size;
 	memset(g_pagebit_ram, 0, sizeof(g_pagebit_ram));
 	memset(g_pagebit_rom, 0, sizeof(g_pagebit_rom));
+	page_slots_clear_all();
 }
 
 static int code_ready(void)
@@ -2570,6 +2655,7 @@ void nw_jit_reset(void)
 {
 	nw68_invalidate_all();
 	memset(g_cache, 0, sizeof(g_cache));
+	page_slots_clear_all();
 	memset(g_pagebit_ram, 0, sizeof(g_pagebit_ram));
 	memset(g_pagebit_rom, 0, sizeof(g_pagebit_rom));
 	g_code_used = 0;
@@ -2634,11 +2720,32 @@ void nw_jit_invalidate_page_src(uint32_t phys_page, int src)
 	if (!page_may_have_code(phys_page))
 		return;
 	g_flush_calls[src]++;
-	for (int i = 0; i < NW_JIT_CACHE; i++) {
-		if (g_cache[i].used == NW_JIT_USED_LIVE && g_cache[i].phys_page == phys_page) {
-			g_cache[i].used = NW_JIT_USED_TOMB;
-			g_flush++;
-			g_flush_src[src]++;
+	std::vector<uint32_t> *list = (nw_jit_legacy & NW_JIT_LEGACY_INDEX) ? NULL : page_slots(phys_page, NULL);
+	if (list) {
+		/* Visit this page's blocks only (see g_page_slots). */
+		for (size_t j = 0; j < list->size(); j++) {
+			struct nw_jit_entry &e = g_cache[(*list)[j]];
+			if (e.used == NW_JIT_USED_LIVE && e.phys_page == phys_page) {
+				e.used = NW_JIT_USED_TOMB;
+				g_flush++;
+				g_flush_src[src]++;
+			}
+		}
+		list->clear();
+#if NW_JIT_INDEX_CHECK
+		for (int i = 0; i < NW_JIT_CACHE; i++)
+			if (g_cache[i].used == NW_JIT_USED_LIVE && g_cache[i].phys_page == phys_page) {
+				fprintf(stderr, "NW_JIT_INDEX_CHECK: live entry %d for page %08x missed by the page index\n", i, (unsigned)phys_page);
+				abort();
+			}
+#endif
+	} else {
+		for (int i = 0; i < NW_JIT_CACHE; i++) {
+			if (g_cache[i].used == NW_JIT_USED_LIVE && g_cache[i].phys_page == phys_page) {
+				g_cache[i].used = NW_JIT_USED_TOMB;
+				g_flush++;
+				g_flush_src[src]++;
+			}
 		}
 	}
 	pagebit_clear(phys_page);
@@ -2677,7 +2784,7 @@ void nw_jit_invalidate_all_src(int src)
 		}
 	}
 	memset(g_pagebit_ram, 0, sizeof(g_pagebit_ram));
-	memset(g_pagebit_rom, 0, sizeof(g_pagebit_rom));
+	memset(g_pagebit_rom, 0, sizeof(g_pagebit_rom));	page_slots_clear_all();
 }
 
 void nw_jit_invalidate_all(void)
@@ -3805,6 +3912,72 @@ void nw_jit_cpu_bind(struct nw_jit_cpu *c)
 	c->jit_stw_pa = (void *)nw_jit_helper_stw_pa;
 }
 
+/* Per DTLB entry: a recorded (reference-bit-setting) read translation has already been done for it. The 68k layer
+ * materialises PTE R bits at every dispatch commit; with this memo it translates a page once per entry lifetime
+ * instead of once per dispatch. A refill clears it, and every flush/drop invalidates the entry itself. */
+static uint8_t g_dtlb_rec[NW_JIT_DTLB_N][NW_JIT_DTLB_WAYS];
+/* Per DTLB entry: a full, recorded store translation (write permission checked, changed bit set) was done for it.
+ * The WRITE flag alone does not say that: loads fill writable entries too, without a permission check. */
+static uint8_t g_dtlb_crec[NW_JIT_DTLB_N][NW_JIT_DTLB_WAYS];
+
+static struct nw_jit_dtlb_ent *dtlb_find_live(uint32_t ea, int pr, unsigned *wi)
+{
+	const unsigned i = (ea >> 12) & (NW_JIT_DTLB_N - 1u);
+	const uint32_t page = ea & ~0xfffu;
+	const uint32_t sr = g_sr_gen[(ea >> 28) & 0xfu];
+	for (int w = 0; w < NW_JIT_DTLB_WAYS; w++) {
+		struct nw_jit_dtlb_ent *e = &g_dtlb[i][w];
+		if (!(e->flags & NW_JIT_DTLB_VALID) || e->ea_page != page)
+			continue;
+		if (e->sr_gen != sr || ((e->flags & NW_JIT_DTLB_BAT) && e->bat_gen != g_bat_gen) ||
+		    ((e->flags & NW_JIT_DTLB_PR) != 0) != (pr != 0))
+			return 0;
+		if (wi)
+			*wi = (unsigned)w;
+		return e;
+	}
+	return 0;
+}
+
+int nw_jit_dtlb_store_rec(uint32_t ea, int pr, uint32_t *pa)
+{
+	unsigned w = 0;
+	const struct nw_jit_dtlb_ent *e = dtlb_find_live(ea, pr, &w);
+	if (!e || !(e->flags & NW_JIT_DTLB_WRITE) || !g_dtlb_crec[(ea >> 12) & (NW_JIT_DTLB_N - 1u)][w])
+		return 0;
+	if (pa)
+		*pa = e->pa_page | (ea & 0xfffu);
+	return 1;
+}
+
+void nw_jit_dtlb_mark_store_rec(uint32_t ea, int pr)
+{
+	unsigned w = 0;
+	const struct nw_jit_dtlb_ent *e = dtlb_find_live(ea, pr, &w);
+	if (e && (e->flags & NW_JIT_DTLB_WRITE))
+		g_dtlb_crec[(ea >> 12) & (NW_JIT_DTLB_N - 1u)][w] = 1;
+}
+
+int nw_jit_dtlb_take_rec(uint32_t ea, int pr)
+{
+	const unsigned i = (ea >> 12) & (NW_JIT_DTLB_N - 1u);
+	const uint32_t page = ea & ~0xfffu;
+	const uint32_t sr = g_sr_gen[(ea >> 28) & 0xfu];
+	for (int w = 0; w < NW_JIT_DTLB_WAYS; w++) {
+		const struct nw_jit_dtlb_ent *e = &g_dtlb[i][w];
+		if (!(e->flags & NW_JIT_DTLB_VALID) || e->ea_page != page)
+			continue;
+		if (e->sr_gen != sr || ((e->flags & NW_JIT_DTLB_BAT) && e->bat_gen != g_bat_gen) ||
+		    ((e->flags & NW_JIT_DTLB_PR) != 0) != (pr != 0))
+			return 0;
+		if (g_dtlb_rec[i][w])
+			return 1;
+		g_dtlb_rec[i][w] = 1;
+		return 0;
+	}
+	return 0;
+}
+
 void nw_jit_dtlb_fill(uint32_t ea, uint32_t pa, int writable, uint64_t host, int pr, int via_bat)
 {
 	{
@@ -3853,6 +4026,8 @@ dtlb_h_done:
 	if (via_bat)
 		flags |= NW_JIT_DTLB_BAT;
 	g_dtlb[i][slot].flags = flags;
+	g_dtlb_rec[i][slot] = 0;
+	g_dtlb_crec[i][slot] = 0;
 }
 
 int nw_jit_dtlb_lookup_pr(uint32_t ea, int is_store, uint32_t *pa, int pr)
@@ -5318,6 +5493,8 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 			? 64 : 1;
 	} else if (g_cache[slot].hits < 0xffffu)
 		g_cache[slot].hits++;
+	if (!same && !(nw_jit_legacy & NW_JIT_LEGACY_INDEX))
+		page_slots_add(phys_page, slot);
 	pagebit_set(phys_page);
 }
 
@@ -7023,6 +7200,17 @@ uint32_t nw_jit_helper_lh(struct nw_jit_cpu *cpu, uint32_t ea)
 		const uint8_t *p = cpu->mem + (ea - cpu->mem_base);
 		return ((uint32_t)p[0] << 8) | p[1];
 	}
+	/* Host-line hit, as for lwz. A halfword at the last byte of a page crosses into the next page, which this
+	 * table cannot serve, so it takes the translating path. */
+	if ((ea & 0xfffu) != 0xfffu && !(nw_jit_legacy & NW_JIT_LEGACY_LOAD)) {
+		dtlb_sync_msr(cpu);
+		uint64_t hostp = 0;
+		if (dtlb_host_line(ea, 0, (int)((cpu->msr >> 14) & 1u), &hostp)) {
+			const uint8_t *p = (const uint8_t *)(uintptr_t)hostp + (ea & 0xfffu);
+			g_dtlb_hit++;
+			return ((uint32_t)p[0] << 8) | p[1];
+		}
+	}
 	if (g_host_lh && cpu->host) {
 		int f = 0;
 		uint32_t v = g_host_lh(cpu->host, ea, cpu->pc, &f);
@@ -7044,6 +7232,14 @@ uint32_t nw_jit_helper_lb(struct nw_jit_cpu *cpu, uint32_t ea)
 			return 0;
 		}
 		return cpu->mem[ea - cpu->mem_base];
+	}
+	if (!(nw_jit_legacy & NW_JIT_LEGACY_LOAD)) {
+		dtlb_sync_msr(cpu);
+		uint64_t hostp = 0;
+		if (dtlb_host_line(ea, 0, (int)((cpu->msr >> 14) & 1u), &hostp)) {
+			g_dtlb_hit++;
+			return ((const uint8_t *)(uintptr_t)hostp)[ea & 0xfffu];
+		}
 	}
 	if (g_host_lb && cpu->host) {
 		int f = 0;
@@ -10320,6 +10516,238 @@ static int emit_fp_environment_leave(struct emit *e)
 	return emit_w(e, 0xd51b440bu) && emit_w(e, 0xd51b442cu);
 }
 
+/* lfs/stfs (and the indexed forms) through the same inline data-TLB sequence the integer loads and stores use, instead
+ * of a C call into the host memory callbacks. The format conversions match nw_jit_helper_lfs/stfs exactly.
+ * Kill switch NW_JIT_LEGACY=fp. */
+static int emit_fp_ea(struct emit *e, int ra, int simm, int rb, int indexed)
+{
+	if (!indexed)
+		return emit_helper_ea(e, ra, simm);
+	if (!emit_ra_or_0(e, W8, ra) || !emit_load_gpr(e, W9, rb))
+		return 0;
+	return emit_w(e, a64_add_reg(W8, W8, W9));
+}
+
+static int emit_lfs_inline(struct emit *e, uint32_t pc, int fd, int ra, int simm, int rb, int indexed)
+{
+	if (!emit_set_pc(e, pc) || !emit_fp_ea(e, ra, simm, rb, indexed))
+		return 0;
+	if (!emit_dtlb_and_helpers(e, 0))
+		return 0;
+	if (!emit_w(e, a64_orr_reg(W9, 31, W0)))	/* the big-endian word, kept across the fault check */
+		return 0;
+	if (!emit_w(e, 0xaa1303e0u))			/* mov x0, x19 */
+		return 0;
+	if (!emit_fault_check(e))
+		return 0;
+	if (!emit_w(e, 0x1e270120u))			/* fmov s0, w9 */
+		return 0;
+	if (!emit_w(e, 0x1e22c000u))			/* fcvt d0, s0 */
+		return 0;
+	return emit_w(e, a64_str_d(0, X19, fpr_off(fd)));
+}
+
+static int emit_stfs_inline(struct emit *e, uint32_t pc, int fs, int ra, int simm, int rb, int indexed)
+{
+	if (!emit_set_pc(e, pc) || !emit_fp_ea(e, ra, simm, rb, indexed))
+		return 0;
+	/* w2 = the single-precision image of the double, when its exponent is outside the denormalising range
+	 * 874..896 (nw_jit_helper_stfs' f32_bits_from_f64 converts that range arithmetically: use the helper). */
+	if (!emit_w(e, a64_ldr_w(W2, X19, fpr_off(fs) + 4)))
+		return 0;
+	if (!emit_w(e, a64_ubfx(4, W2, 20, 11)) || !emit_w(e, 0x51000000u | (874u << 10) | (4u << 5) | 4u) ||
+	    !emit_w(e, a64_cmp_imm(4, 22)))
+		return 0;
+	uint32_t *cold = e->p;
+	if (!emit_w(e, a64_b_cond(9, 0)))		/* ls: 874..896 */
+		return 0;
+	if (!emit_w(e, a64_lsr(5, W2, 30)) || !emit_w(e, a64_lsl(5, 5, 30)))	/* sign and exponent msb */
+		return 0;
+	if (!emit_w(e, a64_ldr_x(3, X19, fpr_off(fs))))
+		return 0;
+	if (!emit_w(e, 0xd3400000u | (29u << 16) | (58u << 10) | (3u << 5) | 3u))	/* ubfx x3, x3, #29, #30 */
+		return 0;
+	if (!emit_w(e, a64_orr_reg(W2, 5, 3)))
+		return 0;
+	if (!emit_dtlb_and_helpers(e, 1))
+		return 0;
+	uint32_t *over = e->p;
+	if (!emit_w(e, a64_b(0)))
+		return 0;
+	*cold = a64_b_cond(9, (int)(e->p - cold));
+	if (!emit_w(e, a64_orr_reg(W2, 31, W8)) || !emit_imm32(e, W1, (uint32_t)fs) || !emit_w(e, 0xaa1303e0u) ||
+	    !emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_stfs) || !emit_w(e, 0xd63f0120u))
+		return 0;
+	*over = a64_b((int)(e->p - over));
+	if (!emit_w(e, 0xaa1303e0u))			/* mov x0, x19 */
+		return 0;
+	return emit_fault_check(e);
+}
+
+/* Single-precision arithmetic (fadds, fsubs, fmuls, fmadds, fmsubs, fnmadds, fnmsubs) without a C call.
+ *
+ * The out-of-line helpers spend most of their time switching the host FP control register (four serialising system
+ * register writes), then classify the result. This sequence runs on the thread's default FP state and handles
+ * exactly the cases whose helper result is plain arithmetic plus a new FPRF (and, for fmuls, FI/FR/XX):
+ *   - FPSCR has no enabled exception, NI clear, round-to-nearest and no pending FEX, and the host FP control
+ *     register is in its default state;
+ *   - every source is a normal, nonzero double (fmuls: a normal single, so the 48-bit product is exact);
+ *   - the rounded result is a normal single (not zero, subnormal, infinite or NaN).
+ * Anything else, including every special-value and exception case, branches to the helper before any state has been
+ * written, so the helper sees the original operands. Kill switch: NW_JIT_LEGACY=fp or NW_JIT_FP_FAST=0. */
+struct fp_fix { uint32_t *p; int type; int arg; };
+enum { FPFIX_CBNZ, FPFIX_BCOND, FPFIX_TBNZ };
+
+static int nw_fp_fast_on(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		const char *e = getenv("NW_JIT_FP_FAST");
+		on = (e && e[0] == '0') ? 0 : 1;
+	}
+	return on && !(nw_jit_legacy & NW_JIT_LEGACY_FP);
+}
+
+static void fp_fix_apply(const struct fp_fix *f, uint32_t *target)
+{
+	const int off = (int)(target - f->p);
+	if (f->type == FPFIX_CBNZ)
+		*f->p = a64_cbnz(f->arg, off);
+	else if (f->type == FPFIX_BCOND)
+		*f->p = a64_b_cond(f->arg, off);
+	else	/* tbnz w8, #arg */
+		*f->p = 0x37000000u | (((uint32_t)f->arg & 31u) << 19) | (((uint32_t)off & 0x3fffu) << 5) | (uint32_t)W8;
+}
+
+static int fp_fix_add(struct emit *e, struct fp_fix *fx, int *n, int type, int arg)
+{
+	if (*n >= 16)
+		return 0;
+	fx[*n].p = e->p;
+	fx[*n].type = type;
+	fx[*n].arg = arg;
+	(*n)++;
+	return emit_w(e, 0);
+}
+
+static int emit_fp_single_fast(struct emit *e, int kind, int rd, int ra, int rb, int fc, struct fp_fix *fx, int *nfx)
+{
+	const int mul = kind == 25;
+	const int fma = kind >= 28 && kind <= 31;
+	const int srcs[3] = { ra, (mul || fma) ? fc : rb, rb };
+	const int nsrc = fma ? 3 : 2;
+	const uint32_t fpscr_off = (uint32_t)offsetof(struct nw_jit_cpu, fpscr);
+	if (!emit_w(e, a64_ldr_w(W8, X19, fpscr_off)))
+		return 0;
+	if (!fp_fix_add(e, fx, nfx, FPFIX_TBNZ, 30))			/* FEX pending */
+		return 0;
+	if (!emit_w(e, a64_ubfx(W9, W8, 0, 8)) || !fp_fix_add(e, fx, nfx, FPFIX_CBNZ, W9))	/* enables, NI, RN */
+		return 0;
+	/* The host FP control register must already be what an instruction would set (round to nearest, no traps,
+	 * no flush-to-zero or default-NaN): the guest owns its FP state, never the thread, so a caller that left the
+	 * thread in another mode gets the helper, which sets it explicitly. */
+	if (!emit_w(e, 0xd53b4409u))					/* mrs x9, fpcr */
+		return 0;
+	if (!emit_w(e, a64_movz64(10, 0x9f00, 0)) || !emit_w(e, a64_movk64(10, 0x3c8, 1)) ||	/* 0x3c89f00 */
+	    !emit_w(e, 0xea0a013fu) || !fp_fix_add(e, fx, nfx, FPFIX_BCOND, 1))			/* tst x9, x10 ; b.ne */
+		return 0;
+	for (int i = 0; i < nsrc; i++) {
+		if (!emit_w(e, a64_ldr_w(W9, X19, fpr_off(srcs[i]) + 4)) || !emit_w(e, a64_ubfx(W9, W9, 20, 11)))
+			return 0;
+		if (mul) {		/* a normal single: double exponent 897..1150 */
+			if (!emit_w(e, 0x51000000u | (897u << 10) | ((uint32_t)W9 << 5) | (uint32_t)W9) ||
+			    !emit_w(e, a64_cmp_imm(W9, 253)))
+				return 0;
+		} else {		/* a normal double: exponent 1..2046 */
+			if (!emit_w(e, 0x51000000u | (1u << 10) | ((uint32_t)W9 << 5) | (uint32_t)W9) ||
+			    !emit_w(e, a64_cmp_imm(W9, 2045)))
+				return 0;
+		}
+		if (!fp_fix_add(e, fx, nfx, FPFIX_BCOND, 8))		/* hi */
+			return 0;
+		if (mul) {		/* exactly representable as a single: low 29 mantissa bits clear */
+			if (!emit_w(e, a64_ldr_w(W9, X19, fpr_off(srcs[i]))) || !emit_w(e, a64_ubfx(W9, W9, 0, 29)) ||
+			    !fp_fix_add(e, fx, nfx, FPFIX_CBNZ, W9))
+				return 0;
+		}
+	}
+	/* The host's accrued-exception flags are not the guest's: keep them as they were across the arithmetic. */
+	if (!emit_w(e, 0xd53b442bu))					/* mrs x11, fpsr */
+		return 0;
+	if (!emit_w(e, a64_ldr_d(0, X19, fpr_off(ra))) || !emit_w(e, a64_ldr_d(1, X19, fpr_off(srcs[1]))))
+		return 0;
+	if (fma && !emit_w(e, a64_ldr_d(2, X19, fpr_off(rb))))
+		return 0;
+	uint32_t opc = 0;
+	if (kind == 21) opc = 0x1e612800u;		/* fadd d0, d0, d1 */
+	else if (kind == 20) opc = 0x1e613800u;		/* fsub d0, d0, d1 */
+	else if (kind == 25) opc = 0x1e610800u;		/* fmul d0, d0, d1 */
+	else if (kind == 28 || kind == 30) opc = 0x1f618800u;	/* fnmsub d0, d0, d1, d2: a*c - b, fused */
+	else if (kind == 29 || kind == 31) opc = 0x1f410800u;	/* fmadd d0, d0, d1, d2: a*c + b, fused */
+	if (!opc || !emit_w(e, opc))
+		return 0;
+	if (kind >= 30 && !emit_w(e, 0x1e614000u))	/* fneg d0, d0 */
+		return 0;
+	if (!emit_w(e, 0x1e624001u))			/* fcvt s1, d0 */
+		return 0;
+	if (!emit_w(e, 0xd51b442bu))					/* msr fpsr, x11 : the last op that can raise a host flag */
+		return 0;
+	if (!emit_w(e, 0x1e260029u))			/* fmov w9, s1 */
+		return 0;
+	if (!emit_w(e, a64_ubfx(W10, W9, 0, 31)))	/* |bits| */
+		return 0;
+	/* ls: zero, subnormal, or the smallest normal. The last can be a tiny product rounded up to it, which sets
+	 * UX; the helper decides that from the exact product, so it takes those too. */
+	if (!emit_w(e, a64_movz(W11, 0x80, 1)) || !emit_w(e, a64_cmp_w(W10, W11)) ||
+	    !fp_fix_add(e, fx, nfx, FPFIX_BCOND, 9))
+		return 0;
+	if (!emit_w(e, a64_movz(W11, 0x7f80, 1)) || !emit_w(e, a64_cmp_w(W10, W11)) ||
+	    !fp_fix_add(e, fx, nfx, FPFIX_BCOND, 2))	/* hs: infinity or NaN */
+		return 0;
+	/* Committed from here: nothing below branches to the helper. */
+	if (!emit_w(e, 0x1e22c021u))			/* fcvt d1, s1 */
+		return 0;
+	if (!emit_w(e, a64_str_d(1, X19, fpr_off(rd))))
+		return 0;
+	if (!emit_w(e, a64_lsr(W10, W9, 31)) || !emit_w(e, a64_movz(W11, 0x4000, 0)) || !emit_w(e, a64_lslv(W10, W11, W10)))
+		return 0;				/* FPRF 0x4000 (+normal) or 0x8000 (-normal) */
+	if (!mul) {
+		if (!emit_w(e, a64_movz(W11, 0xf000, 0)) || !emit_w(e, a64_movk(W11, 0x1, 1)) ||	/* 0x1f000 */
+		    !emit_w(e, a64_bic(W8, W8, W11)) || !emit_w(e, a64_orr_reg(W8, W8, W10)))
+			return 0;
+	} else {
+		/* fmuls also reports inexactness: FI, FR (rounded up) and the sticky XX/FX. */
+		uint32_t *to_exact, *to_nofr, *to_xx;
+		if (!emit_w(e, 0x1e602020u))		/* fcmp d1, d0 : rounded result against the exact product */
+			return 0;
+		if (!emit_w(e, a64_movz(W12, 0, 0)))
+			return 0;
+		to_exact = e->p; if (!emit_w(e, 0)) return 0;		/* b.eq exact */
+		if (!emit_w(e, a64_movz(W12, 0x2, 1)))		/* FI */
+			return 0;
+		if (!emit_w(e, 0x1e60c022u) || !emit_w(e, 0x1e60c000u))	/* fabs d2, d1 ; fabs d0, d0 */
+			return 0;
+		if (!emit_w(e, 0x1e602040u))		/* fcmp d2, d0 : |rounded| > |exact| means rounded up */
+			return 0;
+		to_nofr = e->p; if (!emit_w(e, 0)) return 0;		/* b.le */
+		if (!emit_w(e, a64_movz(W11, 0x4, 1)) || !emit_w(e, a64_orr_reg(W12, W12, W11)))	/* FR */
+			return 0;
+		*to_nofr = a64_b_cond(13, (int)(e->p - to_nofr));
+		to_xx = e->p; if (!emit_w(e, 0)) return 0;		/* tbnz w8, #25 : XX already sticky */
+		if (!emit_w(e, a64_movz(W11, 0x8000, 1)) || !emit_w(e, a64_orr_reg(W8, W8, W11)))	/* FX */
+			return 0;
+		*to_xx = 0x37000000u | (25u << 19) | (((uint32_t)(e->p - to_xx) & 0x3fffu) << 5) | (uint32_t)W8;
+		if (!emit_w(e, a64_movz(W11, 0x200, 1)) || !emit_w(e, a64_orr_reg(W8, W8, W11)))	/* XX */
+			return 0;
+		*to_exact = a64_b_cond(0, (int)(e->p - to_exact));
+		if (!emit_w(e, a64_movz(W11, 0xf000, 0)) || !emit_w(e, a64_movk(W11, 0x7, 1)) ||	/* 0x7f000 */
+		    !emit_w(e, a64_bic(W8, W8, W11)) || !emit_w(e, a64_orr_reg(W8, W8, W10)) ||
+		    !emit_w(e, a64_orr_reg(W8, W8, W12)))
+			return 0;
+	}
+	return emit_w(e, a64_str_w(W8, X19, fpscr_off));
+}
+
 static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int fc, uint32_t op)
 {
 	const int unary = (kind >= 101 && kind <= 103);
@@ -10333,7 +10761,13 @@ static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int 
 	 * sequence back on; unset stays on the helper. */
 	// frsp needs adjusted exponent results and bit-exact NaN projection;
 	// generated blocks call its integer-significand kernel in either mode.
-	const int fast = nw_fp_inline_on() && kind != 100;
+	// Multiply also needs the exact product and adjusted exception results.
+	const int fast_single = nw_fp_fast_on() && (kind == 20 || kind == 21 || kind == 25 || (kind >= 28 && kind <= 31));
+	struct fp_fix single_fix[16];
+	int nsingle_fix = 0;
+	if (fast_single && !emit_fp_single_fast(e, kind, rd, ra, rb, fc, single_fix, &nsingle_fix))
+		return 0;
+	const int fast = !fast_single && nw_fp_inline_on() && kind != 100 && kind != 25;
 	(void)is_cmp;
 	const bool basic = kind == 18 || kind == 20 || kind == 21 || kind == 25;
 	uint32_t *special_done = NULL;
@@ -10502,6 +10936,12 @@ static int emit_fp_inline(struct emit *e, int kind, int rd, int ra, int rb, int 
 			if (!emit_w(e, a64_b(0)))
 				return 0;
 			*slow = a64_cbnz(W8, (int)(e->p - slow));
+		} else if (fast_single) {
+			over = e->p;
+			if (!emit_w(e, a64_b(0)))
+				return 0;
+			for (int i = 0; i < nsingle_fix; i++)
+				fp_fix_apply(&single_fix[i], e->p);
 		}
 		void *fn = NULL;
 		int narg = 2;
@@ -12418,6 +12858,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return emit_fault_check(e);
 	}
+	if ((prim == 48 || prim == 52) && nw_fp_fast_on())
+		return prim == 48 ? emit_lfs_inline(e, pc, rd, ra, simm, 0, 0) : emit_stfs_inline(e, pc, rd, ra, simm, 0, 0);
 	if (prim == 48 || prim == 52) {
 		if (!emit_set_pc(e, pc))
 			return 0;
@@ -12459,6 +12901,8 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 			return 0;
 		return emit_call_fp_d_upd(e, pc, rd, ra, simm, 3);
 	}
+	if (prim == 31 && (xo == 535 || xo == 663) && nw_fp_fast_on())
+		return xo == 535 ? emit_lfs_inline(e, pc, rd, ra, 0, rb, 1) : emit_stfs_inline(e, pc, rd, ra, 0, rb, 1);
 	if (prim == 31 && (xo == 535 || xo == 663)) {
 		if (!emit_set_pc(e, pc))
 			return 0;

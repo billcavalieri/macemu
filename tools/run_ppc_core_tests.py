@@ -18,9 +18,11 @@ parser.add_argument('--replay', type=Path, help='Replay a bounded live PPC verif
 parser.add_argument('--scalar-p6', action='store_true', help='Run the focused independent scalar conversion/comparison fixtures')
 parser.add_argument('--frsp-p6', action='store_true', help='Run independent round-to-single and production exception fixtures')
 parser.add_argument('--basic-special-p6', action='store_true', help='Run basic scalar special-result and production exception fixtures')
+parser.add_argument('--multiply-p6', action='store_true', help='Run finite scalar multiply rounding and exception fixtures')
+parser.add_argument('--fp-fast-sweep', action='store_true', help='Randomised inline single-precision arithmetic against the out-of-line helpers')
 parser.add_argument('--io-publication', action='store_true', help='Run raw file-read code-publication fixtures')
 args = parser.parse_args()
-if sum(bool(x) for x in (args.replay,args.scalar_p6,args.frsp_p6,args.basic_special_p6,args.io_publication)) > 1: parser.error('Focused modes are mutually exclusive')
+if sum(bool(x) for x in (args.replay,args.scalar_p6,args.frsp_p6,args.basic_special_p6,args.multiply_p6,args.io_publication,args.fp_fast_sweep)) > 1: parser.error('Focused modes are mutually exclusive')
 root = Path(__file__).resolve().parents[1]
 lines = args.build_log.read_text().splitlines()
 compile_command = next((shlex.split(line.strip()) for line in lines
@@ -56,8 +58,8 @@ with tempfile.TemporaryDirectory(prefix='macemu-ppc-core-') as directory:
     command[index:index] = [str(cpu_object), str(test_object)]
     binary = path / 'ppc-core-tests'
     subprocess.run(command + ['-Wl,-e,_ppc_test_main', '-o', str(binary)], check=True, cwd=root / 'SheepShaver/src/MacOSX')
-    subprocess.run([str(binary)] + (['--replay', str(args.replay.resolve())] if args.replay else ['--scalar-p6'] if args.scalar_p6 else ['--frsp-p6'] if args.frsp_p6 else ['--basic-special-p6'] if args.basic_special_p6 else ['--io-publication'] if args.io_publication else []), check=True, cwd=root / 'SheepShaver/src/MacOSX')
-    if not args.replay and not args.scalar_p6 and not args.frsp_p6 and not args.basic_special_p6 and not args.io_publication:
+    subprocess.run([str(binary)] + (['--replay', str(args.replay.resolve())] if args.replay else ['--scalar-p6'] if args.scalar_p6 else ['--frsp-p6'] if args.frsp_p6 else ['--basic-special-p6'] if args.basic_special_p6 else ['--multiply-p6'] if args.multiply_p6 else ['--io-publication'] if args.io_publication else ['--fp-fast-sweep'] if args.fp_fast_sweep else []), check=True, cwd=root / 'SheepShaver/src/MacOSX')
+    if not args.replay and not args.scalar_p6 and not args.frsp_p6 and not args.basic_special_p6 and not args.multiply_p6 and not args.io_publication and not args.fp_fast_sweep:
         for name in ['ppc_verify_fctiwz.capture', 'ppc_verify_atomic_alias.capture', 'ppc_verify_vector_sat.capture', 'ppc_verify_system_trap.capture', 'ppc_verify_stale_source.capture']:
             capture = root / 'SheepShaver/src/kpx_cpu/tests' / name
             subprocess.run([str(binary), '--replay', str(capture)], check=True, cwd=root / 'SheepShaver/src/MacOSX')
@@ -92,3 +94,11 @@ with tempfile.TemporaryDirectory(prefix='macemu-ppc-core-') as directory:
                         str(root / 'SheepShaver/src/kpx_cpu/tests/ppc_vmx_integer_sanitize.cpp'),
                         '-o', str(sanitizer_binary)], check=True)
         subprocess.run([str(sanitizer_binary)], check=True)
+
+        multiply_binary = path / 'ppc-multiply-sanitizers'
+        subprocess.run([link_command[0]] + platform_flags + ['-std=c++17', '-O1', '-g',
+                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                        '-I', str(root / 'SheepShaver/src/include'),
+                        str(root / 'SheepShaver/src/kpx_cpu/tests/ppc_multiply_sanitize.cpp'),
+                        '-o', str(multiply_binary)], check=True)
+        subprocess.run([str(multiply_binary)], check=True)

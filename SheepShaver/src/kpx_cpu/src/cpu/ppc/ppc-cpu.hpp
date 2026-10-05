@@ -270,6 +270,7 @@ private:
 	uint64 dec_tb_base_;	/* timebase when dec_ was last sampled */
 	bool dec_pending_;
 	unsigned dec_tick_div_;
+	unsigned jit_dec_div_;	/* jit_events_pending() calls since the decrementer was last sampled */
 	uint64 exception_serial_;
 	int64 tb_offset_;		/* mtspr TBL/TBU: guest TB = host ticks + offset */
 #ifdef SHEEPSHAVER

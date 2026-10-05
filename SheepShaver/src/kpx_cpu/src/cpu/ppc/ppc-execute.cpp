@@ -481,6 +481,64 @@ void powerpc_cpu::record_fpscr(int exceptions)
  *		FPSCR	Predicate to compute FPSCR bits
  **/
 
+struct ppc_multiply_result { double value; uint32 causes, rounded, classification; };
+
+static ppc_multiply_result ppc_finite_multiply(double a, double b, bool single, uint32 fpscr)
+{
+    // Independent numeric reference: a normalized two-product retains the
+    // exact residual with FMA. Never overflow/underflow the host product.
+    fesetround(FE_TONEAREST);
+    int ae, be;
+    const double am = frexp(fabs(a), &ae), bm = frexp(fabs(b), &be);
+    const double high = am * bm, low = fma(am, bm, -high);
+    const bool negative = bool(signbit(a)) != bool(signbit(b));
+    const unsigned precision = single ? 24 : 53, rn = fpscr & 3u;
+    const int emin = single ? -126 : -1022, emax = single ? 127 : 1023;
+    const int exponent = ae + be - ((high > 0.5 || (high == 0.5 && low >= 0)) ? 1 : 2);
+    const bool tiny = exponent < emin, adjusted_underflow = tiny && (fpscr & 0x20u);
+    const int grid = (tiny && !adjusted_underflow ? emin : exponent) - int(precision - 1);
+    const int scale = ae + be - grid;
+    double integral = 0, fraction = 0, residual = 0;
+    bool inexact, above_half = false, at_half = false;
+    if (scale < 0) inexact = true; // Magnitude is nonzero and strictly below half a grid unit.
+    else {
+        const double scaled = ldexp(high, scale);
+        residual = ldexp(low, scale);
+        integral = floor(scaled);
+        fraction = scaled - integral;
+        if (fraction == 0 && residual < 0) { integral -= 1; fraction = 1; }
+        inexact = fraction != 0 || residual != 0;
+        above_half = fraction > 0.5 || (fraction == 0.5 && residual > 0);
+        at_half = fraction == 0.5 && residual == 0;
+    }
+    const uint64 units = uint64(integral);
+    const bool increment = rn == 0 ? above_half || (at_half && (units & 1u)) :
+        rn == 2 ? inexact && !negative : rn == 3 ? inexact && negative : false;
+    const double rounded = integral + unsigned(increment);
+    uint32 causes = inexact ? 0x02000000u : 0;
+    uint32 status = (inexact ? 0x20000u : 0) | (increment ? 0x40000u : 0);
+    if (tiny && (adjusted_underflow || inexact)) causes |= 0x08000000u;
+    int result_exponent = 0;
+    if (rounded) { frexp(rounded, &result_exponent); result_exponent += grid - 1; }
+    const bool overflow = rounded && result_exponent > emax;
+    if (overflow) causes |= 0x10000000u;
+    double result;
+    uint32 classification;
+    if (overflow && !(fpscr & 0x40u)) {
+        const bool infinity = rn == 0 || (rn == 2 && !negative) || (rn == 3 && negative);
+        result = infinity ? INFINITY : ldexp(2 - ldexp(1, 1-int(precision)), emax);
+        causes |= 0x02000000u;
+        status = 0x20000u; // Disabled-overflow FR is undefined: choose zero.
+        classification = infinity ? negative ? 9 : 5 : negative ? 8 : 4;
+    } else {
+        const int adjustment = adjusted_underflow ? single ? 192 : 1536 : overflow ? single ? -192 : -1536 : 0;
+        result = ldexp(rounded, grid + adjustment);
+        classification = !rounded ? negative ? 18 : 2 : tiny && !adjusted_underflow && result_exponent < emin ?
+            negative ? 24 : 20 : negative ? 8 : 4;
+    }
+    return {copysign(result, negative ? -1.0 : 1.0), causes, status, classification};
+}
+
 template< class FP, class OP, class RD, class RA, class RB, class RC, class Rc, bool FPSCR >
 void powerpc_cpu::execute_fp_arith(uint32 opcode)
 {
@@ -508,16 +566,25 @@ void powerpc_cpu::execute_fp_arith(uint32 opcode)
         if (causes & 0x00f00000u) result.j = UVAL64(0x7ff8000000000000);
         const bool suppressed = ((causes & 0x01f00000u) && (fpscr() & 0x80u)) ||
                                 ((causes & 0x04000000u) && (fpscr() & 0x10u));
-        // Special arithmetic is exact or undefined; finite FR/FI and newly
-        // raised OX/UX/XX remain a separate, unqualified arithmetic milestone.
+        // Special arithmetic is exact or undefined. Finite multiply has its
+        // own exact-product status policy; other finite forms remain open.
         const bool exact_special = ai || bi || ((kind == 20 || kind == 21) ? a == 0 && b == 0 : a == 0 || b == 0);
         if (nan_a || nan_b || causes || exact_special) fpscr() &= ~0x60000u;
         record_fpscr(causes);
         if (!suppressed) {
             if (!(nan_a || nan_b || (causes & 0x00f00000u))) {
-                const FP rounded = op_apply<double, OP, RA, RB, RC>::apply(a, b, 0);
-                result.d = rounded;
-                fp_classify(rounded);
+                const bool modeled_multiply = kind == 25 && a != 0 && b != 0 && !ai && !bi &&
+                    (!std::is_same<FP, float>::value || (double(float(a)) == a && double(float(b)) == b));
+                if (modeled_multiply) {
+                    const ppc_multiply_result product = ppc_finite_multiply(a, b, std::is_same<FP, float>::value, fpscr());
+                    result.d = product.value;
+                    fpscr() = (fpscr() & ~0x7f000u) | product.rounded | (product.classification << 12);
+                    record_fpscr(product.causes);
+                } else {
+                    const FP rounded = op_apply<double, OP, RA, RB, RC>::apply(a, b, 0);
+                    result.d = rounded;
+                    fp_classify(rounded);
+                }
             } else fpscr() = (fpscr() & ~0x1f000u) | 0x11000u;
             // Do not round propagated NaNs to single: arithmetic retains the
             // whole selected FPR payload in both precision forms.

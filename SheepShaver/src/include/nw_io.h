@@ -104,6 +104,12 @@ static inline int nw_io_range(uint32_t pa)
 void nw_banks_set(int kind, uint32_t base, uint32_t size);
 int nw_pa_kind(uint32_t pa);
 int nw_pa_writable(uint32_t pa);	/* 1 for RAM-like banks; 0 for ROM, I/O, none */
+/* The same rule for a kind already in hand (nw_pa_kind() is a range scan; callers that need both should call it once). */
+static inline int nw_kind_writable(int kind)
+{
+	return kind == NW_PA_RAM || kind == NW_PA_SHEEP || kind == NW_PA_FB || kind == NW_PA_LOWMEM ||
+	       kind == NW_PA_KDP || kind == NW_PA_BOOTINFO;
+}
 void nw_io_log_banks(void);
 int nw_io_n_devices(void);
 const struct nw_io_device *nw_io_device(int i);

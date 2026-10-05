@@ -494,3 +494,16 @@ All eight Debug/Release × FP/vector-inline host configurations pass **648,133,7
 
 
 The same private Debug binary's ON and VERIFY clones each pass **300 desktop seconds**, all **16 mouse targets**, all **20 ordered interrupts**, shared-directory creation and heartbeat/desktop checks. Both have zero guest/cursor/script/IRQ errors and clean final Finder graphics. VERIFY passes **524.7 million PPC comparisons with zero mismatches**; its maximum observed VBL latency is **87,598 microseconds**. App and seed NVRAM hashes match between runs. The selected special-result host/live gates pass. Finite status/adjusted results and square-root/fused/estimate work remain open; aggregate comparisons and boot timing establish no speedup. Normal launcher artifacts remain unchanged.
+
+
+## P6 finite multiply repair
+
+`fmul`/`fmuls` now retain the exact finite product through one target-precision rounding and exponent adjustment. FR/FI and new XX/OX/UX causes, pre-rounding tininess, disabled gradual underflow and RN-dependent overflow saturation, enabled +/-1536 or +/-192 exponent results, FPRF and selected precise instruction stops are modeled. The integer-product kernel and normalized numeric/FMA-residual reference are independent. ARM64 blocks call the complete multiply helper in both FP-inline settings; no measured performance improvement is claimed.
+
+The finite single domain requires representable single operands according to section 3.3.4 of the programming-environments manual. Other finite double operands passed to `fmuls` retain the earlier undefined extension profile and are not certified. Exact-rational offline literals qualify **1,815,552 engine cases**, including **605,184 production cases**; the focused suite passes **365,752,729 checks**, zero failures. The bounded prior helper fails **852 assertions**. The pure production kernel also passes **4,512 rational-literal cases** under ASan/UBSan, now part of the full runner. Detailed host/live evidence and limits are in the plan. Finite add/subtract/divide, fused/square-root/estimate and non-IEEE profiles remain open.
+
+
+All eight final host configurations pass **1,013,886,526 core checks**, five captures, **393,216 policy probes**, the existing VMX and new finite multiply sanitizer suites, and **34,664 MMU checks** each. Failures are zero. The plan records exact log paths and the private live-candidate hash.
+
+
+Same-binary ON-repeat and VERIFY clones each pass **300 desktop seconds**, all **16 mouse targets**, all **20 ordered interrupts**, the shared write and heartbeat/desktop checks. VERIFY passes **522.1 million PPC comparisons with zero mismatches**. Both have zero guest/cursor/script/IRQ errors and clean final Finder screenshots. A preceding ON run failed only its final single application-name confirmation despite a clean Finder screenshot; the qualifier now retains five full late name snapshots. ON-repeat records five Finder names; VERIFY records four Finder names followed by Control Strip Extension with Finder still visible. The failed run remains documented rather than counted as a pass. The selected finite multiply gates pass; app/seed hashes match, normal launcher artifacts are unchanged, and no speedup is claimed.

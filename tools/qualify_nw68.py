@@ -99,6 +99,10 @@ def prepare(prefs, work, mode, script, seconds, workload, nvram_source=None, mov
         # Reopen the host directory to exercise repeated Mixed Mode callbacks.
         for second in range(90, seconds - 10, 30):
             commands += ['at %d key cmd+w' % second, 'at %d click 976 120' % (second + 2), 'at %d key cmd+o' % (second + 4)]
+        # CurApName is sampled in whichever classic process owns execution at
+        # that instant. Preserve several late samples rather than overwrite
+        # the only evidence with a background process's name.
+        commands += ['at %d dump 910 32 ' % (seconds - 10 + 2*n) + str(work / ('finder-final-%d.bin' % n)) for n in range(5)]
         commands += ['at %d dump 910 8 ' % (seconds - 5) + str(work / 'finder.bin'),
                      'at %d mouse 300 600' % (seconds - 30),
                      'at %d log qualification workload completed' % (seconds - 2)]
@@ -290,7 +294,9 @@ def main():
             native = re.search(r'\bnative (\d+)', hist)
             verified = re.search(r'\bverified_dispatches (\d+)', hist)
             finder = work / 'finder.bin'
-            desktop = finder.exists() and finder.read_bytes()[:7] == b'\x06Finder'
+            final_names = [f.read_bytes() for f in sorted(work.glob('finder-final-*.bin'))]
+            desktop = any(name[:7] == b'\x06Finder' for name in final_names) if final_names else finder.exists() and finder.read_bytes()[:7] == b'\x06Finder'
+
             benchmark = work / 'benchmark.csv'
             samples = list(csv.DictReader(benchmark.open())) if benchmark.exists() else []
             benchmark_required = bool(args.script and 'bench68 ' in args.script.read_text())
@@ -337,6 +343,7 @@ def main():
                           injected_irqs=injections, irq_order_errors=irq_order_errors,
                           shared_write=(work / 'share/regression-created').is_dir(),
                           desktop_confirmed=desktop,
+                          final_process_name_samples=[name[1:1+name[0]].decode('mac_roman', errors='replace') if name else '' for name in final_names],
                           benchmark_samples=samples, benchmark_required=benchmark_required,
                           audio_input_frames=max([int(n) for n in re.findall(r'\bsb_in=(\d+)', log)] or [0]),
                           audio_output_frames=max([int(n) for n in re.findall(r'\bsb_out=(\d+)', log)] or [0]),

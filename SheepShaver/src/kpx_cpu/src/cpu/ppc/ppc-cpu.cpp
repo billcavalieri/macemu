@@ -42,6 +42,7 @@
 
 #ifdef SHEEPSHAVER
 #include "cpu_emulation.h"
+#include <sys/time.h>
 #include "emul_op.h"
 #include "nw_boot_contract.h"
 #include "nw_io.h"
@@ -302,6 +303,7 @@ void powerpc_cpu::initialize()
 	dec_tb_base_ = tb_host_ticks();
 	dec_pending_ = false;
 	dec_tick_div_ = 0;
+	jit_dec_div_ = 0;
 	exception_serial_ = 0;
 #ifdef SHEEPSHAVER
 	last_fetch_pa_ = 0;
@@ -1416,6 +1418,7 @@ void powerpc_cpu::catch_up_timebase()
 }
 
 #ifdef SHEEPSHAVER
+volatile int nw_guest_idle_flag;	/* set while the guest sleeps in its idle loop (for NW_GUEST_PROF) */
 /* New World never hits the SynchIdleTime EMUL_OP (the 68k pattern is not
  * in this ROM). The guest sits in this isync/b loop — measured at
  * 0x0027bae0 / 0x0027bae4 — and the JIT runs it at full rate. Sleep until
@@ -1442,7 +1445,9 @@ int powerpc_cpu::guest_idle_wait()
 		return 0;
 	if (async_exception_pending())
 		return 0;
+	nw_guest_idle_flag = 1;
 	idle_wait();
+	nw_guest_idle_flag = 0;
 #if NW_BOOT_LOG
 	{
 		static int logged;
@@ -1523,6 +1528,50 @@ static nw_trap_record nw_trap_history[128];
 static uint64 nw_trap_sequence;
 #endif
 
+uint32_t nw_trap_hist[65536];		// A-line trap counts, read by the NW_GUEST_PROF sampler
+volatile int nw_trap_prof_on;		// set by the sampler (NW_GUEST_PROF=1/2)
+/* (trap, caller 68k pc) counts: open-addressed table, single writer (the emulation thread), read racily by the sampler. */
+enum { NW_TRAPSITE_N = 16384 };
+uint64_t nw_trapsite_key[NW_TRAPSITE_N];
+uint32_t nw_trapsite_cnt[NW_TRAPSITE_N];
+static inline void nw_trapsite_add(uint32 trap, uint32 pc68)
+{
+	const uint64_t k = ((uint64_t)trap << 32) | pc68 | 1ull << 63;
+	unsigned h = (unsigned)((k * 0x9E3779B97F4A7C15ull) >> 50);
+	for (unsigned i = 0; i < 64; i++, h = (h + 1) & (NW_TRAPSITE_N - 1)) {
+		if (nw_trapsite_key[h] == k) { nw_trapsite_cnt[h]++; return; }
+		if (nw_trapsite_key[h] == 0) { nw_trapsite_key[h] = k; nw_trapsite_cnt[h] = 1; return; }
+	}
+}
+
+/* NW_GUEST_PROF: name the file an Open/OpenRF/HFSDispatch call names, to see which file a slow boot step is loading. */
+static void nw_trap_prof_name(powerpc_cpu *ppc, uint32 trap)
+{
+	const uint32 base = trap & 0xf0ffu;
+	if (base != 0xa000u && base != 0xa00au && base != 0xa060u)
+		return;
+	const uint32 pb = ppc->gpr(16);
+	extern uint32 RAMSize;
+	if (pb < 0x1000u || pb >= RAMSize)
+		return;
+	const uint32 np = ReadMacInt32(pb + 18);
+	if (np < 0x1000u || np >= RAMSize)
+		return;
+	const unsigned len = ReadMacInt8(np);
+	if (len == 0 || len > 63)
+		return;
+	char name[64];
+	for (unsigned i = 0; i < len; i++) {
+		const uint8 c = (uint8)ReadMacInt8(np + 1 + i);
+		name[i] = c >= 32 && c < 127 ? (char)c : '?';
+	}
+	name[len] = 0;
+	static uint64_t n;
+	struct timeval tv; gettimeofday(&tv, NULL);
+	printf("TRAPNAME T=%lld.%03d #%llu %04x pc68=%08x d0=%08x name=\"%s\" dirid=%08x\n", (long long)tv.tv_sec, (int)(tv.tv_usec / 1000), (unsigned long long)++n, (unsigned)trap,
+	       (unsigned)(ppc->gpr(24) - 2u), (unsigned)ppc->gpr(8), name, (unsigned)ReadMacInt32(pb + 48));
+}
+
 static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
 {
 	extern uint32 ROMBase;
@@ -1534,6 +1583,11 @@ static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
 		return;
 	const uint32 trap = (ppc->gpr(29) >> 3) & 0xffffu;
 	nw_event_aline(trap, ppc->gpr(24) - 2u, h);
+	if (nw_trap_prof_on) {
+		nw_trap_hist[trap & 0xffffu]++;
+		nw_trapsite_add(trap & 0xffffu, ppc->gpr(24) - 2u);
+		nw_trap_prof_name(ppc, trap);
+	}
 #if NW_BOOT_LOG
 	static const bool keep_traps = getenv("NW_TEST_NK_STATE_PATH") != NULL;
 	if (keep_traps) {
@@ -1553,6 +1607,20 @@ static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
 				op = (uint16)((hp[0] << 8) | hp[1]);
 			printf("NW-BOOT SysError #%d 68k_pc=%08x opcode=%04x\n",
 			       (int16)ppc->gpr(8), (unsigned)pc68, (unsigned)op);
+			/* Where was the guest? The 68k registers and the top of its stack (an exception frame holds the faulting
+			 * PC) make a Release-build crash log usable without the diagnostic dump below. */
+			printf("NW-BOOT SysError regs d0=%08x d1=%08x a0=%08x a1=%08x a2=%08x a6=%08x sp=%08x stack:",
+			       (unsigned)ppc->gpr(8), (unsigned)ppc->gpr(9), (unsigned)ppc->gpr(16), (unsigned)ppc->gpr(17),
+			       (unsigned)ppc->gpr(18), (unsigned)ppc->gpr(22), (unsigned)ppc->gpr(1));
+			for (unsigned w = 0; w < 12; ++w) {
+				uint32 physical;
+				if (ppc->guest_data_probe(ppc->gpr(1) + w * 4u, 4, false, &physical, NULL, false) &&
+				    nw_pa_kind(physical) != NW_PA_IO && nw_pa_kind(physical) != NW_PA_NONE && nw_pa_kind(physical) != NW_PA_FB)
+					printf(" %08x", (unsigned)vm_read_memory_4(physical));
+				else
+					printf(" --------");
+			}
+			printf("\n");
 #if NW_BOOT_LOG
 			const char *path = getenv("NW_TEST_NK_STATE_PATH");
 			if (path && (int16)ppc->gpr(8) > 0) {
@@ -2403,9 +2471,19 @@ uint32 powerpc_cpu::jit_host_dec(void *host, uint32 val, uint32 guest_pc, int wr
 }
 
 // Both native tail calls and C successors stop at the same event boundary.
+// The decrementer is derived from the host clock and this runs at every chain exit and hop, so
+// reading the clock each time was 5.8% of the emulation thread in a host profile of an iTunes
+// window raise. Sampling every kJitDecSamplePeriod calls only delays noticing the expiry edge by a
+// few block exits (the interpreter samples every 256 instructions); sample_decrementer() adds the
+// full elapsed delta, and every guest read of DEC samples it fresh, so values stay exact.
+static const unsigned kJitDecSamplePeriod = 16;
+
 bool powerpc_cpu::jit_events_pending()
 {
-    sample_decrementer();
+    if ((nw_jit_legacy & NW_JIT_LEGACY_CLOCK) || (!dec_pending_ && ++jit_dec_div_ >= kJitDecSamplePeriod)) {
+        jit_dec_div_ = 0;
+        sample_decrementer();
+    }
     return !nw_68k_can_run() || (async_exception_pending() &&
                                (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_EE));
 }
@@ -2549,6 +2627,8 @@ void powerpc_cpu::jit_host_rfi(void *host, struct nw_jit_cpu *cpu)
 	cpu->pc += 4;
 }
 
+/* Commit and pull run at every chain exit. Only a few registers are usually live, so visit the set bits
+ * instead of testing all 32 (the same loads and stores, in the same ascending order). */
 static void nw_commit_gpr(struct nw_jit_cpu *jc, powerpc_cpu *ppc)
 {
 	const uint32_t mask = jc->gpr_live;
@@ -2557,29 +2637,40 @@ static void nw_commit_gpr(struct nw_jit_cpu *jc, powerpc_cpu *ppc)
 			ppc->gpr(i) = jc->gpr[i];
 		return;
 	}
-	for (int i = 0; i < 32; i++)
-		if (mask & (1u << i))
-			ppc->gpr(i) = jc->gpr[i];
+	if (nw_jit_legacy & NW_JIT_LEGACY_SYNC) {
+		for (int i = 0; i < 32; i++)
+			if (mask & (1u << i))
+				ppc->gpr(i) = jc->gpr[i];
+		return;
+	}
+	for (uint32_t m = mask; m; m &= m - 1)
+		ppc->gpr(__builtin_ctz(m)) = jc->gpr[__builtin_ctz(m)];
 }
-
 static void nw_pull_gpr(struct nw_jit_cpu *jc, powerpc_cpu *ppc, uint32_t mask)
 {
 	if (mask == 0)
 		return;
 	if (jc->gpr_live == 0xffffffffu)
 		return;
-	if (mask == 0xffffffffu) {
-		for (int i = 0; i < 32; i++)
-			if ((jc->gpr_live & (1u << i)) == 0)
+	if (nw_jit_legacy & NW_JIT_LEGACY_SYNC) {
+		if (mask == 0xffffffffu) {
+			for (int i = 0; i < 32; i++)
+				if ((jc->gpr_live & (1u << i)) == 0)
+					jc->gpr[i] = ppc->gpr(i);
+			jc->gpr_live = 0xffffffffu;
+			return;
+		}
+		for (int i = 0; i < 32; i++) {
+			const uint32_t b = 1u << i;
+			if ((mask & b) && (jc->gpr_live & b) == 0)
 				jc->gpr[i] = ppc->gpr(i);
-		jc->gpr_live = 0xffffffffu;
+		}
+		jc->gpr_live |= mask;
 		return;
 	}
-	for (int i = 0; i < 32; i++) {
-		const uint32_t b = 1u << i;
-		if ((mask & b) && (jc->gpr_live & b) == 0)
-			jc->gpr[i] = ppc->gpr(i);
-	}
+	/* Registers the successor reads that are not already live in jc. */
+	for (uint32_t m = mask & ~jc->gpr_live; m; m &= m - 1)
+		jc->gpr[__builtin_ctz(m)] = ppc->gpr(__builtin_ctz(m));
 	jc->gpr_live |= mask;
 }
 
@@ -2591,10 +2682,13 @@ static void nw_commit_fpr(struct nw_jit_cpu *jc, powerpc_cpu *ppc, uint32_t &fps
 	if (mask == 0xffffffffu) {
 		for (int i = 0; i < 32; i++)
 			ppc->fpr_dw(i) = jc->fpr[i];
-	} else {
+	} else if (nw_jit_legacy & NW_JIT_LEGACY_SYNC) {
 		for (int i = 0; i < 32; i++)
 			if (mask & (1u << i))
 				ppc->fpr_dw(i) = jc->fpr[i];
+	} else {
+		for (uint32_t m = mask; m; m &= m - 1)
+			ppc->fpr_dw(__builtin_ctz(m)) = jc->fpr[__builtin_ctz(m)];
 	}
 	fpscr = jc->fpscr;
 }
@@ -2610,12 +2704,16 @@ static void nw_pull_fpr(struct nw_jit_cpu *jc, powerpc_cpu *ppc, uint32_t mask,
 			if ((jc->fpr_live & (1u << i)) == 0)
 				jc->fpr[i] = ppc->fpr_dw(i);
 		jc->fpr_live = 0xffffffffu;
-	} else {
+	} else if (nw_jit_legacy & NW_JIT_LEGACY_SYNC) {
 		for (int i = 0; i < 32; i++) {
 			const uint32_t b = 1u << i;
 			if ((mask & b) && (jc->fpr_live & b) == 0)
 				jc->fpr[i] = ppc->fpr_dw(i);
 		}
+		jc->fpr_live |= mask;
+	} else {
+		for (uint32_t m = mask & ~jc->fpr_live; m; m &= m - 1)
+			jc->fpr[__builtin_ctz(m)] = ppc->fpr_dw(__builtin_ctz(m));
 		jc->fpr_live |= mask;
 	}
 	if (!had)
@@ -2873,8 +2971,9 @@ uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
 	uint32 pa;
+	int via_bat = 0;
 	(void)pc;
-	if (!ppc->guest_data_probe(ea, 2, false, &pa)) {
+	if (!ppc->guest_data_probe(ea, 2, false, &pa, &via_bat)) {
 		*fault = 1;
 		return 0;
 	}
@@ -2884,6 +2983,17 @@ uint32 powerpc_cpu::jit_host_lh(void *host, uint32 ea, uint32 pc, int *fault)
 	if (kind == NW_PA_NONE) {
 		*fault = 1;
 		return 0;
+	}
+	/* Same refill as jit_host_lwz: later byte/halfword loads from this page hit the host-line table in
+	 * nw_jit_helper_lh instead of translating again (translate was 13.7% of the emulation thread in a profile). */
+	if (!(nw_jit_legacy & NW_JIT_LEGACY_LOAD) && kind != NW_PA_FB && ppc32_guest_mmu_enabled() &&
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR)) {
+		const int pr = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0;
+		/* Read-only: this access only proved the page readable. Marking it writable (as the word-load fill does)
+		 * would let a later store skip the guest's write-protection check and the page's changed bit. */
+		nw_jit_dtlb_fill(ea, pa, 0,
+			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
+			pr, via_bat);
 	}
 	return vm_read_memory_2(pa);
 }
@@ -2921,8 +3031,9 @@ uint32 powerpc_cpu::jit_host_lb(void *host, uint32 ea, uint32 pc, int *fault)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
 	uint32 pa;
+	int via_bat = 0;
 	(void)pc;
-	if (!ppc->guest_data_probe(ea, 1, false, &pa)) {
+	if (!ppc->guest_data_probe(ea, 1, false, &pa, &via_bat)) {
 		*fault = 1;
 		return 0;
 	}
@@ -2932,6 +3043,17 @@ uint32 powerpc_cpu::jit_host_lb(void *host, uint32 ea, uint32 pc, int *fault)
 	if (kind == NW_PA_NONE) {
 		*fault = 1;
 		return 0;
+	}
+	/* Same refill as jit_host_lwz: later byte/halfword loads from this page hit the host-line table in
+	 * nw_jit_helper_lb instead of translating again (translate was 13.7% of the emulation thread in a profile). */
+	if (!(nw_jit_legacy & NW_JIT_LEGACY_LOAD) && kind != NW_PA_FB && ppc32_guest_mmu_enabled() &&
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR)) {
+		const int pr = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0;
+		/* Read-only: this access only proved the page readable. Marking it writable (as the word-load fill does)
+		 * would let a later store skip the guest's write-protection check and the page's changed bit. */
+		nw_jit_dtlb_fill(ea, pa, 0,
+			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
+			pr, via_bat);
 	}
 	return vm_read_memory_1(pa);
 }

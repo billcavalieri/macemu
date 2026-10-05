@@ -6,6 +6,7 @@
 #include "nw_io.h"
 #include "cpu/ppc/ppc-cpu.hpp"
 #include "prefs.h"
+#include "cpu/vm.hpp"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,7 +54,22 @@ thread_local captured_reads *active_samples;
 bool plain_memory(uint32_t pa, bool store)
 {
 	const int k = nw_pa_kind(pa);
-	return k != NW_PA_IO && k != NW_PA_NONE && k != NW_PA_FB && (!store || nw_pa_writable(pa));
+	if (k == NW_PA_IO || k == NW_PA_NONE || k == NW_PA_FB)
+		return false;
+	/* nw_pa_writable() scans the banks again; the kind in hand answers it. */
+	return !store || ((nw_jit_legacy & NW_JIT_LEGACY_XLATE) ? nw_pa_writable(pa) : nw_kind_writable(k));
+}
+/* Guest data translation of the current context through the JIT's data TLB. */
+struct dtlb_ctx { bool on; int pr; };
+dtlb_ctx dtlb_context()
+{
+	dtlb_ctx c = { false, 0 };
+	if (nw_jit_legacy & NW_JIT_LEGACY_XLATE) return c;
+	if (!ppc32_guest_mmu_enabled()) return c;
+	const uint32_t msr = ppc32_guest_mmu().msr();
+	if (!(msr & ppc32_mmu::MSR_DR)) return c;
+	c.on = true; c.pr = (msr & ppc32_mmu::MSR_PR) != 0;
+	return c;
 }
 struct bus_context {
 	nw68_page_cache translations;
@@ -65,7 +81,28 @@ struct bus_context {
 };
 bool preview_page(void *opaque, uint32_t ea, bool store, uint32_t *pa)
 {
-	return ((bus_context *)opaque)->cpu->guest_data_probe(ea, 1, store, pa, 0, false);
+	powerpc_cpu *cpu = ((bus_context *)opaque)->cpu;
+	/* A preview needs only the translation, and it has no side effects (R/C bits are materialised at commit),
+	 * so a hit in the JIT's data TLB answers it; that table is flushed on every BAT, segment, MSR, SDR1 and tlbie
+	 * change. Only loads fill it from here: a store preview does not set the changed bit, so a writable entry is
+	 * created by data_write() after its recorded translation. Without this each block run re-translated every
+	 * page it touched (ppc32_mmu::translate was 8.6% of a boot profile). */
+	const dtlb_ctx dc = dtlb_context();
+	const bool dtlb = dc.on;
+	const int pr = dc.pr;
+	/* A store hits only an entry that data_write() marked after a full recorded (permission-checked, C-setting)
+	 * store translation, so a hit proves both the permission and that the page's changed bit is set. */
+	if (dtlb && (store ? nw_jit_dtlb_store_rec(ea, pr, pa) : nw_jit_dtlb_lookup_pr(ea, 0, pa, pr)))
+		return true;
+	int via_bat = 0;
+	if (!cpu->guest_data_probe(ea, 1, store, pa, &via_bat, false))
+		return false;
+	if (dtlb && !store) {
+		const int kind = nw_pa_kind(*pa);
+		if (kind == NW_PA_RAM || kind == NW_PA_ROM)
+			nw_jit_dtlb_fill(ea, *pa, 0, (uint64_t)(uintptr_t)vm_do_get_real_address(*pa & ~0xfffu), pr, via_bat);
+	}
+	return true;
 }
 bool record_read(bus_context &c, uint32_t ea, unsigned width)
 {
@@ -98,7 +135,9 @@ bool probe(bus_context &c, uint32_t ea, unsigned width, bool store, uint32_t *pa
 			if (!nw68_page_translate(c.translations, &c, preview_page, ea + j, store, &next) || next != first + j) return false;
 			if (!store && !record_read(c, ea + j, 1)) return false;
 		}
-		if (!plain_memory(first + j, store)) return false;
+		/* Banks are page-granular: bytes on the first byte's page share its kind, already checked above. */
+		if (((ea + j) ^ ea) & ~4095u || (nw_jit_legacy & NW_JIT_LEGACY_XLATE))
+			if (!plain_memory(first + j, store)) return false;
 	}
 	/* A journaled PTE store would change translation before later accesses
 	 * in the real NK. Delegate it before effects rather than previewing the
@@ -160,8 +199,19 @@ bool write_probe(void *opaque, uint32_t ea, unsigned width)
 void data_write(void *opaque, uint32_t ea, unsigned width, uint32_t value)
 {
 	bus_context &c = *(bus_context *)opaque; uint32_t pa;
-	/* No callbacks/context changes occur between prepare and commit. */
-	if (!c.cpu->guest_data_probe(ea, width, true, &pa)) abort();
+	/* No callbacks/context changes occur between prepare and commit. An entry marked as having had a full recorded
+	 * store translation means this page's permission was checked and its changed bit set (and every translation
+	 * change drops the entry), so the hit replaces the translation; a miss translates with recording, then fills
+	 * and marks RAM pages for the next store. */
+	const dtlb_ctx dc = dtlb_context();
+	if (!(dc.on && nw_jit_dtlb_store_rec(ea, dc.pr, &pa))) {
+		int via_bat = 0;
+		if (!c.cpu->guest_data_probe(ea, width, true, &pa, &via_bat)) abort();
+		if (dc.on && nw_pa_kind(pa) == NW_PA_RAM) {
+			nw_jit_dtlb_fill(ea, pa, 1, (uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu), dc.pr, via_bat);
+			nw_jit_dtlb_mark_store_rec(ea, dc.pr);
+		}
+	}
 	for (unsigned j = 1; j < width; ++j) if (((ea + j) ^ ea) & ~4095u) {
 		uint32_t next;
 		if (!c.cpu->guest_data_probe(ea + j, 1, true, &next) || next != pa + j) abort();
@@ -173,9 +223,19 @@ void data_write(void *opaque, uint32_t ea, unsigned width, uint32_t value)
 }
 bool compatible_nk()
 {
-	const ppc32_xlate_result a = ppc32_guest_mmu().translate(0x68066000u, PPC32_XLATE_IR, 4, false, false);
-	const ppc32_xlate_result b = ppc32_guest_mmu().translate(0x6806c000u, PPC32_XLATE_IR, 4, false, false);
-	if (!a.ok || !b.ok || !plain_memory(a.pa, false) || !plain_memory(b.pa, false)) return false;
+	/* The two handler pages are executed constantly, so the JIT's instruction TLB (flushed with every segment
+	 * and BAT change) normally knows their physical pages; translate only on a miss. */
+	uint32_t pa_a = 0, pa_b = 0;
+	const bool itlb = !(nw_jit_legacy & NW_JIT_LEGACY_XLATE) && (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_IR) &&
+			  nw_jit_itlb_lookup(0x68066000u, &pa_a) && nw_jit_itlb_lookup(0x6806c000u, &pa_b);
+	if (!itlb) {
+		const ppc32_xlate_result a = ppc32_guest_mmu().translate(0x68066000u, PPC32_XLATE_IR, 4, false, false);
+		const ppc32_xlate_result b = ppc32_guest_mmu().translate(0x6806c000u, PPC32_XLATE_IR, 4, false, false);
+		if (!a.ok || !b.ok) return false;
+		pa_a = a.pa; pa_b = b.pa;
+	}
+	const ppc32_xlate_result a = { true, pa_a, 0, false }, b = { true, pa_b, 0, false };
+	if (!plain_memory(a.pa, false) || !plain_memory(b.pa, false)) return false;
 	/* Check current words even if handlers are patched without icbi. The
 	 * mapping is uniform within each page; only two translations are needed. */
 	return vm_read_memory_4(a.pa + 0x84) == 0x537d1b78u && vm_read_memory_4(a.pa + 0x88) == 0x7fa803a6u &&
@@ -509,8 +569,11 @@ int nw_68k_dispatch(powerpc_cpu *cpu)
 	}
 	// Commit PTE read references only after the complete instruction/block
 	// and successor prefetch are safe. Store C bits are set by data_write.
+	const dtlb_ctx rc = dtlb_context();
 	for (unsigned j = 0; j < context.nreads; ++j) {
 		uint32_t pa;
+		/* The page's R bit was set by an earlier commit and no translation event has dropped the entry since. */
+		if (rc.on && nw_jit_dtlb_take_rec(context.read_addresses[j], rc.pr)) continue;
 		if (!cpu->guest_data_probe(context.read_addresses[j], context.read_widths[j], false, &pa)) abort();
 	}
 	nw68_commit(result);

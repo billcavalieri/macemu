@@ -63,6 +63,8 @@ struct ppc_core_test_access {
     static int scalar_p6(powerpc_cpu *);
     static int frsp_p6(powerpc_cpu *);
     static int basic_special_p6(powerpc_cpu *);
+    static int multiply_p6(powerpc_cpu *);
+    static int fp_fast_sweep(powerpc_cpu *);
     static int io_publication(powerpc_cpu *);
     static void stop_on_device(void *context) { static_cast<powerpc_cpu *>(context)->spcflags().set(SPCFLAG_CPU_EXEC_RETURN); }
     static void instruction(powerpc_cpu *cpu, uint32 op) { cpu->decode(op)->execute(cpu, op); }
@@ -744,6 +746,408 @@ int ppc_core_test_access::basic_special_p6(powerpc_cpu *cpu)
     nw_jit_set_host_chain(powerpc_cpu::jit_host_chain); nw_jit_set_mode(NW_JIT_ON);
     return failed ? 1 : 0;
 }
+/* Randomised comparison of the inline single-precision arithmetic against the out-of-line helpers: the same block
+ * is compiled twice (NW_JIT_LEGACY_FP clear and set) and both run on identical state. Every FPR, FPSCR, CR, PC/MSR,
+ * the host FP flags and the host rounding mode must match. Operands cover the cases the inline path takes and the
+ * ones it must hand to the helper (zeros, subnormals, infinities, NaNs, doubles that are not singles, exponent
+ * boundaries), under random FPSCR states including enabled exceptions, rounding modes and sticky bits. */
+int ppc_core_test_access::fp_fast_sweep(powerpc_cpu *cpu)
+{
+    cpu->enable_guest_mmu(true); nw_jit_set_mode(NW_JIT_VERIFY);
+    nw_jit_set_host_fp_exception(checked_fp_exception); nw_jit_set_host_chain(NULL);
+    ppc32_mmu &mmu = ppc32_guest_mmu();
+    const uint32 base = 0x10000000u, pc_fast = base+0x1000, pc_slow = base+0x1800;
+    void *const wanted = (void *)(VMBaseDiff+base);
+    void *const ram = mmap(wanted,0x2000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    CHECK(ram == wanted); if (ram != wanted) return 1;
+    nw_banks_set(NW_PA_RAM,base,0x2000);
+    uint64 state = 0x9e3779b97f4a7c15ULL;
+    auto next = [&]() { state ^= state >> 12; state ^= state << 25; state ^= state >> 27; return state * 0x2545f4914f6cdd1dULL; };
+    auto single_bits = [&](int lo, int hi) {
+        const int e = lo + int(next() % unsigned(hi - lo + 1));
+        const uint32 f = (uint32(next() & 1) << 31) | (uint32(e + 127) << 23) | uint32(next() & 0x7fffff);
+        float x; memcpy(&x, &f, 4); return bits(double(x));
+    };
+    const uint64 specials[] = {0, 0x8000000000000000ULL, 0x7ff0000000000000ULL, 0xfff0000000000000ULL,
+        0x7ff8000000000000ULL, 0x7ff0000000000001ULL, 0xfff8123456789abcULL, 0x0000000000000001ULL, 0x000fffffffffffffULL,
+        0x3810000000000000ULL, 0x380fffffe0000000ULL, 0x47efffffe0000000ULL, 0x47f0000000000000ULL,
+        0x3ff0000000000000ULL, 0xbff0000000000000ULL, 0x3ff0000020000000ULL, 0x3fefffffe0000000ULL,
+        0x7fefffffffffffffULL, 0x0010000000000000ULL, 0x36a0000000000000ULL};
+    auto operand = [&]() -> uint64 {
+        const unsigned r = unsigned(next() % 100);
+        if (r < 55) return single_bits(-40, 40);
+        if (r < 68) return single_bits(-126, 127);
+        if (r < 78) {	/* a double that is generally not a single */
+            const int e = -1000 + int(next() % 2001);
+            return (next() & 0x8000000000000000ULL) | (uint64(e + 1023) << 52) | (next() & 0x000fffffffffffffULL);
+        }
+        if (r < 88) return specials[next() % (sizeof specials / sizeof specials[0])];
+        /* exponent fields at and around the inline path's limits */
+        static const unsigned exps[] = {0, 1, 2, 896, 897, 898, 1149, 1150, 1151, 2045, 2046, 2047};
+        return (next() & 0x8000000000000000ULL) | (uint64(exps[next() % (sizeof exps / sizeof exps[0])]) << 52) |
+               ((next() & 3) ? (next() & 0x000fffffe0000000ULL) : (next() & 0x000fffffffffffffULL));
+    };
+    auto summaries = [](uint32 f) {
+        f &= ~0x60000000u;
+        if (f & 0x01f80700u) f |= 0x20000000u;
+        if ((f&0x20000000u)&&(f&0x80u) || (f&0x10000000u)&&(f&0x40u) || (f&0x08000000u)&&(f&0x20u) ||
+            (f&0x04000000u)&&(f&0x10u) || (f&0x02000000u)&&(f&8u)) f |= 0x40000000u;
+        return f;
+    };
+    struct kind_info { unsigned xo; bool fma, mul; const char *name; };
+    const kind_info kinds[] = {{21,false,false,"fadds"},{20,false,false,"fsubs"},{25,false,true,"fmuls"},
+        {29,true,false,"fmadds"},{28,true,false,"fmsubs"},{31,true,false,"fnmadds"},{30,true,false,"fnmsubs"}};
+    const unsigned rounds = getenv("PPC_FP_SWEEP_ROUNDS") ? unsigned(strtoul(getenv("PPC_FP_SWEEP_ROUNDS"),NULL,10)) : 400;
+    unsigned cases = 0, fast_taken_hint = 0;
+    for (const kind_info &kind : kinds)
+    for (unsigned rc : {0u,1u})
+    for (unsigned shape = 0; shape < 24; ++shape) {
+        /* registers 1..5, with aliasing between destination and sources in most shapes */
+        const unsigned fa = 1 + shape % 3, fc = kind.fma || kind.mul ? 2 + shape % 2 : 0, fb = kind.mul ? 0 : 3 + (shape / 3) % 2;
+        const unsigned fd = shape % 4 == 0 ? fa : shape % 4 == 1 ? (fc ? fc : fb) : shape % 4 == 2 ? fb : 5;
+        const uint32 op = (59u<<26)|(fd<<21)|(fa<<16)|(fb<<11)|(fc<<6)|(kind.xo<<1)|rc;
+        const uint32 ops[] = {op};
+        nw_jit_legacy &= ~NW_JIT_LEGACY_FP;
+        nw_jit_fn fast = nw_jit_compile(ops,1,pc_fast,pc_fast,0,0);
+        nw_jit_legacy |= NW_JIT_LEGACY_FP;
+        nw_jit_fn slow = nw_jit_compile(ops,1,pc_slow,pc_slow,0,0);
+        nw_jit_legacy &= ~NW_JIT_LEGACY_FP;
+        CHECK(fast != NULL && slow != NULL); if (!fast || !slow) continue;
+        for (unsigned round = 0; round < rounds; ++round) {
+            ++cases;
+            nw_jit_cpu before = {};
+            before.msr = 0x2000u | ((next() & 7) == 0 ? 0x900u : 0u);
+            before.cr = uint32(next());
+            uint32 fpscr = (next() & 3) ? 0 : uint32(next()) & ~0x60000000u;
+            if (next() & 1) fpscr |= uint32(next()) & 0x7f000u;		/* FPRF, FR, FI */
+            if ((next() & 7) == 0) fpscr |= uint32(next()) & 0xffu;	/* enables, NI, RN */
+            if ((next() & 7) == 0) fpscr |= uint32(next()) & 0x1ff00000u;	/* sticky causes */
+            before.fpscr = summaries(fpscr);
+            before.srr0 = 0x12345678; before.srr1 = 0x87654321;
+            for (unsigned r = 0; r < 32; ++r) before.fpr[r] = next();
+            before.fpr[fa] = operand();
+            if (fc) before.fpr[fc] = operand();
+            if (fb) before.fpr[fb] = operand();
+            nw_jit_cpu out[2];
+            uint32 pcs[2] = {pc_fast, pc_slow};
+            nw_jit_fn fns[2] = {fast, slow};
+            int round_after[2], flags_after[2];
+            uint32 cpu_srr[2][2], cpu_fpscr[2], cpu_cr[2], cpu_pc[2];
+            for (unsigned v = 0; v < 2; ++v) {
+                before.pc = pcs[v]; before.dec = cpu->dec_;
+                out[v] = before;
+                mmu.reset(); mmu.set_msr(before.msr); cpu->pc() = pcs[v]; cpu->last_fetch_pa_ = pcs[v];
+                cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false; out[v].dec = cpu->dec_;
+                cpu->fpscr() = before.fpscr; cpu->cr().set(before.cr); cpu->xer().set(0); cpu->lr() = cpu->ctr() = 0;
+                cpu->srr0_ = before.srr0; cpu->srr1_ = before.srr1; cpu->spcflags().init(); cpu->regs().reserve_valid = 0;
+                for (unsigned r = 0; r < 32; ++r) { cpu->fpr_dw(r) = before.fpr[r]; cpu->gpr(r) = 0; }
+                fesetround(FE_TONEAREST); feclearexcept(FE_ALL_EXCEPT);
+                out[v].host = cpu; nw_jit_cpu_bind(&out[v]); nw_jit_tail_begin();
+                fns[v](&out[v]);
+                round_after[v] = fegetround(); flags_after[v] = fetestexcept(FE_ALL_EXCEPT);
+                cpu_srr[v][0] = cpu->srr0_; cpu_srr[v][1] = cpu->srr1_; cpu_fpscr[v] = cpu->fpscr(); cpu_cr[v] = cpu->cr().get(); cpu_pc[v] = cpu->pc();
+            }
+            bool same = true;
+            for (unsigned r = 0; r < 32; ++r) same &= out[0].fpr[r] == out[1].fpr[r];
+            same &= out[0].fpscr == out[1].fpscr && out[0].cr == out[1].cr && out[0].msr == out[1].msr;
+            /* SRR0 is the instruction's own address when an exception was taken, so compare it relative to the block. */
+            auto rel = [&](uint32 srr0, uint32 pc) { return srr0 == before.srr0 ? 0u : srr0 - pc; };
+            same &= rel(out[0].srr0, pc_fast) == rel(out[1].srr0, pc_slow) && out[0].srr1 == out[1].srr1 && out[0].fault == out[1].fault;
+            /* A program exception leaves the PC at its vector (absolute); otherwise it stays in the block. */
+            auto relpc = [](uint32 after, uint32 start) { return after >= start && after < start + 0x100 ? after - start : after; };
+            same &= relpc(out[0].pc, pc_fast) == relpc(out[1].pc, pc_slow);
+            same &= round_after[0] == FE_TONEAREST && round_after[1] == FE_TONEAREST;
+            same &= flags_after[0] == 0 && flags_after[1] == 0;
+            same &= rel(cpu_srr[0][0], pc_fast) == rel(cpu_srr[1][0], pc_slow) && cpu_srr[0][1] == cpu_srr[1][1] && cpu_fpscr[0] == cpu_fpscr[1] &&
+                    cpu_cr[0] == cpu_cr[1] && relpc(cpu_pc[0], pc_fast) == relpc(cpu_pc[1], pc_slow);
+            CHECK(same);
+            if (!same && failed < 40) {
+                fprintf(stderr, "fp-fast %s rc=%u fd=%u fa=%u fb=%u fc=%u fpscr=%08x a=%016llx b=%016llx c=%016llx\n  fast fpr[fd]=%016llx fpscr=%08x cr=%08x flags=%x round=%x\n  slow fpr[fd]=%016llx fpscr=%08x cr=%08x flags=%x\n",
+                    kind.name, rc, fd, fa, fb, fc, before.fpscr,
+                    (unsigned long long)before.fpr[fa], (unsigned long long)(fb ? before.fpr[fb] : 0), (unsigned long long)(fc ? before.fpr[fc] : 0),
+                    (unsigned long long)out[0].fpr[fd], out[0].fpscr, out[0].cr, flags_after[0], round_after[0],
+                    (unsigned long long)out[1].fpr[fd], out[1].fpscr, out[1].cr, flags_after[1]);
+                fprintf(stderr, "  pc rel %d/%d msr %08x/%08x srr %08x,%08x/%08x,%08x fault %d/%d cpu fpscr %08x/%08x cr %08x/%08x pc %d/%d\n",
+                    int(out[0].pc - pc_fast), int(out[1].pc - pc_slow), out[0].msr, out[1].msr, out[0].srr0, out[0].srr1, out[1].srr0, out[1].srr1,
+                    int(out[0].fault), int(out[1].fault), cpu_fpscr[0], cpu_fpscr[1], cpu_cr[0], cpu_cr[1], int(cpu_pc[0] - pc_fast), int(cpu_pc[1] - pc_slow));
+                for (unsigned r = 0; r < 32; ++r) if (out[0].fpr[r] != out[1].fpr[r]) fprintf(stderr, "  fpr[%u] %016llx/%016llx\n", r, (unsigned long long)out[0].fpr[r], (unsigned long long)out[1].fpr[r]);
+            }
+            if (out[0].fpr[fd] != before.fpr[fd]) ++fast_taken_hint;
+            if (getenv("PPC_FP_SWEEP_TRACE") && cases <= 12)
+                fprintf(stderr, "trace %s fpscr %08x->%08x fault=%d a=%016llx b=%016llx before_fd=%016llx after_fd=%016llx\n", kind.name, before.fpscr, out[0].fpscr,
+                    int(out[0].fault), (unsigned long long)before.fpr[fa], (unsigned long long)(fb ? before.fpr[fb] : before.fpr[fc]),
+                    (unsigned long long)before.fpr[fd], (unsigned long long)out[0].fpr[fd]);
+        }
+    }
+    /* lfs/stfs and the indexed forms: inline data-TLB access against the helper path, over mapped, page-crossing and
+     * unmapped addresses, with stfs values on both sides of the denormalising exponent range. */
+    {
+        mmu.reset(); mmu.set_msr(0x2000u | ppc32_mmu::MSR_DR);
+        mmu.set_dbat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);
+        nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
+        const unsigned mem_rounds = rounds >= 8 ? rounds / 2 : 4;
+        unsigned mem_cases = 0, mem_faults = 0;
+        for (unsigned form = 0; form < 4; ++form)
+        for (unsigned shape = 0; shape < 12; ++shape) {
+            const bool store = form >= 2, indexed = form & 1;
+            const unsigned rd = 1 + shape % 4, ra = shape % 3 == 0 ? 0 : 3, rb = 4;
+            const int16 disp = int16((next() % 64) * 4 - 16);
+            const uint32 op = indexed ? (31u<<26)|(rd<<21)|(ra<<16)|(rb<<11)|((store ? 663u : 535u)<<1)
+                                      : ((store ? 52u : 48u)<<26)|(rd<<21)|(ra<<16)|(uint16(disp));
+            const uint32 ops[] = {op};
+            nw_jit_legacy &= ~NW_JIT_LEGACY_FP;
+            nw_jit_fn fast = nw_jit_compile(ops,1,pc_fast,pc_fast,0,0);
+            nw_jit_legacy |= NW_JIT_LEGACY_FP;
+            nw_jit_fn slow = nw_jit_compile(ops,1,pc_slow,pc_slow,0,0);
+            nw_jit_legacy &= ~NW_JIT_LEGACY_FP;
+            CHECK(fast != NULL && slow != NULL); if (!fast || !slow) continue;
+            for (unsigned round = 0; round < mem_rounds; ++round) {
+                ++mem_cases;
+                nw_jit_cpu before = {};
+                before.msr = 0x2000u | ppc32_mmu::MSR_DR;
+                for (unsigned r = 0; r < 32; ++r) before.fpr[r] = next();
+                /* stfs sources: mostly ordinary, plus values on both sides of exponent 874..896 and the specials */
+                before.fpr[rd] = (next() & 3) ? operand() : (next() & 0x8000000000000000ULL) | (uint64(868 + next() % 36) << 52) | (next() & 0x000fffffffffffffULL);
+                static const uint32 mem_pick[] = {0x0, 0x10, 0xff8, 0xffc, 0xffd, 0xfff, 0x1000, 0x1ffc, 0x1ffd, 0x1ffe, 0x1fff, 0x2000, 0x2004, 0x20000, 0x30000};
+                uint32 ea = base + (next() % 8 ? (uint32(next()) % 0x1ff0) & ~3u | (next() % 5 == 0 ? (uint32(next()) & 3) : 0) : mem_pick[next() % (sizeof mem_pick / sizeof mem_pick[0])]);
+                if (next() % 40 == 0) ea = 0x30000000u + uint32(next() % 0x1000);
+                if (indexed) { before.gpr[ra] = ra ? ea - (before.gpr[rb] = uint32(next() & 0xff0)) : 0; if (!ra) before.gpr[rb] = ea; }
+                else before.gpr[ra] = ra ? ea - uint32(int32(disp)) : 0;
+                if (!indexed && !ra) { /* EA is just the displacement: an unmapped low address */ }
+                uint8 saved[0x2000];
+                for (unsigned i = 0; i < 0x2000; ++i) saved[i] = uint8(next() % 9 ? next() : 0xff);
+                nw_jit_cpu out[2]; uint8 after[2][0x2000]; uint32 fault_ea[2];
+                for (unsigned v = 0; v < 2; ++v) {
+                    before.pc = v ? pc_slow : pc_fast; before.dec = cpu->dec_;
+                    out[v] = before;
+                    memcpy(ram, saved, 0x2000);
+                    mmu.set_msr(before.msr); cpu->pc() = before.pc; cpu->last_fetch_pa_ = before.pc;
+                    cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false; out[v].dec = cpu->dec_;
+                    cpu->fpscr() = 0; cpu->cr().set(0); cpu->xer().set(0); cpu->lr() = cpu->ctr() = 0; cpu->spcflags().init();
+                    for (unsigned r = 0; r < 32; ++r) { cpu->fpr_dw(r) = before.fpr[r]; cpu->gpr(r) = before.gpr[r]; }
+                    out[v].host = cpu; nw_jit_cpu_bind(&out[v]); nw_jit_tail_begin();
+                    (v ? slow : fast)(&out[v]);
+                    memcpy(after[v], ram, 0x2000);
+                    fault_ea[v] = out[v].fault ? out[v].fault_ea : 0;
+                }
+                bool same = out[0].fault == out[1].fault && fault_ea[0] == fault_ea[1] && !memcmp(after[0], after[1], 0x2000);
+                for (unsigned r = 0; r < 32; ++r) same &= out[0].fpr[r] == out[1].fpr[r];
+                same &= out[0].fault_st == out[1].fault_st;
+                if (out[0].fault) ++mem_faults;
+                if (getenv("PPC_FP_SWEEP_TRACE") && (mem_cases <= 10 || (ea >= base + 0x2000 && mem_cases < 400)))
+                    fprintf(stderr, "memtrace op=%08x ea=%08x fault=%u/%u rd:%016llx -> %016llx msr=%08x\n", op, ea, out[0].fault, out[1].fault,
+                        (unsigned long long)before.fpr[rd], (unsigned long long)out[0].fpr[rd], mmu.msr());
+                CHECK(same);
+                if (!same && failed < 40)
+                    fprintf(stderr, "fp-mem op=%08x ea=%08x fpr[rd]=%016llx fault %u/%u ea %08x/%08x fpr %016llx/%016llx\n", op, ea,
+                        (unsigned long long)before.fpr[rd], out[0].fault, out[1].fault, fault_ea[0], fault_ea[1],
+                        (unsigned long long)out[0].fpr[rd], (unsigned long long)out[1].fpr[rd]);
+            }
+        }
+        printf("FP load/store sweep: %u cases (%u faulted)\n", mem_cases, mem_faults);
+        mmu.reset();
+    }
+    if (getenv("PPC_FP_BENCH")) {
+        /* The decoder's inner loop (fmadds/fmadds/fsubs/fmuls/fadds twice over), compiled with and without the inline path. */
+        auto fp = [](unsigned xo, unsigned d, unsigned a, unsigned b, unsigned c) {
+            return (59u<<26)|(d<<21)|(a<<16)|(b<<11)|(c<<6)|(xo<<1);
+        };
+        uint32 ops[10];
+        for (unsigned half = 0; half < 2; ++half) {
+            ops[half*5+0] = fp(29,3,0,3,4); ops[half*5+1] = fp(29,10,2,3,7); ops[half*5+2] = fp(20,4,10,7,0);
+            ops[half*5+3] = fp(25,3,1,0,10); ops[half*5+4] = fp(21,4,5,4,0);
+        }
+        double per_op[2] = {0, 0};
+        for (unsigned v = 0; v < 2; ++v) {
+            if (v) nw_jit_legacy |= NW_JIT_LEGACY_FP; else nw_jit_legacy &= ~NW_JIT_LEGACY_FP;
+            const uint32 pcb = base + 0x400 + v * 0x400;
+            nw_jit_fn fn = nw_jit_compile(ops,10,pcb,pcb,0,0);
+            CHECK(fn != NULL); if (!fn) continue;
+            nw_jit_cpu st = {};
+            st.pc = pcb; st.msr = 0x2000u; st.host = cpu; nw_jit_cpu_bind(&st);
+            const unsigned batches = 4000, runs = 500;
+            struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+            for (unsigned b = 0; b < batches; ++b) {
+                for (unsigned r = 0; r < 32; ++r) st.fpr[r] = bits(1.0 + 0.0625 * r);
+                st.fpscr = 0;
+                for (unsigned i = 0; i < runs; ++i) { st.pc = pcb; nw_jit_tail_begin(); fn(&st); }
+            }
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            const double ns = (t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec);
+            per_op[v] = ns / (double(batches) * runs * 10);
+        }
+        nw_jit_legacy &= ~NW_JIT_LEGACY_FP;
+        printf("FP bench: %.1f ns per op inline, %.1f ns per op through the helpers (%.1fx)\n", per_op[0], per_op[1], per_op[0] > 0 ? per_op[1] / per_op[0] : 0.0);
+        /* lfs/stfs through translated memory (DBAT identity map, so the inline path hits the data TLB). */
+        mmu.reset(); mmu.set_msr(0x2000u | ppc32_mmu::MSR_DR);
+        mmu.set_dbat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);
+        nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
+        uint32 mops[8];
+        for (unsigned i = 0; i < 4; ++i) { mops[2*i] = (48u<<26)|((1+i)<<21)|(3u<<16)|(i*4); mops[2*i+1] = (52u<<26)|((1+i)<<21)|(3u<<16)|(0x100+i*4); }
+        double mem_op[2] = {0, 0};
+        for (unsigned v = 0; v < 2; ++v) {
+            if (v) nw_jit_legacy |= NW_JIT_LEGACY_FP; else nw_jit_legacy &= ~NW_JIT_LEGACY_FP;
+            const uint32 pcb = base + 0x1c00 + v * 0x100;	/* code on another page than the data: no self-modifying exits */
+            nw_jit_fn fn = nw_jit_compile(mops,8,pcb,pcb,0,0);
+            CHECK(fn != NULL); if (!fn) continue;
+            nw_jit_cpu st = {};
+            st.pc = pcb; st.msr = 0x2000u | ppc32_mmu::MSR_DR; st.host = cpu; st.gpr[3] = base + 0x200; nw_jit_cpu_bind(&st);
+            for (unsigned warm = 0; warm < 4; ++warm) { st.pc = pcb; nw_jit_tail_begin(); fn(&st); }
+            const unsigned runs = 2000000;
+            struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+            for (unsigned i = 0; i < runs; ++i) { st.pc = pcb; nw_jit_tail_begin(); fn(&st); }
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            mem_op[v] = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / (double(runs) * 8);
+        }
+        nw_jit_legacy &= ~NW_JIT_LEGACY_FP;
+        mmu.reset();
+        printf("FP load/store bench: %.1f ns per op inline, %.1f ns per op through the helpers (%.1fx)\n", mem_op[0], mem_op[1], mem_op[0] > 0 ? mem_op[1] / mem_op[0] : 0.0);
+    }
+    nw_banks_set(NW_PA_RAM,0,0); munmap(ram,0x2000);
+    printf("FP fast-path sweep: %u cases (%u wrote their destination)\n", cases, fast_taken_hint);
+    return failed ? 1 : 0;
+}
+int ppc_core_test_access::multiply_p6(powerpc_cpu *cpu)
+{
+    // Offline exact-rational product literals; FI=1, FR=2, UX=4, OX=8.
+    struct product_case { unsigned precision; uint64 a,b; bool tiny; uint64 result[4]; unsigned flags[4]; uint64 adjusted[4]; unsigned adjusted_flags[4]; };
+    const product_case inputs[] = {
+#include "ppc_multiply_literals.inc"
+    };
+    struct control { unsigned enable, fe, ip; };
+    const control controls[] = {
+        {0,0,0},{0,0x900,0x40},{0x80,0,0},{0x80,0x100,0},
+        {0x80,0x800,0},{0x80,0x900,0x40},{0x40,0,0},{0x40,0x900,0x40},
+        {0x20,0,0},{0x20,0x100,0},{0x20,0x800,0x40},{0x20,0x900,0},
+        {8,0,0},{8,0x900,0x40},{0xe8,0,0},{0xe8,0x900,0x40}
+    };
+    cpu->enable_guest_mmu(true); nw_jit_set_mode(NW_JIT_VERIFY);
+    nw_jit_set_host_fp_exception(checked_fp_exception); nw_jit_set_host_chain(NULL);
+    ppc32_mmu &mmu = ppc32_guest_mmu();
+    const uint32 base = 0x10000000u, pc = base+0x1000;
+    void *const wanted = (void *)(VMBaseDiff+base);
+    void *const ram = mmap(wanted,0x2000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    CHECK(ram == wanted); if (ram != wanted) return 1;
+    nw_banks_set(NW_PA_RAM,base,0x2000);
+    fenv_t environment; fegetenv(&environment);
+    const int host_modes[] = {FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};
+    unsigned cases = 0, publication_cases = 0;
+    const bool baseline = getenv("PPC_MULTIPLY_BASELINE") != NULL;
+    for (unsigned precision : {59u,63u})
+    for (unsigned alias = 0; alias < 6; ++alias)
+    for (unsigned rc : {0u,1u}) {
+        if (baseline && (alias || rc)) continue;
+        const unsigned fa=1, fb=alias>=4 ? 1 : 2;
+        const unsigned fd=alias==1 || alias==5 ? fa : alias==2 ? fb : alias==3 ? 0 : 4;
+        const unsigned xo=25;
+        const uint32 ops[] = {(63u<<26)|(7u<<21)|(8u<<11)|(40u<<1),
+            (precision<<26)|(fd<<21)|(fa<<16)|(fb<<6)|(xo<<1)|rc,
+            (63u<<26)|(5u<<21)|(6u<<11)|(72u<<1)};
+        nw_jit_invalidate_all();
+        for (unsigned i = 0; i < 3; ++i) vm_write_memory_4(pc+4*i,ops[i]);
+        vm_write_memory_4(pc+12,0); // builder stops at the unsupported sentinel
+        nw_jit_fn fn = nw_jit_compile(ops,3,pc,pc,0,0); CHECK(fn != NULL); if (!fn) continue;
+        for (const auto &test : inputs)
+        for (unsigned negative : {0u,1u})
+        for (unsigned rn = 0; rn < 4; ++rn)
+        for (const auto &control : controls)
+        for (unsigned sticky : {0u,0x1ff00000u,0x9ff00000u})
+        for (unsigned engine = 0; engine < 6; ++engine) {
+            if (precision!=test.precision || (alias>=4 && (test.a!=test.b || negative))) continue;
+            if (baseline && (rn || sticky || (engine!=0 && engine!=2) || control.ip || control.fe ||
+                (control.enable!=0 && control.enable!=0x40 && control.enable!=0x20 && control.enable!=8))) continue;
+            ++cases; if (engine>=4) ++publication_cases;
+            const unsigned failures=failed;
+            const uint64 sign=uint64(negative)<<63;
+            const unsigned rounding=negative && rn>=2 ? rn^1u : rn;
+            const bool adjusted=(test.tiny && (control.enable&0x20u)) || ((test.flags[rounding]&8u) && (control.enable&0x40u));
+            const unsigned status=adjusted ? test.adjusted_flags[rounding] : test.flags[rounding];
+            const uint64 answer=(adjusted ? test.adjusted[rounding] : test.result[rounding])|sign;
+            const uint32 causes=(status&1 ? 0x02000000u : 0)|(status&4 ? 0x08000000u : 0)|(status&8 ? 0x10000000u : 0);
+            const bool suppressed=false;
+            nw_jit_cpu before={}; before.pc=pc; before.msr=0x2000u|control.fe|control.ip;
+            before.cr=0xb2345678u; before.xer=0xe0000000u;
+            before.fpscr=sticky|control.enable|rn|0x75000u;
+            auto summaries=[](uint32 f) {
+                f&=~0x60000000u;
+                if (f&0x01f80700u) f|=0x20000000u;
+                if ((f&0x20000000u)&&(f&0x80u) || (f&0x10000000u)&&(f&0x40u) ||
+                    (f&0x08000000u)&&(f&0x20u) || (f&0x04000000u)&&(f&0x10u) ||
+                    (f&0x02000000u)&&(f&8u)) f|=0x40000000u;
+                return f;
+            };
+            before.fpscr=summaries(before.fpscr);
+            uint32 expected_fpscr=before.fpscr;
+            expected_fpscr=(expected_fpscr&~0x60000u)|(status&1 ? 0x20000u : 0)|(status&2 ? 0x40000u : 0);
+            if (!suppressed) {
+                const uint64 magnitude=answer&0x7fffffffffffffffULL;
+                const bool negative=answer>>63;
+                const uint32 classification=magnitude>0x7ff0000000000000ULL ? 17 : !magnitude ? negative ? 18 : 2 :
+                    magnitude==0x7ff0000000000000ULL ? negative ? 9 : 5 :
+                    !adjusted && magnitude<(precision==59 ? 0x3810000000000000ULL : 0x0010000000000000ULL) ? negative ? 24 : 20 : negative ? 8 : 4;
+                expected_fpscr=(expected_fpscr&~0x1f000u)|(classification<<12);
+            }
+            if (causes&~before.fpscr) expected_fpscr|=0x80000000u;
+            expected_fpscr=summaries(expected_fpscr|causes);
+            const bool except=control.fe && (expected_fpscr&0x40000000u);
+            before.srr0=0x12345678; before.srr1=0x87654321;
+            for (unsigned r=0;r<32;++r) {
+                before.fpr[r]=bits(double(r+32)); before.gpr[r]=0x12340000u+r;
+                for (unsigned w=0;w<4;++w) before.vr[r][w]=0x89100000u+r*4+w;
+            }
+            before.fpr[fa]=test.a|sign; before.fpr[fb]=test.b;
+            // Encoded fixed-zero operand fields must not read FPR0.
+            before.fpr[0]=0xfff0000000000001ULL;
+            mmu.reset(); mmu.set_msr(before.msr); cpu->pc()=pc; cpu->last_fetch_pa_=pc;
+            cpu->dec_=1000000; cpu->dec_tb_base_=cpu->tb_host_ticks(); cpu->dec_pending_=false; before.dec=cpu->dec_;
+            cpu->fpscr()=before.fpscr; cpu->cr().set(before.cr); cpu->xer().set(before.xer); cpu->lr()=cpu->ctr()=0;
+            cpu->srr0_=before.srr0; cpu->srr1_=before.srr1; cpu->spcflags().init(); cpu->regs().reserve_valid=0;
+            for (unsigned r=0;r<32;++r) {
+                cpu->fpr_dw(r)=before.fpr[r]; cpu->gpr(r)=before.gpr[r];
+                for (unsigned w=0;w<4;++w) cpu->vr(r).w[w]=before.vr[r][w];
+            }
+            nw_jit_cpu result=before;
+            fesetround(host_modes[engine&3]); feclearexcept(FE_ALL_EXCEPT); feraiseexcept(FE_DIVBYZERO);
+            fp_callback_round=fegetround(); fp_callback_flags=fetestexcept(FE_ALL_EXCEPT);
+            const uint64 serial=cpu->exception_serial_, misses=nw_jit_verify_misses();
+            if (!engine) {
+                for (uint32 op : ops) { instruction(cpu,op); if (cpu->exception_serial_!=serial) break; }
+            } else if (engine==1) (void)nw_jit_interp_n(&result,ops,3,pc);
+            else if (engine==2) { result.host=cpu; nw_jit_cpu_bind(&result); nw_jit_tail_begin(); fn(&result); }
+            else if (engine==3) CHECK(cpu->nw_jit_verify_block(result,fn,ops,3)==1);
+            else { nw_jit_set_mode(engine==4 ? NW_JIT_ON : NW_JIT_VERIFY); CHECK(cpu->nw_jit_try(ops[0])==1); }
+            CHECK(nw_jit_verify_misses()==misses);
+            if (engine==0 || engine>=3) {
+                result.pc=cpu->pc(); result.fpscr=cpu->fpscr(); result.cr=cpu->cr().get(); result.msr=mmu.msr();
+                result.srr0=cpu->srr0_; result.srr1=cpu->srr1_;
+                for (unsigned r=0;r<32;++r) {
+                    result.fpr[r]=cpu->fpr_dw(r); result.gpr[r]=cpu->gpr(r);
+                    for (unsigned w=0;w<4;++w) result.vr[r][w]=cpu->vr(r).w[w];
+                }
+            }
+            CHECK(result.fpscr==expected_fpscr);
+            CHECK(result.cr==(rc ? (before.cr&~0x0f000000u)|((expected_fpscr>>4)&0x0f000000u) : before.cr));
+            CHECK(result.pc==(except ? control.ip ? 0xfff00700u : 0x700u : pc+12));
+            CHECK(result.msr==(except ? before.msr&~0x0204ef32u : before.msr));
+            CHECK(result.srr0==(except ? pc+4 : before.srr0));
+            CHECK(result.srr1==(except ? (before.msr&~0x783f0000u)|0x100000u : before.srr1));
+            if (engine==0 || engine==2 || engine>=4) CHECK(cpu->exception_serial_==serial+unsigned(except));
+            for (unsigned r=0;r<32;++r) {
+                CHECK(result.fpr[r]==(r==7 ? before.fpr[8]^0x8000000000000000ULL :
+                    r==fd ? suppressed ? before.fpr[r] : answer : r==5 && !except ? before.fpr[6] : before.fpr[r]));
+                CHECK(result.gpr[r]==before.gpr[r]);
+                for (unsigned w=0;w<4;++w) CHECK(result.vr[r][w]==before.vr[r][w]);
+            }
+            CHECK(fegetround()==fp_callback_round && fetestexcept(FE_ALL_EXCEPT)==fp_callback_flags);
+            if (failed!=failures && failed<100) fprintf(stderr,"multiply engine=%u prim=%u xo=%u alias=%u a=%016llx b=%016llx rn=%u en=%x fe=%x got=%016llx/%08x expected=%016llx/%08x\n",engine,precision,xo,alias,(unsigned long long)test.a,(unsigned long long)test.b,rn,control.enable,control.fe,(unsigned long long)result.fpr[fd],result.fpscr,(unsigned long long)answer,expected_fpscr);
+        }
+    }
+    printf("P6 multiply: %u literal engine cases, including %u production entry/commit cases\n",cases,publication_cases);
+    fesetenv(&environment); nw_jit_invalidate_all(); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,0x2000);
+    nw_jit_set_host_fp_exception(powerpc_cpu::jit_host_fp_exception);
+    nw_jit_set_host_chain(powerpc_cpu::jit_host_chain); nw_jit_set_mode(NW_JIT_ON);
+    return failed ? 1 : 0;
+}
 int ppc_core_test_access::run()
 {
     powerpc_cpu *cpu = new powerpc_cpu;
@@ -905,6 +1309,7 @@ int ppc_core_test_access::run()
     scalar_p6(cpu);
     frsp_p6(cpu);
     basic_special_p6(cpu);
+    multiply_p6(cpu);
     io_publication(cpu);
     // Literal boundary expectations qualify every OE/Rc form independently
     // of the JIT helpers. Run KPX, the local C path, ARM64 and private replay.
@@ -2911,6 +3316,7 @@ int ppc_core_test_access::run()
             mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
             mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
             mmu.set_dbat(1, 0x20020002u, (ram_base + 0x20000u));
+            nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);	// a guest mtdbat would announce this; byte/halfword loads now fill the table too
             for (int i = 0; i < 32; ++i) { cpu->gpr(i) = 0; cpu->fpr_dw(i) = 0; }
             vm_write_memory_4(ram_base + 0x1fffc, 42);
             cpu->gpr(4) = 0x2001fffc; cpu->gpr(30) = 77; cpu->gpr(31) = 88;
@@ -3009,6 +3415,7 @@ int ppc_core_test_access::run()
             mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
             mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
             mmu.set_dbat(1, 0x20020002u, ram_base + 0x20000u);
+            nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);	// a guest mtdbat would announce this; byte/halfword loads now fill the table too
             const uint32 start = 0x69000 + string_case++ * 64;
             nw_jit_cpu shadow = string_start(0x20020000u - prefix, start, 0);
             for (unsigned i = 0; i < prefix; ++i) vm_write_memory_1(ram_base + 0x20000 - prefix + i, 0x10u + i);
@@ -3035,6 +3442,7 @@ int ppc_core_test_access::run()
             mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
             mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
             mmu.set_dbat(1, 0x20020002u, ram_base | 2u);
+            nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);	// a guest mtdbat would announce this; byte/halfword loads now fill the table too
             nw_jit_cpu shadow = string_start(0x2001fffdu, 0x7a000 + store * 64, 0);
             for (unsigned i = 0; i < 7; ++i) vm_write_memory_1(i < 3 ? ram_base + 0x1fffd + i : ram_base + i - 3, 0x11u * (i + 1));
             vm_write_memory_1(ram_base + 4, 0xa5);
@@ -3053,6 +3461,7 @@ int ppc_core_test_access::run()
             mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
             mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
             mmu.set_dbat(1, 0x20020002u, ram_base | (fault ? 0u : 2u));
+            nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);	// a guest mtdbat would announce this; byte/halfword loads now fill the table too
             nw_jit_cpu shadow = string_start(0x2001fffb, 0x7c000 + fault * 64, 0);
             const uint32 before2 = shadow.gpr[2], before5 = shadow.gpr[5];
             for (unsigned i = 0; i < 8; ++i) vm_write_memory_1(i < 5 ? ram_base + 0x1fffb + i : ram_base + i - 5, 0x11u * (i + 1));
@@ -3128,6 +3537,7 @@ int ppc_core_test_access::run()
             mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
             mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
             mmu.set_dbat(1, 0x20020002u, ram_base | (fault ? 0u : 2u));
+            nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);	// a guest mtdbat would announce this; byte/halfword loads now fill the table too
             const uint32 start = 0x2001f800u + 64 * (verify * 2 + fault);
             nw_jit_cpu shadow = string_start(0x2001fffcu, start, 0);
             cpu->last_fetch_pa_ = ram_base + 0x1f800;
@@ -3422,6 +3832,7 @@ int ppc_core_test_access::run()
             mmu.reset(); mmu.set_msr(ppc32_mmu::MSR_DR);
             mmu.set_dbat(0, 0x20000002u, ram_base | 2u);
             mmu.set_dbat(1, 0x20020002u, ram_base);
+            nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);	// a guest mtdbat would announce this; byte/halfword loads now fill the table too
             const uint32 start = ram_base + 0x11000 + 0x100 * (native_tail * 2 + store);
             nw_jit_cpu before = string_start(0x2001fffc, start, 0x80000000);
             cpu->lr() = start + 0xc0;
@@ -3681,6 +4092,43 @@ int ppc_core_test_access::run()
         CHECK(trace.count == 0 && trace.cursor == 0);
     }
 
+    // The data-TLB memo the 68k layer uses for reference-bit commits and writable previews: a recorded-read note
+    // lasts until the entry is refilled or dropped, and a store lookup needs a writable entry.
+    {
+        const uint32 ea = 0x6e000;
+        uint32 pa = 0;
+        nw_jit_dtlb_drop_page(ea, NW_JIT_DTLB_FL_RESET);
+        CHECK(!nw_jit_dtlb_take_rec(ea, 0));			// no entry: nothing to mark
+        nw_jit_dtlb_fill(ea, 0x9000, 0, 0, 0);
+        CHECK(nw_jit_dtlb_lookup_pr(ea, 0, &pa, 0) && pa == 0x9000);
+        CHECK(!nw_jit_dtlb_lookup_pr(ea, 1, &pa, 0));		// read-only entry misses a store lookup
+        CHECK(!nw_jit_dtlb_take_rec(ea, 1));			// other privilege: a miss, and it does not mark
+        CHECK(!nw_jit_dtlb_take_rec(ea, 0));			// first note marks the entry
+        CHECK(nw_jit_dtlb_take_rec(ea, 0));			// and the second reports it done
+        nw_jit_dtlb_fill(ea, 0x9000, 1, 0, 0);			// a refill forgets it
+        CHECK(nw_jit_dtlb_lookup_pr(ea, 1, &pa, 0) && pa == 0x9000);
+        CHECK(!nw_jit_dtlb_take_rec(ea, 0));
+        CHECK(nw_jit_dtlb_take_rec(ea, 0));
+        nw_jit_dtlb_drop_page(ea, NW_JIT_DTLB_FL_RESET);	// a tlbie drops the entry and with it the note
+        CHECK(!nw_jit_dtlb_take_rec(ea, 0));
+        nw_jit_dtlb_fill(ea, 0x9000, 0, 0, 0);
+        CHECK(!nw_jit_dtlb_take_rec(ea, 0));			// the refill after the drop starts unrecorded
+        // A writable flag is not proof of a recorded store translation: only the explicit mark is.
+        nw_jit_dtlb_fill(ea, 0x9000, 1, 0, 0);
+        CHECK(!nw_jit_dtlb_store_rec(ea, 0, &pa));
+        nw_jit_dtlb_mark_store_rec(ea, 1);			// other privilege: no live entry, no mark
+        CHECK(!nw_jit_dtlb_store_rec(ea, 0, &pa));
+        nw_jit_dtlb_mark_store_rec(ea, 0);
+        CHECK(nw_jit_dtlb_store_rec(ea, 0, &pa) && pa == 0x9000);
+        CHECK(!nw_jit_dtlb_store_rec(ea, 1, &pa));
+        nw_jit_dtlb_fill(ea, 0x9000, 1, 0, 0);			// a refill clears the mark
+        CHECK(!nw_jit_dtlb_store_rec(ea, 0, &pa));
+        nw_jit_dtlb_fill(ea, 0x9000, 0, 0, 0);			// a read-only entry cannot be marked
+        nw_jit_dtlb_mark_store_rec(ea, 0);
+        CHECK(!nw_jit_dtlb_store_rec(ea, 0, &pa));
+        nw_jit_dtlb_drop_page(ea, NW_JIT_DTLB_FL_RESET);
+    }
+
     // Explicit integer-conversion bounds/NaNs, including the full chosen
     // KPX-compatible representation. No undefined host float-to-int cast.
     const uint64 conversion_inputs[] = {UINT64_C(0x7ff8000000000000), UINT64_C(0x7ff0000000000001),
@@ -3902,6 +4350,8 @@ extern "C" int ppc_test_main(int argc, char **argv) {
         return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "--basic-special-p6")) { powerpc_cpu *cpu=new powerpc_cpu; int status=ppc_core_test_access::basic_special_p6(cpu); printf("P6 basic special tests: %u passed, %u failed\n",passed,failed); return status; }
+    if (argc == 2 && !strcmp(argv[1], "--fp-fast-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::fp_fast_sweep(cpu); printf("FP fast sweep: %u passed, %u failed\n",passed,failed); return status; }
+    if (argc == 2 && !strcmp(argv[1], "--multiply-p6")) { powerpc_cpu *cpu=new powerpc_cpu; int status=ppc_core_test_access::multiply_p6(cpu); printf("P6 multiply tests: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--frsp-p6")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::frsp_p6(cpu); printf("P6 frsp tests: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--scalar-p6")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::scalar_p6(cpu); printf("P6 scalar tests: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--io-publication")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::io_publication(cpu); printf("Raw file-read tests: %u passed, %u failed\n",passed,failed); return status; }

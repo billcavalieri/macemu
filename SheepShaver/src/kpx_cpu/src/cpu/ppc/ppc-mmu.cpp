@@ -377,20 +377,12 @@ ppc32_xlate_result ppc32_mmu::translate(uint32_t ea, ppc32_xlate_space space, un
 	return r;
 }
 
-static ppc32_mmu g_guest_mmu;
-static bool g_guest_mmu_enabled;
-
-ppc32_mmu &ppc32_guest_mmu()
-{
-	return g_guest_mmu;
-}
+/* The singleton and its enable flag are declared in ppc-mmu.hpp so ppc32_guest_mmu() and ppc32_guest_mmu_enabled()
+ * can inline: they run several times per chain exit (about 1.7% of the emulation thread as out-of-line calls). */
+ppc32_mmu ppc32_guest_mmu_instance;
+bool ppc32_guest_mmu_enabled_flag;
 
 void ppc32_guest_mmu_enable(bool on)
 {
-	g_guest_mmu_enabled = on;
-}
-
-bool ppc32_guest_mmu_enabled()
-{
-	return g_guest_mmu_enabled;
+	ppc32_guest_mmu_enabled_flag = on;
 }

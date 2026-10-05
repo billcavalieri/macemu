@@ -150,6 +150,10 @@ class sheepshaver_cpu
 
 public:
 
+	// Read-only view of the guest PC for the NW_GUEST_PROF sampler thread (a racy read is fine for sampling).
+	uint32 sample_pc() { return pc(); }
+	uint32 sample_gpr(int n) { return gpr(n); }
+
 	// Constructor
 	sheepshaver_cpu();
 
@@ -850,6 +854,165 @@ inline void sheepshaver_cpu::get_resource(uint32 old_get_resource)
 // PowerPC CPU emulator
 static sheepshaver_cpu *ppc_cpu = NULL;
 
+/*
+ *  Guest PC sampler (diagnostic, NW_GUEST_PROF=1; costs nothing when off). A host thread reads the guest PC and the
+ *  idle flag every millisecond, which attributes time to guest code that a host profile cannot see (the JIT's own code
+ *  has no symbols) and shows how much of the time the guest sits in its idle loop. Every 8 s it prints the idle share,
+ *  the share per large address region and the hottest 64-byte blocks, then starts again.
+ */
+extern volatile int nw_guest_idle_flag;
+extern uint32_t nw_trap_hist[65536];
+extern volatile int nw_trap_prof_on;
+#include "nw_68k_jit.h"
+#include "nw_68k_core.h"
+extern uint64_t nw_trapsite_key[16384];
+extern uint32_t nw_trapsite_cnt[16384];
+#include <sys/time.h>
+#include <map>
+#include <chrono>
+#include <functional>
+#include <thread>
+#include <atomic>
+static void nw_guest_prof_main(bool dump_words)
+{
+	std::map<uint32, unsigned> blocks, regions, pc68;
+	unsigned total = 0, idle = 0, ticks = 0;
+	const char *pe = getenv("NW_GUEST_PROF_MS");	// report period, default 8000 ms
+	const unsigned period = pe && atoi(pe) > 0 ? (unsigned)atoi(pe) : 8000u;
+	const auto t_start = std::chrono::steady_clock::now();
+	nw_trap_prof_on = 1;
+	{ struct timeval tv0; gettimeofday(&tv0, NULL); printf("GPROFSTART epoch=%lld.%03d\n", (long long)tv0.tv_sec, (int)(tv0.tv_usec / 1000)); }
+	static uint32_t trap_prev[65536];
+	for (;;) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		if (!ppc_cpu)
+			continue;
+		total++;
+		if (nw_guest_idle_flag) {
+			idle++;
+		} else {
+			const uint32 pc = ppc_cpu->sample_pc();
+			blocks[pc & ~63u]++;
+			regions[pc >> 20]++;
+			if ((pc >> 20) == 0x680)			// in the ROM's 68k emulator: r24 is the 68k PC
+				pc68[ppc_cpu->sample_gpr(24) & ~63u]++;
+		}
+		if (++ticks < period)
+			continue;
+		ticks = 0;
+		printf("GPROF t=%.1fs %u samples: idle %.1f%%; regions (MB-aligned, %% of non-idle):", std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count(), total, 100.0 * idle / (total ? total : 1));
+		std::multimap<unsigned, uint32, std::greater<unsigned>> rs;
+		for (auto &kv : regions) rs.insert({kv.second, kv.first});
+		int n = 0;
+		for (auto &kv : rs) { if (n++ >= 8) break; printf(" %03xMB:%.1f", (unsigned)kv.second, 100.0 * kv.first / (total - idle ? total - idle : 1)); }
+		printf("\n");
+		std::multimap<unsigned, uint32, std::greater<unsigned>> bs;
+		for (auto &kv : blocks) bs.insert({kv.second, kv.first});
+		n = 0;
+		for (auto &kv : bs) {
+			if (n++ >= 24) break;
+			printf("GPROF   %08x %.2f%%", (unsigned)kv.second, 100.0 * kv.first / (total - idle ? total - idle : 1));
+			if (dump_words && n <= 14) {	// NW_GUEST_PROF=2: the block's 16 instruction words, for classifying the hot code
+				// Translate on a private snapshot of the MMU (never the live one: translate() fills the
+				// TLB, which the emulation thread owns) and without recording accesses. Only physical
+				// addresses inside RAM are read; anything else prints as dashes.
+				extern uint32 RAMBase, RAMSize;
+				static ppc32_mmu snap;
+				snap = ppc32_guest_mmu();
+				printf(" :");
+				for (uint32 w = 0; w < 16; w++) {
+					const ppc32_xlate_result xr = snap.translate(kv.second + w * 4u, PPC32_XLATE_IR, 4, false, false);
+					if (xr.ok && xr.pa >= RAMBase && (uint64_t)xr.pa + 4 <= (uint64_t)RAMBase + RAMSize)
+						printf(" %08x", (unsigned)vm_read_memory_4(xr.pa));
+					else
+						printf(" --------");
+				}
+			}
+			printf("\n");
+		}
+		{
+			std::multimap<unsigned, uint32, std::greater<unsigned>> ps;
+			for (auto &kv : pc68) ps.insert({kv.second, kv.first});
+			printf("GPROF68 68k pc (r24) top:");
+			n = 0;
+			for (auto &kv : ps) { if (n++ >= 10) break; printf(" %08x:%.1f", (unsigned)kv.second, 100.0 * kv.first / (total - idle ? total - idle : 1)); }
+			printf("\n");
+			if (dump_words && getenv("NW_DUMP68K")) {	// NW_DUMP68K=<hex start>,<hex length>: one shot, first period after 12 s
+				static bool done;
+				if (!done && std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count() > 12.0) {
+					done = true;
+					unsigned long st = 0, len = 0;
+					sscanf(getenv("NW_DUMP68K"), "%lx,%lx", &st, &len);
+					const uint32 pa = nw_la_to_pa((uint32)st);
+					if (len <= 0x40000 && (nw_pa_kind(pa) == NW_PA_RAM || nw_pa_kind(pa) == NW_PA_ROM)) {
+						printf("GPROF68D %08lx %lx:", st, len);
+						for (unsigned long b = 0; b < len; b++) printf("%02x", (unsigned)vm_read_memory_1(pa + b));
+						printf("\n");
+					}
+				}
+			}
+			if (dump_words) {		// the 64 bytes of each of the 8 hottest 68k blocks, as hex, for offline disassembly
+				n = 0;
+				for (auto &kv : ps) {
+					if (n++ >= 8) break;
+					const uint32 pa = nw_la_to_pa(kv.second);
+					const int kind = nw_pa_kind(pa);
+					printf("GPROF68W %08x %.2f%%:", (unsigned)kv.second, 100.0 * kv.first / (total - idle ? total - idle : 1));
+					if (kind == NW_PA_RAM || kind == NW_PA_ROM)
+						for (uint32 b = 0; b < 64; b++) printf("%02x", (unsigned)vm_read_memory_1(pa + b));
+					printf("\n");
+				}
+			}
+		}
+		{
+			std::multimap<unsigned, unsigned, std::greater<unsigned>> ts;
+			unsigned all = 0;
+			for (unsigned t = 0; t < 65536; t++) {
+				const uint32_t d = nw_trap_hist[t] - trap_prev[t];
+				trap_prev[t] = nw_trap_hist[t];
+				if (d) { ts.insert({d, t}); all += d; }
+			}
+			{	// the busiest (trap, caller pc) pairs of this period
+				std::multimap<unsigned, uint64_t, std::greater<unsigned>> ss;
+				for (unsigned i = 0; i < 16384; i++) {
+					if (nw_trapsite_key[i] && nw_trapsite_cnt[i]) { ss.insert({nw_trapsite_cnt[i], nw_trapsite_key[i]}); }
+					nw_trapsite_cnt[i] = 0;
+				}
+				printf("GPROFSITE:");
+				int m = 0;
+				for (auto &kv : ss) { if (m++ >= 8) break; printf(" %04x@%08x:%u", (unsigned)((kv.second >> 32) & 0xffff), (unsigned)(kv.second & 0xffffffffu), kv.first); }
+				printf("\n");
+			}
+			printf("GPROFTRAP %u traps; top:", all);
+			n = 0;
+			for (auto &kv : ts) { if (n++ >= 8) break; printf(" %04x:%u", kv.second, kv.first); }
+			printf("\n");
+		}
+		{
+			static nw68_cache_stats prev;
+			static uint64_t prev_native, prev_fb;
+			const nw68_cache_stats cs = nw68_cache_statistics();
+			const uint64_t nat = nw_68k_native_count(), fb = nw_68k_fallback_count();
+			printf("GPROF68C dispatches native=%llu fallback=%llu | compiled=%llu hits=%llu invalidated=%llu blocks=%llu block_insn=%llu decoded_hits=%llu\n",
+			       (unsigned long long)(nat - prev_native), (unsigned long long)(fb - prev_fb),
+			       (unsigned long long)(cs.compiled - prev.compiled), (unsigned long long)(cs.hits - prev.hits),
+			       (unsigned long long)(cs.invalidated - prev.invalidated), (unsigned long long)(cs.blocks - prev.blocks),
+			       (unsigned long long)(cs.block_instructions - prev.block_instructions), (unsigned long long)(cs.decoded_hits - prev.decoded_hits));
+			prev = cs; prev_native = nat; prev_fb = fb;
+		}
+		fflush(stdout);
+		blocks.clear(); regions.clear(); pc68.clear(); total = idle = 0;
+	}
+}
+static void nw_guest_prof_start()
+{
+	const char *e = getenv("NW_GUEST_PROF");
+	if (e && (e[0] == '1' || e[0] == '2')) {
+		static std::thread t(nw_guest_prof_main, e[0] == '2');
+		t.detach();
+	}
+}
+
 void FlushCodeCache(uintptr start, uintptr end)
 {
 	D(bug("FlushCodeCache(%08x, %08x)\n", start, end));
@@ -1113,6 +1276,8 @@ void init_emul_ppc(void)
 	} else {
 		nw_log_translator_off();
 	}
+
+	nw_guest_prof_start();
 
 #if ENABLE_MON
 	// Install "regs" command in cxmon
