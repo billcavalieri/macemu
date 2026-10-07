@@ -1,0 +1,8 @@
+[submodule "third_party/qemu"]
+	path = third_party/qemu
+	url = https://gitlab.com/qemu-project/qemu.git
+	shallow = true
+[submodule "third_party/mame"]
+	path = third_party/mame
+	url = https://github.com/mamedev/mame.git
+	shallow = true

@@ -44,5 +44,13 @@ typedef disk_generic::status (disk_factory)(const char *path, bool read_only,
 
 extern disk_factory disk_sparsebundle_factory;
 extern disk_factory disk_vhd_factory;
+extern disk_factory disk_qcow_factory;
+extern disk_factory disk_chd_factory;
+
+// A disk factory that finds a problem the emulator must not start with (a qcow overlay whose backing file cannot be
+// opened) records it here; InitAll() checks sys_disk_startup_failure() after the drivers are initialised and refuses
+// to start, showing the message. The text is also logged by whoever calls this.
+void sys_disk_startup_failed(const char *message);
+const char *sys_disk_startup_failure(void);
 
 #endif

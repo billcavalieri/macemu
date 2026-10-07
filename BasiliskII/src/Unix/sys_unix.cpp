@@ -73,6 +73,12 @@
 static disk_factory *disk_factories[] = {
 #ifndef STANDALONE_GUI
 	disk_sparsebundle_factory,
+#if defined(HAVE_QCOW2)
+	disk_qcow_factory,
+#endif
+#if defined(HAVE_CHD)
+	disk_chd_factory,
+#endif
 #if defined(HAVE_LIBVHD)
 	disk_vhd_factory,
 #endif
@@ -155,6 +161,19 @@ void SysExit(void)
 /*
  *  Manage open file handles
  */
+
+static char disk_startup_failure[2048];
+
+void sys_disk_startup_failed(const char *message)
+{
+	if (!disk_startup_failure[0])	// the first one is the one reported
+		snprintf(disk_startup_failure, sizeof(disk_startup_failure), "%s", message);
+}
+
+const char *sys_disk_startup_failure(void)
+{
+	return disk_startup_failure[0] ? disk_startup_failure : NULL;
+}
 
 static void sys_add_mac_file_handle(mac_file_handle *fh)
 {

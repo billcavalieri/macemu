@@ -48,6 +48,9 @@
 #include "sigsegv.h"
 #include "thunks.h"
 #include "nw_boot_contract.h"
+#if defined(HAVE_QCOW2)
+extern const char *sys_disk_startup_failure(void);
+#endif
 
 #define DEBUG 0
 #include "debug.h"
@@ -131,6 +134,13 @@ bool InitAll(const char *vmdir)
 	SonyInit();
 	DiskInit();
 	CDROMInit();
+#if defined(HAVE_QCOW2)
+	// A qcow overlay whose backing file cannot be opened: do not start (the message has been logged already).
+	if (const char *disk_failure = sys_disk_startup_failure()) {
+		ErrorAlert(disk_failure);
+		return false;
+	}
+#endif
 	SCSIInit();
 
 	// Init external file system
