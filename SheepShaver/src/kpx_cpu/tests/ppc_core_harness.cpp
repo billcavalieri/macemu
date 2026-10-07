@@ -68,6 +68,7 @@ struct ppc_core_test_access {
     static int fp_fast_sweep(powerpc_cpu *);
     static int sub_store_sweep(powerpc_cpu *);
     static int loop_bench(powerpc_cpu *);
+    static int ibtc_remap(powerpc_cpu *);
     static int link_sweep(powerpc_cpu *);
     static int io_publication(powerpc_cpu *);
     static void stop_on_device(void *context) { static_cast<powerpc_cpu *>(context)->spcflags().set(SPCFLAG_CPU_EXEC_RETURN); }
@@ -918,7 +919,7 @@ int ppc_core_test_access::loop_bench(powerpc_cpu *cpu)
     CHECK(ram == wanted); if (ram != wanted) return 1;
     nw_banks_set(NW_PA_RAM,base,span);
     nw_jit_set_code_pages(base,span,0,0);
-    struct kernel { const char *name; std::vector<uint32> code; unsigned insns_per_iter; unsigned iters; };
+    struct kernel { const char *name; std::vector<uint32> code; unsigned insns_per_iter; unsigned iters; std::vector<uint32> code2; std::function<void()> init; uint32 expect_r3; };
     auto lbzu = [](unsigned rd, unsigned ra, int d) { return (35u<<26)|(rd<<21)|(ra<<16)|uint16(d); };
     auto stbu = [](unsigned rs, unsigned ra, int d) { return (39u<<26)|(rs<<21)|(ra<<16)|uint16(d); };
     auto lfd = [](unsigned fd, unsigned ra, int d) { return (50u<<26)|(fd<<21)|(ra<<16)|uint16(d); };
@@ -935,8 +936,25 @@ int ppc_core_test_access::loop_bench(powerpc_cpu *cpu)
      * lbzx r4,r7,r4; lbzx r0,r7,r5; extsb r4,r4; extsb r0,r0; cmpw r4,r0; beq top; exit: blr */
     kernels.push_back({"compare loop   ", {addi(10,10,1), x31(9,4,0,922), x31(0,4,6,0), bc(4,0,0x2c), (42u<<26)|(0u<<21)|(8u<<16),
         x31(10,5,0,922), x31(0,5,0,0), bc(4,0,0x1c), x31(4,7,4,87), x31(0,7,5,87), x31(4,4,0,954), x31(0,0,0,954), x31(0,4,0,0), bc(12,2,-0x34), BLR}, 14, 2047});
+    /* Calls and returns: a leaf one page away and in the same page, and a call through CTR (bctrl) with a conditional loop. */
+    {
+        const uint32 func_far = base + 0x5000u, code_at = base + 0x6000u;
+        auto bl = [](int byte_disp) { return (18u<<26)|(uint32(byte_disp) & 0x3fffffcu)|1u; };
+        const uint32 MFLR = x31(31,8,0,339), MTLR = x31(31,8,0,467);
+        kernel same = {"call, same page ", {MFLR, bl(20), bdnz(-4), MTLR, BLR, 0x60000000u, addi(3,3,1), BLR}, 4, 1500, {}, nullptr, 1500};
+        kernel far = {"call, other page", {MFLR, bl(int(func_far) - int(code_at) - 4), bdnz(-4), MTLR, BLR}, 4, 1500, {addi(3,3,1), BLR}, nullptr, 1500};
+        /* mtctr r6; bctrl; addic. r7,r7,-1; bne top; with the leaf in the other page */
+        kernel ctr = {"bctrl + blr     ", {MFLR, x31(6,9,0,467), (19u<<26)|(20u<<21)|(528u<<1)|1u, (13u<<26)|(7u<<21)|(7u<<16)|uint16(-1), bc(4,2,-12), MTLR, BLR}, 6, 1500, {addi(3,3,1), BLR}, nullptr, 1500};
+        ctr.init = [&]() { cpu->gpr(6) = func_far; cpu->gpr(7) = 1500; };
+        kernels.push_back(same); kernels.push_back(far); kernels.push_back(ctr);
+        /* conditional returns: beqlr not taken then taken, in a leaf one page away */
+        kernel cret = {"conditional blr ", {MFLR, bl(int(func_far) - int(code_at) - 4), bdnz(-4), MTLR, BLR}, 5, 1500, {addi(3,3,1), (19u<<26)|(12u<<21)|(2u<<16)|(16u<<1), BLR}, nullptr, 1500};
+        kernels.push_back(cret);
+    }
     for (kernel &k : kernels) {
         const uint32 code = base + 0x6000u;
+        for (size_t i = 0; i < k.code2.size(); ++i) vm_write_memory_4(base + 0x5000u + uint32(i*4), k.code2[i]);
+        if (!k.code2.empty()) nw_jit_itlb_fill(base + 0x5000u, base + 0x5000u);
         for (size_t i = 0; i < k.code.size(); ++i) vm_write_memory_4(code + uint32(i*4), k.code[i]);
         for (unsigned i = 0; i < 0x4000; ++i) ((uint8 *)ram)[i] = 0;
         for (unsigned i = 0; i < 4096; ++i) ((uint8 *)ram)[i] = uint8(i * 7);	/* copy source */
@@ -944,12 +962,14 @@ int ppc_core_test_access::loop_bench(powerpc_cpu *cpu)
         double best = 1e30; uint64 insns = 0;
         for (unsigned rep = 0; rep < 5; ++rep) {
             nw_jit_invalidate_all(); nw_jit_itlb_flush(); nw_jit_itlb_fill(code, code);	/* the fetch path fills this in the emulator */
+            if (!k.code2.empty()) nw_jit_itlb_fill(base + 0x5000u, base + 0x5000u);
             cpu->pc() = code; cpu->lr() = sentinel; cpu->ctr() = k.iters;
             for (unsigned r = 0; r < 32; ++r) cpu->gpr(r) = 0;
             cpu->gpr(3) = base - 1; cpu->gpr(4) = base + 0x1000u - 1;
             if (k.code.size() == 8) { cpu->gpr(3) = base; cpu->gpr(4) = base + 0x1000u; }
             if (k.code.size() == 15) { cpu->gpr(8) = base + 0x2000u; cpu->gpr(7) = base + 0x3000u; cpu->gpr(6) = 1; cpu->gpr(9) = 0; cpu->gpr(10) = 0;
                 cpu->gpr(4) = 0; /* unused: lbzx r4,r7,r4 reads base+0x3000 */ }
+            if (k.init) k.init();
             cpu->cr().set(0); cpu->xer().set(0); cpu->spcflags().init();
             cpu->dec_ = 0x7fffffffu; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false;
             ppc32_guest_mmu().set_msr(msr_run);
@@ -960,9 +980,12 @@ int ppc_core_test_access::loop_bench(powerpc_cpu *cpu)
                 cpu->pc() = code; cpu->lr() = sentinel; cpu->ctr() = k.iters;
                 cpu->gpr(3) = k.code.size() == 8 ? base : base - 1; cpu->gpr(4) = k.code.size() == 8 ? base + 0x1000u : base + 0x1000u - 1;
                 if (k.code.size() == 15) { cpu->gpr(4) = 0; cpu->gpr(10) = 0; }
+                if (k.init) k.init();
+                if (k.expect_r3) cpu->gpr(3) = 0;
                 while (cpu->pc() != sentinel && calls < 20000000ull) {
                     cpu->last_fetch_pa_ = cpu->pc();
                     const uint32 op = vm_read_memory_4(cpu->pc());
+                    if (getenv("PPC_LOOP_TRACE") && calls < 12) fprintf(stderr, "  [%s] call %llu pc=%08x op=%08x lr=%08x ctr=%x r3=%x\n", k.name, (unsigned long long)calls, cpu->pc(), op, cpu->lr(), unsigned(cpu->ctr()), cpu->gpr(3));
                     if (!cpu->nw_jit_try(op)) { CHECK(false); fprintf(stderr, "loop bench: nw_jit_try declined pc=%08x op=%08x supported=%d mode=%d msr=%08x pa=%08x\n", cpu->pc(), op, nw_jit_op_supported(op), nw_jit_mode(), ppc32_guest_mmu().msr(), cpu->last_fetch_pa_); break; }
                     ++calls;
                 }
@@ -974,11 +997,102 @@ int ppc_core_test_access::loop_bench(powerpc_cpu *cpu)
             CHECK(cpu->pc() == sentinel);
             if (k.code.size() == 4) CHECK(vm_read_memory_1(base + 0x1000u + 10) == uint8(10 * 7));
             if (k.code.size() == 15) CHECK(cpu->gpr(10) == k.iters);
+            if (k.expect_r3) CHECK(cpu->gpr(3) == k.expect_r3);
             if (calls >= 20000000ull) { CHECK(false); fprintf(stderr, "loop bench: %s did not finish: pc=%08x ctr=%u r3=%08x r10=%u\n", k.name, cpu->pc(), unsigned(cpu->ctr()), cpu->gpr(3), cpu->gpr(10)); break; }
         }
         { uint64 lf = 0, lm = 0; nw_jit_link_stats(&lf, &lm); printf("loop bench %s: %.1f guest insns/us (%.2f ns per insn)  [links made %llu, fast hops %llu, helper hops %llu, hop stops cap %llu nochain %llu pcmis %llu itlb %llu aline %llu cmiss %llu]\n", k.name, 1000.0 / best, best, (unsigned long long)lm, (unsigned long long)lf, (unsigned long long)nw_jit_chain_hops(), (unsigned long long)nw_jit_hop_stop_count(0), (unsigned long long)nw_jit_hop_stop_count(1), (unsigned long long)nw_jit_hop_stop_count(2), (unsigned long long)nw_jit_hop_stop_count(3), (unsigned long long)nw_jit_hop_stop_count(4), (unsigned long long)nw_jit_hop_stop_count(5)); }
     }
     nw_jit_invalidate_all(); nw_jit_set_code_pages(0,0,0,0); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,span);
+    return failed ? 1 : 0;
+}
+
+
+/* Block exits that leave the page (a call to another page through bl or through CTR, and the return) are cached across
+ * pages, so the cache must not outlive a change of the instruction translation. The same effective address is mapped to
+ * a leaf in one physical page, called until every exit is linked, then remapped (an IBAT change, as mtspr does it:
+ * set_ibat and an instruction TLB flush) to a different leaf; the next calls must run the new one. Same for a
+ * segment-register change and tlbie, which go through the same instruction-TLB events. */
+int ppc_core_test_access::ibtc_remap(powerpc_cpu *cpu)
+{
+    cpu->enable_guest_mmu(true); nw_jit_set_mode(NW_JIT_ON); nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+    const uint32 base = 0x10000000u, sentinel = base + 0x7000u, code = base + 0x6000u, win = base + 0x400000u;
+    const uint32 pa1 = base + 0x20000u, pa2 = base + 0x40000u;
+    const unsigned span = 0x60000;
+    const uint32 msr_run = 0x2000u | ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR;
+    ppc32_mmu &mmu = ppc32_guest_mmu();
+    mmu.reset(); mmu.set_msr(msr_run);
+    void *const wanted = (void *)(VMBaseDiff+base);
+    void *const ram = mmap(wanted,span,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    CHECK(ram == wanted); if (ram != wanted) return 1;
+    nw_banks_set(NW_PA_RAM,base,span);
+    nw_jit_set_code_pages(base,span,0,0);
+    auto bat = [&](unsigned i, uint32 ea, uint32 pa) { mmu.set_ibat(i, (ea & 0xfffe0000u) | 3u, (pa & 0xfffe0000u) | 2u); };
+    mmu.set_ibat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);
+    mmu.set_dbat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);
+    auto x31 = [](unsigned rd, unsigned ra, unsigned rb, unsigned xo) { return (31u<<26)|(rd<<21)|(ra<<16)|(rb<<11)|(xo<<1); };
+    auto addi = [](unsigned rd, unsigned ra, int i) { return (14u<<26)|(rd<<21)|(ra<<16)|uint16(i); };
+    auto addis = [](unsigned rd, unsigned ra, int i) { return (15u<<26)|(rd<<21)|(ra<<16)|uint16(i); };
+    const uint32 BLR = 0x4e800020u;
+    /* mflr r31; bl win; bl win; lis r12,hi(win); mtctr r12; bctrl; bctrl; mtlr r31; blr: two direct calls to the other page,
+     * two through CTR; after the first call has been resolved by the helper the rest are the cached exits. */
+    const uint32 BL = (18u<<26)|1u, BCTRL = (19u<<26)|(20u<<21)|(528u<<1)|1u;
+    const uint32 prog[] = { x31(31,8,0,339), BL | (uint32(win - (code + 4)) & 0x3fffffcu), BL | (uint32(win - (code + 8)) & 0x3fffffcu),
+                            addis(12,0,int16(win >> 16)), x31(12,9,0,467), BCTRL, BCTRL, x31(31,8,0,467), BLR };
+    for (size_t i = 0; i < sizeof prog / sizeof prog[0]; ++i) vm_write_memory_4(code + uint32(i * 4), prog[i]);
+    vm_write_memory_4(pa1, addi(3,3,1)); vm_write_memory_4(pa1 + 4, BLR);
+    vm_write_memory_4(pa2, addi(3,3,100)); vm_write_memory_4(pa2 + 4, BLR);
+    auto run = [&]() {
+        cpu->pc() = code; cpu->lr() = sentinel; cpu->gpr(3) = 0; cpu->ctr() = 0;
+        cpu->cr().set(0); cpu->xer().set(0); cpu->spcflags().init();
+        cpu->dec_ = 0x7fffffffu; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false;
+        mmu.set_msr(msr_run);
+        uint64 calls = 0;
+        while (cpu->pc() != sentinel && calls < 100000) {
+            uint32 ipa = 0;
+            if (!nw_jit_itlb_lookup(cpu->pc(), &ipa)) {		/* what the fetch path does on a miss */
+                ppc32_xlate_result r = mmu.translate(cpu->pc(), PPC32_XLATE_IR, 4);
+                CHECK(r.ok); if (!r.ok) break;
+                ipa = r.pa; nw_jit_itlb_fill(cpu->pc(), ipa);
+            }
+            cpu->last_fetch_pa_ = ipa;
+            const uint32 op = vm_read_memory_4(ipa);
+            if (!cpu->nw_jit_try(op)) { CHECK(false); break; }
+            ++calls;
+        }
+        CHECK(cpu->pc() == sentinel);
+        return cpu->gpr(3);
+    };
+    /* the effective address moves from one physical page to another, by a different instruction-translation event each round */
+    for (int round = 0; round < 10; ++round) {
+        const uint32 from = round & 1 ? pa2 : pa1, to = round & 1 ? pa1 : pa2;
+        const uint32 inc_from = from == pa1 ? 1u : 100u, inc_to = to == pa1 ? 1u : 100u;
+        nw_jit_invalidate_all(); nw_jit_itlb_flush();
+        bat(1, win, from);
+        for (int i = 0; i < 8; ++i) CHECK(run() == 4 * inc_from);
+        uint64 lf = 0, lm = 0; nw_jit_link_stats(&lf, &lm);
+        CHECK(lf > 0);
+        bat(1, win, to);					/* the mapping changes ... */
+        switch (round / 2) {					/* ... and the emulator reports it the way that instruction does */
+        case 0: nw_jit_itlb_flush(); break;			/* mtspr IBATxL */
+        case 1: nw_jit_dtlb_drop_page(win, NW_JIT_DTLB_FL_TLB); break;	/* tlbie */
+        case 2: nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_TLB); break;	/* tlbia */
+        case 3: nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_SDR1); break;	/* mtsdr1 */
+        default: nw_jit_mtsr_note(1, 0, 0x100); break;		/* mtsr with a different VSID */
+        }
+        for (int i = 0; i < 4; ++i) CHECK(run() == 4 * inc_to);
+    }
+    /* A change of MSR[IR|DR|PR] only (the exits carry the MSR bits they were resolved under): the exits stay valid. */
+    {
+        const uint64 fills_before = nw_jit_ibtc_fills();
+        bat(1, win, pa1); nw_jit_invalidate_all(); nw_jit_itlb_flush();
+        for (int i = 0; i < 4; ++i) CHECK(run() == 4);
+        const uint64 fills = nw_jit_ibtc_fills();
+        for (int i = 0; i < 4; ++i) { nw_jit_itlb_note_msr(msr_run, msr_run ^ ppc32_mmu::MSR_PR); nw_jit_itlb_note_msr(msr_run ^ ppc32_mmu::MSR_PR, msr_run); mmu.set_msr(msr_run); CHECK(run() == 4); }
+        CHECK(nw_jit_ibtc_fills() == fills);
+        (void)fills_before;
+    }
+    /* a segment-register change: the translation of the window goes through segment 1 with a different VSID mapped by BATs off */
+    nw_jit_invalidate_all(); nw_jit_set_code_pages(0,0,0,0); mmu.reset(); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,span);
     return failed ? 1 : 0;
 }
 
@@ -1104,7 +1218,7 @@ int ppc_core_test_access::link_sweep(powerpc_cpu *cpu)
     for (unsigned prog = 0; prog < iterations; ++prog) {
         std::vector<uint32> w;
         std::vector<std::pair<size_t,size_t> > calls;	/* bl placeholder index, unused */
-        std::vector<size_t> call_sites;
+        std::vector<size_t> call_sites, computed_sites;
         struct smc { size_t store_at; };
         std::vector<size_t> smc_sites, smc_loop;	/* site, innermost enclosing loop start (or npos) */
         std::vector<size_t> loop_stack;
@@ -1209,8 +1323,18 @@ int ppc_core_test_access::link_sweep(powerpc_cpu *cpu)
                 for (unsigned i = 0; i < n; ++i) alu();
                 break;
             }
-            case 5:						/* call a leaf */
-                call_sites.push_back(w.size()); emit(0); break;
+            case 5:						/* call a leaf, directly or through CTR */
+                if (!in_ctr && rnd(3) == 0) {			/* (mtctr would end an enclosing CTR loop early) */
+                    computed_sites.push_back(w.size());
+                    emit((18u<<26)|4u|1u);				/* bl .+4: LR = the next word */
+                    emit(x31(12, 8, 0, 339));				/* mflr r12 */
+                    emit(0);						/* addi r12,r12,delta (patched) */
+                    emit(x31(12, 9, 0, 467));				/* mtctr r12 */
+                    emit((19u<<26)|(20u<<21)|(528u<<1)|1u);		/* bctrl */
+                } else {
+                    call_sites.push_back(w.size()); emit(0);
+                }
+                break;
             case 6:						/* store into the program's own page, then icbi */
                 emit_smc(); break;
             default: skip(depth, in_ctr); break;
@@ -1223,10 +1347,19 @@ int ppc_core_test_access::link_sweep(powerpc_cpu *cpu)
         for (unsigned i = 0; i < nseg; ++i) segment(0, false);
         emit(x31(31, 8, 0, 467));						/* mtlr r31 */
         emit(0x4e800020u);							/* blr */
+        if (rnd(4) == 0)				/* the leaf in the next page: calls and returns that cross pages */
+            while (w.size() < 1024 + rnd(8)) emit(0x60000000u);
         const size_t leaf = w.size();
+        if (rnd(2)) {					/* a conditional return first: beqlr and friends, bdnzlr */
+            const unsigned k = rnd(8);
+            cmp(k);
+            static const unsigned ret_bo[] = {12, 4, 13, 5};	/* CR forms: a CTR form would end an enclosing CTR loop early */
+            emit((19u<<26)|(ret_bo[rnd(4)]<<21)|((4 * k + rnd(4))<<16)|(16u<<1));
+        }
         for (unsigned i = 0, n = 1 + rnd(4); i < n; ++i) alu();
         emit(0x4e800020u);
         for (size_t site : call_sites) w[site] = (18u<<26)|uint32((int(leaf) - int(site)) * 4) & 0x3fffffcu | 1u;
+        for (size_t site : computed_sites) w[site + 2] = addi(12, 12, int((int(leaf) - int(site + 1)) * 4));
         for (size_t si = 0; si < smc_sites.size(); ++si) {
             const size_t site = smc_sites[si];
             /* Rewrite an addi with a different immediate: lis/ori the new word, stw it, icbi, isync. Inside a loop the target
@@ -3461,8 +3594,12 @@ int ppc_core_test_access::run()
             CHECK(cpu->cr().get() == before.cr && cpu->xer().get() == before.xer && mmu.msr() == msr);
         }
         CHECK(branch_state_cases == 72);
-        // Repeated indirect self tails are bounded and reuse one native frame.
-        for (unsigned native_tail = 0; native_tail < 2; ++native_tail) {
+        // Repeated indirect self tails are bounded and reuse one native frame. With the indirect branch target cache off, every
+        // hop goes through the C helper and the bound is exact; with it on, each helper hop buys up to a link budget of
+        // cached hops, so the bound is that many times larger.
+        for (unsigned native_tail = 0; native_tail < 2; ++native_tail) for (unsigned cached = 0; cached < (native_tail ? 2u : 1u); ++cached) {
+            const unsigned saved_legacy = nw_jit_legacy;
+            if (cached) nw_jit_legacy &= ~NW_JIT_LEGACY_IBTC; else nw_jit_legacy |= NW_JIT_LEGACY_IBTC;
             const uint32 start = ram_base + 0x15000;
             nw_jit_invalidate_all(); nw_jit_itlb_flush(); mmu.reset();
             vector_start(start,ram_base + 0x14000,false); cpu->lr() = start;
@@ -3475,8 +3612,10 @@ int ppc_core_test_access::run()
             for (unsigned repeat = 0; repeat < 1000; ++repeat) {
                 const uint32 before = cpu->gpr(3); const uint64 hops = nw_jit_chain_hops();
                 CHECK(cpu->nw_jit_try(ops[0]) == 1 && cpu->pc() == start);
-                CHECK(cpu->gpr(3) == before + steps && nw_jit_chain_hops() == hops + steps - 1);
+                if (!cached) CHECK(cpu->gpr(3) == before + steps && nw_jit_chain_hops() == hops + steps - 1);
+                else CHECK(cpu->gpr(3) - before >= steps && cpu->gpr(3) - before <= steps * 32u && nw_jit_chain_hops() == hops + steps - 1);
             }
+            nw_jit_legacy = saved_legacy;
         }
         printf("P5 mixed state: %u cases; 2000 bounded indirect loops\n",branch_state_cases);
         nw_jit_invalidate_all(); nw_jit_itlb_flush();
@@ -4894,6 +5033,7 @@ extern "C" int ppc_test_main(int argc, char **argv) {
     }
     if (argc == 2 && !strcmp(argv[1], "--basic-special-p6")) { powerpc_cpu *cpu=new powerpc_cpu; int status=ppc_core_test_access::basic_special_p6(cpu); printf("P6 basic special tests: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--link-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::link_sweep(cpu); printf("Link sweep: %u passed, %u failed\n",passed,failed); return status; }
+    if (argc == 2 && !strcmp(argv[1], "--ibtc-remap")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::ibtc_remap(cpu); printf("IBTC remap: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--loop-bench")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::loop_bench(cpu); printf("Loop bench: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--sub-store-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::sub_store_sweep(cpu); printf("Sub-word store sweep: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--fp-fast-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::fp_fast_sweep(cpu); printf("FP fast sweep: %u passed, %u failed\n",passed,failed); return status; }

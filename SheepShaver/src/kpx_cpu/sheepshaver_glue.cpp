@@ -1007,9 +1007,9 @@ static void nw_guest_prof_main(bool dump_words)
 			const uint64_t b = nw_jit_exec_blocks(), i = nw_jit_exec_insns(), h = nw_jit_chain_hops();
 			uint64_t lf = 0, lm = 0;
 			nw_jit_link_stats(&lf, &lm);
-			printf("GPROFJIT blocks=%llu insns=%llu (%.1f/block) chain_hops=%llu link_fast=%llu links_made=%llu cuts:",
+			printf("GPROFJIT blocks=%llu insns=%llu (%.1f/block) chain_hops=%llu link_fast=%llu links_made=%llu ibtc_fills=%llu epochs[link,itlbflush,itlbdrop,mtsr]=%llu,%llu,%llu,%llu cuts:",
 			       (unsigned long long)(b - pb), (unsigned long long)(i - pi), b > pb ? double(i - pi) / double(b - pb) : 0.0,
-			       (unsigned long long)(h - ph), (unsigned long long)(lf - plf), (unsigned long long)(lm - plm));
+			       (unsigned long long)(h - ph), (unsigned long long)(lf - plf), (unsigned long long)(lm - plm), (unsigned long long)nw_jit_ibtc_fills(), (unsigned long long)nw_jit_ibtc_epoch_count(0), (unsigned long long)nw_jit_ibtc_epoch_count(1), (unsigned long long)nw_jit_ibtc_epoch_count(2), (unsigned long long)nw_jit_ibtc_epoch_count(3));
 			plf = lf; plm = lm;
 			static const char *const cn[] = {"ends", "page", "peek", "class", "unsup", "mem0", "mem2", "max", "io"};
 			for (int r = 0; r < NW_JIT_CUT_N; r++) { const uint64_t c = nw_jit_cut_count(r); printf(" %s=%llu", cn[r], (unsigned long long)(c - pcut[r])); pcut[r] = c; }

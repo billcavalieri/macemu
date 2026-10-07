@@ -3996,6 +3996,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	jc.verify_xlate = NULL;
 	jc.verify_context = NULL;
 	nw_jit_cpu_bind(&jc);
+	jc.jit_fetch_pa = &last_fetch_pa_;
 	if (mode == NW_JIT_VERIFY) return nw_jit_verify_block(jc, fn, ops, n, compiled_first);
 
 	auto commit = [&]() {

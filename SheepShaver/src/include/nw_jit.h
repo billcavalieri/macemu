@@ -110,6 +110,10 @@ struct nw_jit_cpu {
 	uint32_t link_budget;	/* fast hops left before the next hop must take the C helper (events, hop cap) */
 	uint32_t link_armed;	/* the helper set link_budget in this dispatch (statistics) */
 	uint32_t link_pad;
+	/* Indirect branch target cache (nw_jit_ibtc): bound by nw_jit_cpu_bind; jit_fetch_pa is set by the host. */
+	struct nw_jit_ibtc *jit_ibtc;
+	uint32_t *jit_ibtc_gen;	/* &g_ibtc_gen: an entry is valid only while its generation matches */
+	uint32_t *jit_fetch_pa;	/* where the host keeps the physical page of the block being executed (last_fetch_pa_) */
 };
 
 /* Typed observations cover modeled SPR/MMU/cache services. Native code owns
@@ -119,6 +123,19 @@ void nw_jit_system_operands(const nw_jit_cpu *, uint32_t opcode, uint32_t *, uin
 typedef void (*nw_jit_host_system)(void *, nw_jit_cpu *, uint32_t opcode,
                                   uint32_t a, uint32_t b, nw_jit_system_result *);
 void nw_jit_set_host_system(nw_jit_host_system);
+
+/* One entry of the indirect branch target cache: a block exit to a computed address (blr, bctr) that the chain helper
+ * has resolved before. Direct-mapped by guest address; valid only while gen equals g_ibtc_gen, which every event that
+ * can move translated code or change an instruction translation increments. */
+struct nw_jit_ibtc {
+	uint32_t pc;		/* guest address of the successor; the entry is empty while target is 0 */
+	uint32_t msrkey;	/* MSR & (IR|DR|PR) the successor was resolved under */
+	uint64_t target;	/* successor body entry */
+	uint32_t gen;
+	uint32_t gmask, fmask;	/* registers the successor reads or writes; must already be live */
+	uint32_t fetch_pa;	/* physical page of the successor */
+};
+enum { NW_JIT_IBTC_N = 4096 };
 
 typedef void (*nw_jit_fn)(struct nw_jit_cpu *cpu);
 
@@ -213,6 +230,8 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 uint64_t nw_jit_chain_hops(void);
 /* Hops taken through direct block links (counted when the next helper hop runs) and links made. */
 void nw_jit_link_stats(uint64_t *fast, uint64_t *made);
+uint64_t nw_jit_ibtc_fills(void);
+uint64_t nw_jit_ibtc_epoch_count(int why);	/* 0 link epoch, 1 itlb flush, 2 itlb drop page, 3 mtsr */
 void nw_jit_note_chain(int hops);
 void nw_jit_tail_begin(void);
 int nw_jit_tail_n(void);
@@ -352,7 +371,9 @@ enum {
 	NW_JIT_LEGACY_HOP   = 64u,	/* every native chain hop copies the live GPRs/FPRs back to the interpreter state */
 	NW_JIT_LEGACY_SUBST = 128u,	/* byte/halfword stores always translate and never use the data TLB */
 	NW_JIT_LEGACY_LINK  = 256u,	/* every block exit goes through the C chain helper; conditional/CTR branches are out-of-line helper calls */
-	NW_JIT_LEGACY_MEM   = 512u	/* byte/halfword/doubleword loads and stores are C helper calls instead of the inline data-TLB sequence */
+	NW_JIT_LEGACY_MEM   = 512u,	/* byte/halfword/doubleword loads and stores are C helper calls instead of the inline data-TLB sequence */
+	NW_JIT_LEGACY_BCLR  = 1024u,	/* bclr/bcctr (blr, bctr, conditional returns) are evaluated by a C helper call */
+	NW_JIT_LEGACY_IBTC  = 2048u	/* block exits to a computed address (blr, bctr) always take the C chain helper */
 };
 extern unsigned nw_jit_legacy;
 void nw_jit_dtlb_flush(void);

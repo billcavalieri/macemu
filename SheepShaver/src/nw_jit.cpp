@@ -196,7 +196,7 @@ static unsigned nw_parse_legacy(void)
 	if (!e)
 		return 0;
 	if (strstr(e, "all"))
-		m = NW_JIT_LEGACY_CLOCK | NW_JIT_LEGACY_SYNC | NW_JIT_LEGACY_LOAD | NW_JIT_LEGACY_INDEX | NW_JIT_LEGACY_XLATE | NW_JIT_LEGACY_FP | NW_JIT_LEGACY_HOP | NW_JIT_LEGACY_SUBST | NW_JIT_LEGACY_LINK | NW_JIT_LEGACY_MEM;
+		m = NW_JIT_LEGACY_CLOCK | NW_JIT_LEGACY_SYNC | NW_JIT_LEGACY_LOAD | NW_JIT_LEGACY_INDEX | NW_JIT_LEGACY_XLATE | NW_JIT_LEGACY_FP | NW_JIT_LEGACY_HOP | NW_JIT_LEGACY_SUBST | NW_JIT_LEGACY_LINK | NW_JIT_LEGACY_MEM | NW_JIT_LEGACY_BCLR | NW_JIT_LEGACY_IBTC;
 	if (strstr(e, "clock")) m |= NW_JIT_LEGACY_CLOCK;
 	if (strstr(e, "sync")) m |= NW_JIT_LEGACY_SYNC;
 	if (strstr(e, "load")) m |= NW_JIT_LEGACY_LOAD;
@@ -207,6 +207,8 @@ static unsigned nw_parse_legacy(void)
 	if (strstr(e, "substore")) m |= NW_JIT_LEGACY_SUBST;
 	if (strstr(e, "link")) m |= NW_JIT_LEGACY_LINK;
 	if (strstr(e, "mem")) m |= NW_JIT_LEGACY_MEM;
+	if (strstr(e, "bclr")) m |= NW_JIT_LEGACY_BCLR;
+	if (strstr(e, "ibtc")) m |= NW_JIT_LEGACY_IBTC;
 	fprintf(stderr, "NW_JIT_LEGACY=%s (mask %u)\n", e, m);
 	return m;
 }
@@ -275,18 +277,38 @@ struct nw_jit_link {
 	uint64_t target;	/* successor body entry; 0 = unlinked */
 	uint32_t gen;		/* g_link_gen when linked */
 	uint32_t gmask, fmask;	/* registers the successor reads or writes; must already be live */
-	uint32_t src_page;	/* physical page of the block that owns this site */
-	uint32_t pad[2];
+	uint32_t src_page;	/* physical page of the block that owns this site; bit 0 set: the target is in another page */
+	uint32_t epoch;		/* cross-page sites: g_ibtc_gen when linked (a translation may have changed since) */
+	uint32_t fetch_pa;	/* cross-page sites: physical page of the successor, set as the host's page being executed */
 };
 static_assert(sizeof(struct nw_jit_link) == 32, "link literal layout");
 static uint32_t g_link_gen = 1;
 static int g_link_body_off;	/* bytes from a block's entry to the end of its prologue, set at the first compile */
 static uint32_t g_emit_phys_page = 0xffffffffu;
 static uint64_t g_link_fast, g_link_made;
+/* Indirect branch target cache: block exits to a computed address (blr, bctr, ...) are resolved by the C chain helper
+ * the first time; the helper then records the successor here, and later exits to the same address test the entry in
+ * compiled code and jump straight into the successor's body, like a linked exit but across pages. Unlike a link, an
+ * entry does not stay inside one physical page, so it is also invalidated by everything that changes how an
+ * instruction address is translated (segment registers, BATs, tlbie, MSR[IR|DR|PR], SDR1: the events that drop the
+ * instruction TLB), through g_ibtc_gen. Each hop still sets the host's "page being executed" for the store-into-code
+ * test and spends the same hop budget as a link. NW_JIT_LEGACY=ibtc turns it off. */
+static struct nw_jit_ibtc g_ibtc[NW_JIT_IBTC_N];
+static uint32_t g_ibtc_gen = 1;
+static uint64_t g_ibtc_fill;
+static void itlb_clear(void);
+static uint64_t g_ibtc_epochs[4];	/* by cause: link epoch, itlb flush, itlb drop page, mtsr */
+static inline void ibtc_epoch(int why)
+{
+	g_ibtc_epochs[why]++;
+	if (++g_ibtc_gen == 0)
+		g_ibtc_gen = 1;
+}
 static inline void link_epoch(void)
 {
 	if (++g_link_gen == 0)
 		g_link_gen = 1;
+	ibtc_epoch(0);
 }
 enum { NW_JIT_TAIL_MAX = 32, NW_JIT_TAIL_LIMIT = 256 };
 /* How many native hops one nw_jit_try may chain before returning to the execute loop. NW_JIT_TAIL=<n> overrides it. */
@@ -753,6 +775,7 @@ void nw_jit_mtsr_note(unsigned sr, uint32_t old_val, uint32_t new_val)
 	nw68_context_changed();
 	g_sr_gen[sr & 0xfu]++;
 	g_itlb_sticky = 0;
+	ibtc_epoch(3);
 }
 
 void nw_jit_helper_mtsr(struct nw_jit_cpu *cpu, uint32_t sr, uint32_t val)
@@ -3818,7 +3841,7 @@ void nw_jit_tail_class(int *fpr, int *vr)
 		*vr = g_tail_vr;
 }
 
-static void link_site(struct nw_jit_link *site, void *next, const struct nw_jit_chain_info &ci, uint32_t pc,
+static void link_site(struct nw_jit_cpu *cpu, struct nw_jit_link *site, void *next, const struct nw_jit_chain_info &ci, uint32_t pc,
 		      int cur_fpr, int cur_vr, int f2, int v2)
 {
 	if (!site || (nw_jit_legacy & NW_JIT_LEGACY_LINK) || !g_link_body_off)
@@ -3828,12 +3851,17 @@ static void link_site(struct nw_jit_link *site, void *next, const struct nw_jit_
 	 * last_fetch page for the self-modifying-store test); 68k opcode-table entries need the 68k layer's boundary hooks. */
 	if (v2 || cur_vr || (f2 && !cur_fpr))
 		return;
-	if (site->src_page != (ci.npa & ~0xfffu))
+	const int cross = (int)(site->src_page & 1u);
+	const uint32_t npage = ci.npa & ~0xfffu;
+	if (!cross && site->src_page != npage)
+		return;
+	if (cross && (!cpu->jit_fetch_pa || (nw_jit_legacy & NW_JIT_LEGACY_IBTC)))
 		return;
 	if (pc >= 0x68080000u && pc < 0x68100000u)
 		return;
 	const uint64_t target = (uint64_t)(uintptr_t)next + (uint64_t)g_link_body_off;
-	if (site->target == target && site->gen == g_link_gen && site->gmask == ci.gmask && site->fmask == ci.fmask)
+	if (site->target == target && site->gen == g_link_gen && site->gmask == ci.gmask && site->fmask == ci.fmask &&
+	    (!cross || (site->epoch == g_ibtc_gen && site->fetch_pa == npage)))
 		return;
 	static const long link_max = getenv("NW_JIT_LINK_MAX") ? atol(getenv("NW_JIT_LINK_MAX")) : -1;
 	if (link_max >= 0 && (long)g_link_made >= link_max)
@@ -3847,10 +3875,38 @@ static void link_site(struct nw_jit_link *site, void *next, const struct nw_jit_
 	site->gmask = ci.gmask;
 	site->fmask = ci.fmask;
 	site->gen = g_link_gen;
+	if (cross) {
+		site->epoch = g_ibtc_gen;
+		site->fetch_pa = npage;
+	}
 #ifdef __APPLE__
 	pthread_jit_write_protect_np(1);
 #endif
 	g_link_made++;
+}
+
+static void ibtc_fill(struct nw_jit_cpu *cpu, void *next, const struct nw_jit_chain_info &ci, uint32_t pc, int cur_vr, int v2)
+{
+	/* The same exclusions as a link, except the page: vector blocks keep the C path, and 68k opcode-table entries need
+	 * the 68k layer's boundary hooks. A successor that needs MSR[FP] is checked by the exit that uses the entry. */
+	if ((nw_jit_legacy & NW_JIT_LEGACY_IBTC) || !g_link_body_off || v2 || cur_vr || !cpu->jit_fetch_pa || !ci.npa)
+		return;
+	if (pc >= 0x68080000u && pc < 0x68100000u)
+		return;
+	struct nw_jit_ibtc *e = &g_ibtc[(pc >> 2) & (NW_JIT_IBTC_N - 1u)];
+	const uint64_t target = (uint64_t)(uintptr_t)next + (uint64_t)g_link_body_off;
+	const uint32_t msrkey = cpu->msr & 0x4030u;
+	if (e->pc == pc && e->target == target && e->gen == g_ibtc_gen && e->msrkey == msrkey && e->gmask == ci.gmask &&
+	    e->fmask == ci.fmask && e->fetch_pa == (ci.npa & ~0xfffu))
+		return;
+	e->pc = pc;
+	e->msrkey = msrkey;
+	e->target = target;
+	e->gen = g_ibtc_gen;
+	e->gmask = ci.gmask;
+	e->fmask = ci.fmask;
+	e->fetch_pa = ci.npa & ~0xfffu;
+	g_ibtc_fill++;
 }
 
 void *nw_jit_helper_chain(struct nw_jit_cpu *cpu, uint32_t chain_pc, uint32_t cur_class, struct nw_jit_link *site)
@@ -3861,7 +3917,8 @@ void *nw_jit_helper_chain(struct nw_jit_cpu *cpu, uint32_t chain_pc, uint32_t cu
 	}
 	if (g_mode != NW_JIT_ON || !cpu || cpu->fault)
 		return NULL;
-	if (chain_pc == NW_JIT_CHAIN_DYNAMIC) chain_pc = cpu->pc;
+	const int dynamic = chain_pc == NW_JIT_CHAIN_DYNAMIC;
+	if (dynamic) chain_pc = cpu->pc;
 	if (!chain_pc || cpu->pc != chain_pc)
 		return NULL;
 	if (g_tail_hops >= g_tail_max)
@@ -3888,7 +3945,9 @@ void *nw_jit_helper_chain(struct nw_jit_cpu *cpu, uint32_t chain_pc, uint32_t cu
 	nw_jit_note_chain(1);
 	(void)chain2;
 	if (!(nw_jit_legacy & NW_JIT_LEGACY_LINK) && !cpu->verify_mem) {
-		link_site(site, next, ci, chain_pc, cur_fpr, cur_vr, f2, v2);
+		link_site(cpu, site, next, ci, chain_pc, cur_fpr, cur_vr, f2, v2);
+		if (dynamic)
+			ibtc_fill(cpu, next, ci, chain_pc, cur_vr, v2);
 		cpu->link_budget = NW_JIT_LINK_BUDGET;
 		cpu->link_armed = 1;
 	}
@@ -3937,7 +3996,10 @@ void nw_jit_dtlb_flush_src(int src)
 		src = NW_JIT_DTLB_FL_OTHER;
 	g_dtlb_fl[src]++;
 	memset(g_dtlb, 0, sizeof(g_dtlb));
-	nw_jit_itlb_flush();
+	if (src == NW_JIT_DTLB_FL_MTMSR || src == NW_JIT_DTLB_FL_RFI)
+		itlb_clear();		/* an MSR change: the cached targets carry the MSR bits they were resolved under */
+	else
+		nw_jit_itlb_flush();
 }
 
 void nw_jit_dtlb_flush(void)
@@ -4020,6 +4082,8 @@ void nw_jit_cpu_bind(struct nw_jit_cpu *c)
 		c->jit_sr_gen = g_sr_gen;
 	}
 	c->jit_link_gen = &g_link_gen;
+	c->jit_ibtc = g_ibtc;
+	c->jit_ibtc_gen = &g_ibtc_gen;
 	c->jit_lwz = (void *)nw_jit_helper_lwz;
 	c->jit_stw = (void *)nw_jit_helper_stw;
 	c->jit_lwz_pa = (void *)nw_jit_helper_lwz_pa;
@@ -4303,10 +4367,18 @@ int nw_jit_cache_slots(void)
 	return NW_JIT_CACHE;
 }
 
-void nw_jit_itlb_flush(void)
+/* The instruction TLB is emptied; cached branch targets (g_ibtc, cross-page links) stay valid. For a change of MSR[IR|DR|PR]:
+ * those bits are part of what an entry was resolved under and are compared when it is used. */
+static void itlb_clear(void)
 {
 	memset(g_itlb, 0, sizeof(g_itlb));
 	g_itlb_sticky = 0;
+}
+
+void nw_jit_itlb_flush(void)
+{
+	ibtc_epoch(1);
+	itlb_clear();
 }
 
 void nw_jit_itlb_fill(uint32_t ea, uint32_t pa)
@@ -4346,6 +4418,7 @@ int nw_jit_itlb_lookup(uint32_t ea, uint32_t *pa)
 
 void nw_jit_itlb_drop_page(uint32_t ea)
 {
+	ibtc_epoch(2);
 	g_itlb_sticky = 0;
 	const unsigned i = (ea >> 12) & (NW_JIT_ITLB_N - 1u);
 	if (g_itlb[i].flags && g_itlb[i].ea_page == (ea & ~0xfffu))
@@ -4356,7 +4429,7 @@ void nw_jit_itlb_note_msr(uint32_t old_msr, uint32_t new_msr)
 {
 	/* Instruction mappings and execute permissions depend on IR and PR. */
 	if ((old_msr ^ new_msr) & 0x00004020u)
-		nw_jit_itlb_flush();
+		itlb_clear();
 }
 
 uint64_t nw_jit_itlb_hits(void)
@@ -4387,6 +4460,16 @@ uint64_t nw_jit_exec_insns(void)
 uint64_t nw_jit_chain_hops(void)
 {
 	return g_chain_hops;
+}
+
+uint64_t nw_jit_ibtc_fills(void)
+{
+	return g_ibtc_fill;
+}
+
+uint64_t nw_jit_ibtc_epoch_count(int why)
+{
+	return why >= 0 && why < 4 ? g_ibtc_epochs[why] : 0;
 }
 
 void nw_jit_link_stats(uint64_t *fast, uint64_t *made)
@@ -9143,6 +9226,7 @@ struct emit {
 	int pin_next;
 	uint32_t *start;	/* first word of the block (link literals are 8-aligned relative to it, so compaction keeps them aligned) */
 	uint32_t *slow_entry;	/* start of the C-helper path of the most recent chain epilogue (fault branches enter here) */
+	uint32_t ea_page;	/* guest address page of the block's first instruction: an exit to another page is a cross-page site */
 };
 
 static int emit_imm32(struct emit *e, int rd, uint32_t v);
@@ -9765,6 +9849,34 @@ static int emit_ret(struct emit *e)
  * without this pop nested frames and blacked or died in NK. Cap is
  * NW_JIT_TAIL_MAX (start at 1).
  */
+/* Forward branches emitted with a placeholder and patched once their target is known. */
+enum { MF_BCOND, MF_TBZ, MF_TBNZ, MF_CBZ64, MF_CBNZ32 };
+struct mem_fix { uint32_t *p; int type; int arg; int rt; };
+
+static void mem_fix_apply(const struct mem_fix *f, uint32_t *target)
+{
+	const int off = (int)(target - f->p);
+	switch (f->type) {
+	case MF_BCOND: *f->p = a64_b_cond(f->arg, off); break;
+	case MF_TBZ: *f->p = a64_tbz(f->rt, f->arg, off); break;
+	case MF_TBNZ: *f->p = a64_tbz(f->rt, f->arg, off) | 0x01000000u; break;
+	case MF_CBNZ32: *f->p = a64_cbnz(f->rt, off); break;
+	default: *f->p = a64_cbz64(f->rt, off); break;
+	}
+}
+
+static int mem_branch(struct emit *e, struct mem_fix *fx, int *n, int type, int arg, int rt, uint32_t placeholder)
+{
+	if (*n >= 8)
+		return 0;
+	fx[*n].p = e->p;
+	fx[*n].type = type;
+	fx[*n].arg = arg;
+	fx[*n].rt = rt;
+	(*n)++;
+	return emit_w(e, placeholder);
+}
+
 static int emit_chain_epilogue(struct emit *e, uint32_t chain_pc)
 {
 	if (!chain_pc)
@@ -9780,7 +9892,13 @@ static int emit_chain_epilogue(struct emit *e, uint32_t chain_pc)
 			   !e->uses_vr && g_emit_phys_page != 0xffffffffu;
 	uint32_t *ldr_tgt = NULL, *ldr_gen = NULL, *ldr_gm = NULL, *ldr_fm = NULL, *adr_site = NULL;
 	uint32_t *cbz_slow = NULL, *ne_gen = NULL, *lo_budget = NULL, *ne_gm = NULL, *ne_fm = NULL;
-	if (linked) {
+	uint32_t *ldr_ep = NULL, *ldr_fp = NULL, *ne_ep = NULL, *cbz_fpp = NULL;
+	/* A target in another page also needs the translation epoch (see g_ibtc) and sets the host's page being executed;
+	 * with that cache turned off such an exit has no site and always takes the C helper, as it did before. */
+	const int other_page = linked && ((chain_pc ^ e->ea_page) & ~0xfffu) != 0;
+	const int cross = other_page && !(nw_jit_legacy & NW_JIT_LEGACY_IBTC);
+	const int site_on = linked && (!other_page || cross);
+	if (site_on) {
 		ldr_tgt = e->p;
 		if (!emit_w(e, 0))					/* ldr x16, [site.target] */
 			return 0;
@@ -9830,20 +9948,113 @@ static int emit_chain_epilogue(struct emit *e, uint32_t chain_pc)
 			if (!emit_w(e, 0))				/* b.ne slow */
 				return 0;
 		}
+		if (cross) {
+			if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_ibtc_gen))) ||
+			    !emit_w(e, a64_ldr_w(W10, X10, 0)))
+				return 0;
+			ldr_ep = e->p;
+			if (!emit_w(e, 0))				/* ldr w11, [site.epoch] */
+				return 0;
+			if (!emit_w(e, a64_cmp_w(W10, W11)))
+				return 0;
+			ne_ep = e->p;
+			if (!emit_w(e, 0))				/* b.ne slow */
+				return 0;
+			if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_fetch_pa))))
+				return 0;
+			cbz_fpp = e->p;
+			if (!emit_w(e, 0))				/* cbz x10, slow */
+				return 0;
+			ldr_fp = e->p;
+			if (!emit_w(e, 0))				/* ldr w11, [site.fetch_pa] */
+				return 0;
+			if (!emit_w(e, a64_str_w(W11, X10, 0)))
+				return 0;
+		}
 		if (!emit_w(e, 0xaa1303e0u))				/* mov x0, x19 */
 			return 0;
 		if (!emit_w(e, a64_br(X16)))
 			return 0;
 	}
+	/* A computed target (blr, bctr): the indirect branch target cache (see g_ibtc). The exit tests the entry for
+	 * cpu->pc and, like a link, jumps into the successor's body; anything else takes the C helper below. */
+	struct mem_fix dfx[12];
+	int ndfx = 0;
+	if (chain_pc == NW_JIT_CHAIN_DYNAMIC && !(nw_jit_legacy & (NW_JIT_LEGACY_LINK | NW_JIT_LEGACY_IBTC)) && !e->uses_vr) {
+		static_assert((offsetof(struct nw_jit_cpu, jit_ibtc) & 7) == 0 && (offsetof(struct nw_jit_cpu, jit_ibtc_gen) & 7) == 0 &&
+			      (offsetof(struct nw_jit_cpu, jit_fetch_pa) & 7) == 0, "ibtc pointers 8-aligned");
+		static_assert(NW_JIT_IBTC_N == 4096 && sizeof(struct nw_jit_ibtc) == 32, "ubfx #2,#12; lsl #5");
+		if (!emit_w(e, a64_ldr_w(W10, X19, (uint32_t)offsetof(struct nw_jit_cpu, pc))) ||
+		    !emit_w(e, a64_ldr_x(X11, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_ibtc))) ||
+		    !emit_w(e, a64_ubfx(12, W10, 2, 12)) ||
+		    !emit_w(e, a64_add_x_lsl(X11, X11, 12, 5)) ||
+		    !emit_w(e, a64_ldr_w(12, X11, (uint32_t)offsetof(struct nw_jit_ibtc, pc))) ||
+		    !emit_w(e, a64_cmp_w(12, W10)))
+			return 0;
+		if (!mem_branch(e, dfx, &ndfx, MF_BCOND, 1, 0, a64_b_cond(1, 0)))				/* another address */
+			return 0;
+		if (!emit_w(e, a64_ldr_x(X16, X11, (uint32_t)offsetof(struct nw_jit_ibtc, target))))
+			return 0;
+		if (!mem_branch(e, dfx, &ndfx, MF_CBZ64, 0, X16, a64_cbz64(X16, 0)))				/* empty */
+			return 0;
+		if (!emit_w(e, a64_ldr_w(12, X11, (uint32_t)offsetof(struct nw_jit_ibtc, gen))) ||
+		    !emit_w(e, a64_ldr_x(13, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_ibtc_gen))) ||
+		    !emit_w(e, a64_ldr_w(13, 13, 0)) ||
+		    !emit_w(e, a64_cmp_w(12, 13)))
+			return 0;
+		if (!mem_branch(e, dfx, &ndfx, MF_BCOND, 1, 0, a64_b_cond(1, 0)))				/* stale */
+			return 0;
+		if (!emit_w(e, a64_ldr_w(12, X19, (uint32_t)offsetof(struct nw_jit_cpu, msr))) ||
+		    !emit_w(e, a64_movz(13, 0x4030u, 0)) ||
+		    !emit_w(e, a64_and_reg(12, 12, 13)) ||
+		    !emit_w(e, a64_ldr_w(13, X11, (uint32_t)offsetof(struct nw_jit_ibtc, msrkey))) ||
+		    !emit_w(e, a64_cmp_w(12, 13)))
+			return 0;
+		if (!mem_branch(e, dfx, &ndfx, MF_BCOND, 1, 0, a64_b_cond(1, 0)))				/* resolved under another MSR */
+			return 0;
+		if (!emit_w(e, a64_ldr_w(W10, X19, (uint32_t)offsetof(struct nw_jit_cpu, link_budget))) ||
+		    !emit_w(e, a64_subs_imm(W10, W10, 1)))
+			return 0;
+		if (!mem_branch(e, dfx, &ndfx, MF_BCOND, 3, 0, a64_b_cond(3, 0)))				/* budget spent */
+			return 0;
+		if (!emit_w(e, a64_str_w(W10, X19, (uint32_t)offsetof(struct nw_jit_cpu, link_budget))) ||
+		    !emit_w(e, a64_ldr_w(W10, X19, (uint32_t)offsetof(struct nw_jit_cpu, gpr_live))) ||
+		    !emit_w(e, a64_ldr_w(12, X11, (uint32_t)offsetof(struct nw_jit_ibtc, gmask))) ||
+		    !emit_w(e, a64_bics_wzr(12, W10)))
+			return 0;
+		if (!mem_branch(e, dfx, &ndfx, MF_BCOND, 1, 0, a64_b_cond(1, 0)))				/* a register still to pull */
+			return 0;
+		if (!emit_w(e, a64_ldr_w(12, X11, (uint32_t)offsetof(struct nw_jit_ibtc, fmask))))
+			return 0;
+		if (e->uses_fpr) {
+			if (!emit_w(e, a64_ldr_w(W10, X19, (uint32_t)offsetof(struct nw_jit_cpu, fpr_live))) ||
+			    !emit_w(e, a64_bics_wzr(12, W10)))
+				return 0;
+			if (!mem_branch(e, dfx, &ndfx, MF_BCOND, 1, 0, a64_b_cond(1, 0)))
+				return 0;
+		} else if (!mem_branch(e, dfx, &ndfx, MF_CBNZ32, 0, 12, a64_cbnz(12, 0)))			/* needs MSR[FP], this block did not */
+			return 0;
+		if (!emit_w(e, a64_ldr_x(13, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_fetch_pa))))
+			return 0;
+		if (!mem_branch(e, dfx, &ndfx, MF_CBZ64, 0, 13, a64_cbz64(13, 0)))
+			return 0;
+		if (!emit_w(e, a64_ldr_w(12, X11, (uint32_t)offsetof(struct nw_jit_ibtc, fetch_pa))) ||
+		    !emit_w(e, a64_str_w(12, 13, 0)) ||
+		    !emit_w(e, 0xaa1303e0u) ||								/* mov x0, x19 */
+		    !emit_w(e, a64_br(X16)))
+			return 0;
+	}
 	uint32_t *slow = e->p;
 	e->slow_entry = slow;
+	for (int i = 0; i < ndfx; i++)
+		mem_fix_apply(&dfx[i], slow);
 	if (!emit_w(e, 0xaa1303e0u))
 		return 0;
 	if (!emit_imm32(e, W1, chain_pc))
 		return 0;
 	if (!emit_imm32(e, W2, cur_class))
 		return 0;
-	if (linked) {
+	if (site_on) {
 		adr_site = e->p;
 		if (!emit_w(e, 0))					/* adr x3, site */
 			return 0;
@@ -9868,7 +10079,7 @@ static int emit_chain_epilogue(struct emit *e, uint32_t chain_pc)
 	*cbz = a64_cbz64(X0, (int)(e->p - cbz));
 	if (!emit_ret(e))
 		return 0;
-	if (!linked)
+	if (!site_on)
 		return 1;
 	/* The site literal follows the code (never executed: ret above ends it). */
 	while ((((uint8_t *)e->p - (uint8_t *)e->start) & 7) != 0)
@@ -9880,7 +10091,7 @@ static int emit_chain_epilogue(struct emit *e, uint32_t chain_pc)
 	for (int i = 0; i < 8; i++)
 		e->p[i] = 0;
 	e->p += 8;
-	((struct nw_jit_link *)lit)->src_page = g_emit_phys_page & ~0xfffu;
+	((struct nw_jit_link *)lit)->src_page = (g_emit_phys_page & ~0xfffu) | (cross ? 1u : 0u);
 	*ldr_tgt = a64_ldr_lit(X16, 1, (int)(lit - ldr_tgt));
 	*cbz_slow = a64_cbz64(X16, (int)(slow - cbz_slow));
 	*ldr_gen = a64_ldr_lit(W11, 0, (int)(lit + 2 - ldr_gen));
@@ -9891,6 +10102,12 @@ static int emit_chain_epilogue(struct emit *e, uint32_t chain_pc)
 	if (ldr_fm) {
 		*ldr_fm = a64_ldr_lit(W11, 0, (int)(lit + 4 - ldr_fm));
 		*ne_fm = a64_b_cond(1, (int)(slow - ne_fm));
+	}
+	if (ldr_ep) {
+		*ldr_ep = a64_ldr_lit(W11, 0, (int)(lit + 6 - ldr_ep));
+		*ne_ep = a64_b_cond(1, (int)(slow - ne_ep));
+		*cbz_fpp = a64_cbz64(X10, (int)(slow - cbz_fpp));
+		*ldr_fp = a64_ldr_lit(W11, 0, (int)(lit + 7 - ldr_fp));
 	}
 	*adr_site = a64_adr(3, (int32_t)((uint8_t *)lit - (uint8_t *)adr_site));
 	return 1;
@@ -10910,35 +11127,10 @@ static int emit_stfs_inline(struct emit *e, uint32_t pc, int fs, int ra, int sim
  * helper call sits after the hit path and is only taken on a miss. cpu->pc is written there, not on the hit path.
  * Kill switch: NW_JIT_LEGACY=mem. */
 enum { MK_LBZ, MK_LHZ, MK_LHA, MK_STB, MK_STH, MK_LFD, MK_STFD };
-enum { MF_BCOND, MF_TBZ, MF_TBNZ, MF_CBZ64 };
-struct mem_fix { uint32_t *p; int type; int arg; int rt; };
 
 static int nw_mem_inline_on(void)
 {
 	return !(nw_jit_legacy & NW_JIT_LEGACY_MEM);
-}
-
-static void mem_fix_apply(const struct mem_fix *f, uint32_t *target)
-{
-	const int off = (int)(target - f->p);
-	switch (f->type) {
-	case MF_BCOND: *f->p = a64_b_cond(f->arg, off); break;
-	case MF_TBZ: *f->p = a64_tbz(f->rt, f->arg, off); break;
-	case MF_TBNZ: *f->p = a64_tbz(f->rt, f->arg, off) | 0x01000000u; break;
-	default: *f->p = a64_cbz64(f->rt, off); break;
-	}
-}
-
-static int mem_branch(struct emit *e, struct mem_fix *fx, int *n, int type, int arg, int rt, uint32_t placeholder)
-{
-	if (*n >= 8)
-		return 0;
-	fx[*n].p = e->p;
-	fx[*n].type = type;
-	fx[*n].arg = arg;
-	fx[*n].rt = rt;
-	(*n)++;
-	return emit_w(e, placeholder);
 }
 
 /* LDR/STR (register, UXTW, unscaled): base is 0x38600800 (ldrb), 0x78600800 (ldrh), 0xb8600800 (ldr w), 0xf8600800
@@ -12561,6 +12753,58 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 		if (!emit_w(e, a64_orr_reg(W8, W8, W12)))
 			return 0;
 		return emit_w(e, a64_str_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr)));
+	}
+	if (prim == 19 && (xo == 16 || xo == 528) && !(nw_jit_legacy & (NW_JIT_LEGACY_BCLR | NW_JIT_LEGACY_LINK)) &&
+	    !(xo == 528 && !(rd & 4))) {
+		/* bclr/bcctr without the helper call: the branch goes through LR (or CTR), which is read before LK
+		 * overwrites it; CTR is decremented first, then the CTR and CR conditions are tested. A taken branch stores
+		 * the target and leaves through a computed exit, a branch not taken falls through. */
+		const int bo = rd, bi = ra;
+		const int lk = (int)(op & 1);
+		const int dec_ctr = (bo & 4) == 0;
+		uint32_t *skip[2];
+		int nskip = 0;
+		if (!emit_w(e, a64_ldr_w(W8, X0, (uint32_t)(xo == 16 ? offsetof(struct nw_jit_cpu, lr) : offsetof(struct nw_jit_cpu, ctr)))))
+			return 0;
+		if (lk) {
+			if (!emit_imm32(e, W10, pc + 4) || !emit_w(e, a64_str_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, lr))))
+				return 0;
+		}
+		if (dec_ctr) {
+			if (!emit_w(e, a64_ldr_w(W9, X0, (uint32_t)offsetof(struct nw_jit_cpu, ctr))) ||
+			    !emit_w(e, a64_sub_imm_w(W9, W9, 1)) ||
+			    !emit_w(e, a64_str_w(W9, X0, (uint32_t)offsetof(struct nw_jit_cpu, ctr))))
+				return 0;
+			skip[nskip++] = e->p;
+			if (!emit_w(e, 0))
+				return 0;
+		}
+		if (!(bo & 0x10)) {
+			if (!emit_w(e, a64_ldr_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, cr))) ||
+			    !emit_w(e, a64_ubfx(W10, W10, 31 - bi, 1)))
+				return 0;
+			skip[nskip++] = e->p;
+			if (!emit_w(e, 0))
+				return 0;
+		}
+		if (!emit_w(e, 0x121e7400u | ((uint32_t)W8 << 5) | (uint32_t)W8) ||			/* and w8, w8, #0xfffffffc */
+		    !emit_w(e, a64_str_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, pc))))
+			return 0;
+		if (!emit_chain_epilogue(e, NW_JIT_CHAIN_DYNAMIC))
+			return 0;
+		int k = 0;
+		if (dec_ctr) {
+			/* BO[3] set: branch when CTR == 0, so skip when it is not */
+			*skip[k] = (bo & 0x02) ? a64_cbnz(W9, (int)(e->p - skip[k])) : a64_cbz(W9, (int)(e->p - skip[k]));
+			k++;
+		}
+		if (!(bo & 0x10)) {
+			/* BO[1] set: branch when the CR bit is 1, so skip when it is 0 */
+			*skip[k] = (bo & 0x08) ? a64_cbz(W10, (int)(e->p - skip[k])) : a64_cbnz(W10, (int)(e->p - skip[k]));
+		}
+		if (nskip == 0)
+			return 1;		/* always taken: the block ends here */
+		return is_last ? emit_set_pc(e, pc + 4) : 1;
 	}
 	if (prim == 19 && (xo == 16 || xo == 528)) {
 		if (!emit_w(e, 0xaa1303e0u))
@@ -14451,9 +14695,22 @@ static uint32_t block_chain_pc(const uint32_t *ops, int n, uint32_t guest_pc)
 /* The fixed address the emitted epilogue chains to when the block runs off its end. Conditional branches are expanded
  * inline (see emit_op), so reaching the epilogue means "not taken": the fall-through address, which can be linked. The
  * cache metadata (block_chain_pc) stays dynamic for them because the C hop loop follows either outcome. */
+/* A conditional bclr/bcctr (not the always-taken forms) whose condition is evaluated inline: its not-taken exit is the
+ * fall-through, a fixed address. */
+static int is_inline_cond_bclr(uint32_t op)
+{
+	if ((op >> 26) != 19 || (nw_jit_legacy & (NW_JIT_LEGACY_BCLR | NW_JIT_LEGACY_LINK)))
+		return 0;
+	const int xo = (int)((op >> 1) & 0x3ff);
+	const int bo = (int)((op >> 21) & 0x1f);
+	return (xo == 16 || xo == 528) && (bo & 0x14) != 0x14 && !(xo == 528 && !(bo & 4));
+}
+
 static uint32_t block_tail_pc(const uint32_t *ops, int n, uint32_t guest_pc)
 {
 	if (n > 0 && ops && (ops[n - 1] >> 26) == 16 && !(ops[n - 1] & 1u) && !(nw_jit_legacy & NW_JIT_LEGACY_LINK))
+		return guest_pc + (uint32_t)n * 4u;
+	if (n > 0 && ops && is_inline_cond_bclr(ops[n - 1]))
 		return guest_pc + (uint32_t)n * 4u;
 	return block_chain_pc(ops, n, guest_pc);
 }
@@ -14728,6 +14985,7 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc,
 	e.pin_gpr[0] = e.pin_gpr[1] = e.pin_gpr[2] = e.pin_gpr[3] = -1;
 	e.pin_next = 0;
 	e.slow_entry = NULL;
+	e.ea_page = guest_pc & ~0xfffu;
 	if (n > 0) {
 		const uint32_t op0 = ops[0];
 		const int prim = (int)(op0 >> 26);

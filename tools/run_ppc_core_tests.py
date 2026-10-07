@@ -20,6 +20,7 @@ parser.add_argument('--frsp-p6', action='store_true', help='Run independent roun
 parser.add_argument('--basic-special-p6', action='store_true', help='Run basic scalar special-result and production exception fixtures')
 parser.add_argument('--multiply-p6', action='store_true', help='Run finite scalar multiply rounding and exception fixtures')
 parser.add_argument('--fp-fast-sweep', action='store_true', help='Randomised inline single-precision arithmetic against the out-of-line helpers')
+parser.add_argument('--mode', help='Run one harness mode by its flag (for example --ibtc-remap) and nothing else')
 parser.add_argument('--keep-binary', type=Path, help='Copy the test binary here (to debug it)')
 parser.add_argument('--link-sweep', action='store_true', help='Random branchy programs, direct block links against the all-helper path')
 parser.add_argument('--loop-bench', action='store_true', help='Guest instructions per microsecond for tight loops through the dispatch and chaining path')
@@ -63,6 +64,9 @@ with tempfile.TemporaryDirectory(prefix='macemu-ppc-core-') as directory:
     binary = path / 'ppc-core-tests'
     subprocess.run(command + ['-Wl,-e,_ppc_test_main', '-o', str(binary)], check=True, cwd=root / 'SheepShaver/src/MacOSX')
     if args.keep_binary: import shutil; shutil.copy(binary, args.keep_binary)
+    if args.mode:
+        subprocess.run([str(binary), args.mode], check=True, cwd=root / 'SheepShaver/src/MacOSX')
+        raise SystemExit(0)
     subprocess.run([str(binary)] + (['--replay', str(args.replay.resolve())] if args.replay else ['--scalar-p6'] if args.scalar_p6 else ['--frsp-p6'] if args.frsp_p6 else ['--basic-special-p6'] if args.basic_special_p6 else ['--multiply-p6'] if args.multiply_p6 else ['--io-publication'] if args.io_publication else ['--fp-fast-sweep'] if args.fp_fast_sweep else ['--sub-store-sweep'] if args.sub_store_sweep else ['--loop-bench'] if args.loop_bench else ['--link-sweep'] if args.link_sweep else []), check=True, cwd=root / 'SheepShaver/src/MacOSX')
     if not args.replay and not args.scalar_p6 and not args.frsp_p6 and not args.basic_special_p6 and not args.multiply_p6 and not args.io_publication and not args.fp_fast_sweep and not args.sub_store_sweep and not args.loop_bench and not args.link_sweep:
         for name in ['ppc_verify_fctiwz.capture', 'ppc_verify_atomic_alias.capture', 'ppc_verify_vector_sat.capture', 'ppc_verify_system_trap.capture', 'ppc_verify_stale_source.capture']:
