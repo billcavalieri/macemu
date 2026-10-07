@@ -20,6 +20,7 @@
  */
 
 #include <stdio.h>
+#include "nw_log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <atomic>
@@ -176,7 +177,7 @@ static const char *bank_name(int kind)
 void nw_io_log_banks(void)
 {
 	for (int i = 0; i < g_nbanks; i++)
-		printf("NW-BOOT G1: banks %s %08x+%x\n", bank_name(g_banks[i].kind),
+		NW_DIAG("NW-BOOT G1: banks %s %08x+%x\n", bank_name(g_banks[i].kind),
 		       (unsigned)g_banks[i].base, (unsigned)g_banks[i].size);
 	int i = 0;
 	while (i < g_ndevs) {
@@ -198,11 +199,11 @@ void nw_io_log_banks(void)
 			n++;
 		}
 		if (n > 1)
-			printf("NW-BOOT G1: banks io %s %08x+%x x%d stride %x\n",
+			NW_DIAG("NW-BOOT G1: banks io %s %08x+%x x%d stride %x\n",
 			       d->name ? d->name : "?", (unsigned)d->base, (unsigned)d->size,
 			       n, (unsigned)stride);
 		else
-			printf("NW-BOOT G1: banks io %s %08x+%x\n",
+			NW_DIAG("NW-BOOT G1: banks io %s %08x+%x\n",
 			       d->name ? d->name : "?", (unsigned)d->base, (unsigned)d->size);
 		i += n;
 	}
@@ -253,7 +254,7 @@ static void log_page(char rw, uint32_t pa, int size, uint32_t value, uint32_t pc
 			return;
 	if (g_npages < NW_IO_PAGES_MAX)
 		g_pages[g_npages++] = page;
-	printf("NW-BOOT IO page %08x first %c%d %08x %08x %08x\n", (unsigned)page, rw, size,
+	NW_DIAG("NW-BOOT IO page %08x first %c%d %08x %08x %08x\n", (unsigned)page, rw, size,
 	       (unsigned)pa, (unsigned)value, (unsigned)pc);
 }
 
@@ -265,10 +266,10 @@ static void log_unclaimed(char rw, uint32_t pa, int size, uint32_t value, uint32
 	g_log_count++;
 	/* Grammar: NW-BOOT IO <R|W><size> <pa> <value> <pc>; same line shape as
 	 * the X E events so the diff tools can align on it. */
-	printf("NW-BOOT IO %c%d %08x %08x %08x unclaimed\n", rw, size, (unsigned)pa,
+	NW_DIAG("NW-BOOT IO %c%d %08x %08x %08x unclaimed\n", rw, size, (unsigned)pa,
 	       (unsigned)value, (unsigned)pc);
 	if (g_log_count == NW_IO_LOG_MAX)
-		printf("NW-BOOT IO (further unclaimed accesses not logged)\n");
+		NW_DIAG("NW-BOOT IO (further unclaimed accesses not logged)\n");
 }
 
 
@@ -614,7 +615,7 @@ void nw_fb_fps_proxy_tick(void)
 		g_fps_flat = 0;
 	}
 	if (nw_jit_stats_wanted()) {
-		printf("NW-BOOT G1: qt_fps_proxy frames=%llu dbytes=%llu hash=%08x flat=%u\n",
+		NW_DIAG("NW-BOOT G1: qt_fps_proxy frames=%llu dbytes=%llu hash=%08x flat=%u\n",
 		       (unsigned long long)g_fps_frames_sec,
 		       (unsigned long long)dbytes,
 		       (unsigned)g_fps_hash,

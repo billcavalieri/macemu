@@ -19,6 +19,7 @@
  */
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "cpu_emulation.h"
 #include "main.h"
 #include "prefs.h"
@@ -259,7 +260,7 @@ void sheepshaver_cpu::execute_emul_op(uint32 emul_op)
 			char buf[96];
 			snprintf(buf, sizeof(buf), "G1: first EMUL_OP %u at 68k pc %08x; KDP LA %08x -> PA %08x",
 				 (unsigned)emul_op, gpr(24) - 2u, (unsigned)KERNEL_DATA_BASE, (unsigned)xr.pa);
-			nw_boot_log(buf);
+			nw_boot_diag(buf);
 #endif
 		}
 	}
@@ -282,7 +283,7 @@ void sheepshaver_cpu::execute_emul_op(uint32 emul_op)
 	EmulOp(&r68, gpr(24), emul_op);
 #if NW_BOOT_LOG
 	if (spcflags().test(SPCFLAG_CPU_EXEC_RETURN) && getenv("NW_TEST_NK_STATE_PATH")) {
-		printf("NW-BOOT CPU return pending after EmulOp selector=%u pc=%08x depth=%d last_return=%08x last_depth=%d r24=%08x r29=%08x\n",
+		NW_DIAG("NW-BOOT CPU return pending after EmulOp selector=%u pc=%08x depth=%d last_return=%08x last_depth=%d r24=%08x r29=%08x\n",
 		       emul_op, pc(), nw_68k_execute_depth(), nw_last_return_pc, nw_last_return_depth, gpr(24), gpr(29));
 		fflush(stdout);
 	}
@@ -335,7 +336,7 @@ void sheepshaver_cpu::execute_sheep(uint32 opcode)
 		nw_last_return_pc = pc();
 		nw_last_return_depth = nw_68k_execute_depth();
 		if (nw_last_return_depth <= 1 && getenv("NW_TEST_NK_STATE_PATH")) {
-			printf("NW-BOOT CPU outer return requested pc=%08x opcode=%08x r24=%08x r29=%08x cr=%08x\n",
+			NW_DIAG("NW-BOOT CPU outer return requested pc=%08x opcode=%08x r24=%08x r29=%08x cr=%08x\n",
 			       pc(), opcode, gpr(24), gpr(29), get_cr());
 			fflush(stdout);
 		}
@@ -1271,7 +1272,7 @@ void init_emul_ppc(void)
 			snprintf(buf, sizeof(buf), "G1: NKSystemInfo r5=%08x bank=%08x+%08x vectors@0 from ROM+%06x r9=%08x",
 				 (unsigned)sysinfo, (unsigned)RAMBase, (unsigned)RAMSize, (unsigned)NW_NK_EXC_TABLE_ROM_OFF,
 				 (unsigned)hwinfo);
-			nw_boot_log(buf);
+			nw_boot_diag(buf);
 		}
 	} else {
 		nw_log_translator_off();

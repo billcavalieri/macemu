@@ -25,6 +25,7 @@
 #include <time.h>
 #include <atomic>
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "nw_io.h"
 #include "nw_devices.h"
 #include "cpu_emulation.h"
@@ -182,7 +183,7 @@ static void pic_write_ivpr(int n, uint32_t v)
 	pic_update();
 #if defined(NW_BOOT_LOG) && NW_BOOT_LOG
 	if (n == NW_VBL_IRQ && ((old ^ pic.src[n].ivpr) & (uint32_t)NW_OPENPIC_IVPR_MASK))
-		printf("NW-BOOT G1: vbl ivpr_mask %d -> %d pc=%08x ivpr=%08x\n",
+		NW_DIAG("NW-BOOT G1: vbl ivpr_mask %d -> %d pc=%08x ivpr=%08x\n",
 		       (old & (uint32_t)NW_OPENPIC_IVPR_MASK) != 0,
 		       (pic.src[n].ivpr & (uint32_t)NW_OPENPIC_IVPR_MASK) != 0,
 		       (unsigned)nw_io_last_pc(), (unsigned)pic.src[n].ivpr);
@@ -243,7 +244,7 @@ static uint32_t pic_iack(void)
 				mode = ReadMacInt32(XLM_RUN_MODE);
 				tm = ReadMacInt32(0x16A);
 			}
-			printf("NW-BOOT G1: pic_iack n=%u src=%d vec=%02x pc=%08x ctpr=%u vbl_serv=%d ext=%d lvl=%u nest=%d mode=%u tm=%u ack=%llu\n",
+			NW_DIAG("NW-BOOT G1: pic_iack n=%u src=%d vec=%02x pc=%08x ctpr=%u vbl_serv=%d ext=%d lvl=%u nest=%d mode=%u tm=%u ack=%llu\n",
 			       n, src, (unsigned)vec, (unsigned)nw_io_last_pc(),
 			       (unsigned)pic.ctpr, pic.src[NW_VBL_IRQ].servicing, nw_io_ext_irq,
 			       lvl, nest, mode, tm, (unsigned long long)(src >= 0 ? pic.src[src].ack_serial : 0));
@@ -275,7 +276,7 @@ static void pic_eoi(void)
 		static unsigned n;
 		n++;
 		if (n <= 32u || which == NW_VBL_IRQ)
-			printf("NW-BOOT G1: pic_eoi n=%u src=%d pc=%08x vbl_serv=%d ext=%d ack=%llu age_us=%llu\n",
+			NW_DIAG("NW-BOOT G1: pic_eoi n=%u src=%d pc=%08x vbl_serv=%d ext=%d ack=%llu age_us=%llu\n",
 			       n, which, (unsigned)nw_io_last_pc(),
 			       pic.src[NW_VBL_IRQ].servicing, nw_io_ext_irq,
 			       (unsigned long long)acknowledgement, (unsigned long long)age);
@@ -374,7 +375,7 @@ static void vbl_tick(void)
 		const uint32_t iv = pic.src[NW_VBL_IRQ].ivpr;
 		n++;
 		if (n <= 8u || (n % 60u) == 0 || !vbl_enabled || pic.src[NW_VBL_IRQ].servicing)
-			printf("NW-BOOT G1: vbl_tick n=%u en=%d ivpr=%08x mask=%d serv=%d serv_src=%d ctpr=%u ext=%d\n",
+			NW_DIAG("NW-BOOT G1: vbl_tick n=%u en=%d ivpr=%08x mask=%d serv=%d serv_src=%d ctpr=%u ext=%d\n",
 			       n, vbl_enabled, (unsigned)iv,
 			       (iv & (uint32_t)NW_OPENPIC_IVPR_MASK) != 0,
 			       pic.src[NW_VBL_IRQ].servicing, which,
@@ -439,7 +440,7 @@ static void pic_cpu_write(uint32_t off, uint32_t v)
 		pic_update();
 #if defined(NW_BOOT_LOG) && NW_BOOT_LOG
 		if (old != pic.ctpr)
-			printf("NW-BOOT G1: pic_ctpr %u -> %u pc=%08x ext=%d\n",
+			NW_DIAG("NW-BOOT G1: pic_ctpr %u -> %u pc=%08x ext=%d\n",
 			       (unsigned)old, (unsigned)pic.ctpr,
 			       (unsigned)nw_io_last_pc(), nw_io_ext_irq);
 #endif
@@ -1249,7 +1250,7 @@ static int adb_mouse_request(uint8_t *obuf, const uint8_t *buf, int len)
 				adb.mouse_addr = buf[1] & 0xf;
 				if (buf[2] == 1 || buf[2] == 2)
 					adb.mouse_handler = buf[2];
-				printf("NW-BOOT G1: adb mouse reg3 addr=%u handler=%u raw=%02x\n",
+				NW_DIAG("NW-BOOT G1: adb mouse reg3 addr=%u handler=%u raw=%02x\n",
 				       (unsigned)adb.mouse_addr, (unsigned)adb.mouse_handler, buf[2]);
 				break;
 			}
@@ -1514,7 +1515,7 @@ static void pmu_dispatch(void)
 		return;
 	case NW_PMU_RESET:
 		if (in_len == 0) {
-			printf("NW-BOOT G1: PMU reset (0xd0)\n");
+			NW_DIAG("NW-BOOT G1: PMU reset (0xd0)\n");
 			pmu_queue_power(NW_PMU_POWER_RESTART);
 		}
 		return;
@@ -1523,7 +1524,7 @@ static void pmu_dispatch(void)
 	case NW_PMU_SHUTDOWN:
 		if (in_len != 4)
 			return;
-		printf("NW-BOOT G1: PMU shutdown (0x7e %02x%02x%02x%02x)\n", in[0], in[1], in[2], in[3]);
+		NW_DIAG("NW-BOOT G1: PMU shutdown (0x7e %02x%02x%02x%02x)\n", in[0], in[1], in[2], in[3]);
 		out[0] = 0;
 		via.rsp_sz = 1;
 		pmu_queue_power(NW_PMU_POWER_OFF);
@@ -1976,7 +1977,7 @@ int nw_sheepblaster_play(const uint8_t *bytes, uint32_t frames,
 		static int n_fmt;
 		if (n_fmt < 4) {
 			n_fmt++;
-			printf("NW-BOOT G1: sheepblaster skip format=%08x\n", (unsigned)format);
+			NW_DIAG("NW-BOOT G1: sheepblaster skip format=%08x\n", (unsigned)format);
 			fflush(stdout);
 		}
 		return 0;
@@ -2029,7 +2030,7 @@ int nw_sheepblaster_play(const uint8_t *bytes, uint32_t frames,
 	}
 	sb_plays++;
 	if (sb_plays <= 8)
-		printf("NW-BOOT G1: sheepblaster play #%d in=%u rate=%u ch=%d bits=%d fmt=%08x out=%d\n",
+		NW_DIAG("NW-BOOT G1: sheepblaster play #%d in=%u rate=%u ch=%d bits=%d fmt=%08x out=%d\n",
 		       sb_plays, (unsigned)frames, (unsigned)(rate_fixed >> 16),
 		       channels, bits, (unsigned)format, out);
 	return out;

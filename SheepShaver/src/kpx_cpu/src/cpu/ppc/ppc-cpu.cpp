@@ -19,6 +19,7 @@
  */
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
@@ -456,7 +457,7 @@ static void nw_glue_site(powerpc_cpu &cpu, uint32 pc)
 	if (nlog < 12) {
 		nlog++;
 		const uint32 trap = (cpu.gpr(29) >> 3) & 0xffffu;
-		printf("NW-BOOT G1: glue pc=%08x lr=%08x cr=%08x r24=%08x trap=%04x ppc_rd=%llu insns=%llu\n",
+		NW_DIAG("NW-BOOT G1: glue pc=%08x lr=%08x cr=%08x r24=%08x trap=%04x ppc_rd=%llu insns=%llu\n",
 		       (unsigned)pc, (unsigned)cpu.debug_lr(), (unsigned)cpu.debug_cr(),
 		       (unsigned)cpu.gpr(24), (unsigned)trap,
 		       (unsigned long long)nw_mixedmode_ppc_rds(),
@@ -469,13 +470,13 @@ static void nw_glue_site(powerpc_cpu &cpu, uint32 pc)
 			uint32 w = 0;
 			const uint32 ea = pc + (uint32)k * 4u;
 			const int ok = nw_jit_peek(ea, &w);
-			printf("NW-BOOT G1: glue word %08x %+d %s %08x\n",
+			NW_DIAG("NW-BOOT G1: glue word %08x %+d %s %08x\n",
 			       (unsigned)pc, k, ok ? "ok" : "fail", (unsigned)w);
 		}
 		fflush(stdout);
 	}
 	if (g_glue_trips && (g_glue_trips % 10000ull) == 0 && pc == 0x6806e8c4u) {
-		printf("NW-BOOT G1: glue trips=%llu insns_to_twi=%llu avg=%llu\n",
+		NW_DIAG("NW-BOOT G1: glue trips=%llu insns_to_twi=%llu avg=%llu\n",
 		       (unsigned long long)g_glue_trips,
 		       (unsigned long long)g_glue_sum,
 		       (unsigned long long)(g_glue_sum / g_glue_trips));
@@ -523,7 +524,7 @@ static void nw_trace_pc(powerpc_cpu &cpu, uint32 pc)
 				 (unsigned)pc, (unsigned)cpu.debug_lr(), (unsigned)cpu.gpr(1),
 				 (unsigned)cpu.gpr(3), (unsigned)cpu.gpr(8), (unsigned)cpu.gpr(9),
 				 (unsigned)cpu.sprg(0), (unsigned)ppc32_guest_mmu().msr());
-			nw_boot_log(buf);
+			nw_boot_diag(buf);
 			/* The NK prints its panic text a character at a time out
 			 * of ROM; r8 walks that string. */
 			const uint32 msg = (cpu.gpr(8) - 0x140u) & ~0xfu;
@@ -538,7 +539,7 @@ static void nw_trace_pc(powerpc_cpu &cpu, uint32 pc)
 				}
 				txt[k] = 0;
 				snprintf(buf, sizeof(buf), "NKPANIC msg@%08x \"%s\"", (unsigned)a, txt);
-				nw_boot_log(buf);
+				nw_boot_diag(buf);
 			}
 			if (!dumped_panic) {
 				dumped_panic = 1;
@@ -554,12 +555,12 @@ static void nw_trace_pc(powerpc_cpu &cpu, uint32 pc)
 		return;
 	snprintf(buf, sizeof(buf), "PCTRACE enter %s pc=%08x (%u transfers)",
 		 why, (unsigned)pc, count);
-	nw_boot_log(buf);
+	nw_boot_diag(buf);
 	unsigned i = (head + RING - count) % RING;
 	for (unsigned n = 0; n < count; n++, i = (i + 1) % RING) {
 		snprintf(buf, sizeof(buf), "PCTRACE %08x -> %08x",
 			 (unsigned)from[i], (unsigned)to[i]);
-		nw_boot_log(buf);
+		nw_boot_diag(buf);
 	}
 }
 #endif
@@ -730,17 +731,17 @@ static void note_tw_emu(uint32 src)
 
 static void kcall_hist_dump(const char *why)
 {
-	printf("NW-BOOT G1: kcall %s", why ? why : "?");
+	NW_DIAG("NW-BOOT G1: kcall %s", why ? why : "?");
 	for (unsigned n = 0; n < (unsigned)NW_EMU_KCALL_N; n++) {
 		if (!g_tw_emu[n] && !g_kcall_seen[n] && !g_kcall_hit[n] && !g_kcall_miss_ctx[n])
 			continue;
-		printf(" n%u tw=%llu seen=%llu hit=%llu miss=%llu", n,
+		NW_DIAG(" n%u tw=%llu seen=%llu hit=%llu miss=%llu", n,
 		       (unsigned long long)g_tw_emu[n],
 		       (unsigned long long)g_kcall_seen[n],
 		       (unsigned long long)g_kcall_hit[n],
 		       (unsigned long long)g_kcall_miss_ctx[n]);
 	}
-	printf(" mm enter=%llu leave=%llu ppc_rd=%llu fast=%llu\n",
+	NW_DIAG(" mm enter=%llu leave=%llu ppc_rd=%llu fast=%llu\n",
 	       (unsigned long long)nw_mixedmode_enters(),
 	       (unsigned long long)nw_mixedmode_leaves(),
 	       (unsigned long long)nw_mixedmode_ppc_rds(),
@@ -760,16 +761,16 @@ static void kcall_hist_dump(const char *why)
  */
 static void kdp_probe_dump(const char *why, uint32 kdp, uint32 vectbl)
 {
-	printf("NW-BOOT G1: kdp probe %s base=%08x\n", why ? why : "?", (unsigned)kdp);
+	NW_DIAG("NW-BOOT G1: kdp probe %s base=%08x\n", why ? why : "?", (unsigned)kdp);
 	/* NK v2 LoadInterruptRegisters: ContextPtr at -0x14, Flags at -0x10,
 	 * handler base at -0x4. */
-	printf("NW-BOOT G1: kdp-20 %08x %08x %08x %08x  -10 %08x %08x %08x %08x\n",
+	NW_DIAG("NW-BOOT G1: kdp-20 %08x %08x %08x %08x  -10 %08x %08x %08x %08x\n",
 	       (unsigned)vm_read_memory_4(kdp - 0x20u), (unsigned)vm_read_memory_4(kdp - 0x1cu),
 	       (unsigned)vm_read_memory_4(kdp - 0x18u), (unsigned)vm_read_memory_4(kdp - 0x14u),
 	       (unsigned)vm_read_memory_4(kdp - 0x10u), (unsigned)vm_read_memory_4(kdp - 0x0cu),
 	       (unsigned)vm_read_memory_4(kdp - 0x08u), (unsigned)vm_read_memory_4(kdp - 0x04u));
 	for (uint32 off = 0x5f0; off < 0x6b0; off += 16)
-		printf("NW-BOOT G1: kdp+%03x %08x %08x %08x %08x\n", (unsigned)off,
+		NW_DIAG("NW-BOOT G1: kdp+%03x %08x %08x %08x %08x\n", (unsigned)off,
 		       (unsigned)vm_read_memory_4(kdp + off),
 		       (unsigned)vm_read_memory_4(kdp + off + 4),
 		       (unsigned)vm_read_memory_4(kdp + off + 8),
@@ -783,7 +784,7 @@ static void kdp_probe_dump(const char *why, uint32 kdp, uint32 vectbl)
 		const int32 li = (int32)((w0 & 0x03fffffcu) << 6) >> 6;
 		loadint = target + (uint32)li;
 	}
-	printf("NW-BOOT G1: vectbl=%08x program=%08x loadint=%08x\n",
+	NW_DIAG("NW-BOOT G1: vectbl=%08x program=%08x loadint=%08x\n",
 	       (unsigned)vectbl, (unsigned)target, (unsigned)loadint);
 	fflush(stdout);
 }
@@ -796,6 +797,26 @@ void powerpc_cpu::take_program(uint32 srr1_bits)
 	 * [44] illegal = 0x00080000. */
 	take_exception(NW_VEC_PROGRAM, pc(), srr1_bits);
 }
+#ifdef SHEEPSHAVER
+	{
+		/* Diagnostic (NW_VERBOSE=1): the first occurrence of each distinct (pc, cause) outside the 68k emulator's own
+		 * trap use, with the faulting opcode, so an unimplemented instruction is named instead of just misbehaving. */
+		static struct { uint32 pc, bits; } seen[48];
+		static unsigned nseen;
+		const uint32 at = pc();
+		if (!(at >= 0x68000000u && at < 0x68c00000u) && nseen < 48) {
+			unsigned i = 0;
+			while (i < nseen && !(seen[i].pc == at && seen[i].bits == srr1_bits)) i++;
+			if (i == nseen) {
+				seen[nseen].pc = at; seen[nseen].bits = srr1_bits; nseen++;
+				uint32 op = 0;
+				const bool ok = nw_jit_peek(at, &op);
+				NW_DIAG("NW-BOOT program exception #%u pc=%08x srr1bits=%08x op=%s%08x\n", nseen, (unsigned)at,
+				       (unsigned)srr1_bits, ok ? "" : "?", (unsigned)op);
+			}
+		}
+	}
+#endif
 
 #ifdef SHEEPSHAVER
 /*
@@ -857,18 +878,18 @@ int powerpc_cpu::programint_kcall_fast(void)
 		static unsigned ntrace;
 		if (n == 1u && ntrace < 2u) {
 			ntrace++;
-			printf("NW-BOOT G1: kcall_state #%u n=%u srr0=%08x srr1=%08x msr=%08x cr=%08x xer=%08x lr=%08x ctr=%08x\n",
+			NW_DIAG("NW-BOOT G1: kcall_state #%u n=%u srr0=%08x srr1=%08x msr=%08x cr=%08x xer=%08x lr=%08x ctr=%08x\n",
 			       ntrace, n, (unsigned)srr0_, (unsigned)srr1_,
 			       (unsigned)ppc32_guest_mmu().msr(), (unsigned)cr().get(),
 			       (unsigned)xer().get(), (unsigned)lr(), (unsigned)ctr());
-			printf("NW-BOOT G1: kcall_state #%u r0=%08x r1=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x r13=%08x\n",
+			NW_DIAG("NW-BOOT G1: kcall_state #%u r0=%08x r1=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x r13=%08x\n",
 			       ntrace, (unsigned)gpr(0), (unsigned)gpr(1), (unsigned)gpr(3),
 			       (unsigned)gpr(4), (unsigned)gpr(5), (unsigned)gpr(6),
 			       (unsigned)gpr(7), (unsigned)gpr(8), (unsigned)gpr(9),
 			       (unsigned)gpr(10), (unsigned)gpr(11), (unsigned)gpr(12),
 			       (unsigned)gpr(13));
 			if (ctx)
-				printf("NW-BOOT G1: kcall_state #%u cb r0=%08x r7=%08x r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x r13=%08x kdp r1=%08x r6=%08x\n",
+				NW_DIAG("NW-BOOT G1: kcall_state #%u cb r0=%08x r7=%08x r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x r13=%08x kdp r1=%08x r6=%08x\n",
 				       ntrace,
 				       (unsigned)vm_read_memory_4(ctx + (uint32)NW_CB_R0),
 				       (unsigned)vm_read_memory_4(ctx + (uint32)NW_CB_R7),
@@ -901,7 +922,7 @@ int powerpc_cpu::programint_kcall_fast(void)
 				nmiss++;
 				if (nmiss == 1u)
 					kdp_probe_dump("first-miss", kdp, sprg(3));
-				printf("NW-BOOT G1: kcall_miss #%u n=%u src=%08x kdp=%08x ctx=%08x flags=%08x base=%08x kcall=%08x lr=%08x\n",
+				NW_DIAG("NW-BOOT G1: kcall_miss #%u n=%u src=%08x kdp=%08x ctx=%08x flags=%08x base=%08x kcall=%08x lr=%08x\n",
 				       nmiss, n, (unsigned)src, (unsigned)kdp, (unsigned)ctx,
 				       (unsigned)flags, (unsigned)base, (unsigned)kcall,
 				       (unsigned)lr());
@@ -962,7 +983,7 @@ int powerpc_cpu::programint_kcall_fast(void)
 		static unsigned nlog;
 		if (nlog < 8u) {
 			nlog++;
-			printf("NW-BOOT G1: kcall_fast #%u n=%u src=%08x kdp=%08x ctx=%08x flags=%08x lr=%08x -> %08x\n",
+			NW_DIAG("NW-BOOT G1: kcall_fast #%u n=%u src=%08x kdp=%08x ctx=%08x flags=%08x lr=%08x -> %08x\n",
 			       nlog, n, (unsigned)src, (unsigned)kdp, (unsigned)ctx,
 			       (unsigned)flags, (unsigned)lr_save, (unsigned)kcall);
 			fflush(stdout);
@@ -1265,7 +1286,7 @@ void powerpc_cpu::take_fpu()
 		static unsigned n;
 		if (n < 8u) {
 			n++;
-			printf("NW-BOOT G1: fpu #%u pc=%08x msr=%08x\n",
+			NW_DIAG("NW-BOOT G1: fpu #%u pc=%08x msr=%08x\n",
 			       n, (unsigned)pc(),
 			       (unsigned)ppc32_guest_mmu().msr());
 			fflush(stdout);
@@ -1288,7 +1309,7 @@ void powerpc_cpu::finish_fpu_rfi()
 		static unsigned n;
 		if (n < 8u) {
 			n++;
-			printf("NW-BOOT G1: fpu-enable #%u pc=%08x srr1=%08x\n",
+			NW_DIAG("NW-BOOT G1: fpu-enable #%u pc=%08x srr1=%08x\n",
 			       n, (unsigned)srr0_, (unsigned)srr1_);
 			fflush(stdout);
 		}
@@ -1375,14 +1396,14 @@ void powerpc_cpu::catch_up_timebase()
 		if (sb_now != sb_last && sb_n < 12) {
 			sb_last = sb_now;
 			sb_n++;
-			printf("NW-BOOT G1: sheepblaster stuck #%d pc=%08x r24=%08x r1=%08x",
+			NW_DIAG("NW-BOOT G1: sheepblaster stuck #%d pc=%08x r24=%08x r1=%08x",
 			       sb_n, (unsigned)pc(), (unsigned)gpr(24), (unsigned)gpr(1));
 			if (sb_n == 1) {
-				printf(" bytes");
+				NW_DIAG(" bytes");
 				for (int i = 0; i < 16; i++)
-					printf(" %02x", ReadMacInt8(gpr(24) + i));
+					NW_DIAG(" %02x", ReadMacInt8(gpr(24) + i));
 			}
-			printf("\n");
+			NW_DIAG("\n");
 			fflush(stdout);
 		}
 	}
@@ -1406,7 +1427,7 @@ void powerpc_cpu::catch_up_timebase()
 			if ((++kdump % 10u) == 0)
 				kcall_hist_dump("tick");
 			if (g_vec500 == last500 && g_vec900)
-				printf("NW-BOOT G1: 900-only r24=%08x pc=%08x n500=%llu n900=%llu ext=%d\n",
+				NW_DIAG("NW-BOOT G1: 900-only r24=%08x pc=%08x n500=%llu n900=%llu ext=%d\n",
 				       (unsigned)gpr(24), (unsigned)pc(),
 				       (unsigned long long)g_vec500, (unsigned long long)g_vec900,
 				       nw_io_ext_irq);
@@ -1453,7 +1474,7 @@ int powerpc_cpu::guest_idle_wait()
 		static int logged;
 		if (!logged) {
 			logged = 1;
-			printf("NW-BOOT G1: idle sleep pc=%08x\n", (unsigned)p);
+			NW_DIAG("NW-BOOT G1: idle sleep pc=%08x\n", (unsigned)p);
 			fflush(stdout);
 		}
 	}
@@ -2112,7 +2133,7 @@ bool powerpc_cpu::check_spcflags()
 	if (spcflags().test(SPCFLAG_CPU_EXEC_RETURN)) {
 #if defined(SHEEPSHAVER) && NW_BOOT_LOG
 		if (execute_depth <= 1) {
-			printf("NW-BOOT CPU outer execution-return pc=%08x r24=%08x r29=%08x r1=%08x cr=%08x mode=%u\n",
+			NW_DIAG("NW-BOOT CPU outer execution-return pc=%08x r24=%08x r29=%08x r1=%08x cr=%08x mode=%u\n",
 			       pc(), gpr(24), gpr(29), gpr(1), cr().get(), ReadMacInt32(XLM_RUN_MODE));
 			fflush(stdout);
 		}
@@ -2609,7 +2630,7 @@ void powerpc_cpu::jit_host_rfi(void *host, struct nw_jit_cpu *cpu)
 			static unsigned nh;
 			if (nh < 6u) {
 				nh++;
-				printf("NW-BOOT G1: halt-rfi pc=%08x cpu_pc=%08x lr=%08x r13=%08x r28=%08x r31=%08x cr=%08x\n",
+				NW_DIAG("NW-BOOT G1: halt-rfi pc=%08x cpu_pc=%08x lr=%08x r13=%08x r28=%08x r31=%08x cr=%08x\n",
 				       (unsigned)ppc->pc(), (unsigned)cpu->pc, (unsigned)cpu->lr,
 				       cpu->gpr[13], cpu->gpr[28], cpu->gpr[31], cpu->cr);
 				fflush(stdout);
@@ -3567,7 +3588,7 @@ int powerpc_cpu::nw_jit_verify_block(nw_jit_cpu &jc, nw_jit_fn fn, const uint32 
         for (unsigned i = 0; i < captures; ++i) already_captured |= captured_pc[i] == start;
         if (!already_captured && captures < 16) {
             captured_pc[captures++] = start;
-            printf("NW-BOOT JIT isolated verify miss #%u pc=%08x n=%d bits=%x accesses=%u/%u fault=%u expected=%u cached_op=%08x current_op=%08x\n",
+            NW_DIAG("NW-BOOT JIT isolated verify miss #%u pc=%08x n=%d bits=%x accesses=%u/%u fault=%u expected=%u cached_op=%08x current_op=%08x\n",
                    misses, start, n, bits, trace.cursor, trace.count, jc.fault, expected_fault, compiled_first, ops[0]);
             // A bounded, deterministic replay record with no host pointers.
             // Captures all input/output registers, opcodes and access observations.
@@ -3601,12 +3622,12 @@ int powerpc_cpu::nw_jit_verify_block(nw_jit_cpu &jc, nw_jit_fn fn, const uint32 
                     fprintf(file, "%s %08x %08x %u %u %u %016llx\n", a.kind == nw_jit_verify_trace::system ? "system" : a.kind == nw_jit_verify_trace::translation ? "translation" : "access", a.pc, a.ea, a.width, a.store, a.fault, (unsigned long long)a.value);
                 }
                 fclose(file);
-                printf("NW-BOOT JIT verify capture %s\n", name);
+                NW_DIAG("NW-BOOT JIT verify capture %s\n", name);
             }
             fflush(stdout);
         }
     } else if (comparisons <= 16) {
-        printf("NW-BOOT JIT isolated verify ok #%u pc=%08x n=%d accesses=%u\n", comparisons, start, n, trace.count);
+        NW_DIAG("NW-BOOT JIT isolated verify ok #%u pc=%08x n=%d accesses=%u\n", comparisons, start, n, trace.count);
         fflush(stdout);
     }
     if (comparisons % 100000 == 0) nw_jit_verify_dump(comparisons % 1000000 == 0 ? "isolated" : "periodic");
@@ -3663,7 +3684,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 						uint32 w = 0;
 						const uint32 ea = guest_pc + (uint32)k * 4u;
 						const int ok = nw_jit_peek(ea, &w);
-						printf("NW-BOOT G1: spinword %+d ea=%08x %s %08x\n",
+						NW_DIAG("NW-BOOT G1: spinword %+d ea=%08x %s %08x\n",
 						       k, (unsigned)ea, ok ? "ok" : "fail",
 						       (unsigned)w);
 					}
@@ -3680,7 +3701,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 				static int op6_id;
 				if (!op6_id) {
 					op6_id = 1;
-					printf("NW-BOOT G1: op6 id pc=%08x op=%08x msr=%08x IR=%u DR=%u PR=%u\n",
+					NW_DIAG("NW-BOOT G1: op6 id pc=%08x op=%08x msr=%08x IR=%u DR=%u PR=%u\n",
 					       (unsigned)guest_pc, (unsigned)first_opcode,
 					       (unsigned)msr,
 					       (msr & ppc32_mmu::MSR_IR) ? 1u : 0u,
@@ -3690,7 +3711,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 						uint32 w = 0;
 						const uint32 ea = guest_pc + (uint32)k * 4u;
 						const int ok = nw_jit_peek(ea, &w);
-						printf("NW-BOOT G1: op6 word %+d ea=%08x %s %08x\n",
+						NW_DIAG("NW-BOOT G1: op6 word %+d ea=%08x %s %08x\n",
 						       k, (unsigned)ea, ok ? "ok" : "fail",
 						       (unsigned)w);
 					}
@@ -3792,7 +3813,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		static unsigned nfail_log;
 		if (nfail_log < 8u) {
 			nfail_log++;
-			printf("NW-BOOT JIT verify compile-fail #%u pc=%08x n=%d op=%08x\n",
+			NW_DIAG("NW-BOOT JIT verify compile-fail #%u pc=%08x n=%d op=%08x\n",
 			       nfail_log, (unsigned)guest_pc, n, (unsigned)first_opcode);
 			fflush(stdout);
 		}
@@ -3956,16 +3977,16 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			if (*done)
 				return;
 			*done = 1;
-			printf("NW-BOOT G1: itunes-loop %08x\n", (unsigned)ea);
+			NW_DIAG("NW-BOOT G1: itunes-loop %08x\n", (unsigned)ea);
 			for (int i = 0; i < 20; i++) {
 				const uint32 a = ea + (uint32)i * 4u;
 				const ppc32_xlate_result xr = ppc32_guest_mmu().translate(
 					a, PPC32_XLATE_DR, 4, false);
 				if (!xr.ok) {
-					printf("  %08x translate-fail\n", (unsigned)a);
+					NW_DIAG("  %08x translate-fail\n", (unsigned)a);
 					continue;
 				}
-				printf("  %08x %08x\n", (unsigned)a,
+				NW_DIAG("  %08x %08x\n", (unsigned)a,
 				       (unsigned)vm_read_memory_4(xr.pa));
 			}
 			fflush(stdout);
@@ -4158,7 +4179,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 				static unsigned ndsi_log;
 				if (ndsi_log < 8u) {
 					ndsi_log++;
-					printf("NW-BOOT G1: jit dsi #%u pc=%08x ea=%08x st=%u\n",
+					NW_DIAG("NW-BOOT G1: jit dsi #%u pc=%08x ea=%08x st=%u\n",
 					       ndsi_log, (unsigned)jc.pc,
 					       (unsigned)jc.fault_ea, (unsigned)jc.fault_st);
 					fflush(stdout);
@@ -4171,7 +4192,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		static unsigned nskip_log;
 		nskip_log++;
 		if (nskip_log <= 8u) {
-			printf("NW-BOOT JIT verify skip-%s #%u pc=%08x op=%08x n=%d\n",
+			NW_DIAG("NW-BOOT JIT verify skip-%s #%u pc=%08x op=%08x n=%d\n",
 			       jc.fault == 2 ? "io" : "dsi", nskip_log,
 			       (unsigned)guest_pc, (unsigned)first_opcode, n);
 			fflush(stdout);
@@ -4200,7 +4221,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			static unsigned nlog;
 			if (nlog < 16u) {
 				nlog++;
-				printf("NW-BOOT JIT on #%u n=%d pc=%08x op=%08x -> %08x\n",
+				NW_DIAG("NW-BOOT JIT on #%u n=%d pc=%08x op=%08x -> %08x\n",
 				       nlog, n, (unsigned)guest_pc, (unsigned)first_opcode,
 				       (unsigned)jc.pc);
 				fflush(stdout);

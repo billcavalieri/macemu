@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "rsrc_patches.h"
 #include "cpu_emulation.h"
 #include "emul_op.h"
@@ -125,7 +126,7 @@ void CheckLoad(uint32 type, int16 id, uint16 *p, uint32 size)
 		static int n_any;
 		if (n_any < 6) {
 			n_any++;
-			printf("NW-BOOT G1: checkload #%d %c%c%c%c id=%d\n", n_any,
+			NW_DIAG("NW-BOOT G1: checkload #%d %c%c%c%c id=%d\n", n_any,
 			       (int)(type >> 24), (int)((type >> 16) & 0xff),
 			       (int)((type >> 8) & 0xff), (int)(type & 0xff), (int)id);
 			fflush(stdout);
@@ -516,7 +517,7 @@ void CheckLoad(uint32 type, int16 id, uint16 *p, uint32 size)
 			static int n_sing;
 			if (n_sing < 8) {
 				n_sing++;
-				printf("NW-BOOT G1: audio-thng #%d id=%d sub=%c%c%c%c ->awgc\n",
+				NW_DIAG("NW-BOOT G1: audio-thng #%d id=%d sub=%c%c%c%c ->awgc\n",
 				       n_sing, (int)id,
 				       (int)(sub_type >> 24), (int)((sub_type >> 16) & 0xff),
 				       (int)((sub_type >> 8) & 0xff), (int)(sub_type & 0xff));

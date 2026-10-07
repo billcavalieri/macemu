@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "rom_patches.h"
 #include "main.h"
 #include "prefs.h"
@@ -715,7 +716,7 @@ bool PatchROM(void)
 			printf("PatchROM: patch_68k failed\n");
 			return false;
 		}
-		printf("NW-BOOT G1: patch_68k incomplete (New World, continuing)\n");
+		NW_DIAG("NW-BOOT G1: patch_68k incomplete (New World, continuing)\n");
 	}
 	/* Sound component rewrite sits past the VIA search that fails on
 	 * this ROM. Run it anyway. */
@@ -869,13 +870,13 @@ static bool patch_nanokernel_boot(void)
 				       bp.parcels ? "present" : "missing", (unsigned)bp.parcels_size);
 				return false;
 			}
-			printf("NW-BOOT G1: boot-info tree %d nodes, %#x bytes, parcels %u bytes, display %ux%ux%u lb %u @%08x\n",
+			NW_DIAG("NW-BOOT G1: boot-info tree %d nodes, %#x bytes, parcels %u bytes, display %ux%ux%u lb %u @%08x\n",
 			       nw_bootinfo_count_nodes(Mac2HostAddr(NW_BOOTINFO_LA), NW_BOOTINFO_TREE_MAX), (unsigned)tree_end,
 			       (unsigned)bp.parcels_size, bp.fb_width, bp.fb_height, bp.fb_depth, bp.fb_linebytes,
 			       (unsigned)bp.fb_la);
 		}
 		int n = nw_fill_config_info_be(ROMBaseHost + 0x30d000, &ci);
-		printf("NW-BOOT G1: ConfigInfo page map %d entries rom=%08x ram=%08x+%08x sheep=%08x+%x fb=%08x+%x\n",
+		NW_DIAG("NW-BOOT G1: ConfigInfo page map %d entries rom=%08x ram=%08x+%08x sheep=%08x+%x fb=%08x+%x\n",
 		       n, (unsigned)ROMBase, (unsigned)RAMBase, (unsigned)RAMSize,
 		       (unsigned)SheepMem::Base(), (unsigned)SheepMem::Size(),
 		       (unsigned)screen_base, (unsigned)fb_size);
@@ -1597,7 +1598,7 @@ void nw_install_drivers(void)
 		r.a[0] = pb;
 		Execute68kTrap(0xa000, &r);		// Open()
 #if NW_BOOT_LOG
-		printf("NW-BOOT G1: %s installed refnum %d, Open -> %d\n", drv[i].name + 1, drv[i].refnum, (int16)r.d[0]);
+		NW_DIAG("NW-BOOT G1: %s installed refnum %d, Open -> %d\n", drv[i].name + 1, drv[i].refnum, (int16)r.d[0]);
 #endif
 	}
 }
@@ -2680,7 +2681,7 @@ static void patch_rom_sound(void)
 		}
 		thing = find_rom_resource(FOURCC('t','h','n','g'), 4711, true);
 	}
-	printf("NW-BOOT G1: audio-rom sdev=%d\n", found);
+	NW_DIAG("NW-BOOT G1: audio-rom sdev=%d\n", found);
 	fflush(stdout);
 
 	// Patch component code

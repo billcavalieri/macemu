@@ -135,8 +135,10 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
             bounds.minX, bounds.minY, bounds.width, bounds.height,
             inWindow.minX, inWindow.minY, inWindow.width, inWindow.height
         )
-        fputs(line, stdout)
-        fflush(stdout)
+        if nwDiagnosticsOn {
+            fputs(line, stdout)
+            fflush(stdout)
+        }
     }
 
     func play(_ doc: VirtualMachineDocument) {

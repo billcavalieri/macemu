@@ -25,6 +25,11 @@
  */
 
 #include "sysdeps.h"
+#ifdef SHEEPSHAVER
+#include "nw_log.h"
+#else
+#define NW_DIAG(...) ((void)0)
+#endif
 #include <string.h>
 #include "cpu_emulation.h"
 #include "macos_util.h"
@@ -572,7 +577,7 @@ static bool sb_pull(void)
 	static int n_log;
 	if (n_log < 12) {
 		n_log++;
-		printf("NW-BOOT G1: sheepblaster src #%d err=%08x info=%08x frames=%u fmt=%08x rate=%u ch=%d bits=%d\n",
+		NW_DIAG("NW-BOOT G1: sheepblaster src #%d err=%08x info=%08x frames=%u fmt=%08x rate=%u ch=%d bits=%d\n",
 		       n_log, (unsigned)r.d[0], (unsigned)info, (unsigned)frames,
 		       (unsigned)format, (unsigned)(rate >> 16), ch, bits);
 		fflush(stdout);
@@ -701,7 +706,7 @@ int32 AudioSheepBlasterTick(uint32 *task)
 			double audio_s = (double)acc_fr / 44100.0;
 			double cpu_s = (double)acc_us / 1000000.0;
 			double ratio = audio_s > 0.001 ? cpu_s / audio_s : 0.0;
-			printf("NW-BOOT G1: sb-cost cpu_us=%llu frames=%llu cpu_per_audio=%.3f\n",
+			NW_DIAG("NW-BOOT G1: sb-cost cpu_us=%llu frames=%llu cpu_per_audio=%.3f\n",
 			       (unsigned long long)acc_us, (unsigned long long)acc_fr, ratio);
 			nw_jit_itunes_log(acc_fr);
 			nw_jit_pull_log();
@@ -767,15 +772,15 @@ int32 AudioDispatch(uint32 params, uint32 globals)
 		if (!probe && (n_other < 20 || tear)) {
 			n_other++;
 #if defined(SHEEPSHAVER)
-			printf("NW-BOOT G1: audio-sel other #%d sel=%d in_tick=%d in_mixer=%d hold_on=%d hold_lock=%d run=%d src=%d\n",
+			NW_DIAG("NW-BOOT G1: audio-sel other #%d sel=%d in_tick=%d in_mixer=%d hold_on=%d hold_lock=%d run=%d src=%d\n",
 			       n_other, (int)selector, (int)sb_in_tick, sb_in_mixer, sb_hold_on, sb_hold_lock, (int)sb_run, sb_sources);
 #else
-			printf("NW-BOOT G1: audio-sel other #%d sel=%d\n", n_other, (int)selector);
+			NW_DIAG("NW-BOOT G1: audio-sel other #%d sel=%d\n", n_other, (int)selector);
 #endif
 			fflush(stdout);
 		} else if (n_sel < 8) {
 			n_sel++;
-			printf("NW-BOOT G1: audio-sel #%d sel=%d\n", n_sel, (int)selector);
+			NW_DIAG("NW-BOOT G1: audio-sel #%d sel=%d\n", n_sel, (int)selector);
 			fflush(stdout);
 		}
 	}
@@ -800,7 +805,7 @@ int32 AudioDispatch(uint32 params, uint32 globals)
 			static int n_pass;
 			if (n_pass < 8) {
 				n_pass++;
-				printf("NW-BOOT G1: audio-pass #%d sel=%d\n", n_pass, (int)selector);
+				NW_DIAG("NW-BOOT G1: audio-pass #%d sel=%d\n", n_pass, (int)selector);
 				fflush(stdout);
 			}
 			/* Component Manager selectors we do not implement must
@@ -822,7 +827,7 @@ int32 AudioDispatch(uint32 params, uint32 globals)
 				static int n_open;
 				if (n_open < 8) {
 					n_open++;
-					printf("NW-BOOT G1: audio-open #%d sources=%d\n", n_open, AudioStatus.num_sources);
+					NW_DIAG("NW-BOOT G1: audio-open #%d sources=%d\n", n_open, AudioStatus.num_sources);
 					fflush(stdout);
 				}
 			}
@@ -962,7 +967,7 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 						 * 0081000b). CloseMixer dereferences it and the
 						 * guest takes SysError(2) as QuickTime opens. */
 						if (AudioStatus.mixer & 1) {
-							printf("NW-BOOT G1: audio-close skip mixer=%08x\n",
+							NW_DIAG("NW-BOOT G1: audio-close skip mixer=%08x\n",
 							       (unsigned)AudioStatus.mixer);
 							fflush(stdout);
 						} else
@@ -1025,7 +1030,7 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 			WriteMacInt32(audio_data + adatData + scd_reserved, 0);
 			WriteMacInt32(audio_data + adatStreamInfo, 0);
 
-			printf("NW-BOOT G1: audio-init enter\n");
+			NW_DIAG("NW-BOOT G1: audio-init enter\n");
 			fflush(stdout);
 			// Open Apple Mixer in the system heap; the calling
 			// application's heap can go away while the mixer is in use
@@ -1037,7 +1042,7 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 			Execute68k(audio_data + adatOpenMixer, &r);
 			WriteMacInt32(0x118, zone);
 			AudioStatus.mixer = ReadMacInt32(audio_data + adatMixer);
-			printf("NW-BOOT G1: audio-mixer err=%08x mixer=%08x\n",
+			NW_DIAG("NW-BOOT G1: audio-mixer err=%08x mixer=%08x\n",
 			       (unsigned)r.d[0], (unsigned)AudioStatus.mixer);
 			fflush(stdout);
 #if defined(SHEEPSHAVER)
@@ -1069,7 +1074,7 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 				static int n_add;
 				if (n_add < 8) {
 					n_add++;
-					printf("NW-BOOT G1: audio-add #%d sources=%d\n", n_add, AudioStatus.num_sources);
+					NW_DIAG("NW-BOOT G1: audio-add #%d sources=%d\n", n_add, AudioStatus.num_sources);
 					fflush(stdout);
 				}
 			}
@@ -1098,7 +1103,7 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 				static int n_rm;
 				if (n_rm < 4) {
 					n_rm++;
-					printf("NW-BOOT G1: audio-rm #%d sources=%d\n", n_rm, AudioStatus.num_sources);
+					NW_DIAG("NW-BOOT G1: audio-rm #%d sources=%d\n", n_rm, AudioStatus.num_sources);
 					fflush(stdout);
 				}
 			}
@@ -1136,7 +1141,7 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 				uint32 completion = pb ? ReadMacInt32(pb + 52) : 0;
 				if (n_psb < 8) {
 					n_psb++;
-					printf("NW-BOOT G1: sheepblaster psb #%d pb=%08x frames=%u completion=%08x sources=%d\n",
+					NW_DIAG("NW-BOOT G1: sheepblaster psb #%d pb=%08x frames=%u completion=%08x sources=%d\n",
 					       n_psb, (unsigned)pb,
 					       pb ? (unsigned)ReadMacInt32(pb + 4 + scd_sampleCount) : 0u,
 					       (unsigned)completion, sb_sources);

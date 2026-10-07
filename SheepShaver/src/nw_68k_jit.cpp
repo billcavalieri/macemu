@@ -1,6 +1,7 @@
 /* Direct New World 68k-to-ARM64 dispatch. The NK owns service/fault
  * continuations. Native preparation has no device or memory-write effects. */
 #include "nw_68k_jit.h"
+#include "nw_log.h"
 #include "nw_68k_core.h"
 #include "nw_jit.h"
 #include "nw_io.h"
@@ -532,7 +533,7 @@ int nw_68k_dispatch(powerpc_cpu *cpu)
 	const uint64_t report = (blocks_compared + blocks_inconclusive) >> 20;
 	if (check_blocks && report > block_report) {
 		block_report = report;
-		printf("NW-BOOT G1: jit68k block-check compared=%llu inconclusive=%llu\n",
+		NW_DIAG("NW-BOOT G1: jit68k block-check compared=%llu inconclusive=%llu\n",
 			(unsigned long long)blocks_compared, (unsigned long long)blocks_inconclusive);
 	}
 	if (m == VERIFY) {

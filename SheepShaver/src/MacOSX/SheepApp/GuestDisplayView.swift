@@ -18,6 +18,17 @@
 import AppKit
 import QuartzCore
 
+/// Diagnostic output: on in Debug builds, or in any build with NW_VERBOSE=1 in the environment (NW_VERBOSE=0 turns
+/// it off). A normal run prints status lines, warnings and errors only. The C++ side is nw_log.h.
+let nwDiagnosticsOn: Bool = {
+    if let e = ProcessInfo.processInfo.environment["NW_VERBOSE"], !e.isEmpty { return e != "0" }
+    #if DEBUG
+    return true
+    #else
+    return false
+    #endif
+}()
+
 @_silgen_name("VideoHostKey")
 private func VideoHostKey(_ code: Int32, _ down: Int32)
 
@@ -146,7 +157,7 @@ final class GuestDisplayView: NSView {
         stopGrabHold()
         gaming = on
         layoutGuestArrow()
-        logMouse("NW-BOOT mouse mode=\(on ? "relative" : "absolute")")
+        logMouse("NW-BOOT mouse mode=\(on ? "relative" : "absolute")", status: true)
     }
 
     override func layout() {
@@ -708,7 +719,7 @@ final class GuestDisplayView: NSView {
         } else {
             loggedAssociateError = code
         }
-        logMouse("NW-BOOT mouse \(what) failed \(code)")
+        logMouse("NW-BOOT mouse \(what) failed \(code)", status: true)
     }
 
     private func warpToCenter() {
@@ -829,7 +840,9 @@ final class GuestDisplayView: NSView {
         }
     }
 
-    private func logMouse(_ line: String) {
+    /// A status or error line always prints; everything else only with diagnostics on.
+    private func logMouse(_ line: String, status: Bool = false) {
+        guard status || nwDiagnosticsOn else { return }
         fputs(line + "\n", stdout)
         fflush(stdout)
     }

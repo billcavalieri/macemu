@@ -20,6 +20,7 @@
  */
 
 #include <stdio.h>
+#include "nw_log.h"
 #include <string.h>
 #include "nw_io.h"
 #include "nw_nvram.h"
@@ -199,7 +200,7 @@ static void erase_block(uint32_t off)
 	const uint32_t block = off & ~(NW_NVRAM_BANK_SIZE - 1);
 	memset(g_image + block, 0xff, NW_NVRAM_BANK_SIZE);
 	g_dirty = 1;
-	printf("NW-BOOT G1: nvram flash erase bank %c\n", block ? 'B' : 'A');
+	NW_DIAG("NW-BOOT G1: nvram flash erase bank %c\n", block ? 'B' : 'A');
 }
 
 static uint32_t flash_read(void *, uint32_t off, int size)
@@ -250,7 +251,7 @@ static void flash_write_byte(uint32_t off, uint8_t v)
 		if (g_programmed) {
 			/* the driver programs a whole bank then verifies it; the file
 			 * follows each completed sequence, not each byte */
-			printf("NW-BOOT G1: nvram flash bank %c programmed %u bytes, generation %u\n",
+			NW_DIAG("NW-BOOT G1: nvram flash bank %c programmed %u bytes, generation %u\n",
 			       g_program_bank ? 'B' : 'A', (unsigned)g_programmed,
 			       (unsigned)nw_nvram_bank_generation(g_image + g_program_bank * NW_NVRAM_BANK_SIZE));
 			g_programmed = 0;

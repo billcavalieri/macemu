@@ -20,6 +20,7 @@
  */
 
 #include "nw_jit.h"
+#include "nw_log.h"
 #include "nw_68k_jit.h"
 #include "nw_68k_core.h"
 #include "nw_io.h"
@@ -2838,7 +2839,7 @@ static void wrap_note_occupancy(void)
 		g_occ_max = live;
 	const uint64_t since = g_compiles - g_compiles_at_wrap;
 	if (nw_jit_stats_wanted()) {
-		printf("NW-BOOT G1: jit wrap live %d occ_max %d used %zu compiles %llu b/block %llu\n",
+		NW_DIAG("NW-BOOT G1: jit wrap live %d occ_max %d used %zu compiles %llu b/block %llu\n",
 		       live, g_occ_max, g_code_used,
 		       (unsigned long long)since,
 		       (unsigned long long)(since ? g_code_used / since : 0));
@@ -3001,15 +3002,15 @@ static void nw_vxo_summary_print(void)
 	vxo_top(idx, &n);
 	if (!n)
 		return;
-	printf("NW-BOOT G1: jit vxo");
+	NW_DIAG("NW-BOOT G1: jit vxo");
 	for (int i = 0; i < n; i++) {
 		const char *nm = vxo_name((unsigned)idx[i]);
 		if (nm)
-			printf(" %03x %s=%llu", idx[i], nm, (unsigned long long)g_vxo_n[idx[i]]);
+			NW_DIAG(" %03x %s=%llu", idx[i], nm, (unsigned long long)g_vxo_n[idx[i]]);
 		else
-			printf(" %03x=%llu", idx[i], (unsigned long long)g_vxo_n[idx[i]]);
+			NW_DIAG(" %03x=%llu", idx[i], (unsigned long long)g_vxo_n[idx[i]]);
 	}
-	printf("\n");
+	NW_DIAG("\n");
 }
 
 static void nw_vxo_summary_write(FILE *f)
@@ -3037,7 +3038,7 @@ void nw_jit_stats_print(const char *why)
 		"store", "icbi", "tlb", "sr", "bat", "sdr1", "wrap",
 		"istore", "host", "other"
 	};
-	printf("NW-BOOT G1: jit stats %s mode %s blocks %llu insns %llu flush %llu compiles %llu evict %llu recompile_n %llu dtlb hit %llu miss %llu wrap %llu occ_max %d b/block %llu\n",
+	NW_DIAG("NW-BOOT G1: jit stats %s mode %s blocks %llu insns %llu flush %llu compiles %llu evict %llu recompile_n %llu dtlb hit %llu miss %llu wrap %llu occ_max %d b/block %llu\n",
 	       why, nw_jit_mode_name(),
 	       (unsigned long long)g_exec_blocks,
 	       (unsigned long long)g_exec_insns,
@@ -3051,17 +3052,17 @@ void nw_jit_stats_print(const char *why)
 	       g_occ_max,
 	       (unsigned long long)(g_compiles ? g_code_emitted / g_compiles : 0));
 #ifdef __APPLE__
-	printf("NW-BOOT G1: jit wx ns %llu icache ns %llu n %llu\n",
+	NW_DIAG("NW-BOOT G1: jit wx ns %llu icache ns %llu n %llu\n",
 	       (unsigned long long)g_wx_ns,
 	       (unsigned long long)g_icache_ns,
 	       (unsigned long long)g_wx_n);
 #endif
-	printf("NW-BOOT G1: jit itlb hit %llu miss %llu mtsr vsid_chg=%llu total=%llu\n",
+	NW_DIAG("NW-BOOT G1: jit itlb hit %llu miss %llu mtsr vsid_chg=%llu total=%llu\n",
 	       (unsigned long long)g_itlb_hit, (unsigned long long)g_itlb_miss,
 	       (unsigned long long)g_mtsr_vsid, (unsigned long long)g_mtsr_total);
 	for (int i = 0; i < NW_JIT_FL_N; i++) {
 		if (g_flush_calls[i] || g_flush_src[i])
-			printf("NW-BOOT G1: jit flush %s calls %llu entries %llu\n",
+			NW_DIAG("NW-BOOT G1: jit flush %s calls %llu entries %llu\n",
 			       src_name[i],
 			       (unsigned long long)g_flush_calls[i],
 			       (unsigned long long)g_flush_src[i]);
@@ -3072,7 +3073,7 @@ void nw_jit_stats_print(const char *why)
 		};
 		for (int i = 0; i < NW_JIT_DTLB_FL_N; i++) {
 			if (g_dtlb_fl[i])
-				printf("NW-BOOT G1: jit dtlb-flush %s %llu\n",
+				NW_DIAG("NW-BOOT G1: jit dtlb-flush %s %llu\n",
 				       dtlb_fl_name[i],
 				       (unsigned long long)g_dtlb_fl[i]);
 		}
@@ -3417,7 +3418,7 @@ void nw_jit_stats_print(const char *why)
 				nm = "sraw";
 			else if (p == 31 && x == 824)
 				nm = "srawi";
-			printf("NW-BOOT G1: jit skip_unsup %s prim=%d xo=%d n=%llu lost=%llu op=%08x pc=%08x ra=%d rd=%d\n",
+			NW_DIAG("NW-BOOT G1: jit skip_unsup %s prim=%d xo=%d n=%llu lost=%llu op=%08x pc=%08x ra=%d rd=%d\n",
 			       nm ? nm : "?", p, x,
 			       (unsigned long long)g_skip[j].n,
 			       (unsigned long long)g_skip[j].lost,
@@ -3432,7 +3433,7 @@ void nw_jit_stats_print(const char *why)
 		const uint64_t do_ = g_other_insns - g_other_insns_tick;
 		const uint64_t tot = dc + do_;
 		const unsigned ratio = tot ? (unsigned)((dc * 1000ull) / tot) : 0;
-		printf("NW-BOOT G1: jit codec %s insns %llu other %llu ratio %u/1000\n",
+		NW_DIAG("NW-BOOT G1: jit codec %s insns %llu other %llu ratio %u/1000\n",
 		       why, (unsigned long long)dc, (unsigned long long)do_, ratio);
 		g_codec_insns_tick = g_codec_insns;
 		g_other_insns_tick = g_other_insns;
@@ -3446,7 +3447,7 @@ void nw_jit_summary_print(const char *why)
 {
 	const uint64_t tot = g_dtlb_hit + g_dtlb_miss;
 	const unsigned miss_pct = tot ? (unsigned)((g_dtlb_miss * 1000ull) / tot) : 0;
-	printf("NW-BOOT G1: jit summary %s skip_unsup %llu skip_io %llu dtlb_miss %u/1000 wrap %llu occ_max %d chain %llu\n",
+	NW_DIAG("NW-BOOT G1: jit summary %s skip_unsup %llu skip_io %llu dtlb_miss %u/1000 wrap %llu occ_max %d chain %llu\n",
 	       why ? why : "?",
 	       (unsigned long long)g_v_skip_unsup,
 	       (unsigned long long)g_v_skip_io,
@@ -3454,7 +3455,7 @@ void nw_jit_summary_print(const char *why)
 	       (unsigned long long)g_wraps,
 	       g_occ_max,
 	       (unsigned long long)g_chain_hops);
-	printf("NW-BOOT G1: dtlb-why sr=%llu bat=%llu conflict=%llu pr=%llu other=%llu\n",
+	NW_DIAG("NW-BOOT G1: dtlb-why sr=%llu bat=%llu conflict=%llu pr=%llu other=%llu\n",
 	       (unsigned long long)g_dtlb_why[DTLB_WHY_SR],
 	       (unsigned long long)g_dtlb_why[DTLB_WHY_BAT],
 	       (unsigned long long)g_dtlb_why[DTLB_WHY_CONFLICT],
@@ -3465,32 +3466,32 @@ void nw_jit_summary_print(const char *why)
 			"ends_block", "page_cross", "peek_fail", "class_change",
 			"unsup_next", "mem_ok0", "mem_ok2", "max_block", "first_op_io"
 		};
-		printf("NW-BOOT G1: jit summary %s cut", why ? why : "?");
+		NW_DIAG("NW-BOOT G1: jit summary %s cut", why ? why : "?");
 		for (int i = 0; i < NW_JIT_CUT_N; i++)
-			printf(" %s=%llu", cut_name[i], (unsigned long long)g_cut[i]);
-		printf("\n");
+			NW_DIAG(" %s=%llu", cut_name[i], (unsigned long long)g_cut[i]);
+		NW_DIAG("\n");
 	}
 	{
 		static const char *const hop_name[NW_JIT_HOP_N] = {
 			"cap", "no_chain_pc", "pc_mismatch", "itlb_miss", "aline",
 			"cache_miss", "vec_gate", "fp_gate", "compile_null"
 		};
-		printf("NW-BOOT G1: jit summary %s hop_stop", why ? why : "?");
+		NW_DIAG("NW-BOOT G1: jit summary %s hop_stop", why ? why : "?");
 		for (int i = 0; i < NW_JIT_HOP_N; i++)
-			printf(" %s=%llu", hop_name[i], (unsigned long long)g_hop_stop[i]);
-		printf("\n");
+			NW_DIAG(" %s=%llu", hop_name[i], (unsigned long long)g_hop_stop[i]);
+		NW_DIAG("\n");
 	}
 	nw_vxo_summary_print();
 	nw_68k_op_summary();
 	{
 		const uint64_t it = g_itlb_hit + g_itlb_miss;
 		const unsigned im = it ? (unsigned)((g_itlb_miss * 1000ull) / it) : 0;
-		printf("NW-BOOT G1: jit summary %s itlb_miss %u/1000 mtsr vsid_chg=%llu total=%llu bat_gen=%llu bat_total=%llu\n",
+		NW_DIAG("NW-BOOT G1: jit summary %s itlb_miss %u/1000 mtsr vsid_chg=%llu total=%llu bat_gen=%llu bat_total=%llu\n",
 		       why ? why : "?", im,
 		       (unsigned long long)g_mtsr_vsid, (unsigned long long)g_mtsr_total,
 		       (unsigned long long)g_bat_bumps, (unsigned long long)g_bat_total);
 	}
-	printf("NW-BOOT G1: jit summary %s codec %llu other %llu kcall_fast %llu qt_fps_proxy frames=%llu flat_max=%u upload=%llu\n",
+	NW_DIAG("NW-BOOT G1: jit summary %s codec %llu other %llu kcall_fast %llu qt_fps_proxy frames=%llu flat_max=%u upload=%llu\n",
 	       why ? why : "?",
 	       (unsigned long long)g_codec_insns,
 	       (unsigned long long)g_other_insns,
@@ -3498,7 +3499,7 @@ void nw_jit_summary_print(const char *why)
 	       (unsigned long long)nw_fb_fps_proxy_frames(),
 	       nw_fb_fps_proxy_flat_max(),
 	       (unsigned long long)nw_fb_damage_upload_bytes());
-	printf("NW-BOOT G1: jit68k_host fallback=%llu\n",
+	NW_DIAG("NW-BOOT G1: jit68k_host fallback=%llu\n",
 	       (unsigned long long)nw_68k_fallback_count());
 	{
 		int top[8];
@@ -3520,7 +3521,7 @@ void nw_jit_summary_print(const char *why)
 		}
 		for (int i = 0; i < ntop; i++) {
 			const int j = top[i];
-			printf("NW-BOOT G1: jit dtlb-page ea=%08x n=%llu\n",
+			NW_DIAG("NW-BOOT G1: jit dtlb-page ea=%08x n=%llu\n",
 			       (unsigned)g_dtlb_h[j].page,
 			       (unsigned long long)g_dtlb_h[j].n);
 		}
@@ -3545,7 +3546,7 @@ void nw_jit_summary_print(const char *why)
 		}
 		for (int i = 0; i < ntop; i++) {
 			const int j = top[i];
-			printf("NW-BOOT G1: jit skip_io ea=%08x pc=%08x n=%llu\n",
+			NW_DIAG("NW-BOOT G1: jit skip_io ea=%08x pc=%08x n=%llu\n",
 			       (unsigned)g_io_h[j].page,
 			       (unsigned)g_io_h[j].pc,
 			       (unsigned long long)g_io_h[j].n);
@@ -4104,7 +4105,7 @@ static void dtlb_sync_msr(struct nw_jit_cpu *cpu)
 	static unsigned n;
 	if (n < 8u) {
 		n++;
-		printf("NW-BOOT G1: dtlb-msr #%u cpu=%08x live=%08x pc=%08x\n",
+		NW_DIAG("NW-BOOT G1: dtlb-msr #%u cpu=%08x live=%08x pc=%08x\n",
 		       n, (unsigned)cpu->msr, (unsigned)live, (unsigned)cpu->pc);
 		fflush(stdout);
 	}
@@ -4918,7 +4919,7 @@ void nw_jit_skip_raw_once(uint32_t op, uint32_t pc)
 	g_skip_raw_pc = pc;
 	const char *nm = skip_raw_name(op);
 	snprintf(g_skip_raw_nm, sizeof(g_skip_raw_nm), "%s", nm);
-	printf("NW-BOOT G1: jit skip_raw prim=%d xo=%d op=%08x pc=%08x %s\n",
+	NW_DIAG("NW-BOOT G1: jit skip_raw prim=%d xo=%d op=%08x pc=%08x %s\n",
 	       prim, xo, (unsigned)op, (unsigned)pc, nm);
 	fflush(stdout);
 }
@@ -5046,7 +5047,7 @@ void nw_jit_itunes_log(uint64_t frames)
 	const double audio_s = (double)frames / 44100.0;
 	const double host_s = (double)g_it_us / 1000000.0;
 	const double ratio = audio_s > 0.001 ? host_s / audio_s : 0.0;
-	printf("NW-BOOT G1: itunes-cost jit=%llu interp=%llu host_us=%llu frames=%llu host_per_audio=%.3f class_change=%llu fp_gate=%llu skip=%llu\n",
+	NW_DIAG("NW-BOOT G1: itunes-cost jit=%llu interp=%llu host_us=%llu frames=%llu host_per_audio=%.3f class_change=%llu fp_gate=%llu skip=%llu\n",
 	       (unsigned long long)g_it_jit, (unsigned long long)g_it_interp,
 	       (unsigned long long)g_it_us, (unsigned long long)frames, ratio,
 	       (unsigned long long)g_it_class, (unsigned long long)g_it_fp,
@@ -5060,31 +5061,31 @@ void nw_jit_pull_log(void)
 		"cap", "no_chain_pc", "pc_mismatch", "itlb_miss", "aline",
 		"cache_miss", "vec_gate", "fp_gate", "compile_null"
 	};
-	printf("NW-BOOT G1: sb-pull jit=%llu vr=%llu skip=%llu vmx=%llu op6=%llu class_change=%llu",
+	NW_DIAG("NW-BOOT G1: sb-pull jit=%llu vr=%llu skip=%llu vmx=%llu op6=%llu class_change=%llu",
 	       (unsigned long long)g_pull_jit, (unsigned long long)g_pull_vr,
 	       (unsigned long long)g_pull_skip, (unsigned long long)g_pull_vmx,
 	       (unsigned long long)g_pull_op6, (unsigned long long)g_pull_class);
 	for (int i = 0; i < NW_JIT_HOP_N; i++) {
 		if (g_pull_hop[i])
-			printf(" %s=%llu", hop_name[i], (unsigned long long)g_pull_hop[i]);
+			NW_DIAG(" %s=%llu", hop_name[i], (unsigned long long)g_pull_hop[i]);
 	}
-	printf("\n");
-	printf("NW-BOOT G1: sb-pull pc");
+	NW_DIAG("\n");
+	NW_DIAG("NW-BOOT G1: sb-pull pc");
 	for (int i = 0; i < 4; i++) {
 		if (g_pull_pc[i].pc)
-			printf(" %08x:%llu%s", g_pull_pc[i].pc,
+			NW_DIAG(" %08x:%llu%s", g_pull_pc[i].pc,
 			       (unsigned long long)g_pull_pc[i].n,
 			       g_pull_pc[i].vr ? ":vr" : "");
 	}
-	printf("\n");
-	printf("NW-BOOT G1: sb-pull skip");
+	NW_DIAG("\n");
+	NW_DIAG("NW-BOOT G1: sb-pull skip");
 	for (int i = 0; i < 4; i++) {
 		if (g_pull_sk[i].n)
-			printf(" prim=%d xo=%d pc=%08x n=%llu",
+			NW_DIAG(" prim=%d xo=%d pc=%08x n=%llu",
 			       g_pull_sk[i].prim, g_pull_sk[i].xo, g_pull_sk[i].pc,
 			       (unsigned long long)g_pull_sk[i].n);
 	}
-	printf("\n");
+	NW_DIAG("\n");
 	g_pull_jit = g_pull_vr = g_pull_skip = g_pull_vmx = g_pull_op6 = g_pull_class = 0;
 	memset(g_pull_hop, 0, sizeof g_pull_hop);
 	memset(g_pull_pc, 0, sizeof g_pull_pc);
@@ -5146,7 +5147,7 @@ void nw_jit_verify_dump(const char *why)
 		if (g_hist[i].prim == 36)
 			n_stw = g_hist[i].n;
 	}
-	printf("NW-BOOT G1: jit verify %s cmp %llu miss %llu fail %llu skip_unsup %llu skip_mem %llu skip_dsi %llu skip_io %llu skip_effect %llu blr %llu mfspr %llu mtspr %llu lwz %llu stw %llu\n",
+	NW_DIAG("NW-BOOT G1: jit verify %s cmp %llu miss %llu fail %llu skip_unsup %llu skip_mem %llu skip_dsi %llu skip_io %llu skip_effect %llu blr %llu mfspr %llu mtspr %llu lwz %llu stw %llu\n",
 	       why ? why : "?",
 	       (unsigned long long)g_v_cmp, (unsigned long long)g_v_miss,
 	       (unsigned long long)g_v_fail,
@@ -5161,16 +5162,16 @@ void nw_jit_verify_dump(const char *why)
 		return;
 	}
 	for (size_t i = 0; i < sizeof(g_hist) / sizeof(g_hist[0]); i++)
-		printf("NW-BOOT G1: jit verify %s n=%llu miss=%llu\n",
+		NW_DIAG("NW-BOOT G1: jit verify %s n=%llu miss=%llu\n",
 		       g_hist[i].name,
 		       (unsigned long long)g_hist[i].n,
 		       (unsigned long long)g_hist[i].miss);
 	if (g_v_other)
-		printf("NW-BOOT G1: jit verify other n=%llu miss=%llu\n",
+		NW_DIAG("NW-BOOT G1: jit verify other n=%llu miss=%llu\n",
 		       (unsigned long long)g_v_other, (unsigned long long)g_v_other_miss);
 	for (int i = 1; i <= NW_JIT_MAX_BLOCK; i++) {
 		if (g_v_blocks[i])
-			printf("NW-BOOT G1: jit verify blocklen %d n=%llu\n",
+			NW_DIAG("NW-BOOT G1: jit verify blocklen %d n=%llu\n",
 			       i, (unsigned long long)g_v_blocks[i]);
 	}
 	nw_jit_pc_hot_dump(why);
@@ -5222,7 +5223,7 @@ void nw_jit_pc_hot_dump(const char *why)
 	}
 	for (int i = 0; i < ntop; i++) {
 		int j = top[i];
-		printf("NW-BOOT G1: jit pc-hot %s pc=%08x op=%08x n=%llu\n",
+		NW_DIAG("NW-BOOT G1: jit pc-hot %s pc=%08x op=%08x n=%llu\n",
 		       why ? why : "?",
 		       (unsigned)g_pchot[j].pc, (unsigned)g_pchot[j].op,
 		       (unsigned long long)g_pchot[j].n);
@@ -6886,7 +6887,7 @@ void nw_jit_helper_bclr(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc)
 		 * on the way in. */
 		if (cpu->lr == 0x680d0370u && nslot < 24) {
 			nslot++;
-			printf("NW-BOOT G1: slot r24=%08x d0=%08x a0=%08x cr=%08x ppc=%08x\n",
+			NW_DIAG("NW-BOOT G1: slot r24=%08x d0=%08x a0=%08x cr=%08x ppc=%08x\n",
 			       r24, cpu->gpr[8], cpu->gpr[16], cpu->cr, pc);
 			fflush(stdout);
 		}
@@ -6898,7 +6899,7 @@ void nw_jit_helper_bclr(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc)
 					dup = 1;
 			if (!dup) {
 				initpc[ninit++] = r24;
-				printf("NW-BOOT G1: bcinit r24=%08x d0=%08x a0=%08x a1=%08x lr=%08x ppc=%08x\n",
+				NW_DIAG("NW-BOOT G1: bcinit r24=%08x d0=%08x a0=%08x a1=%08x lr=%08x ppc=%08x\n",
 				       r24, cpu->gpr[8], cpu->gpr[16], cpu->gpr[17], cpu->lr, pc);
 				fflush(stdout);
 			}
@@ -6914,7 +6915,7 @@ void nw_jit_helper_bclr(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc)
 					dup = 1;
 			if (!dup) {
 				path[npath++] = r24;
-				printf("NW-BOOT G1: ipl5 r24=%08x d0=%08x cr=%08x lr=%08x ppc=%08x r27=%08x\n",
+				NW_DIAG("NW-BOOT G1: ipl5 r24=%08x d0=%08x cr=%08x lr=%08x ppc=%08x r27=%08x\n",
 				       r24, cpu->gpr[8], cpu->cr, cpu->lr, pc, cpu->gpr[27]);
 				fflush(stdout);
 			}
@@ -6927,7 +6928,7 @@ void nw_jit_helper_bclr(struct nw_jit_cpu *cpu, uint32_t op, uint32_t pc)
 		static int n;
 		if (r24 >= 0xffc04600u && r24 <= 0xffc04800u && n < 16) {
 			n++;
-			printf("NW-BOOT G1: emu-lvl pc=%08x npc=%08x cr=%08x r6=%08x r7=%08x r24=%08x r25=%08x\n",
+			NW_DIAG("NW-BOOT G1: emu-lvl pc=%08x npc=%08x cr=%08x r6=%08x r7=%08x r24=%08x r25=%08x\n",
 			       pc, cpu->pc, cpu->cr, cpu->gpr[6], cpu->gpr[7],
 			       r24, cpu->gpr[25]);
 			fflush(stdout);
@@ -11323,7 +11324,7 @@ void nw_jit_dump_wake_ring(void)
 	unsigned start = g_wake_ring_n > 32u ? g_wake_ring_n - 32u : 0u;
 	for (unsigned i = 0; i < n; i++) {
 		const struct nw_wake_ring *e = &g_wake_ring[(start + i) & 31u];
-		printf("NW-BOOT G1: wake-ring pc=%08x cr=%08x r13=%08x r24=%08x r25=%08x ctr=%08x lr=%08x\n",
+		NW_DIAG("NW-BOOT G1: wake-ring pc=%08x cr=%08x r13=%08x r24=%08x r25=%08x ctr=%08x lr=%08x\n",
 		       e->pc, e->cr, e->r13, e->r24, e->r25, e->ctr, e->lr);
 	}
 	fflush(stdout);
@@ -11384,7 +11385,7 @@ static void nw_jit_log_wake(struct nw_jit_cpu *cpu, uint32_t pc)
 		return;
 	else
 		n++;
-	printf("NW-BOOT G1: wake%s pc=%08x r7=%08x r13=%08x r27=%08x r28=%08x r29=%08x r31=%08x cr=%08x\n",
+	NW_DIAG("NW-BOOT G1: wake%s pc=%08x r7=%08x r13=%08x r27=%08x r28=%08x r29=%08x r31=%08x cr=%08x\n",
 	       odd ? "-odd" : "", pc, cpu->gpr[7], r13, cpu->gpr[27], r28,
 	       cpu->gpr[29], r31, cpu->cr);
 	fflush(stdout);
@@ -13906,7 +13907,7 @@ static int compact_code(void)
 	if (dropped)
 		pagebit_rebuild();
 	if (nw_jit_stats_wanted()) {
-		printf("NW-BOOT G1: jit compact live %d kept %zu was %zu dropped %d\n",
+		NW_DIAG("NW-BOOT G1: jit compact live %d kept %zu was %zu dropped %d\n",
 		       live, used, before, dropped);
 		fflush(stdout);
 	}
@@ -13980,7 +13981,7 @@ static size_t evict_cold(size_t want)
 		g_flush_calls[NW_JIT_FL_WRAP]++;
 		pagebit_rebuild();
 		if (nw_jit_stats_wanted()) {
-			printf("NW-BOOT G1: jit evict freed %zu blocks %d hits<=%u\n",
+			NW_DIAG("NW-BOOT G1: jit evict freed %zu blocks %d hits<=%u\n",
 			       freed, n, cut);
 			fflush(stdout);
 		}
@@ -14042,7 +14043,7 @@ static int ensure_code_room(size_t need)
 		return 0;
 	}
 	if (nw_jit_stats_wanted()) {
-		printf("NW-BOOT G1: jit compact skip live_bytes %zu need %zu\n",
+		NW_DIAG("NW-BOOT G1: jit compact skip live_bytes %zu need %zu\n",
 		       live, need);
 		fflush(stdout);
 	}

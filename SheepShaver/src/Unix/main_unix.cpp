@@ -98,6 +98,7 @@
 #endif
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "main.h"
 #include "version.h"
 #include "prefs.h"
@@ -1761,7 +1762,7 @@ static void *tick_func(void *arg)
 			uint32_t sb_min = 0, sb_max = 0, sb_sub = 0, sb_rate = 0;
 			SheepBlasterTakeStats(&sb_in, &sb_out, &sb_full, &sb_unsent, &sb_min, &sb_max,
 					      &sb_sub, &sb_src, &sb_rate);
-			printf("PLAY presents=%llu present_max_us=%llu pictures=%llu audio_cb=%llu audio_cb_max_us=%llu short_pulls=%llu sb_in=%llu sb_out=%llu sb_min=%u sb_max=%u sb_full=%llu sb_unsent=%llu sb_sub=%u sb_src=%llu sb_rate=%u\n",
+			NW_DIAG("PLAY presents=%llu present_max_us=%llu pictures=%llu audio_cb=%llu audio_cb_max_us=%llu short_pulls=%llu sb_in=%llu sb_out=%llu sb_min=%u sb_max=%u sb_full=%llu sb_unsent=%llu sb_sub=%u sb_src=%llu sb_rate=%u\n",
 			       (unsigned long long)presents, (unsigned long long)present_us,
 			       (unsigned long long)pictures, (unsigned long long)cbs,
 			       (unsigned long long)cb_us, (unsigned long long)AudioShortPulls(),

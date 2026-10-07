@@ -1,4 +1,5 @@
 #include "nw_68k_jit.h"
+#include "nw_log.h"
 #include "nw_68k_core.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -117,6 +118,6 @@ uint64_t nw_68k_native_count() { return native_count; }
 void nw_68k_op_summary()
 {
 	if (native_count || fallback_count)
-		printf("NW-BOOT G1: jit68k native=%llu nanokernel=%llu\n", (unsigned long long)native_count, (unsigned long long)fallback_count);
+		NW_DIAG("NW-BOOT G1: jit68k native=%llu nanokernel=%llu\n", (unsigned long long)native_count, (unsigned long long)fallback_count);
 	write_hist();
 }

@@ -403,6 +403,7 @@ const char *nw_boot_line_g2_first_dsi(void);
 const char *nw_boot_line_g2_translator_off(void);
 
 void nw_boot_log(const char *line);
+void nw_boot_diag(const char *line);
 /* decoded = 4 MiB after DecodeROM; file = the ROM prefs bytes (CHRP or 4 MiB). */
 void nw_log_g0_decode(const uint8_t *decoded, size_t decoded_size,
 		      const uint8_t *file, size_t file_size);

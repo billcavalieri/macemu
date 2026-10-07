@@ -19,6 +19,7 @@
  */
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "cpu_emulation.h"
 #include "main.h"
 #include "sony.h"
@@ -274,7 +275,7 @@ uint32 FindLibSymbol(const char *lib_str, const char *sym_str)
 		D(bug(" GetSharedLibrary: ret %d, connection ID %ld, main %p\n", (int16)r.d[0], conn_id.value(), main_addr.value()));
 		if (r.d[0]) {
 			if (ROMType == ROMTYPE_NEWWORLD)
-				printf("NW-BOOT G1: GetSharedLibrary %s -> %d (68k)\n", lib.value() + 1, (int)(int16)r.d[0]);
+				NW_DIAG("NW-BOOT G1: GetSharedLibrary %s -> %d (68k)\n", lib.value() + 1, (int)(int16)r.d[0]);
 			return 0;
 		}
 	
@@ -300,7 +301,7 @@ uint32 FindLibSymbol(const char *lib_str, const char *sym_str)
 //!! CloseConnection()?
 		if (r.d[0]) {
 			if (ROMType == ROMTYPE_NEWWORLD)
-				printf("NW-BOOT G1: FindSymbol %s in %s -> %d (68k)\n", sym.value() + 1, lib.value() + 1, (int)(int16)r.d[0]);
+				NW_DIAG("NW-BOOT G1: FindSymbol %s in %s -> %d (68k)\n", sym.value() + 1, lib.value() + 1, (int)(int16)r.d[0]);
 			return 0;
 		}
 		else
@@ -317,7 +318,7 @@ uint32 FindLibSymbol(const char *lib_str, const char *sym_str)
 		D(bug(" GetSharedLibrary: ret %d, connection ID %ld, main %p\n", res, conn_id.value(), main_addr.value()));
 		if (res) {
 			if (ROMType == ROMTYPE_NEWWORLD)
-				printf("NW-BOOT G1: GetSharedLibrary %s -> %d\n", lib.value() + 1, (int)res);
+				NW_DIAG("NW-BOOT G1: GetSharedLibrary %s -> %d\n", lib.value() + 1, (int)res);
 			return 0;
 		}
 		res = FindSymbol(conn_id.value(), sym.addr(), sym_addr.addr(), sym_class.addr());
@@ -350,12 +351,12 @@ uint32 FindLibSymbolNative(const char *lib_str, const char *sym_str)
 	SheepString sym(sym_str);
 	int16 res = GetSharedLibrary(lib.addr(), FOURCC('p','w','p','c'), 1, conn_id.addr(), main_addr.addr(), err.addr());
 	if (res) {
-		printf("SheepForce: GetSharedLibrary %s -> %d\n", lib.value() + 1, (int)res);
+		NW_DIAG("SheepForce: GetSharedLibrary %s -> %d\n", lib.value() + 1, (int)res);
 		return 0;
 	}
 	res = FindSymbol(conn_id.value(), sym.addr(), sym_addr.addr(), sym_class.addr());
 	if (res) {
-		printf("SheepForce: FindSymbol %s in %s -> %d\n", sym.value() + 1, lib.value() + 1, (int)res);
+		NW_DIAG("SheepForce: FindSymbol %s in %s -> %d\n", sym.value() + 1, lib.value() + 1, (int)res);
 		return 0;
 	}
 	return sym_addr.value();

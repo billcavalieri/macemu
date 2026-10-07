@@ -1282,7 +1282,12 @@ int16 CDROMStatus(uint32 pb, uint32 dce)
 			return noErr;
 			
 		default:
-			printf("WARNING: Unknown CDROMStatus(%d)\n", code);
+			{
+				/* Once per code: the guest polls these. */
+				static uint8 warned[256];
+				if (!warned[code & 0xff]++)
+					printf("WARNING: Unknown CDROMStatus(%d)\n", code);
+			}
 			return statusErr;
 	}
 }

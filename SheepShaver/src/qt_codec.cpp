@@ -22,6 +22,7 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "cpu_emulation.h"
 #include "prefs.h"
 #include "thunks.h"
@@ -332,7 +333,7 @@ int QtCodecRegister(void)
 		M68kRegisters rr;
 		memset(&rr, 0, sizeof rr);
 		Execute68k(stub_addr, &rr);
-		printf("SheepForce: qtcodec register %08x -> %08x\n", subtypes[s], (unsigned)rr.d[0]);
+		NW_DIAG("SheepForce: qtcodec register %08x -> %08x\n", subtypes[s], (unsigned)rr.d[0]);
 	}
 	return 1;
 }
@@ -364,7 +365,7 @@ bool SheepForceRaveScanRAM(void)
 			if (memcmp(ram + off, needles[ni], nl) == 0) {
 				found++;
 				done = true;
-				printf("SheepForce probe: RAVE '%s' in guest RAM at %08x:", needles[ni], (unsigned)off);
+				NW_DIAG("SheepForce probe: RAVE '%s' in guest RAM at %08x:", needles[ni], (unsigned)off);
 				size_t from = off >= 1400 ? off - 1400 : 0;
 				for (size_t k = from; k < off + nl + 400 && k < size; k++) {
 					uint8 c = ram[k];
@@ -419,7 +420,7 @@ void SheepForceRaveRegisterNative(void)
 		sym[0] = 16;
 		memcpy(sym + 1, "QARegisterEngine", 17);
 		reg = FindLibSymbol(lib, sym);
-		printf("SheepForce probe: FindLibSymbol(\"%s\", QARegisterEngine) = %08x\n", libs[i], (unsigned)reg);
+		NW_DIAG("SheepForce probe: FindLibSymbol(\"%s\", QARegisterEngine) = %08x\n", libs[i], (unsigned)reg);
 		if (reg) {
 			static const struct { const char *name; uint32 *dst; } more[] = { {"QADeviceGetFirstEngine", &first},
 				{"QADeviceGetNextEngine", &next}, {"QAEngineGestalt", &gestalt}, {"QAEngineCheckDevice", &check} };
@@ -427,7 +428,7 @@ void SheepForceRaveRegisterNative(void)
 				sym[0] = (char)strlen(more[m].name);
 				memcpy(sym + 1, more[m].name, (size_t)(uint8)sym[0] + 1);
 				*more[m].dst = FindLibSymbol(lib, sym);
-				printf("SheepForce probe:   %s = %08x\n", more[m].name, (unsigned)*more[m].dst);
+				NW_DIAG("SheepForce probe:   %s = %08x\n", more[m].name, (unsigned)*more[m].dst);
 			}
 		}
 	}
@@ -449,21 +450,21 @@ void SheepForceRaveRegisterNative(void)
 		SheepVar buf(256);
 		SheepVar32 val = 0;
 		WriteMacInt32(buf.addr(), 0);
-		printf("SheepForce probe: engine %08x:", (unsigned)eng);
+		NW_DIAG("SheepForce probe: engine %08x:", (unsigned)eng);
 		static const struct { uint32 sel; const char *name; } gs[] = {
 			{2, "vendor"}, {3, "engineID"}, {0, "optional"}, {15, "optional2"}, {1, "fast"}, {16, "multitex"} };
 		for (unsigned g = 0; g < sizeof gs / sizeof gs[0]; g++) {
 			WriteMacInt32(val.addr(), 0);
 			int32 err = CallMacOS3(fn3, gestalt, eng, gs[g].sel, val.addr());
-			printf(" %s=%08x%s", gs[g].name, (unsigned)val.value(), err ? "(err)" : "");
+			NW_DIAG(" %s=%08x%s", gs[g].name, (unsigned)val.value(), err ? "(err)" : "");
 		}
 		int32 err = CallMacOS3(fn3, gestalt, eng, 6, buf.addr());
-		printf(" name='%s'%s", err ? "?" : (const char *)Mac2HostAddr(buf.addr()), err ? "(err)" : "");
+		NW_DIAG(" name='%s'%s", err ? "?" : (const char *)Mac2HostAddr(buf.addr()), err ? "(err)" : "");
 		if (check) {
 			int32 ok = CallMacOS2(fn2, check, eng, dev.addr());
-			printf(" checkDevice=%d", (int)ok);
+			NW_DIAG(" checkDevice=%d", (int)ok);
 		}
-		printf("\n");
+		NW_DIAG("\n");
 		fflush(stdout);
 		if (!next)
 			break;

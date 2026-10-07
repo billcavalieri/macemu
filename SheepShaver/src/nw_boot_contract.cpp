@@ -3,6 +3,7 @@
  */
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "nw_boot_contract.h"
 #include "nw_devices.h"
 #include "nw_jit.h"
@@ -1058,6 +1059,13 @@ void nw_boot_log(const char *line)
 	fflush(stdout);
 }
 
+/* The same line, only when diagnostics are on (Debug builds, or NW_VERBOSE=1). */
+void nw_boot_diag(const char *line)
+{
+	if (nw_log_on())
+		nw_boot_log(line);
+}
+
 static const char *nw_rom_wrap_name(const uint8_t *file, size_t file_size)
 {
 	if (file_size == (size_t)NW_ROM_SIZE)
@@ -1118,14 +1126,14 @@ void nw_log_g0_decode(const uint8_t *decoded, size_t decoded_size,
 
 void nw_log_g1_tree(void)
 {
-	nw_boot_log(nw_boot_line_g1_tree());
+	nw_boot_diag(nw_boot_line_g1_tree());
 }
 
 void nw_log_g1_kdp(const uint8_t *page)
 {
 	if (nw_kdp_hnfo_valid_htab(page) && nw_kdp_bat_range_init_present(page) &&
 	    nw_kdp_save_ptrs_adjacent(page))
-		nw_boot_log(nw_boot_line_g1_kdp());
+		nw_boot_diag(nw_boot_line_g1_kdp());
 }
 
 void nw_note_mtsdr1(void)
@@ -1134,7 +1142,7 @@ void nw_note_mtsdr1(void)
 	if (logged)
 		return;
 	logged = 1;
-	nw_boot_log(nw_boot_line_g1_mtsdr1());
+	nw_boot_diag(nw_boot_line_g1_mtsdr1());
 }
 
 void nw_log_msr_dr(uint32_t msr)
@@ -1145,7 +1153,7 @@ void nw_log_msr_dr(uint32_t msr)
 	if ((msr & NW_MSR_DR) == 0)
 		return;
 	logged = 1;
-	nw_boot_log("G2: MSR[DR] on");
+	nw_boot_diag("G2: MSR[DR] on");
 }
 
 void nw_log_emu_rfi(uint32_t srr0, uint32_t srr1, uint32_t cr, uint32_t kdp)
@@ -1200,12 +1208,12 @@ void nw_log_emu_rfi(uint32_t srr0, uint32_t srr1, uint32_t cr, uint32_t kdp)
 			if (trace.count < sizeof(trace.first) / sizeof(trace.first[0]))
 				trace.first[trace.count++] = ret;
 			if (ret.age >= 250000) {
-				printf("NW-BOOT G1: irq-stall src=%d vec=%02x ack=%llu age_us=%llu saved_returns=%u\n",
+				NW_DIAG("NW-BOOT G1: irq-stall src=%d vec=%02x ack=%llu age_us=%llu saved_returns=%u\n",
 				       service.source, (unsigned)service.vector,
 				       (unsigned long long)trace.serial, (unsigned long long)ret.age, trace.count);
 				for (unsigned i = 0; i <= trace.count; i++) {
 					const irq_return &r = i < trace.count ? trace.first[i] : ret;
-					printf("NW-BOOT G1: irq-rfi src=%d vec=%02x ack=%llu slot=%u age_us=%llu srr0=%08x srr1=%08x cr=%08x kdp=%08x defer=%08x flags=%08x mask=%08x pending=%08x stack=%08x\n",
+					NW_DIAG("NW-BOOT G1: irq-rfi src=%d vec=%02x ack=%llu slot=%u age_us=%llu srr0=%08x srr1=%08x cr=%08x kdp=%08x defer=%08x flags=%08x mask=%08x pending=%08x stack=%08x\n",
 					       service.source, (unsigned)service.vector,
 					       (unsigned long long)trace.serial, i, (unsigned long long)r.age,
 					       (unsigned)r.pc, (unsigned)r.msr, (unsigned)r.cr,
@@ -1259,7 +1267,7 @@ void nw_log_emu_rfi(uint32_t srr0, uint32_t srr1, uint32_t cr, uint32_t kdp)
 	}
 	if (!interesting)
 		return;
-	printf("NW-BOOT G1: emu-rfi bit8=%d halt=%u serv=%d srr0=%08x srr1=%08x cr=%08x defer=%08x flags=%08x mask=%08x\n",
+	NW_DIAG("NW-BOOT G1: emu-rfi bit8=%d halt=%u serv=%d srr0=%08x srr1=%08x cr=%08x defer=%08x flags=%08x mask=%08x\n",
 	       bit8, nhalt, nw_pic_vbl_servicing(), (unsigned)srr0, (unsigned)srr1,
 	       (unsigned)cr, (unsigned)defer, (unsigned)flags, (unsigned)mask);
 	fflush(stdout);
@@ -1284,13 +1292,13 @@ void nw_log_msr_write(const char *how, uint32_t pc, uint32_t msr)
 		ee_on = 1;
 		snprintf(buf, sizeof(buf), "G2: %s EE on pc=%08x msr=%08x",
 			 how, (unsigned)pc, (unsigned)msr);
-		nw_boot_log(buf);
+		nw_boot_diag(buf);
 	}
 	if (n < 8) {
 		n++;
 		snprintf(buf, sizeof(buf), "G2: %s n=%u pc=%08x msr=%08x",
 			 how, n, (unsigned)pc, (unsigned)msr);
-		nw_boot_log(buf);
+		nw_boot_diag(buf);
 	}
 #else
 	(void)how;
@@ -1301,7 +1309,7 @@ void nw_log_msr_write(const char *how, uint32_t pc, uint32_t msr)
 
 void nw_log_g1_hwinit(void)
 {
-	nw_boot_log(nw_boot_line_g1_hwinit());
+	nw_boot_diag(nw_boot_line_g1_hwinit());
 }
 
 void nw_log_g1_patch_skip(int is_newworld)
@@ -1319,14 +1327,14 @@ void nw_log_first_dsi(uint32_t srr0, uint32_t dar, int dr_on_hit)
 	logged = 1;
 	snprintf(buf, sizeof(buf), "G2: first DSI SRR0=%08x DAR=%08x DRhit=%d",
 		 (unsigned)srr0, (unsigned)dar, dr_on_hit);
-	nw_boot_log(buf);
+	nw_boot_diag(buf);
 	if (srr0 != dar && dr_on_hit)
-		nw_boot_log(nw_boot_line_g2_first_dsi());
+		nw_boot_diag(nw_boot_line_g2_first_dsi());
 }
 
 void nw_log_translator_off(void)
 {
-	nw_boot_log(nw_boot_line_g2_translator_off());
+	nw_boot_diag(nw_boot_line_g2_translator_off());
 }
 
 /*
@@ -1397,10 +1405,10 @@ void nw_event_exception(uint32_t srr0, uint32_t vector, uint32_t extra, int extr
 	nw_event_nx++;
 	if (nw_boot_log_stream() && nw_boot_log_verbose()) {
 		if (extra_valid)
-			printf("NW-BOOT X E %08x %08x %08x\n", (unsigned)srr0,
+			NW_DIAG("NW-BOOT X E %08x %08x %08x\n", (unsigned)srr0,
 			       (unsigned)vector, (unsigned)extra);
 		else
-			printf("NW-BOOT X E %08x %08x\n", (unsigned)srr0, (unsigned)vector);
+			NW_DIAG("NW-BOOT X E %08x %08x\n", (unsigned)srr0, (unsigned)vector);
 	}
 #else
 	(void)srr0;
@@ -1449,16 +1457,16 @@ void nw_atrap_hist_dump(const char *why)
 	return;
 #endif
 	static const uint16_t hot[] = { 0xaafe, 0xa22e, 0xa148, 0xa96f, 0xa82a, 0xa88f };
-	printf("NW-BOOT G1: atrap %s boot", why ? why : "?");
+	NW_DIAG("NW-BOOT G1: atrap %s boot", why ? why : "?");
 	for (size_t i = 0; i < sizeof(hot) / sizeof(hot[0]); i++)
-		printf(" %04x=%llu", (unsigned)hot[i],
+		NW_DIAG(" %04x=%llu", (unsigned)hot[i],
 		       (unsigned long long)g_atrap[0][hot[i] & 0xfffu]);
-	printf(" later");
+	NW_DIAG(" later");
 	for (size_t i = 0; i < sizeof(hot) / sizeof(hot[0]); i++)
-		printf(" %04x=%llu", (unsigned)hot[i],
+		NW_DIAG(" %04x=%llu", (unsigned)hot[i],
 		       (unsigned long long)g_atrap[1][hot[i] & 0xfffu]);
-	printf("\n");
-	printf("NW-BOOT G1: mm %s enter=%llu leave=%llu ppc_rd=%llu kcall_fast=%llu\n",
+	NW_DIAG("\n");
+	NW_DIAG("NW-BOOT G1: mm %s enter=%llu leave=%llu ppc_rd=%llu kcall_fast=%llu\n",
 	       why ? why : "?",
 	       (unsigned long long)nw_mixedmode_enters(),
 	       (unsigned long long)nw_mixedmode_leaves(),
@@ -1474,13 +1482,13 @@ void nw_event_aline(uint32_t op, uint32_t pc68k, int handler)
 #if NW_BOOT_LOG
 	nw_event_na++;
 	if (nw_boot_log_stream() && nw_boot_log_verbose())
-		printf("NW-BOOT A %04x %08x %d\n", (unsigned)trap,
+		NW_DIAG("NW-BOOT A %04x %08x %d\n", (unsigned)trap,
 		       (unsigned)pc68k, handler);
 	if (trap == 0xa148u) {
 		static uint64_t n;
 		n++;
 		if (n == 1 || (n % 10000ull) == 0)
-			printf("NW-BOOT G1: trap a148 Finder-info n=%llu pc68k=%08x handler=%d\n",
+			NW_DIAG("NW-BOOT G1: trap a148 Finder-info n=%llu pc68k=%08x handler=%d\n",
 			       (unsigned long long)n, (unsigned)pc68k, handler);
 	}
 	if (trap == 0xaafeu || trap == 0xa22eu) {
@@ -1488,7 +1496,7 @@ void nw_event_aline(uint32_t op, uint32_t pc68k, int handler)
 		uint64_t *c = (trap == 0xaafeu) ? &naa : &nbm;
 		(*c)++;
 		if (*c == 1 || (*c % 10000ull) == 0)
-			printf("NW-BOOT G1: trap %04x n=%llu pc68k=%08x nkpc handler=%d\n",
+			NW_DIAG("NW-BOOT G1: trap %04x n=%llu pc68k=%08x nkpc handler=%d\n",
 			       (unsigned)trap, (unsigned long long)*c,
 			       (unsigned)pc68k, handler);
 	}
@@ -1584,7 +1592,7 @@ void nw_mixedmode_note_ppc_rd(uint32_t pc68k, uint32_t proc)
 	g_mm_ppc_rd++;
 #if NW_BOOT_LOG
 	if (g_mm_ppc_rd == 1 || (g_mm_ppc_rd % 10000ull) == 0)
-		printf("NW-BOOT G1: mm-ppc n=%llu pc68k=%08x proc=%08x\n",
+		NW_DIAG("NW-BOOT G1: mm-ppc n=%llu pc68k=%08x proc=%08x\n",
 		       (unsigned long long)g_mm_ppc_rd, (unsigned)pc68k, (unsigned)proc);
 #else
 	(void)pc68k;
@@ -1629,7 +1637,7 @@ void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, u
 		const uint64_t other = nw_jit_other_insns();
 		const uint64_t d_codec = (codec >= last_codec) ? codec - last_codec : 0;
 		const uint64_t d_other = (other >= last_other) ? other - last_other : 0;
-		printf("NW-BOOT G1: clock10 host_us=%llu d_us=%llu mftb=%llu d_tb=%llu tm=%u fps_frames=%llu d_fr=%llu fps_flat=%u codec=%llu d_codec=%llu other=%llu d_other=%llu pc=%08x lr=%08x\n",
+		NW_DIAG("NW-BOOT G1: clock10 host_us=%llu d_us=%llu mftb=%llu d_tb=%llu tm=%u fps_frames=%llu d_fr=%llu fps_flat=%u codec=%llu d_codec=%llu other=%llu d_other=%llu pc=%08x lr=%08x\n",
 		       (unsigned long long)host_us, (unsigned long long)d_us,
 		       (unsigned long long)mftb, (unsigned long long)d_tb,
 		       (unsigned)tm_ticks,
@@ -1663,7 +1671,7 @@ void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, u
 		}
 		if (idle_win >= 10) {
 			if (idle_n) {
-				printf("NW-BOOT G1: idle n=%d/%d lr=%08x lr_n=%d lr2=%08x lr2_n=%d stk=%08x ext=%d\n",
+				NW_DIAG("NW-BOOT G1: idle n=%d/%d lr=%08x lr_n=%d lr2=%08x lr2_n=%d stk=%08x ext=%d\n",
 				       idle_n, idle_win,
 				       (unsigned)idle_lr, idle_lr_n,
 				       (unsigned)idle_lr2, idle_lr2_n,
@@ -1684,7 +1692,7 @@ void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, u
 						*outp[zi] = ReadMacInt32(z + 12u);
 				}
 			}
-			printf("NW-BOOT G1: mem sys=%u app=%u\n",
+			NW_DIAG("NW-BOOT G1: mem sys=%u app=%u\n",
 			       (unsigned)sys_free, (unsigned)app_free);
 			fflush(stdout);
 			idle_n = idle_win = idle_lr_n = idle_lr2_n = 0;
@@ -1698,7 +1706,7 @@ void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, u
 		return;
 	last = tv.tv_sec;
 #if NW_BOOT_LOG
-	printf("NW-BOOT T %lld %lu %lu %08x %08x %llu %lu %llu\n",
+	NW_DIAG("NW-BOOT T %lld %lu %lu %08x %08x %llu %lu %llu\n",
 	       (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000,
 	       nw_event_nx, nw_event_na, (unsigned)pc, (unsigned)msr,
 	       nw_event_ni, nw_event_nf, (unsigned long long)nw_jit_flush_count());
@@ -1709,7 +1717,7 @@ void nw_event_tick(uint32_t pc, uint32_t msr, uint64_t host_us, uint64_t mftb, u
 #endif
 	nw_fb_fps_proxy_tick();
 	if (nw_jit_stats_wanted()) {
-		printf("NW-BOOT G1: clock host_us=%llu mftb=%llu tm_ticks=%u fps_frames=%llu fps_flat=%u\n",
+		NW_DIAG("NW-BOOT G1: clock host_us=%llu mftb=%llu tm_ticks=%u fps_frames=%llu fps_flat=%u\n",
 		       (unsigned long long)host_us, (unsigned long long)mftb,
 		       (unsigned)tm_ticks,
 		       (unsigned long long)nw_fb_fps_proxy_frames(),

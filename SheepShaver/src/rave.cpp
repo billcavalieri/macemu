@@ -32,6 +32,7 @@
  */
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "prefs.h"
 #include "sheepforce.h"
 #include "rave_engine.h"
@@ -453,7 +454,7 @@ static uint32 draw_private_new(const RaveGuestCall *c)
 	static unsigned logged;
 	if (rave_trace() || logged < 20) {
 		logged++;
-		printf("SheepForce RAVE: draw context %u created %dx%d at %d,%d pix %d z %d%s %s device %08x clip %08x\n",
+		NW_DIAG("SheepForce RAVE: draw context %u created %dx%d at %d,%d pix %d z %d%s %s device %08x clip %08x\n",
 		       (unsigned)g_ctx.size(), x->w, x->h, x->rl, x->rt, x->pix, (int)x->zbuf,
 		       (flags & kQAContext_DeepZ) ? " deepZ" : "", x->screen ? "screen" : "memory", (unsigned)x->base,
 		       (unsigned)clip_rgn);
@@ -1031,7 +1032,7 @@ static uint32 engine_gestalt(uint32 selector, uint32 response)
 static uint32 engine_method(uint32 tag, const RaveGuestCall *c)
 {
 	if (rave_trace())
-		printf("SheepForce RAVE: engine %s(%08x, %08x, %08x)\n",
+		NW_DIAG("SheepForce RAVE: engine %s(%08x, %08x, %08x)\n",
 		       tag < kQAEngineMethodCount ? engine_method_name[tag] : "?",
 		       (unsigned)arg(c, 0), (unsigned)arg(c, 1), (unsigned)arg(c, 2));
 	switch (tag) {
@@ -1092,7 +1093,7 @@ static uint32 engine_get_method(const RaveGuestCall *c)
 	static uint32 tvect[kQAEngineMethodCount];
 	const uint32 tag = arg(c, 0), out = arg(c, 1);
 	if (rave_trace())
-		printf("SheepForce RAVE: getMethod(%u -> %s)\n", (unsigned)tag,
+		NW_DIAG("SheepForce RAVE: getMethod(%u -> %s)\n", (unsigned)tag,
 		       tag < kQAEngineMethodCount ? engine_method_name[tag] : "?");
 	if (tag >= kQAEngineMethodCount || !out || !g_host.slot_tvect)
 		return kQAParamErr;

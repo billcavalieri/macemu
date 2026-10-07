@@ -19,6 +19,7 @@
  */
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include <time.h>
 
 #include "prefs.h"
@@ -582,7 +583,7 @@ void NQD_fillmask_report(void)
 	const NqdFillStats &s = g_fm_stats;
 	if (!s.hooks)
 		return;
-	printf("SheepForce: fill-mask: %llu hooks, %llu accepted (%llu empty), %llu drawn: %llu GPU, %llu declined by GPU, %llu CPU fallbacks, %llu CPU failures, %llu lost; "
+	NW_DIAG("SheepForce: fill-mask: %llu hooks, %llu accepted (%llu empty), %llu drawn: %llu GPU, %llu declined by GPU, %llu CPU fallbacks, %llu CPU failures, %llu lost; "
 	       "pixels: rect %llu, clipped %llu, GPU %llu, CPU %llu; time ms: build %.2f, GPU submit %.2f, wait %.2f, CPU draw %.2f; rejected:",
 	       (unsigned long long)s.hooks, (unsigned long long)s.accepted, (unsigned long long)s.empty_plans, (unsigned long long)s.draws,
 	       (unsigned long long)s.gpu_ok, (unsigned long long)s.gpu_declined, (unsigned long long)s.cpu_fallbacks,
@@ -590,14 +591,14 @@ void NQD_fillmask_report(void)
 	       (unsigned long long)s.gpu_px, (unsigned long long)s.cpu_px, s.ns_build / 1e6, s.ns_submit / 1e6, s.ns_wait / 1e6, s.ns_cpu / 1e6);
 	for (int i = 1; i < NQD_FM_REJ_COUNT; i++)
 		if (s.rejected[i])
-			printf(" %s %llu (rect %llu kpx, clipped %llu kpx)", nqd_fm_reject_name(i), (unsigned long long)s.rejected[i], (unsigned long long)s.rejected_px[i] / 1000, (unsigned long long)s.rejected_clip_px[i] / 1000);
-	printf("; tiled draws %llu (%llu kpx)", (unsigned long long)s.tiled_draws, (unsigned long long)s.tiled_px / 1000);
+			NW_DIAG(" %s %llu (rect %llu kpx, clipped %llu kpx)", nqd_fm_reject_name(i), (unsigned long long)s.rejected[i], (unsigned long long)s.rejected_px[i] / 1000, (unsigned long long)s.rejected_clip_px[i] / 1000);
+	NW_DIAG("; tiled draws %llu (%llu kpx)", (unsigned long long)s.tiled_draws, (unsigned long long)s.tiled_px / 1000);
 	if (s.mode_nk) {
-		printf("; mode-rejected (pen,transfer,pixsize) n/kpx:");
+		NW_DIAG("; mode-rejected (pen,transfer,pixsize) n/kpx:");
 		for (unsigned k = 0; k < s.mode_nk; k++)
-			printf(" (%u,%u,%u) %llu/%llu", s.mode_key[k][0], s.mode_key[k][1], s.mode_key[k][2], (unsigned long long)s.mode_n[k], (unsigned long long)s.mode_px[k] / 1000);
+			NW_DIAG(" (%u,%u,%u) %llu/%llu", s.mode_key[k][0], s.mode_key[k][1], s.mode_key[k][2], (unsigned long long)s.mode_n[k], (unsigned long long)s.mode_px[k] / 1000);
 	}
-	printf("\n");
+	NW_DIAG("\n");
 	fflush(stdout);
 }
 
@@ -991,7 +992,7 @@ static void nqd_trace_bitblt(uint32 p, int native)
 	const int16 sb_l = (int16)ReadMacInt16(p + acclSrcBoundsRect + 2);
 	const int16 sb_b = (int16)ReadMacInt16(p + acclSrcBoundsRect + 4);
 	const int16 sb_r = (int16)ReadMacInt16(p + acclSrcBoundsRect + 6);
-	printf("NW-BOOT G1: bitblt %s dest %08x xy %d,%d %dx%d drow %d dbounds %d,%d %dx%d src %08x xy %d,%d srow %d sbounds %d,%d %dx%d mode %d depth %d\n",
+	NW_DIAG("NW-BOOT G1: bitblt %s dest %08x xy %d,%d %dx%d drow %d dbounds %d,%d %dx%d src %08x xy %d,%d srow %d sbounds %d,%d %dx%d mode %d depth %d\n",
 	       native ? "nq" : "cpu",
 	       (unsigned)dest, dest_X, dest_Y, width, height,
 	       (int)ReadMacInt32(p + acclDestRowBytes),
@@ -1139,12 +1140,12 @@ static void shadow_grid(const nqd_shadow_op &q)
 			line[x] = i < 16 ? "0123456789abcdef"[i] : '?';
 		}
 		line[x] = 0;
-		printf("SheepForce shadow: code %u call %u row %2d %s\n", q.code, q.n, y, line);
+		NW_DIAG("SheepForce shadow: code %u call %u row %2d %s\n", q.code, q.n, y, line);
 	}
-	printf("SheepForce shadow: code %u call %u palette", q.code, q.n);
+	NW_DIAG("SheepForce shadow: code %u call %u palette", q.code, q.n);
 	for (unsigned i = 0; i < ns; i++)
-		printf(" %x=%06x", i, (unsigned)seen[i]);
-	printf("\n");
+		NW_DIAG(" %x=%06x", i, (unsigned)seen[i]);
+	NW_DIAG("\n");
 }
 
 /*
@@ -1303,13 +1304,13 @@ static void locate_pixels(const nqd_shadow_op &q)
 			for (uint32 d = 0; d < 0x8000 && hits < 6; d += 4)
 				if (memcmp(h + d, key, sizeof key) == 0) {
 					hits++;
-					printf("SheepForce locate: code %u call %u pixels (first changed %d,%d) found at word@%03x=%08x level %d +%u\n",
+					NW_DIAG("SheepForce locate: code %u call %u pixels (first changed %d,%d) found at word@%03x=%08x level %d +%u\n",
 					       q.code, q.n, fx, fy, (unsigned)off, (unsigned)w, level, (unsigned)d);
 				}
 		}
 	}
 	if (!hits)
-		printf("SheepForce locate: code %u call %u pixels (first changed %d,%d) not found behind any pointer\n", q.code, q.n, fx, fy);
+		NW_DIAG("SheepForce locate: code %u call %u pixels (first changed %d,%d) not found behind any pointer\n", q.code, q.n, fx, fy);
 	if (q.code == 3 || q.code == 6) {
 		// Patterns hang off several handle levels (PixPat -> patXData -> pixels): follow
 		// pointers up to four steps from the block and report the path to the pixels.
@@ -1335,15 +1336,15 @@ static void locate_pixels(const nqd_shadow_op &q)
 						const int bb = (int16)ReadMacInt16(pm + 10), br = (int16)ReadMacInt16(pm + 12);
 						if ((rb & 0x8000) && (psz == 1 || psz == 2 || psz == 4 || psz == 8 || psz == 16 || psz == 32) &&
 						    bt == 0 && bl == 0 && bb > 0 && bb <= 256 && br > 0 && br <= 256) {
-							printf("SheepForce locate: code %u call %u PIXPAT at %08x type %u map %08x pm %08x rowBytes %u pixelSize %u bounds %dx%d "
+							NW_DIAG("SheepForce locate: code %u call %u PIXPAT at %08x type %u map %08x pm %08x rowBytes %u pixelSize %u bounds %dx%d "
 							       "patData %08x patXData %08x patXValid %d patXMap %08x pmTable %08x; path:",
 							       q.code, q.n, (unsigned)a, ptype, (unsigned)hm, (unsigned)pm, rb & 0x3fff, psz, br, bb,
 							       (unsigned)ReadMacInt32(a + 6), (unsigned)ReadMacInt32(a + 10), (int)(int16)ReadMacInt16(a + 14),
 							       (unsigned)ReadMacInt32(a + 16), (unsigned)ReadMacInt32(pm + 42));
 							int depth = 0;
 							for (int k = i; k >= 0 && depth < 6; k = nodes[k].parent, depth++)
-								printf(" [%x%s]", (unsigned)nodes[k].via, nodes[k].parent < 0 ? "@blk" : "");
-							printf("\n");
+								NW_DIAG(" [%x%s]", (unsigned)nodes[k].via, nodes[k].parent < 0 ? "@blk" : "");
+							NW_DIAG("\n");
 							found++;
 						}
 					}
@@ -1352,11 +1353,11 @@ static void locate_pixels(const nqd_shadow_op &q)
 			for (uint32 d = 0; d < 0x6000 && found < 4; d += 4)
 				if (memcmp(h + d, key, sizeof key) == 0) {
 					found++;
-					printf("SheepForce locate: code %u call %u DEEP pixels at %08x +%u, path:", q.code, q.n, (unsigned)a, (unsigned)d);
+					NW_DIAG("SheepForce locate: code %u call %u DEEP pixels at %08x +%u, path:", q.code, q.n, (unsigned)a, (unsigned)d);
 					int depth = 0;
 					for (int k = i; k >= 0 && depth < 6; k = nodes[k].parent, depth++)
-						printf(" [%x%s]", (unsigned)nodes[k].via, nodes[k].parent < 0 ? "@blk" : "");
-					printf("\n");
+						NW_DIAG(" [%x%s]", (unsigned)nodes[k].via, nodes[k].parent < 0 ? "@blk" : "");
+					NW_DIAG("\n");
 				}
 			int depth = 0;
 			for (int k = i; nodes[k].parent >= 0; k = nodes[k].parent)
@@ -1377,7 +1378,7 @@ static void locate_pixels(const nqd_shadow_op &q)
 			}
 		}
 		if (!found)
-			printf("SheepForce locate: code %u call %u DEEP search (%d nodes) found nothing\n", q.code, q.n, n);
+			NW_DIAG("SheepForce locate: code %u call %u DEEP search (%d nodes) found nothing\n", q.code, q.n, n);
 	}
 }
 
@@ -1491,10 +1492,10 @@ static void code3_stats(const nqd_shadow_op &q)
 		static unsigned dumped[8];
 		const int ci = c == &none ? 0 : c == &many ? 1 : c == &two ? 2 : c == &solid_fore ? 3 : c == &solid_back ? 4 : 5;
 		if (dumped[ci]++ < 4 && area > 2000) {
-			printf("SheepForce shadow: code 3 class %d dump call %u pen %u:", ci, q.n, (unsigned)q.w[0x10 / 4]);
+			NW_DIAG("SheepForce shadow: code 3 class %d dump call %u pen %u:", ci, q.n, (unsigned)q.w[0x10 / 4]);
 			for (int i = 0; i < 0x60 / 4 + 8; i++)
-				printf(" %03x=%08x", i * 4, (unsigned)q.w[i]);
-			printf("\n");
+				NW_DIAG(" %03x=%08x", i * 4, (unsigned)q.w[i]);
+			NW_DIAG("\n");
 			// Look for a colour GrafPort (portVersion 0xC000 at +6) one or two pointer steps from the block.
 			for (uint32 off = 0; off < 0x500; off += 4) {
 				const uint32 w = q.w[off / 4];
@@ -1507,30 +1508,30 @@ static void code3_stats(const nqd_shadow_op &q)
 					const uint32 hv = ReadMacInt32(port + 24), hc = ReadMacInt32(port + 28);
 					if (!nqd_guest_ptr_ok(hv) || !nqd_guest_ptr_ok(hc))
 						continue;
-					printf("    PORT via +%03x%s -> %08x pnMode %u:", (unsigned)off, lvl ? " (handle)" : "", (unsigned)port, ReadMacInt16(port + 56));
+					NW_DIAG("    PORT via +%03x%s -> %08x pnMode %u:", (unsigned)off, lvl ? " (handle)" : "", (unsigned)port, ReadMacInt16(port + 56));
 					static const struct { const char *n; uint32 o; } pats[] = { { "bk", 0x20 }, { "pn", 0x3a }, { "fill", 0x3e } };
 					for (auto &pt : pats) {
 						const uint32 hp = ReadMacInt32(port + pt.o);
 						nqd_pixpat pp;
 						if (nqd_guest_ptr_ok(hp) && nqd_pixpat_at(ReadMacInt32(hp), &pp))
-							printf(" %s=PixPat@%08x type %u pat1 %08x%08x xvalid %d", pt.n, (unsigned)pp.addr, ReadMacInt16(pp.addr),
+							NW_DIAG(" %s=PixPat@%08x type %u pat1 %08x%08x xvalid %d", pt.n, (unsigned)pp.addr, ReadMacInt16(pp.addr),
 							       (unsigned)ReadMacInt32(pp.addr + 20), (unsigned)ReadMacInt32(pp.addr + 24), pp.xvalid);
 						else if (nqd_guest_ptr_ok(hp) && nqd_guest_ptr_ok(ReadMacInt32(hp)))
-							printf(" %s=h%08x type %u pat1 %08x%08x", pt.n, (unsigned)hp, ReadMacInt16(ReadMacInt32(hp)),
+							NW_DIAG(" %s=h%08x type %u pat1 %08x%08x", pt.n, (unsigned)hp, ReadMacInt16(ReadMacInt32(hp)),
 							       (unsigned)ReadMacInt32(ReadMacInt32(hp) + 20), (unsigned)ReadMacInt32(ReadMacInt32(hp) + 24));
 						else
-							printf(" %s=%08x", pt.n, (unsigned)hp);
+							NW_DIAG(" %s=%08x", pt.n, (unsigned)hp);
 					}
-					printf("\n");
+					NW_DIAG("\n");
 				}
 			}
 			for (uint32 off = 0; off < 0x100; off += 4) {
 				const uint32 w = q.w[off / 4];
 				if (nqd_guest_ptr_ok(w) && w != q.w[0x64 / 4] && w != q.w[0x30 / 4]) {
-					printf("    @%03x -> %08x:", (unsigned)off, (unsigned)w);
+					NW_DIAG("    @%03x -> %08x:", (unsigned)off, (unsigned)w);
 					for (int k = 0; k < 8; k++)
-						printf(" %08x", (unsigned)ReadMacInt32(w + k * 4));
-					printf("\n");
+						NW_DIAG(" %08x", (unsigned)ReadMacInt32(w + k * 4));
+					NW_DIAG("\n");
 				}
 			}
 		}
@@ -1540,12 +1541,12 @@ static void code3_stats(const nqd_shadow_op &q)
 	if (c == &many && area > 20000)
 		big_many_nopat.n++;
 	if (q.n <= 3 || (q.n % 40) == 0 || (area > 100000 && c != &solid_fore && c != &solid_back && c->n <= 12))
-		printf("SheepForce shadow: code 3 call %u classify: %s, %d colours, area %llu, pen %u fore %08x back %08x first %08x\n", q.n,
+		NW_DIAG("SheepForce shadow: code 3 call %u classify: %s, %d colours, area %llu, pen %u fore %08x back %08x first %08x\n", q.n,
 		       c == &none ? "unchanged" : c == &many ? "many" : c == &two ? "two" : c == &solid_fore ? "solid fore" :
 		       c == &solid_back ? "solid back" : "solid other", nc, area, (unsigned)q.w[0x10 / 4],
 		       (unsigned)fore, (unsigned)back, (unsigned)colours[0]);
 	if ((++total % 40) == 0)
-		printf("SheepForce shadow: code 3 classes (ops/kpixels after %u ops): solid-fore %u/%llu solid-back %u/%llu solid-other %u/%llu two-colour %u/%llu many %u/%llu unchanged %u/%llu\n",
+		NW_DIAG("SheepForce shadow: code 3 classes (ops/kpixels after %u ops): solid-fore %u/%llu solid-back %u/%llu solid-other %u/%llu two-colour %u/%llu many %u/%llu unchanged %u/%llu\n",
 		       total, solid_fore.n, solid_fore.px / 1000, solid_back.n, solid_back.px / 1000, solid_other.n, solid_other.px / 1000,
 		       two.n, two.px / 1000, many.n, many.px / 1000, none.n, none.px / 1000);
 }
@@ -1629,11 +1630,11 @@ static void code3_prod_verify(const nqd_shadow_op &q)
 			}
 			if (rej == NQD_FM_REJ_REGION_BAD && pi == 0 && q.fm[pi] && shown_bad_region++ < 12) {
 				const uint32 base = q.fm[pi]->bad_region;
-				printf("SheepForce shadow: call %u rejected for an undecodable region at %08x size %u bbox %d,%d,%d,%d words:", q.n, (unsigned)base,
+				NW_DIAG("SheepForce shadow: call %u rejected for an undecodable region at %08x size %u bbox %d,%d,%d,%d words:", q.n, (unsigned)base,
 				       ReadMacInt16(base), (int16)ReadMacInt16(base + 2), (int16)ReadMacInt16(base + 4), (int16)ReadMacInt16(base + 6), (int16)ReadMacInt16(base + 8));
 				for (unsigned i = 5; i < ReadMacInt16(base) / 2 && i < 60; i++)
-					printf(" %04x", ReadMacInt16(base + i * 2));
-				printf("\n");
+					NW_DIAG(" %04x", ReadMacInt16(base + i * 2));
+				NW_DIAG("\n");
 			}
 			continue;
 		}
@@ -1666,18 +1667,18 @@ static void code3_prod_verify(const nqd_shadow_op &q)
 		bad_n[pi]++;
 		bad_px[pi] += area;
 		if (pi >= 2)
-			printf("SheepForce shadow: %c-MISMATCH-LINE call %u rect %dx%d at %d,%d wrong %u of %d tiled %d pen %u regions %d spans %zu px\n", "ABCD"[pi], q.n, q.rw, q.rh,
+			NW_DIAG("SheepForce shadow: %c-MISMATCH-LINE call %u rect %dx%d at %d,%d wrong %u of %d tiled %d pen %u regions %d spans %zu px\n", "ABCD"[pi], q.n, q.rw, q.rh,
 			       (int16)(q.w[0xd4 / 4] & 0xffff), (int16)(q.w[0xd4 / 4] >> 16), wrong, q.rw * q.rh, (int)pl.tiled, (unsigned)pl.pen, pl.regions, pl.spans.pixels());
 		if (shown[pi]++ < (pi >= 2 ? 12u : 4u)) {
-			printf("SheepForce shadow: PRODUCTION RULE %s MISMATCH call %u: %u of %d pixels differ; rect %dx%d pen %u pattern %02x colour %08x regions %d (+%d skipped) spans %zu px\n",
+			NW_DIAG("SheepForce shadow: PRODUCTION RULE %s MISMATCH call %u: %u of %d pixels differ; rect %dx%d pen %u pattern %02x colour %08x regions %d (+%d skipped) spans %zu px\n",
 			       names[pi], q.n, wrong, q.rw * q.rh, q.rw, q.rh, (unsigned)pl.pen, pl.pattern, (unsigned)pl.colour, pl.regions, pl.skipped_regions, pl.spans.pixels());
 			for (unsigned i = 0; i < wrong && i < 6; i++)
-				printf("    pixel %d,%d pre %08x got %08x want %08x\n", list[i].x, list[i].y, (unsigned)list[i].pre, (unsigned)list[i].got, (unsigned)list[i].want);
+				NW_DIAG("    pixel %d,%d pre %08x got %08x want %08x\n", list[i].x, list[i].y, (unsigned)list[i].pre, (unsigned)list[i].got, (unsigned)list[i].want);
 			if (pi == 0) {
-				printf("    block:");
+				NW_DIAG("    block:");
 				for (int i = 0; i < 0x140; i++)
-					printf(" %03x=%08x", i * 4, (unsigned)q.w[i]);
-				printf("\n");
+					NW_DIAG(" %03x=%08x", i * 4, (unsigned)q.w[i]);
+				NW_DIAG("\n");
 				for (uint32 off = 0; off < NQD_FM_BLOCK_SIZE; off += 4) {
 					const uint32 w = q.w[off / 4];
 					if (!nqd_guest_ptr_ok(w))
@@ -1689,10 +1690,10 @@ static void code3_prod_verify(const nqd_shadow_op &q)
 					const int t = (int16)ReadMacInt16(base + 2), l = (int16)ReadMacInt16(base + 4), b = (int16)ReadMacInt16(base + 6), r = (int16)ReadMacInt16(base + 8);
 					if (sz < 10 || sz > 8192 || b <= t || r <= l)
 						continue;
-					printf("    region via +%03x at %08x size %u words:", (unsigned)off, (unsigned)base, sz);
+					NW_DIAG("    region via +%03x at %08x size %u words:", (unsigned)off, (unsigned)base, sz);
 					for (unsigned i = 0; i < sz / 2 && i < 60; i++)
-						printf(" %04x", ReadMacInt16(base + i * 2));
-					printf("\n");
+						NW_DIAG(" %04x", ReadMacInt16(base + i * 2));
+					NW_DIAG("\n");
 				}
 			}
 		}
@@ -1700,18 +1701,18 @@ static void code3_prod_verify(const nqd_shadow_op &q)
 	++tick;
 	if (tick == 5 || tick == 10 || tick == 20 || (tick % 40) == 0)
 		for (int pi = 0; pi < 4; pi++) {
-			printf("SheepForce shadow: PRODUCTION RULE %s accepted: exact %u/%llu kpx, MISMATCH %u/%llu kpx, inconclusive %u/%llu kpx; rejected:",
+			NW_DIAG("SheepForce shadow: PRODUCTION RULE %s accepted: exact %u/%llu kpx, MISMATCH %u/%llu kpx, inconclusive %u/%llu kpx; rejected:",
 			       names[pi], ex_n[pi], ex_px[pi] / 1000, bad_n[pi], bad_px[pi] / 1000, inc_n[pi], inc_px[pi] / 1000);
 			for (int i = 1; i < NQD_FM_REJ_COUNT; i++)
 				if (rej_n[pi][i])
-					printf(" %s %u/%llu", nqd_fm_reject_name(i), rej_n[pi][i], rej_px[pi][i] / 1000);
-			printf("\n");
+					NW_DIAG(" %s %u/%llu", nqd_fm_reject_name(i), rej_n[pi][i], rej_px[pi][i] / 1000);
+			NW_DIAG("\n");
 		}
 	if (tick == 5 || tick == 10 || tick == 20 || (tick % 40) == 0) {
-		printf("SheepForce shadow: mode-rejected ops by (pen,transfer) n/kpx:");
+		NW_DIAG("SheepForce shadow: mode-rejected ops by (pen,transfer) n/kpx:");
 		for (unsigned k = 0; k < mode_nk; k++)
-			printf(" (%u,%u) %u/%llu", mode_key[k][0], mode_key[k][1], mode_n[k], mode_px[k] / 1000);
-		printf("\n");
+			NW_DIAG(" (%u,%u) %u/%llu", mode_key[k][0], mode_key[k][1], mode_n[k], mode_px[k] / 1000);
+		NW_DIAG("\n");
 	}
 }
 
@@ -1746,7 +1747,7 @@ static void code3_fill_verify(const nqd_shadow_op &q)
 			shown_ns++;
 			const int rl = (int16)(q.w[0xd4 / 4] & 0xffff), rt = (int16)(q.w[0xd4 / 4] >> 16);
 			const int bl = (int16)(q.w[0x6c / 4] & 0xffff), bt = (int16)(q.w[0x6c / 4] >> 16);
-			printf("SheepForce shadow: code 3 call %u NONSOLID fill bits %02x%02x%02x%02x%02x%02x%02x%02x type %d rect %d,%d bounds %d,%d size %dx%d fore %08x back %08x; origins:",
+			NW_DIAG("SheepForce shadow: code 3 call %u NONSOLID fill bits %02x%02x%02x%02x%02x%02x%02x%02x type %d rect %d,%d bounds %d,%d size %dx%d fore %08x back %08x; origins:",
 			       q.n, pt.bits[0], pt.bits[1], pt.bits[2], pt.bits[3], pt.bits[4], pt.bits[5], pt.bits[6], pt.bits[7], pt.type, rl, rt, bl, bt, q.rw, q.rh,
 			       (unsigned)fore, (unsigned)back);
 			for (int oy = 0; oy < 8; oy++)
@@ -1765,9 +1766,9 @@ static void code3_fill_verify(const nqd_shadow_op &q)
 							ok = !((got ^ want) & 0xffffff00u);
 						}
 					if (ok)
-						printf(" (%d,%d)", ox, oy);
+						NW_DIAG(" (%d,%d)", ox, oy);
 				}
-			printf("\n");
+			NW_DIAG("\n");
 		}
 		return;
 	}
@@ -1808,7 +1809,7 @@ static void code3_fill_verify(const nqd_shadow_op &q)
 			add((!in_wrong && !out_changed) ? ex[i] : bd[i], q.w[i]);
 		static unsigned seen_ops;
 		if ((++seen_ops % 80) == 0) {
-			printf("SheepForce shadow: code 3 fields that separate exact fills from the rest:");
+			NW_DIAG("SheepForce shadow: code 3 fields that separate exact fills from the rest:");
 			for (int i = 0; i < 0x140; i++)
 				if (ex[i].n && bd[i].n && !ex[i].over && !bd[i].over) {
 					bool disjoint = true;
@@ -1817,16 +1818,16 @@ static void code3_fill_verify(const nqd_shadow_op &q)
 							if (ex[i].v[a2] == bd[i].v[b2])
 								disjoint = false;
 					if (disjoint) {
-						printf(" %03x[ex", i * 4);
+						NW_DIAG(" %03x[ex", i * 4);
 						for (int a2 = 0; a2 < ex[i].n; a2++)
-							printf(" %x", (unsigned)ex[i].v[a2]);
-						printf(" | bad");
+							NW_DIAG(" %x", (unsigned)ex[i].v[a2]);
+						NW_DIAG(" | bad");
 						for (int b2 = 0; b2 < bd[i].n; b2++)
-							printf(" %x", (unsigned)bd[i].v[b2]);
-						printf("]");
+							NW_DIAG(" %x", (unsigned)bd[i].v[b2]);
+						NW_DIAG("]");
 					}
 				}
-			printf("\n");
+			NW_DIAG("\n");
 		}
 	}
 	{
@@ -1838,7 +1839,7 @@ static void code3_fill_verify(const nqd_shadow_op &q)
 			px_noop += area;
 			if (!announced && n_noop >= 20) {
 				announced = true;
-				printf("SheepForce shadow: code 3 ROM drew nothing in %u fills we would have painted (%llu kpx)\n", n_noop, px_noop / 1000);
+				NW_DIAG("SheepForce shadow: code 3 ROM drew nothing in %u fills we would have painted (%llu kpx)\n", n_noop, px_noop / 1000);
 			}
 		}
 	}
@@ -1861,7 +1862,7 @@ static void code3_fill_verify(const nqd_shadow_op &q)
 				}
 				if (any) { fy = y; break; }
 			}
-			printf("SheepForce shadow: code 3 call %u GRID rows %d..%d of rect %dx%d (# painted, . untouched, o other, ' ' outside clip); fill pattern %02x, pn/bk/fill bytes:",
+			NW_DIAG("SheepForce shadow: code 3 call %u GRID rows %d..%d of rect %dx%d (# painted, . untouched, o other, ' ' outside clip); fill pattern %02x, pn/bk/fill bytes:",
 			       q.n, fy, fy + 13, q.rw, q.rh, pt.bits[0]);
 			{
 				static const uint32 offs[3] = { 0x3a, 0x20, 0x3e };
@@ -1869,14 +1870,14 @@ static void code3_fill_verify(const nqd_shadow_op &q)
 				for (int si = 0; si < 3; si++) {
 					const uint32 hp = ReadMacInt32(port + offs[si]);
 					const uint32 pt2 = nqd_guest_ptr_ok(hp) ? ReadMacInt32(hp) : 0;
-					printf(" [");
+					NW_DIAG(" [");
 					if (nqd_guest_ptr_ok(pt2))
 						for (int i = 0; i < 8; i++)
-							printf("%02x", (unsigned)ReadMacInt8(pt2 + 20 + i));
-					printf("]");
+							NW_DIAG("%02x", (unsigned)ReadMacInt8(pt2 + 20 + i));
+					NW_DIAG("]");
 				}
 			}
-			printf("\n");
+			NW_DIAG("\n");
 			for (int y = fy; y < fy + 14 && y < q.rh && y < q.ch; y++) {
 				char line[100];
 				int n = 0;
@@ -1894,7 +1895,7 @@ static void code3_fill_verify(const nqd_shadow_op &q)
 					line[n++] = c;
 				}
 				line[n] = 0;
-				printf("    |%s|\n", line);
+				NW_DIAG("    |%s|\n", line);
 			}
 		}
 	}
@@ -1951,12 +1952,12 @@ static void code3_fill_verify(const nqd_shadow_op &q)
 						}
 					if (!mism && tmpcover) {
 						explained++;
-						printf("SheepForce shadow: code 3 call %u DISCOVERED missing clip: region %08x%s size %u bbox %d,%d,%d,%d; path:", q.n, (unsigned)base,
+						NW_DIAG("SheepForce shadow: code 3 call %u DISCOVERED missing clip: region %08x%s size %u bbox %d,%d,%d,%d; path:", q.n, (unsigned)base,
 						       bi ? " (via handle)" : "", sz, t, l, b, r);
 						int depth = 0;
 						for (int k = i; k >= 0 && depth < 6; k = nodes[k].parent, depth++)
-							printf(" [%x%s]", (unsigned)nodes[k].via, nodes[k].parent < 0 ? "@blk" : "");
-						printf("\n");
+							NW_DIAG(" [%x%s]", (unsigned)nodes[k].via, nodes[k].parent < 0 ? "@blk" : "");
+						NW_DIAG("\n");
 					}
 				}
 				int depth = 0;
@@ -1971,24 +1972,24 @@ static void code3_fill_verify(const nqd_shadow_op &q)
 				}
 			}
 			if (!explained)
-				printf("SheepForce shadow: code 3 call %u clip discovery found nothing (%d nodes, %d regions tested)\n", q.n, n, tested);
+				NW_DIAG("SheepForce shadow: code 3 call %u clip discovery found nothing (%d nodes, %d regions tested)\n", q.n, n, tested);
 		}
 	}
 	if (!in_wrong && !out_changed) {
 		n_exact++; px_exact += area;
 		if (n_exact < 40 || (n_exact % 10) == 0)
-			printf("SheepForce shadow: code 3 call %u exact solid fill: pattern %02x -> %08x rect %dx%d at %d,%d, %d regions, src30 %08x src34 %08x src48 %08x\n",
+			NW_DIAG("SheepForce shadow: code 3 call %u exact solid fill: pattern %02x -> %08x rect %dx%d at %d,%d, %d regions, src30 %08x src34 %08x src48 %08x\n",
 			       q.n, pt.bits[0], (unsigned)want_c, q.rw, q.rh, (int16)(q.w[0xd4 / 4] & 0xffff), (int16)(q.w[0xd4 / 4] >> 16), q.ncand,
 			       (unsigned)q.w[0x30 / 4], (unsigned)q.w[0x34 / 4], (unsigned)q.w[0x48 / 4]);
 	} else {
 		n_bad++; px_bad += area;
 		if (shown_bad++ < 60)
-			printf("SheepForce shadow: code 3 call %u SOLID FILL MISMATCH: pattern %02x -> %08x, %u inside wrong (%u of them untouched by the ROM), %u outside changed, %d regions (+%d over cap), rect %dx%d at %d,%d, pen %u, src30 %08x src34 %08x src48 %08x fore %08x\n",
+			NW_DIAG("SheepForce shadow: code 3 call %u SOLID FILL MISMATCH: pattern %02x -> %08x, %u inside wrong (%u of them untouched by the ROM), %u outside changed, %d regions (+%d over cap), rect %dx%d at %d,%d, pen %u, src30 %08x src34 %08x src48 %08x fore %08x\n",
 			       q.n, pt.bits[0], (unsigned)want_c, in_wrong, wrong_unchanged, out_changed, q.ncand, q.over, q.rw, q.rh, (int16)(q.w[0xd4 / 4] & 0xffff), (int16)(q.w[0xd4 / 4] >> 16),
 			       (unsigned)q.w[0x10 / 4], (unsigned)q.w[0x30 / 4], (unsigned)q.w[0x34 / 4], (unsigned)q.w[0x48 / 4], (unsigned)fore);
 	}
 	if ((++total % 40) == 0)
-		printf("SheepForce shadow: code 3 fillPixPat solid verify (ops/kpixels): exact %u/%llu BAD %u/%llu; nonsolid %u/%llu, no pattern %u/%llu\n",
+		NW_DIAG("SheepForce shadow: code 3 fillPixPat solid verify (ops/kpixels): exact %u/%llu BAD %u/%llu; nonsolid %u/%llu, no pattern %u/%llu\n",
 		       n_exact, px_exact / 1000, n_bad, px_bad / 1000, n_nonsolid, px_nonsolid / 1000, n_skipped, px_skipped / 1000);
 }
 
@@ -2053,12 +2054,12 @@ static void code3_slot_verify(const nqd_shadow_op &q)
 		for (int i = 0; i < 0x140; i++) add(cb[i], q.w[i]);
 	static unsigned tick;
 	if ((++tick % 50) == 0) {
-		printf("SheepForce shadow: code 3 slot match (bk,pn,fill: 0 n/a, 1 exact, 2 wrong) ops/kpx:");
+		NW_DIAG("SheepForce shadow: code 3 slot match (bk,pn,fill: 0 n/a, 1 exact, 2 wrong) ops/kpx:");
 		for (int k = 0; k < 27; k++)
 			if (n[k])
-				printf(" [%d%d%d]%u/%llu", k / 9, (k / 3) % 3, k % 3, n[k], px[k] / 1000);
-		printf("\n");
-		printf("SheepForce shadow: code 3 fields separating fill-correct ops from bk-correct ops:");
+				NW_DIAG(" [%d%d%d]%u/%llu", k / 9, (k / 3) % 3, k % 3, n[k], px[k] / 1000);
+		NW_DIAG("\n");
+		NW_DIAG("SheepForce shadow: code 3 fields separating fill-correct ops from bk-correct ops:");
 		for (int i = 0; i < 0x140; i++)
 			if (ca[i].n && cb[i].n && !ca[i].over && !cb[i].over) {
 				bool disjoint = true;
@@ -2067,14 +2068,14 @@ static void code3_slot_verify(const nqd_shadow_op &q)
 						if (ca[i].v[a2] == cb[i].v[b2])
 							disjoint = false;
 				if (disjoint) {
-					printf(" %03x[fill", i * 4);
-					for (int a2 = 0; a2 < ca[i].n; a2++) printf(" %x", (unsigned)ca[i].v[a2]);
-					printf(" | bk");
-					for (int b2 = 0; b2 < cb[i].n; b2++) printf(" %x", (unsigned)cb[i].v[b2]);
-					printf("]");
+					NW_DIAG(" %03x[fill", i * 4);
+					for (int a2 = 0; a2 < ca[i].n; a2++) NW_DIAG(" %x", (unsigned)ca[i].v[a2]);
+					NW_DIAG(" | bk");
+					for (int b2 = 0; b2 < cb[i].n; b2++) NW_DIAG(" %x", (unsigned)cb[i].v[b2]);
+					NW_DIAG("]");
 				}
 			}
-		printf("\n");
+		NW_DIAG("\n");
 	}
 }
 
@@ -2176,25 +2177,25 @@ static void code3_port_check(const nqd_shadow_op &q)
 		// ops that only one slot explains: dump the block words so the field that picks the slot can be found
 		static unsigned shown[8];
 		if ((mask == 1 || mask == 2 || mask == 4) && shown[mask]++ < 6) {
-			printf("SheepForce shadow: code 3 call %u ONLY %s explains it (pen %u transfer %u rect %dx%d):", q.n,
+			NW_DIAG("SheepForce shadow: code 3 call %u ONLY %s explains it (pen %u transfer %u rect %dx%d):", q.n,
 			       mask == 1 ? "bk" : mask == 2 ? "pn" : "fill", (unsigned)q.w[0x10 / 4], (unsigned)q.w[0xc / 4], q.rw, q.rh);
 			for (int i = 0; i < 0xb0 / 4; i++)
-				printf(" %03x=%08x", i * 4, (unsigned)q.w[i]);
-			printf("\n");
+				NW_DIAG(" %03x=%08x", i * 4, (unsigned)q.w[i]);
+			NW_DIAG("\n");
 		}
 	}
 	match_n[mask]++;
 	match_px[mask] += (unsigned long long)q.rw * (unsigned long long)q.rh;
 	if (np >= 3 && (q.n <= 12 || (q.n % 40) == 0))
-		printf("SheepForce shadow: code 3 call %u port %08x patterns:%s | origin bk %d,%d pn %d,%d fill %d,%d | rect@dest %d,%d bounds %d,%d fore %08x back %08x\n",
+		NW_DIAG("SheepForce shadow: code 3 call %u port %08x patterns:%s | origin bk %d,%d pn %d,%d fill %d,%d | rect@dest %d,%d bounds %d,%d fore %08x back %08x\n",
 		       q.n, (unsigned)port, desc, found_ox[0], found_oy[0], found_ox[1], found_oy[1], found_ox[2], found_oy[2], X0, Y0, bl, bt,
 		       (unsigned)fore, (unsigned)back);
 	if ((++total % 40) == 0) {
-		printf("SheepForce shadow: code 3 pattern match by set (bk=1 pn=2 fill=4), ops/kpixels:");
+		NW_DIAG("SheepForce shadow: code 3 pattern match by set (bk=1 pn=2 fill=4), ops/kpixels:");
 		for (int m = 0; m < 8; m++)
 			if (match_n[m])
-				printf(" set%d %u/%llu", m, match_n[m], match_px[m] / 1000);
-		printf("\n");
+				NW_DIAG(" set%d %u/%llu", m, match_n[m], match_px[m] / 1000);
+		NW_DIAG("\n");
 	}
 }
 
@@ -2210,9 +2211,9 @@ static void code3_check(const nqd_shadow_op &q)
 	}
 	static unsigned n_seen, n_nopat, n_noxdata, n_noorigin, n_pred;
 	static unsigned cand_seen[0x140], cand_exact[0x140];
-	auto R = [&](const char *m, int v = 0) { if (q.n <= 40) printf("SheepForce shadow: code 3 call %u result: %s %d\n", q.n, m, v); };
+	auto R = [&](const char *m, int v = 0) { if (q.n <= 40) NW_DIAG("SheepForce shadow: code 3 call %u result: %s %d\n", q.n, m, v); };
 	if (q.n <= 12)
-		printf("SheepForce shadow: code 3 call %u entry: pen %u transfer %u has_pre %d dbpp %d rect %dx%d\n", q.n, (unsigned)q.w[0x10 / 4], (unsigned)q.w[0xc / 4], (int)q.has_pre, q.dbpp, q.rw, q.rh);
+		NW_DIAG("SheepForce shadow: code 3 call %u entry: pen %u transfer %u has_pre %d dbpp %d rect %dx%d\n", q.n, (unsigned)q.w[0x10 / 4], (unsigned)q.w[0xc / 4], (int)q.has_pre, q.dbpp, q.rw, q.rh);
 	if (q.w[0x10 / 4] != 8 || q.w[0xc / 4] != 8 || !q.has_pre || q.dbpp != 4)
 		return;
 	n_seen++;
@@ -2222,7 +2223,7 @@ static void code3_check(const nqd_shadow_op &q)
 		n_nopat++;
 		R("no PixPat");
 		if (n_nopat <= 5)
-			printf("SheepForce shadow: code 3 call %u: no PixPat reachable (pen %u transfer %u)\n", q.n, (unsigned)q.w[0x10 / 4], (unsigned)q.w[0xc / 4]);
+			NW_DIAG("SheepForce shadow: code 3 call %u: no PixPat reachable (pen %u transfer %u)\n", q.n, (unsigned)q.w[0x10 / 4], (unsigned)q.w[0xc / 4]);
 		return;
 	}
 	if (!pp.xdata || pp.xvalid != 32 || pp.xw <= 0 || pp.xh <= 0 || pp.xrow < pp.xw * 4) {
@@ -2230,13 +2231,13 @@ static void code3_check(const nqd_shadow_op &q)
 		R("no expansion");
 		if (n_noxdata <= 6) {
 			const uint32 hx = ReadMacInt32(pp.addr + 10), hxm = ReadMacInt32(pp.addr + 16), hd = ReadMacInt32(pp.addr + 6);
-			printf("SheepForce shadow: code 3 call %u pattern has no usable 32-bit expansion (xvalid %d xdata %08x %dx%d rowbytes %d); "
+			NW_DIAG("SheepForce shadow: code 3 call %u pattern has no usable 32-bit expansion (xvalid %d xdata %08x %dx%d rowbytes %d); "
 			       "patData %08x->%08x patXData %08x->%08x patXMap %08x->%08x\n",
 			       q.n, pp.xvalid, (unsigned)pp.xdata, pp.xw, pp.xh, pp.xrow,
 			       (unsigned)hd, (unsigned)ReadMacInt32(hd), (unsigned)hx, (unsigned)ReadMacInt32(hx), (unsigned)hxm, (unsigned)ReadMacInt32(hxm));
 			const uint32 xpm = ReadMacInt32(hxm);
 			if (nqd_guest_ptr_ok(xpm))
-				printf("    patXMap pixmap %08x: base %08x rowBytes %04x bounds %d,%d,%d,%d pixelSize %u\n", (unsigned)xpm,
+				NW_DIAG("    patXMap pixmap %08x: base %08x rowBytes %04x bounds %d,%d,%d,%d pixelSize %u\n", (unsigned)xpm,
 				       (unsigned)ReadMacInt32(xpm), ReadMacInt16(xpm + 4), (int16)ReadMacInt16(xpm + 6), (int16)ReadMacInt16(xpm + 8),
 				       (int16)ReadMacInt16(xpm + 10), (int16)ReadMacInt16(xpm + 12), ReadMacInt16(xpm + 32));
 		}
@@ -2265,7 +2266,7 @@ static void code3_check(const nqd_shadow_op &q)
 		R("too few changed pixels", np);
 		static unsigned few;
 		if (few++ < 5)
-			printf("SheepForce shadow: code 3 call %u: only %d changed pixels sampled, cannot pin the origin\n", q.n, np);
+			NW_DIAG("SheepForce shadow: code 3 call %u: only %d changed pixels sampled, cannot pin the origin\n", q.n, np);
 		return;				// too little changed to pin the origin
 	}
 	const int X0 = rl - bl, Y0 = rt - bt;	// rectangle origin in destination pixel coordinates
@@ -2284,14 +2285,14 @@ static void code3_check(const nqd_shadow_op &q)
 		n_noorigin++;
 		R("no origin", np);
 		if (n_noorigin <= 5)
-			printf("SheepForce shadow: code 3 call %u no origin makes the tile match (%d changed pixels, rect %d,%d tile %dx%d)\n",
+			NW_DIAG("SheepForce shadow: code 3 call %u no origin makes the tile match (%d changed pixels, rect %d,%d tile %dx%d)\n",
 			       q.n, np, rl, rt, pp.xw, pp.xh);
 		return;
 	}
 	n_pred++;
 	R("origin found", sols);
 	if (n_pred <= 8 || (n_pred % 25) == 0)
-		printf("SheepForce shadow: code 3 call %u pattern %08x via %04x.%02x tile %dx%d origin (%d,%d) solutions %d rect@dest %d,%d bounds %d,%d\n",
+		NW_DIAG("SheepForce shadow: code 3 call %u pattern %08x via %04x.%02x tile %dx%d origin (%d,%d) solutions %d rect@dest %d,%d bounds %d,%d\n",
 		       q.n, (unsigned)pp.addr, (unsigned)(via >> 16), (unsigned)(via & 0xffff), pp.xw, pp.xh, ox, oy, sols, X0, Y0, bl, bt);
 	// Exactness per candidate mask: inside the region the tile, outside the pre-image.
 	for (int k = 0; k < q.ncand; k++) {
@@ -2309,12 +2310,12 @@ static void code3_check(const nqd_shadow_op &q)
 		cand_exact[f] += mism == 0;
 	}
 	if ((n_pred % 25) == 0) {
-		printf("SheepForce shadow: code 3 summary: %u ops, %u no pattern, %u no expansion, %u no origin, %u predicted; mask fields (exact/seen):",
+		NW_DIAG("SheepForce shadow: code 3 summary: %u ops, %u no pattern, %u no expansion, %u no origin, %u predicted; mask fields (exact/seen):",
 		       n_seen, n_nopat, n_noxdata, n_noorigin, n_pred);
 		for (unsigned f = 0; f < 0x140; f++)
 			if (cand_seen[f] >= 3)
-				printf(" %03x:%u/%u", f * 4, cand_exact[f], cand_seen[f]);
-		printf("\n");
+				NW_DIAG(" %03x:%u/%u", f * 4, cand_exact[f], cand_seen[f]);
+		NW_DIAG("\n");
 	}
 }
 
@@ -2357,11 +2358,11 @@ static void shadow_check(const nqd_shadow_op &q)
 			}
 		}
 		if ((ops[c] % 100) == 0) {
-			printf("SheepForce shadow: code %u mask fields after %u ops (%u changed nothing):", q.code, ops[c], noop[c]);
+			NW_DIAG("SheepForce shadow: code %u mask fields after %u ops (%u changed nothing):", q.code, ops[c], noop[c]);
 			for (unsigned f = 0; f < 0x140; f++)
 				if (total[c][f] >= 5)
-					printf(" %03x:%u/%u", f * 4, contained[c][f], total[c][f]);
-			printf("\n");
+					NW_DIAG(" %03x:%u/%u", f * 4, contained[c][f], total[c][f]);
+			NW_DIAG("\n");
 		}
 	}
 	if (q.code == 4 && q.dbpp == 4 && q.has_pre && q.w[3] == 0 &&
@@ -2406,7 +2407,7 @@ static void shadow_check(const nqd_shadow_op &q)
 			if (bad_here) {
 				d4_bad[bits]++;
 				if (d4_shown++ < 8)
-					printf("SheepForce shadow: code 4 call %u %u-bit MISMATCH %u px, first at %d,%d idx %u expect %08x got %08x pre %08x (ctable %08x n %d, src %08x row %d sx %d sy %d)\n",
+					NW_DIAG("SheepForce shadow: code 4 call %u %u-bit MISMATCH %u px, first at %d,%d idx %u expect %08x got %08x pre %08x (ctable %08x n %d, src %08x row %d sx %d sy %d)\n",
 					       q.n, bits, bad_here, first_x, first_y, first_idx, (unsigned)first_expect, (unsigned)first_got, (unsigned)first_pre,
 					       (unsigned)ct, n, (unsigned)sbase, (int)srow, sx, sy);
 			} else {
@@ -2414,7 +2415,7 @@ static void shadow_check(const nqd_shadow_op &q)
 				if (clipped_here) d4_clipped[bits]++;
 			}
 			if (((d4_ok[bits] + d4_bad[bits]) % 25) == 0)
-				printf("SheepForce shadow: code 4 indexed->32 %u-bit: ok %u (of which clipped %u) mismatch %u\n", bits, d4_ok[bits], d4_clipped[bits], d4_bad[bits]);
+				NW_DIAG("SheepForce shadow: code 4 indexed->32 %u-bit: ok %u (of which clipped %u) mismatch %u\n", bits, d4_ok[bits], d4_clipped[bits], d4_bad[bits]);
 		}
 		(void)informative;
 	}
@@ -2445,7 +2446,7 @@ static void shadow_check(const nqd_shadow_op &q)
 		if (unclipped_wrong) {
 			bad[c]++;
 			if (shown_bad[c]++ < 6)
-				printf("SheepForce shadow: code 5 call %u MISMATCH: %u pixels changed to something other than the pen %08x\n",
+				NW_DIAG("SheepForce shadow: code 5 call %u MISMATCH: %u pixels changed to something other than the pen %08x\n",
 				       q.n, unclipped_wrong, (unsigned)q.w[7]);
 			return;
 		}
@@ -2456,22 +2457,22 @@ static void shadow_check(const nqd_shadow_op &q)
 			if (q.gate) { if (was_clipped) g_pass_clipped++; else g_pass_clean++; }
 			else { if (was_clipped) g_fail_clipped++; else g_fail_clean++; }
 			if (q.gate && was_clipped && g_pass_clipped <= 5) {
-				printf("SheepForce shadow: GATE WRONG: code 5 call %u accelerated-but-clipped (%d regions seen), %u pixels clipped; rect %d x %d, pen %08x\n",
+				NW_DIAG("SheepForce shadow: GATE WRONG: code 5 call %u accelerated-but-clipped (%d regions seen), %u pixels clipped; rect %d x %d, pen %08x\n",
 				       q.n, q.gate_regions, clipped, q.rw, q.rh, (unsigned)q.w[7]);
 				for (int y = 0; y < q.rh && y < q.ch; y++)
 					for (int x = 0; x < q.rw && x < q.cw; x++) {
 						uint32 got = nqd_word_load(q.dest + (size_t)y * q.row + (size_t)x * 4);
 						uint32 pre = nqd_word_load(q.pre + ((size_t)y * SHADOW_MAXW + x) * 4);
 						if (wrong[y * SHADOW_MAXW + x] && ((got ^ expect) & 0xffffff00u) && got == pre)
-							printf("    pixel (%d,%d) still %08x (pen %08x)\n", x, y, (unsigned)got, (unsigned)expect);
+							NW_DIAG("    pixel (%d,%d) still %08x (pen %08x)\n", x, y, (unsigned)got, (unsigned)expect);
 					}
 				for (int c = 0; c < q.cap_n; c++) {
-					printf("    gate region %d:", c);
+					NW_DIAG("    gate region %d:", c);
 					for (int k = 0; k < 40; k++)
-						printf(" %d", (int)(int16)q.cap[c][k]);
-					printf("\n");
+						NW_DIAG(" %d", (int)(int16)q.cap[c][k]);
+					NW_DIAG("\n");
 				}
-				printf("    dest base %08x row %d bounds %08x,%08x rect %08x,%08x pix %d\n", (unsigned)q.w[0x64 / 4], (int)q.w[0x68 / 4],
+				NW_DIAG("    dest base %08x row %d bounds %08x,%08x rect %08x,%08x pix %d\n", (unsigned)q.w[0x64 / 4], (int)q.w[0x68 / 4],
 				       (unsigned)q.w[0x6c / 4], (unsigned)q.w[0x70 / 4], (unsigned)q.w[0xd4 / 4], (unsigned)q.w[0xd8 / 4], (int)q.w[0x7c / 4]);
 				for (uint32 off = 0; off < 0x500; off += 4) {
 					uint32 w0 = q.w[off / 4];
@@ -2485,17 +2486,17 @@ static void shadow_check(const nqd_shadow_op &q)
 					int rb = (int16)ReadMacInt16(base + 6), rr = (int16)ReadMacInt16(base + 8);
 					if (sz < 10 || sz > 8192 || rb <= rt || rr <= rl)
 						continue;
-					printf("    region via +%03x: size %u bbox t%d l%d b%d r%d\n", off, sz, rt, rl, rb, rr);
+					NW_DIAG("    region via +%03x: size %u bbox t%d l%d b%d r%d\n", off, sz, rt, rl, rb, rr);
 				}
 			}
 			static unsigned v_clean[4], v_clipped[4];
 			for (int v = 0; v < 4; v++)
 				if (q.gate_v[v]) { if (was_clipped) v_clipped[v]++; else v_clean[v]++; }
 			if ((g_total + 1) % 250 == 0)
-				printf("SheepForce shadow: gate variants (accelerated clean / CLIPPED): original %u/%u, +direct %u/%u, +deep handles %u/%u, +deep direct %u/%u\n",
+				NW_DIAG("SheepForce shadow: gate variants (accelerated clean / CLIPPED): original %u/%u, +direct %u/%u, +deep handles %u/%u, +deep direct %u/%u\n",
 				       v_clean[0], v_clipped[0], v_clean[1], v_clipped[1], v_clean[2], v_clipped[2], v_clean[3], v_clipped[3]);
 			if ((++g_total % 250) == 0)
-				printf("SheepForce shadow: clip gate: pass+clean %u (accelerated), pass+CLIPPED %u (must be 0), fail+clipped %u (correctly kept), fail+clean %u (opportunity lost)\n",
+				NW_DIAG("SheepForce shadow: clip gate: pass+clean %u (accelerated), pass+CLIPPED %u (must be 0), fail+clipped %u (correctly kept), fail+clean %u (opportunity lost)\n",
 				       g_pass_clean, g_pass_clipped, g_fail_clipped, g_fail_clean);
 		}
 		if (clipped && q.ncand > 0) {
@@ -2515,11 +2516,11 @@ static void shadow_check(const nqd_shadow_op &q)
 				clip_exact[f] += mism == 0;
 			}
 			if (clip_ops <= 3 || (clip_ops % 20) == 0) {
-				printf("SheepForce shadow: code 5 clip fields after %u clipped lines (exact/seen):", clip_ops);
+				NW_DIAG("SheepForce shadow: code 5 clip fields after %u clipped lines (exact/seen):", clip_ops);
 				for (unsigned f = 0; f < 0x140; f++)
 					if (clip_cands[f] >= 3)
-						printf(" %03x:%u/%u", f * 4, clip_exact[f], clip_cands[f]);
-				printf("\n");
+						NW_DIAG(" %03x:%u/%u", f * 4, clip_exact[f], clip_cands[f]);
+				NW_DIAG("\n");
 			}
 		}
 		(void)informative;
@@ -2527,7 +2528,7 @@ static void shadow_check(const nqd_shadow_op &q)
 		skipped[c]++;
 	}
 	if (((ok[c] + bad[c] + skipped[c]) % 200) == 0)
-		printf("SheepForce shadow: code %u totals ok %u mismatch %u undecoded %u\n", q.code, ok[c], bad[c], skipped[c]);
+		NW_DIAG("SheepForce shadow: code %u totals ok %u mismatch %u undecoded %u\n", q.code, ok[c], bad[c], skipped[c]);
 }
 
 static void shadow_flush(void)
@@ -2594,11 +2595,11 @@ static void locate_regions(uint32 p, uint32 code, uint32 n)
 			if (dup || nd >= 64)
 				continue;
 			done[nd++] = base;
-			printf("SheepForce locate: code %u call %u region word@%03x=%08x level %d size %u bbox %d,%d,%d,%d data",
+			NW_DIAG("SheepForce locate: code %u call %u region word@%03x=%08x level %d size %u bbox %d,%d,%d,%d data",
 			       code, n, (unsigned)off, (unsigned)w, level, sz, t, l, b, r);
 			for (unsigned i = 10; i < sz && i < 120; i += 2)
-				printf(" %04x", ReadMacInt16(base + i));
-			printf("\n");
+				NW_DIAG(" %04x", ReadMacInt16(base + i));
+			NW_DIAG("\n");
 		}
 	}
 }
@@ -2632,10 +2633,10 @@ static void probe_count(uint32 p, uint32 code, bool masked, bool screen)
 			probe_keys[i].pixels += (unsigned long long)aw * (unsigned long long)ah;
 	}
 	if ((++probe_total % 2000) == 0) {
-		printf("SheepForce stats after %u hook calls:\n", probe_total);
+		NW_DIAG("SheepForce stats after %u hook calls:\n", probe_total);
 		for (unsigned j = 0; j < probe_nkeys; j++)
 			if (probe_keys[j].count >= 20)
-				printf("SheepForce stats:   code %u mode %d pen %d src %dbpp dst %dbpp %s %s: %u calls, %llu kpixels\n",
+				NW_DIAG("SheepForce stats:   code %u mode %d pen %d src %dbpp dst %dbpp %s %s: %u calls, %llu kpixels\n",
 				       probe_keys[j].code, probe_keys[j].mode, probe_keys[j].pen, probe_keys[j].spix,
 				       probe_keys[j].dpix, probe_keys[j].masked ? "masked" : "rect",
 				       probe_keys[j].screen ? "screen" : "offscreen", probe_keys[j].count, probe_keys[j].pixels / 1000);
@@ -2652,7 +2653,7 @@ bool NQD_probe_hook(uint32 p, uint32 code)
 		return false;
 	const unsigned n = ++calls[code];
 	if (n <= 12 || (n % 500) == 0) {
-		printf("SheepForce probe: code %u call %u params %08x mode %d pen %d fore %08x back %08x"
+		NW_DIAG("SheepForce probe: code %u call %u params %08x mode %d pen %d fore %08x back %08x"
 		       " dest %08x drow %d dpix %u rect %d,%d,%d,%d src %08x srow %d spix %u\n",
 		       code, n, (unsigned)p, (int)ReadMacInt32(p + acclTransferMode), (int)ReadMacInt32(p + acclPenMode),
 		       (unsigned)ReadMacInt32(p + acclForePen), (unsigned)ReadMacInt32(p + acclBackPen),
@@ -2663,13 +2664,13 @@ bool NQD_probe_hook(uint32 p, uint32 code)
 		       (unsigned)ReadMacInt32(p + acclSrcBaseAddr), (int)ReadMacInt32(p + acclSrcRowBytes),
 		       (unsigned)ReadMacInt32(p + acclSrcPixelSize));
 		if (n <= 6) {
-			printf("SheepForce probe: code %u call %u dump", code, n);
+			NW_DIAG("SheepForce probe: code %u call %u dump", code, n);
 			for (uint32 off = 0; off < 0x500; off += 4) {
 				uint32 v = ReadMacInt32(p + off);
 				if (v)
-					printf(" %03x=%08x", (unsigned)off, (unsigned)v);
+					NW_DIAG(" %03x=%08x", (unsigned)off, (unsigned)v);
 			}
-			printf("\n");
+			NW_DIAG("\n");
 		}
 		if (n <= 6 && code != 5)
 			locate_regions(p, code, n);
@@ -2861,7 +2862,7 @@ int NQD_copybits_expand(uint32 srcBits, uint32 dstBits, uint32 srcRect,
 	static unsigned nlog;
 	if (nlog < 40u) {
 		nlog++;
-		printf("NW-BOOT G1: copybits expand %d→32 %dx%d dest %08x\n",
+		NW_DIAG("NW-BOOT G1: copybits expand %d→32 %dx%d dest %08x\n",
 		       src_ps, width, height, (unsigned)ReadMacInt32(dstBits));
 		fflush(stdout);
 	}
@@ -2905,14 +2906,14 @@ void VideoInstallAccel(void)
 			WriteMacInt32(info + 8, codes[i]);
 			NQDMisc(6, info);
 		}
-		printf("SheepForce: probe hooks planted for codes 1 3 4 5 6 7 8\n");
+		NW_DIAG("SheepForce: probe hooks planted for codes 1 3 4 5 6 7 8\n");
 	}
 	if (SheepForceQDEnabled() && PrefsFindBool("sheepforce_lines") && !PrefsFindBool("sheepforce_probe")) {
 		WriteMacInt32(info + 0, NativeTVECT(NATIVE_NQD_LINES_HOOK));
 		WriteMacInt32(info + 4, NativeTVECT(NATIVE_NQD_SYNC_HOOK));
 		WriteMacInt32(info + 8, ACCL_LINES);
 		NQDMisc(6, info);
-		printf("SheepForce: lines hook (code %d) planted\n", (int)ACCL_LINES);
+		NW_DIAG("SheepForce: lines hook (code %d) planted\n", (int)ACCL_LINES);
 	}
 	if (SheepForceQDEnabled() && PrefsFindBool("sheepforce_fillmask") && !PrefsFindBool("sheepforce_probe")) {
 		WriteMacInt32(info + 0, NativeTVECT(NATIVE_NQD_FILLMASK_HOOK));
@@ -2920,7 +2921,7 @@ void VideoInstallAccel(void)
 		WriteMacInt32(info + 8, ACCL_FILLMASK);
 		NQDMisc(6, info);
 		atexit(NQD_fillmask_report);
-		printf("SheepForce: fill-mask hook (code %d) planted\n", (int)ACCL_FILLMASK);
+		NW_DIAG("SheepForce: fill-mask hook (code %d) planted\n", (int)ACCL_FILLMASK);
 	}
-	printf("SheepForce: Native QuickDraw hooks installed\n");
+	printf("SheepForce: QuickDraw hooks installed\n");
 }

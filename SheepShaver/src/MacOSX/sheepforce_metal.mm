@@ -19,6 +19,7 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "sheepforce.h"
 #include "video.h"
 #include "cpu_emulation.h"
@@ -555,7 +556,7 @@ bool SheepForceAdoptHostFB(uint8 *host, uint32 bytes)
 			options:MTLResourceStorageModeShared deallocator:nil];
 		if (g_fb) {
 			g_fb_nocopy = true;
-			printf("SheepForce: guest FB wrapped as Metal buffer %p %u\n",
+			NW_DIAG("SheepForce: guest FB wrapped as Metal buffer %p %u\n",
 			       host, (unsigned)length);
 			fflush(stdout);
 			return true;

@@ -19,6 +19,7 @@
  */
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #if defined(__clang__)
 #pragma STDC FENV_ACCESS ON
 #endif
@@ -72,7 +73,7 @@ void powerpc_cpu::execute_illegal(uint32 opcode)
 		static int n_ill;
 		if (n_ill < 8) {
 			n_ill++;
-			printf("NW-BOOT illegal pc=%08x op=%08x -> 0x700\n", pc(), opcode);
+			NW_DIAG("NW-BOOT illegal pc=%08x op=%08x -> 0x700\n", pc(), opcode);
 			fflush(stdout);
 		}
 #endif
@@ -87,7 +88,7 @@ void powerpc_cpu::execute_illegal(uint32 opcode)
 	static int n_ill;
 	if (n_ill < 8) {
 		n_ill++;
-		printf("NW-BOOT illegal pc=%08x op=%08x\n", pc(), opcode);
+		NW_DIAG("NW-BOOT illegal pc=%08x op=%08x\n", pc(), opcode);
 		fflush(stdout);
 	}
 #endif

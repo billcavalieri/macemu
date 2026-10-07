@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "main.h"
 #include "version.h"
 #include "prefs.h"
@@ -127,7 +128,7 @@ static void nw_audio_debug_scan(void)
 		 * made the Sound control panel execute an illegal instruction
 		 * (error type 3) once SheepBlaster was the saved output. */
 		const char *what = (addr & 1) ? "odd" : "code";
-		printf("NW-BOOT SheepBlaster debug sift pass=%d ptr=%08x %s\n",
+		NW_DIAG("NW-BOOT SheepBlaster debug sift pass=%d ptr=%08x %s\n",
 		       pass, (unsigned)addr, what);
 		fflush(stdout);
 	}
@@ -140,11 +141,11 @@ static void nw_audio_debug_scan(void)
 		ndesc++;
 		p = hit + sizeof desc;
 		uint32 addr = RAMBase + (uint32)(hit - base);
-		printf("NW-BOOT SheepBlaster debug desc pass=%d ptr=%08x\n",
+		NW_DIAG("NW-BOOT SheepBlaster debug desc pass=%d ptr=%08x\n",
 		       pass, (unsigned)addr);
 		fflush(stdout);
 	}
-	printf("NW-BOOT SheepBlaster debug scan pass=%d sift=%d desc=%d\n",
+	NW_DIAG("NW-BOOT SheepBlaster debug scan pass=%d sift=%d desc=%d\n",
 	       pass, sift, ndesc);
 	fflush(stdout);
 }
@@ -273,7 +274,7 @@ static void nw_register_output(void)
 		for (int i = 0; i < 12; i++)
 			WriteMacInt8(p + 1 + i, (uint8)s[i]);
 	}
-	printf("NW-BOOT G1: audio-reg name=%08x\n", (unsigned)name_h);
+	NW_DIAG("NW-BOOT G1: audio-reg name=%08x\n", (unsigned)name_h);
 	fflush(stdout);
 	/* RegisterComponent(cd, entry, global=1, name, nil, nil).
 	 * D0 is the selector ($7001). A parameter block with D0=0 is not
@@ -297,18 +298,18 @@ static void nw_register_output(void)
 	/* Open/Register during RegisterComponent must hit this card, not
 	 * the mixer path. That path calls 68k again and freezes the desktop. */
 	nw_sheepblaster_set_ready(1);
-	printf("NW-BOOT G1: audio-reg enter\n");
+	NW_DIAG("NW-BOOT G1: audio-reg enter\n");
 	fflush(stdout);
 	Execute68k(stub_addr, &rr);
 	uint32 component = rr.d[0];
-	printf("NW-BOOT G1: audio-reg component=%08x\n", (unsigned)component);
+	NW_DIAG("NW-BOOT G1: audio-reg component=%08x\n", (unsigned)component);
 	fflush(stdout);
 	if (component == 0 || name_h == 0) {
 		static int tries;
 		nw_sheepblaster_set_ready(0);
 		if (++tries < 5)
 			nw_reg_arm = 1;
-		printf("NW-BOOT G1: audio-reg retry component=%08x name=%08x\n",
+		NW_DIAG("NW-BOOT G1: audio-reg retry component=%08x name=%08x\n",
 		       (unsigned)component, (unsigned)name_h);
 		fflush(stdout);
 		return;
@@ -378,7 +379,7 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 				else {
 					nw_components_done = true;
 					nw_components_remove_hooks();
-					printf("SheepForce: event-loop component registration completed\n");
+					NW_DIAG("SheepForce: event-loop component registration completed\n");
 				}
 				nw_components_busy = false;
 			}
@@ -531,7 +532,7 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 					static int n_sniff;
 					if (n_sniff < 24) {
 						n_sniff++;
-						printf("NW-BOOT SheepBlaster debug sniff #%d pc=%08x sp=%08x sel=%d s0=%08x s4=%08x s8=%08x s12=%08x\n",
+						NW_DIAG("NW-BOOT SheepBlaster debug sniff #%d pc=%08x sp=%08x sel=%d s0=%08x s4=%08x s8=%08x s12=%08x\n",
 						       n_sniff, (unsigned)pc, (unsigned)sp, (int)sel,
 						       (unsigned)ReadMacInt32(sp),
 						       (unsigned)ReadMacInt32(sp + 4),

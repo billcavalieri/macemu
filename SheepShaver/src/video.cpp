@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "sysdeps.h"
+#include "nw_log.h"
 #include "video.h"
 #include "video_defs.h"
 #include "main.h"
@@ -141,7 +142,7 @@ static void nw_install_vbl_handler(VidLocals *csSave)
 	int32 err = (int32)CallMacOS4(rpg_ptr, rpg_tvect, (void *)(uintptr)csSave->regEntryID, (const char *)(uintptr)name.addr(),
 	                              (void *)(uintptr)ist.addr(), (uint32 *)(uintptr)size.addr());
 	if (err != 0 || size.value() < 8) {
-		printf("NW-BOOT G1: video ndrv: no driver-ist on the display node (err %d); no VBL\n", (int)err);
+		NW_DIAG("NW-BOOT G1: video ndrv: no driver-ist on the display node (err %d); no VBL\n", (int)err);
 		return;
 	}
 	const uint32 set_id = ReadMacInt32(ist.addr() + IST_CHIP_SOURCE * 8);
@@ -152,11 +153,11 @@ static void nw_install_vbl_handler(VidLocals *csSave)
 	err = (int32)CallMacOS6(gif_ptr, gif_tvect, set_id, member, (void *)(uintptr)refcon.addr(),
 	                        (void *)(uintptr)handler.addr(), (void *)(uintptr)enabler.addr(), (void *)(uintptr)disabler.addr());
 	if (err != 0 || enabler.value() == 0) {
-		printf("NW-BOOT G1: video ndrv: GetInterruptFunctions -> %d enabler %08x; no VBL\n", (int)err, (unsigned)enabler.value());
+		NW_DIAG("NW-BOOT G1: video ndrv: GetInterruptFunctions -> %d enabler %08x; no VBL\n", (int)err, (unsigned)enabler.value());
 		return;
 	}
 	if (nw_vbl_code == 0) {
-		printf("NW-BOOT G1: video ndrv: no VBL stub\n");
+		NW_DIAG("NW-BOOT G1: video ndrv: no VBL stub\n");
 		return;
 	}
 	/* CFM function pointer: a transition vector, then the code it names.
@@ -169,13 +170,13 @@ static void nw_install_vbl_handler(VidLocals *csSave)
 	err = (int32)CallMacOS6(iif_ptr, iif_tvect, set_id, member, (void *)(uintptr)refcon.value(),
 	                        (void *)(uintptr)nw_vbl_code, (void *)(uintptr)enabler.value(), (void *)(uintptr)disabler.value());
 	if (err != 0) {
-		printf("NW-BOOT G1: video ndrv: InstallInterruptFunctions -> %d\n", (int)err);
+		NW_DIAG("NW-BOOT G1: video ndrv: InstallInterruptFunctions -> %d\n", (int)err);
 		return;
 	}
 	CallMacOS3(ien_ptr, enabler.value(), set_id, member, (void *)0);
 	nw_vbl_installed = true;
 	nw_display_vbl_enable(1);
-	printf("NW-BOOT G1: video ndrv: VBL handler on interrupt set %08x member %d, enabled\n", (unsigned)set_id, (int)member);
+	NW_DIAG("NW-BOOT G1: video ndrv: VBL handler on interrupt set %08x member %d, enabled\n", (unsigned)set_id, (int)member);
 }
 
 /*
@@ -191,7 +192,7 @@ bool VideoVBLShouldService(void)
 		return false;
 	if (!private_data->interruptsEnabled) {
 		private_data->interruptsEnabled = true;
-		printf("NW-BOOT G1: video ndrv: VSL armed after Open\n");
+		NW_DIAG("NW-BOOT G1: video ndrv: VSL armed after Open\n");
 		fflush(stdout);
 		return false;
 	}
@@ -281,7 +282,7 @@ static int16 VideoOpen(uint32 pb, VidLocals *csSave)
 	csSave->luminanceMapping = false;
 	csSave->cursorHardware = UseHardwareCursor();
 	if (ROMType == ROMTYPE_NEWWORLD)
-		printf("NW-BOOT G1: video ndrv: %s cursor\n", csSave->cursorHardware ? "hardware" : "software");
+		NW_DIAG("NW-BOOT G1: video ndrv: %s cursor\n", csSave->cursorHardware ? "hardware" : "software");
 	csSave->cursorX = 0;
 	csSave->cursorY = 0;
 	csSave->cursorVisible = 0;
@@ -575,7 +576,7 @@ static int16 VideoControl(uint32 pb, VidLocals *csSave)
 			D(bug("SetInterrupt\n"));
 			csSave->interruptsEnabled = !ReadMacInt8(param);
 #if defined(NW_BOOT_LOG) && NW_BOOT_LOG
-			printf("NW-BOOT G1: cscSetInterrupt param=%u enabled=%d installed=%d\n",
+			NW_DIAG("NW-BOOT G1: cscSetInterrupt param=%u enabled=%d installed=%d\n",
 			       (unsigned)ReadMacInt8(param), csSave->interruptsEnabled,
 			       nw_vbl_installed ? 1 : 0);
 #endif
@@ -1221,7 +1222,7 @@ int16 VideoDoDriverIO(uint32 spaceID, uint32 commandID, uint32 commandContents, 
 				break;
 			}
 			if (ROMType == ROMTYPE_NEWWORLD && vslnewis_tvect == 0)
-				printf("NW-BOOT G1: video ndrv: no VideoServicesLib; display opens without VBL\n");			nqdmisc_tvect = FindLibSymbol("\014InterfaceLib", "\007NQDMisc");
+				NW_DIAG("NW-BOOT G1: video ndrv: no VideoServicesLib; display opens without VBL\n");			nqdmisc_tvect = FindLibSymbol("\014InterfaceLib", "\007NQDMisc");
 			D(bug("NQDMisc TVECT at %08lx\n", nqdmisc_tvect));
 			if (nqdmisc_tvect == 0) {
 				printf("FATAL: VideoDoDriverIO(): Can't find NQDMisc()\n");
@@ -1233,7 +1234,7 @@ int16 VideoDoDriverIO(uint32 spaceID, uint32 commandID, uint32 commandContents, 
 				iif_tvect = FindLibSymbol("\021DriverServicesLib", "\031InstallInterruptFunctions");
 				gif_tvect = FindLibSymbol("\021DriverServicesLib", "\025GetInterruptFunctions");
 				if (rpg_tvect == 0 || iif_tvect == 0 || gif_tvect == 0)
-					printf("NW-BOOT G1: video ndrv: RegistryPropertyGet %08x InstallInterruptFunctions %08x GetInterruptFunctions %08x; no VBL\n",
+					NW_DIAG("NW-BOOT G1: video ndrv: RegistryPropertyGet %08x InstallInterruptFunctions %08x GetInterruptFunctions %08x; no VBL\n",
 					       (unsigned)rpg_tvect, (unsigned)iif_tvect, (unsigned)gif_tvect);
 			}
 
