@@ -71,6 +71,9 @@ final class GuestDisplayView: NSView {
     private var fracY: CGFloat = 0
     private var appliedGames: Bool?
     private var trackingClick = false
+    /// Buttons whose press grabbed the pointer. That click only grabs: it is not sent to the guest, and its
+    /// release is dropped, so coming back into the window never clicks or drags something in the guest.
+    private var swallowedUp = Set<Int>()
     private let hint = NSTextField(labelWithString: "ctrl-g to release")
     private let guestArrow = GuestArrowView()
     private var arrowHotX: CGFloat = 1
@@ -346,45 +349,75 @@ final class GuestDisplayView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard inputEnabled else { return }
         if gaming {
+            let wasAttached = attached
             captureForClick()
+            if !wasAttached {
+                swallowedUp.insert(event.buttonNumber)
+                return
+            }
             press(event)
             return
         }
-        grabAbsolute(event)
+        if !attached {
+            grabAbsolute(event)
+            swallowedUp.insert(event.buttonNumber)
+            return
+        }
         press(event)
     }
 
     override func mouseUp(with event: NSEvent) {
+        if swallowedUp.remove(event.buttonNumber) != nil { return }
         release(event)
     }
 
     override func rightMouseDown(with event: NSEvent) {
         guard inputEnabled else { return }
         if gaming {
+            let wasAttached = attached
             captureForClick()
+            if !wasAttached {
+                swallowedUp.insert(event.buttonNumber)
+                return
+            }
             press(event)
             return
         }
-        grabAbsolute(event)
+        if !attached {
+            grabAbsolute(event)
+            swallowedUp.insert(event.buttonNumber)
+            return
+        }
         press(event)
     }
 
     override func rightMouseUp(with event: NSEvent) {
+        if swallowedUp.remove(event.buttonNumber) != nil { return }
         release(event)
     }
 
     override func otherMouseDown(with event: NSEvent) {
         guard inputEnabled else { return }
         if gaming {
+            let wasAttached = attached
             captureForClick()
+            if !wasAttached {
+                swallowedUp.insert(event.buttonNumber)
+                return
+            }
             press(event)
             return
         }
-        grabAbsolute(event)
+        if !attached {
+            grabAbsolute(event)
+            swallowedUp.insert(event.buttonNumber)
+            return
+        }
         press(event)
     }
 
     override func otherMouseUp(with event: NSEvent) {
+        if swallowedUp.remove(event.buttonNumber) != nil { return }
         release(event)
     }
 
@@ -540,6 +573,7 @@ final class GuestDisplayView: NSView {
     private func ungrab(_ reason: String) {
         guard attached else { return }
         attached = false
+        swallowedUp.removeAll()
         stopGrabHold()
         VideoHostMouseButton(0, 0)
         VideoHostMouseButton(1, 0)
