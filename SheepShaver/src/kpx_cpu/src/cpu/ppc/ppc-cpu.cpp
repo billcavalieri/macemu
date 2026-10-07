@@ -804,7 +804,7 @@ void powerpc_cpu::take_program(uint32 srr1_bits)
 		static struct { uint32 pc, bits; } seen[48];
 		static unsigned nseen;
 		const uint32 at = pc();
-		if (!(at >= 0x68000000u && at < 0x68c00000u) && nseen < 48) {
+		if (nw_log_on() && !(at >= 0x68000000u && at < 0x68c00000u) && nseen < 48) {
 			unsigned i = 0;
 			while (i < nseen && !(seen[i].pc == at && seen[i].bits == srr1_bits)) i++;
 			if (i == nseen) {
