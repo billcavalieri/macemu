@@ -1149,6 +1149,20 @@ adat_error:	printf("FATAL: audio component data block initialization error\n");
 				}
 				if (audio_data == 0 || AudioStatus.mixer == 0)
 					return noErr;
+				/* A PlaySourceBuffer that arrives while the mixer is inside a call of ours (a completion that
+				 * RemoveSource or StopSource flushed) must not enter the mixer a second time: it is not
+				 * re-entrant, and when the last source is being removed the buffer has nowhere to go. */
+				if (sb_in_mixer && !sb_in_tick && sb_sources <= 0) {
+					static int n_nested;
+					if (n_nested < 16) {
+						n_nested++;
+						printf("NW-BOOT G1: audio-nested-psb #%d dropped (in_mixer=%d src=%d run=%d)\n",
+						       n_nested, sb_in_mixer, sb_sources, (int)sb_run);
+						fflush(stdout);
+					}
+					if (sb_defer_on())
+						return noErr;
+				}
 				/* Inside GetSourceData, or while the mixer is taking the
 				 * buffer we just flushed. That completion is the next
 				 * movie slice. Queuing it in this same pull would mark
