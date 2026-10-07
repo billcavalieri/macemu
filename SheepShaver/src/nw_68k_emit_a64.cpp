@@ -11,6 +11,8 @@
 #include <pthread.h>
 #endif
 
+void nw_jit_dtlb_demote_pa(uint32_t pa);
+
 namespace {
 enum { CACHE = 16384, CODE_BYTES = 8 << 20, ENTRY_BYTES = 4096 };
 typedef int (*native_fn)(nw68_frame *);
@@ -33,7 +35,10 @@ std::atomic<uint32_t> pagebits[32768];
 void mark_page(uint32_t page, bool present) {
 	const unsigned bit = page >> 12;
 	const uint32_t mask = 1u << (bit & 31);
-	if (present) pagebits[bit >> 5].fetch_or(mask, std::memory_order_release);
+	if (present) {
+		/* The first block of this page: the PPC JIT's store-proven data-TLB entries for it stop being that. */
+		if (!(pagebits[bit >> 5].fetch_or(mask, std::memory_order_release) & mask)) nw_jit_dtlb_demote_pa(page);
+	}
 	else pagebits[bit >> 5].fetch_and(~mask, std::memory_order_release);
 }
 std::mutex mutex;

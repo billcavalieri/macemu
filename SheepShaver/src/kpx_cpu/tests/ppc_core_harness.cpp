@@ -778,12 +778,32 @@ int ppc_core_test_access::sub_store_sweep(powerpc_cpu *cpu)
     std::vector<step> seq;
     for (unsigned i = 0; i < steps; ++i) {
         step st = {};
-        const unsigned form = unsigned(next() % 12);
+        const unsigned form = unsigned(next() % 30);
         const unsigned rs = 5, ra = 3, rb = 4;
-        /* 0 stb 1 stbx 2 stbu 3 sth 4 sthx 5 sthu 6 lbz 7 lhz 8 lwz 9 stw 10 stbux 11 sthux */
+        /* 0 stb 1 stbx 2 stbu 3 sth 4 sthx 5 sthu 6 lbz 7 lhz 8 lwz 9 stw 10 stbux 11 sthux 12 lha 13 lhzu 14 lhau
+         * 15 lbzu 16 lbzx 17 lhzx 18 lhax 19 lbzux 20 lhzux 21 lhaux 22 lfd 23 lfdx 24 lfdu 25 lfdux 26 stfd 27 stfdx
+         * 28 stfdu 29 stfdux */
         uint32 op = 0;
         const int16 disp = int16(next() % 0x40) - 0x10;
         switch (form) {
+        case 12: op = (42u<<26)|(6u<<21)|(ra<<16)|uint16(disp); break;
+        case 13: op = (41u<<26)|(6u<<21)|(ra<<16)|uint16(disp); break;
+        case 14: op = (43u<<26)|(6u<<21)|(ra<<16)|uint16(disp); break;
+        case 15: op = (35u<<26)|(6u<<21)|(ra<<16)|uint16(disp); break;
+        case 16: op = (31u<<26)|(6u<<21)|(ra<<16)|(rb<<11)|(87u<<1); break;
+        case 17: op = (31u<<26)|(6u<<21)|(ra<<16)|(rb<<11)|(279u<<1); break;
+        case 18: op = (31u<<26)|(6u<<21)|(ra<<16)|(rb<<11)|(343u<<1); break;
+        case 19: op = (31u<<26)|(6u<<21)|(ra<<16)|(rb<<11)|(119u<<1); break;
+        case 20: op = (31u<<26)|(6u<<21)|(ra<<16)|(rb<<11)|(311u<<1); break;
+        case 21: op = (31u<<26)|(6u<<21)|(ra<<16)|(rb<<11)|(375u<<1); break;
+        case 22: op = (50u<<26)|(1u<<21)|(ra<<16)|uint16(disp); break;
+        case 23: op = (31u<<26)|(1u<<21)|(ra<<16)|(rb<<11)|(599u<<1); break;
+        case 24: op = (51u<<26)|(1u<<21)|(ra<<16)|uint16(disp); break;
+        case 25: op = (31u<<26)|(1u<<21)|(ra<<16)|(rb<<11)|(631u<<1); break;
+        case 26: op = (54u<<26)|(1u<<21)|(ra<<16)|uint16(disp); break;
+        case 27: op = (31u<<26)|(1u<<21)|(ra<<16)|(rb<<11)|(727u<<1); break;
+        case 28: op = (55u<<26)|(1u<<21)|(ra<<16)|uint16(disp); break;
+        case 29: op = (31u<<26)|(1u<<21)|(ra<<16)|(rb<<11)|(759u<<1); break;
         case 0: op = (38u<<26)|(rs<<21)|(ra<<16)|uint16(disp); break;
         case 1: op = (31u<<26)|(rs<<21)|(ra<<16)|(rb<<11)|(215u<<1); break;
         case 2: op = (39u<<26)|(rs<<21)|(ra<<16)|uint16(disp); break;
@@ -798,9 +818,14 @@ int ppc_core_test_access::sub_store_sweep(powerpc_cpu *cpu)
         default: op = (31u<<26)|(rs<<21)|(ra<<16)|(rb<<11)|(439u<<1); break;
         }
         static const uint32 edge[] = {0, 1, 0xff8, 0xffc, 0xffe, 0xfff, 0x1000, 0x1ffe, 0x1fff, 0x2000, 0x2ffe, 0x2fff, 0x3000, 0x3ff8, 0x3ffa};
-        const uint32 off = next() % 6 ? (uint32(next()) % 0x3fe0) : edge[next() % (sizeof edge / sizeof edge[0])];
+        uint32 off = next() % 6 ? (uint32(next()) % 0x3fe0) : edge[next() % (sizeof edge / sizeof edge[0])];
         const uint32 window = next() % 5 == 0 ? ro : base;
-        const bool indexed = form == 1 || form == 4 || form == 10 || form == 11;
+        /* A word store hits the table whenever its entry is writable, whether or not the page holds translated code
+         * (the entry's history decides it, and the two runs fill differently); everything else here is store-proven,
+         * so only stw stays off the executing page. */
+        if (form == 9 && window == base && off + 4 > (code - base) - 8 && off < (code - base) + 0x1000u + 8) off &= 0x1fffu;
+        const bool indexed = form == 1 || form == 4 || form == 10 || form == 11 || (form >= 16 && form <= 21) ||
+                             form == 23 || form == 25 || form == 27 || form == 29;
         st.op = op; st.rs_val = uint32(next());
         if (indexed) { st.rb_val = uint32(next() & 0xff0); st.ra_val = window + off - st.rb_val; }
         else { st.rb_val = 0; st.ra_val = window + off - uint32(int32(disp)); }
@@ -814,7 +839,7 @@ int ppc_core_test_access::sub_store_sweep(powerpc_cpu *cpu)
     const unsigned saved_legacy = nw_jit_legacy;
     unsigned fast_hits_before = 0, fast_hits_after = 0;
     for (unsigned v = 0; v < 2; ++v) {
-        if (v || getenv("PPC_SUB_SELF")) nw_jit_legacy |= NW_JIT_LEGACY_SUBST; else nw_jit_legacy &= ~NW_JIT_LEGACY_SUBST;
+        if (v || getenv("PPC_SUB_SELF")) nw_jit_legacy |= NW_JIT_LEGACY_SUBST | NW_JIT_LEGACY_MEM; else nw_jit_legacy &= ~(NW_JIT_LEGACY_SUBST | NW_JIT_LEGACY_MEM);
         mmu.reset(); mmu.set_msr(0x2000u | ppc32_mmu::MSR_DR);
         mmu.set_dbat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);		/* read/write */
         mmu.set_dbat(1, (ro & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 1u);		/* read only alias of the same RAM */
@@ -832,6 +857,7 @@ int ppc_core_test_access::sub_store_sweep(powerpc_cpu *cpu)
             nw_jit_cpu c = {};
             c.pc = code; c.msr = 0x2000u | ppc32_mmu::MSR_DR; c.host = cpu;
             c.gpr[3] = st.ra_val; c.gpr[4] = st.rb_val; c.gpr[5] = st.rs_val;
+            c.fpr[1] = (uint64(st.rs_val) << 32) | uint64(~st.rs_val);
             mmu.set_msr(c.msr); cpu->pc() = code; cpu->last_fetch_pa_ = code;
             cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false; c.dec = cpu->dec_;
             cpu->cr().set(0); cpu->xer().set(0); cpu->lr() = cpu->ctr() = 0; cpu->spcflags().init();
@@ -842,7 +868,7 @@ int ppc_core_test_access::sub_store_sweep(powerpc_cpu *cpu)
             t.fault = c.fault; t.fault_ea = c.fault ? c.fault_ea : 0; t.ra = c.gpr[3];
             uint64 h = 1469598103934665603ULL;
             for (unsigned i = 0; i < span; ++i) h = (h ^ ((uint8 *)ram)[i]) * 1099511628211ULL;
-            t.hash = h ^ c.gpr[6];
+            t.hash = h ^ c.gpr[6] ^ (c.fpr[1] * 0x9e3779b97f4a7c15ULL);
             if (getenv("PPC_SUB_TRACE") && out[v].size() < 4) {
                 unsigned sum = 0; for (unsigned i = 0; i < span; ++i) sum += ((uint8 *)ram)[i];
                 fprintf(stderr, "sub-trace v=%u step=%zu op=%08x ra=%08x rb=%08x rs=%08x fault=%u sum=%u gpr6=%08x hash=%016llx\n", v, out[v].size(), st.op, st.ra_val, st.rb_val, st.rs_val, c.fault, sum, c.gpr[6], (unsigned long long)t.hash);

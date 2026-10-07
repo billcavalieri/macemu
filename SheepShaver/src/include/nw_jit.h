@@ -328,7 +328,8 @@ enum {
 	NW_JIT_DTLB_WRITE = 2u,
 	NW_JIT_DTLB_HOST = 4u,	/* host page pointer is live; ARM ldr/str */
 	NW_JIT_DTLB_PR = 8u,	/* filled with MSR[PR]=1; miss if current PR differs */
-	NW_JIT_DTLB_BAT = 16u	/* filled from a BAT; miss if bat_gen changed */
+	NW_JIT_DTLB_BAT = 16u,	/* filled from a BAT; miss if bat_gen changed */
+	NW_JIT_DTLB_CREC = 32u	/* a full recorded store translation was done for this entry (see nw_jit_dtlb_store_rec) */
 };
 struct nw_jit_dtlb_ent {
 	uint32_t ea_page;
@@ -350,7 +351,8 @@ enum {
 	NW_JIT_LEGACY_FP    = 32u,	/* single-precision FP arithmetic always calls the out-of-line helpers */
 	NW_JIT_LEGACY_HOP   = 64u,	/* every native chain hop copies the live GPRs/FPRs back to the interpreter state */
 	NW_JIT_LEGACY_SUBST = 128u,	/* byte/halfword stores always translate and never use the data TLB */
-	NW_JIT_LEGACY_LINK  = 256u	/* every block exit goes through the C chain helper; conditional/CTR branches are out-of-line helper calls */
+	NW_JIT_LEGACY_LINK  = 256u,	/* every block exit goes through the C chain helper; conditional/CTR branches are out-of-line helper calls */
+	NW_JIT_LEGACY_MEM   = 512u	/* byte/halfword/doubleword loads and stores are C helper calls instead of the inline data-TLB sequence */
 };
 extern unsigned nw_jit_legacy;
 void nw_jit_dtlb_flush(void);
@@ -370,6 +372,9 @@ int nw_jit_dtlb_take_rec(uint32_t ea, int pr);
  * translation; a writable flag from a load fill does not count. */
 int nw_jit_dtlb_store_rec(uint32_t ea, int pr, uint32_t *pa);
 void nw_jit_dtlb_mark_store_rec(uint32_t ea, int pr);
+/* A page that held no translated code now does: its store-proven entries stop being store-proven, so the next
+ * byte/halfword/doubleword store takes the invalidating path again. */
+void nw_jit_dtlb_demote_pa(uint32_t pa);
 /* A PPC block or a translated 68k block was built from this physical page: a store must take the invalidating path. */
 int nw_jit_page_has_code(uint32_t pa);
 uint64_t nw_jit_dtlb_hits(void);

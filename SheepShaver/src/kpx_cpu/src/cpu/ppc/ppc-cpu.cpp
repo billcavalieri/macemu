@@ -2252,7 +2252,10 @@ uint32 powerpc_cpu::jit_host_lwz(void *host, uint32 ea, uint32 pc, int *fault)
 	if (kind != NW_PA_FB && ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR)) {
 		const int pr = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0;
-		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM,
+		/* Read-only: this access only proved the page readable. A writable flag here let a later word store hit the
+		 * entry and skip the guest's write-protection check (a store to a read-only mapping must take the DSI);
+		 * the first store to the page refills it writable after the translation that proves it. */
+		nw_jit_dtlb_fill(ea, pa, 0,
 			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
 			pr, via_bat);
 	}
@@ -2965,7 +2968,7 @@ void powerpc_cpu::jit_host_lfd(void *host, uint32 fd, uint32 ea, uint32 pc, int 
 	}
 	if (kind != NW_PA_FB && ppc32_guest_mmu_enabled() &&
 	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
-		nw_jit_dtlb_fill(ea, pa, nw_pa_writable(pa) && kind != NW_PA_ROM,
+		nw_jit_dtlb_fill(ea, pa, 0,	/* read-only: see jit_host_lwz */
 			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
 			(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0, via_bat);
 	const uint64 v = vm_read_memory_8(pa);
@@ -2999,10 +3002,16 @@ void powerpc_cpu::jit_host_stfd(void *host, uint32 ea, uint64 val, uint32 pc, in
 	if (kind == NW_PA_FB)
 		nw_fb_damage_store(pa, 8);
 	else if (ppc32_guest_mmu_enabled() &&
-	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR)) {
+		const int pr = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0;
+		const bool code_page = nw_jit_page_has_code(pa) != 0;
 		nw_jit_dtlb_fill(ea, pa, 1,
-			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu),
-			(ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0, via_bat);
+			(uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu), pr, via_bat);
+		/* The probe above proved the page writable. A page without translated code can then be stored to from the
+		 * compiled code's inline sequence (stfd); one that has code keeps taking this invalidating path. */
+		if (!(nw_jit_legacy & NW_JIT_LEGACY_MEM) && !code_page)
+			nw_jit_dtlb_mark_store_rec(ea, pr);
+	}
 	if (kind != NW_PA_FB)
 		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
