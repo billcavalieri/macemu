@@ -426,7 +426,8 @@ public:
 				    uint32 chain_pc, int *n2,
 				    int *uses_fpr, int *uses_vr,
 				    uint32 *dsi_pc, uint32 *chain2,
-				    int cur_fpr, int cur_vr);
+				    int cur_fpr, int cur_vr,
+				    struct nw_jit_chain_info *info);
 	static void jit_host_icbi(void *host, uint32 ea);
 	static void jit_host_tlbie(void *host, uint32 ea);
 	static void jit_host_tlbia(void *host);

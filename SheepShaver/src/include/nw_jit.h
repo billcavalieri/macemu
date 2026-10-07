@@ -42,7 +42,7 @@
  * host writes into guest RAM drop that page. 4d: ON DSI from a helper
  * takes the exception with SRR0 = the faulting PC (same as kpx).
  */
-enum { NW_JIT_MAX_BLOCK = 32 };
+enum { NW_JIT_MAX_BLOCK = 128 };
 #define NW_JIT_CHAIN_DYNAMIC UINT32_C(0xffffffff)
 
 /* A system service returns observed reads/outcomes, never a replacement CPU
@@ -105,6 +105,11 @@ struct nw_jit_cpu {
 	uint32_t srr0, srr1; /* private exception state, compared after system exits */
 	uint32_t (*verify_system)(void *, uint32_t pc, uint32_t opcode,
 	                         uint32_t a, uint32_t b, nw_jit_system_result *);
+	/* Direct block links (see nw_jit_link). Bound by nw_jit_cpu_bind; compiled exits read them via x19. */
+	uint32_t *jit_link_gen;	/* &g_link_gen: a link is valid only while its generation matches */
+	uint32_t link_budget;	/* fast hops left before the next hop must take the C helper (events, hop cap) */
+	uint32_t link_armed;	/* the helper set link_budget in this dispatch (statistics) */
+	uint32_t link_pad;
 };
 
 /* Typed observations cover modeled SPR/MMU/cache services. Native code owns
@@ -206,6 +211,8 @@ void nw_jit_cache_put(uint32_t phys_page, uint32_t guest_pc, uint32_t msr_ir,
 		      int16_t chain_disp = 0, uint32_t code_bytes = 0,
 		      uint32_t fpr_mask = 0xffffffffu);
 uint64_t nw_jit_chain_hops(void);
+/* Hops taken through direct block links (counted when the next helper hop runs) and links made. */
+void nw_jit_link_stats(uint64_t *fast, uint64_t *made);
 void nw_jit_note_chain(int hops);
 void nw_jit_tail_begin(void);
 int nw_jit_tail_n(void);
@@ -333,14 +340,17 @@ struct nw_jit_dtlb_ent {
 	uint32_t pad2;
 };
 /* Runtime kill switches for the October 2026 host-performance changes. Set NW_JIT_LEGACY to a comma list of
- * clock, sync, load, index, xlate, fp (or all) to run the previous behaviour of each, for A/B tests in one binary. */
+ * clock, sync, load, index, xlate, fp, hop (or all) to run the previous behaviour of each, for A/B tests in one binary. */
 enum {
 	NW_JIT_LEGACY_CLOCK = 1u,	/* decrementer sampled on every jit_events_pending() call */
 	NW_JIT_LEGACY_SYNC  = 2u,	/* GPR/FPR commit and pull test all 32 registers */
 	NW_JIT_LEGACY_LOAD  = 4u,	/* byte/halfword loads do not use or fill the data TLB */
 	NW_JIT_LEGACY_INDEX = 8u,	/* invalidation scans the whole cache instead of the per-page index */
 	NW_JIT_LEGACY_XLATE = 16u,	/* the 68k layer's load previews always run the full MMU translation */
-	NW_JIT_LEGACY_FP    = 32u	/* single-precision FP arithmetic always calls the out-of-line helpers */
+	NW_JIT_LEGACY_FP    = 32u,	/* single-precision FP arithmetic always calls the out-of-line helpers */
+	NW_JIT_LEGACY_HOP   = 64u,	/* every native chain hop copies the live GPRs/FPRs back to the interpreter state */
+	NW_JIT_LEGACY_SUBST = 128u,	/* byte/halfword stores always translate and never use the data TLB */
+	NW_JIT_LEGACY_LINK  = 256u	/* every block exit goes through the C chain helper; conditional/CTR branches are out-of-line helper calls */
 };
 extern unsigned nw_jit_legacy;
 void nw_jit_dtlb_flush(void);
@@ -360,6 +370,8 @@ int nw_jit_dtlb_take_rec(uint32_t ea, int pr);
  * translation; a writable flag from a load fill does not count. */
 int nw_jit_dtlb_store_rec(uint32_t ea, int pr, uint32_t *pa);
 void nw_jit_dtlb_mark_store_rec(uint32_t ea, int pr);
+/* A PPC block or a translated 68k block was built from this physical page: a store must take the invalidating path. */
+int nw_jit_page_has_code(uint32_t pa);
 uint64_t nw_jit_dtlb_hits(void);
 uint64_t nw_jit_dtlb_misses(void);
 uint64_t nw_jit_mtsr_total(void);
@@ -418,11 +430,14 @@ void nw_jit_set_host_vmx(nw_jit_host_vmx fn);
 typedef void (*nw_jit_host_rfi)(void *host, struct nw_jit_cpu *cpu);
 void nw_jit_set_host_rfi(nw_jit_host_rfi fn);
 void nw_jit_dump_wake_ring(void);
+/* What the chain helper learned about the successor, for linking the exit that asked. */
+struct nw_jit_chain_info { uint32_t npa, gmask, fmask; };
 typedef void *(*nw_jit_host_chain)(void *host, struct nw_jit_cpu *cpu,
 				   uint32_t chain_pc, int *n2,
 				   int *uses_fpr, int *uses_vr,
 				   uint32_t *dsi_pc, uint32_t *chain2,
-				   int cur_fpr, int cur_vr);
+				   int cur_fpr, int cur_vr,
+				   struct nw_jit_chain_info *info);
 void nw_jit_set_host_chain(nw_jit_host_chain fn);
 typedef void (*nw_jit_host_icbi)(void *host, uint32_t ea);
 void nw_jit_set_host_icbi(nw_jit_host_icbi fn);

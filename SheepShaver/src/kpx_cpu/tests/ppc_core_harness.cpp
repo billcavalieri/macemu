@@ -1,6 +1,7 @@
 /* Tests execute the real KPX decoder and instruction methods. Linked against
  * an isolated app build, with a private entry point and deterministic TB clock;
  * no GUI, ROM, disk or guest device callback is initialized. */
+#include <functional>
 #include "sysdeps.h"
 #include "cpu/ppc/ppc-cpu.hpp"
 #include "nw_jit.h"
@@ -51,11 +52,11 @@ struct ppc_core_test_access {
         powerpc_cpu::jit_host_fp_exception(host,c);
     }
     static void *stale_vector_tail(void *host, nw_jit_cpu *c, uint32 pc, int *n,
-        int *f, int *v, uint32 *dsi, uint32 *chain, int cf, int cv) {
+        int *f, int *v, uint32 *dsi, uint32 *chain, int cf, int cv, nw_jit_chain_info *info) {
         powerpc_cpu *ppc = static_cast<powerpc_cpu *>(host);
         uint32 stale[32][4];
         for (unsigned r = 0; r < 32; ++r) for (unsigned w = 0; w < 4; ++w) stale[r][w] = ppc->vr(r).w[w];
-        void *next = powerpc_cpu::jit_host_chain(host,c,pc,n,f,v,dsi,chain,cf,cv);
+        void *next = powerpc_cpu::jit_host_chain(host,c,pc,n,f,v,dsi,chain,cf,cv,info);
         if (next && *v && cv) memcpy(c->vr,stale,sizeof stale);
         return next;
     }
@@ -65,6 +66,9 @@ struct ppc_core_test_access {
     static int basic_special_p6(powerpc_cpu *);
     static int multiply_p6(powerpc_cpu *);
     static int fp_fast_sweep(powerpc_cpu *);
+    static int sub_store_sweep(powerpc_cpu *);
+    static int loop_bench(powerpc_cpu *);
+    static int link_sweep(powerpc_cpu *);
     static int io_publication(powerpc_cpu *);
     static void stop_on_device(void *context) { static_cast<powerpc_cpu *>(context)->spcflags().set(SPCFLAG_CPU_EXEC_RETURN); }
     static void instruction(powerpc_cpu *cpu, uint32 op) { cpu->decode(op)->execute(cpu, op); }
@@ -751,6 +755,513 @@ int ppc_core_test_access::basic_special_p6(powerpc_cpu *cpu)
  * the host FP flags and the host rounding mode must match. Operands cover the cases the inline path takes and the
  * ones it must hand to the helper (zeros, subnormals, infinities, NaNs, doubles that are not singles, exponent
  * boundaries), under random FPSCR states including enabled exceptions, rounding modes and sticky bits. */
+/* Byte/halfword stores (and the loads that fill the same table) through the data TLB against the always-translate path
+ * (NW_JIT_LEGACY_SUBST). A long random sequence runs twice from identical memory; every step must leave the same bytes,
+ * fault and updated base register. The sequence mixes loads (which fill entries as writable without a permission check),
+ * stores to a read-only alias of the same RAM (must fault even after a load filled it), page-crossing halfwords, dropped
+ * entries and word stores (which fill and must stay coherent with the byte path). */
+int ppc_core_test_access::sub_store_sweep(powerpc_cpu *cpu)
+{
+    cpu->enable_guest_mmu(true); nw_jit_set_mode(NW_JIT_ON); nw_jit_set_host_chain(NULL);
+    ppc32_mmu &mmu = ppc32_guest_mmu();
+    const uint32 base = 0x10000000u, ro = 0x20000000u, code = base + 0x3000u;
+    const unsigned span = 0x4000;
+    void *const wanted = (void *)(VMBaseDiff+base);
+    void *const ram = mmap(wanted,span + 0x2000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);	/* slack: a halfword on the last byte of the bank writes one byte past it */
+    CHECK(ram == wanted); if (ram != wanted) return 1;
+    nw_banks_set(NW_PA_RAM,base,span);
+    nw_jit_set_code_pages(base,span,0,0);	/* per-page code bits: without them every page counts as code and no store may use the table */
+    uint64 state = 0x2545f4914f6cdd1dULL;
+    auto next = [&]() { state ^= state >> 12; state ^= state << 25; state ^= state >> 27; return state * 0x2545f4914f6cdd1dULL; };
+    struct step { uint32 op, ra_val, rb_val, rs_val; int kind; };	/* kind: 0 op, 1 drop the page of ra, 2 flush */
+    const unsigned steps = getenv("PPC_SUB_STEPS") ? unsigned(strtoul(getenv("PPC_SUB_STEPS"),NULL,10)) : 6000;
+    std::vector<step> seq;
+    for (unsigned i = 0; i < steps; ++i) {
+        step st = {};
+        const unsigned form = unsigned(next() % 12);
+        const unsigned rs = 5, ra = 3, rb = 4;
+        /* 0 stb 1 stbx 2 stbu 3 sth 4 sthx 5 sthu 6 lbz 7 lhz 8 lwz 9 stw 10 stbux 11 sthux */
+        uint32 op = 0;
+        const int16 disp = int16(next() % 0x40) - 0x10;
+        switch (form) {
+        case 0: op = (38u<<26)|(rs<<21)|(ra<<16)|uint16(disp); break;
+        case 1: op = (31u<<26)|(rs<<21)|(ra<<16)|(rb<<11)|(215u<<1); break;
+        case 2: op = (39u<<26)|(rs<<21)|(ra<<16)|uint16(disp); break;
+        case 3: op = (44u<<26)|(rs<<21)|(ra<<16)|uint16(disp); break;
+        case 4: op = (31u<<26)|(rs<<21)|(ra<<16)|(rb<<11)|(407u<<1); break;
+        case 5: op = (45u<<26)|(rs<<21)|(ra<<16)|uint16(disp); break;
+        case 6: op = (34u<<26)|(6u<<21)|(ra<<16)|uint16(disp); break;
+        case 7: op = (40u<<26)|(6u<<21)|(ra<<16)|uint16(disp); break;
+        case 8: op = (32u<<26)|(6u<<21)|(ra<<16)|uint16(disp); break;
+        case 9: op = (36u<<26)|(rs<<21)|(ra<<16)|uint16(disp); break;
+        case 10: op = (31u<<26)|(rs<<21)|(ra<<16)|(rb<<11)|(247u<<1); break;
+        default: op = (31u<<26)|(rs<<21)|(ra<<16)|(rb<<11)|(439u<<1); break;
+        }
+        static const uint32 edge[] = {0, 1, 0xff8, 0xffc, 0xffe, 0xfff, 0x1000, 0x1ffe, 0x1fff, 0x2000, 0x2ffe, 0x2fff, 0x3000, 0x3ff8, 0x3ffa};
+        const uint32 off = next() % 6 ? (uint32(next()) % 0x3fe0) : edge[next() % (sizeof edge / sizeof edge[0])];
+        const uint32 window = next() % 5 == 0 ? ro : base;
+        const bool indexed = form == 1 || form == 4 || form == 10 || form == 11;
+        st.op = op; st.rs_val = uint32(next());
+        if (indexed) { st.rb_val = uint32(next() & 0xff0); st.ra_val = window + off - st.rb_val; }
+        else { st.rb_val = 0; st.ra_val = window + off - uint32(int32(disp)); }
+        seq.push_back(st);
+        const unsigned extra = unsigned(next() % 20);
+        if (extra == 0) { step d = {}; d.kind = 1; d.ra_val = (next() % 2 ? ro : base) + ((uint32(next()) % 4) << 12); seq.push_back(d); }
+        if (extra == 1) { step f = {}; f.kind = 2; seq.push_back(f); }
+    }
+    struct trace { uint32 fault, fault_ea, ra; uint64 hash; };
+    std::vector<trace> out[2];
+    const unsigned saved_legacy = nw_jit_legacy;
+    unsigned fast_hits_before = 0, fast_hits_after = 0;
+    for (unsigned v = 0; v < 2; ++v) {
+        if (v || getenv("PPC_SUB_SELF")) nw_jit_legacy |= NW_JIT_LEGACY_SUBST; else nw_jit_legacy &= ~NW_JIT_LEGACY_SUBST;
+        mmu.reset(); mmu.set_msr(0x2000u | ppc32_mmu::MSR_DR);
+        mmu.set_dbat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);		/* read/write */
+        mmu.set_dbat(1, (ro & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 1u);		/* read only alias of the same RAM */
+        nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
+        uint64 rs2 = 0x9e3779b97f4a7c15ULL;
+        for (unsigned i = 0; i < span; ++i) { rs2 ^= rs2 >> 12; rs2 ^= rs2 << 25; rs2 ^= rs2 >> 27; ((uint8 *)ram)[i] = uint8((rs2 * 0x2545f4914f6cdd1dULL) >> 56); }
+        if (v == 0) fast_hits_before = unsigned(nw_jit_dtlb_hits());
+        for (const step &st : seq) {
+            if (st.kind == 1) { nw_jit_dtlb_drop_page(st.ra_val, NW_JIT_DTLB_FL_TLB); continue; }
+            if (st.kind == 2) { nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_TLB); continue; }
+            const uint32 ops[] = {st.op};
+            nw_jit_invalidate_all_src(NW_JIT_FL_OTHER);
+            nw_jit_fn fn = nw_jit_compile(ops,1,code,code,0,0);
+            CHECK(fn != NULL); if (!fn) continue;
+            nw_jit_cpu c = {};
+            c.pc = code; c.msr = 0x2000u | ppc32_mmu::MSR_DR; c.host = cpu;
+            c.gpr[3] = st.ra_val; c.gpr[4] = st.rb_val; c.gpr[5] = st.rs_val;
+            mmu.set_msr(c.msr); cpu->pc() = code; cpu->last_fetch_pa_ = code;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false; c.dec = cpu->dec_;
+            cpu->cr().set(0); cpu->xer().set(0); cpu->lr() = cpu->ctr() = 0; cpu->spcflags().init();
+            for (unsigned r = 0; r < 32; ++r) cpu->gpr(r) = c.gpr[r];
+            nw_jit_cpu_bind(&c); nw_jit_tail_begin();
+            fn(&c);
+            trace t = {};
+            t.fault = c.fault; t.fault_ea = c.fault ? c.fault_ea : 0; t.ra = c.gpr[3];
+            uint64 h = 1469598103934665603ULL;
+            for (unsigned i = 0; i < span; ++i) h = (h ^ ((uint8 *)ram)[i]) * 1099511628211ULL;
+            t.hash = h ^ c.gpr[6];
+            if (getenv("PPC_SUB_TRACE") && out[v].size() < 4) {
+                unsigned sum = 0; for (unsigned i = 0; i < span; ++i) sum += ((uint8 *)ram)[i];
+                fprintf(stderr, "sub-trace v=%u step=%zu op=%08x ra=%08x rb=%08x rs=%08x fault=%u sum=%u gpr6=%08x hash=%016llx\n", v, out[v].size(), st.op, st.ra_val, st.rb_val, st.rs_val, c.fault, sum, c.gpr[6], (unsigned long long)t.hash);
+            }
+            out[v].push_back(t);
+        }
+        if (v == 0) fast_hits_after = unsigned(nw_jit_dtlb_hits());
+    }
+    nw_jit_legacy = saved_legacy;
+    CHECK(out[0].size() == out[1].size());
+    unsigned diffs = 0, faults = 0;
+    for (size_t i = 0; i < out[0].size() && i < out[1].size(); ++i) {
+        const bool same = out[0][i].fault == out[1][i].fault && out[0][i].fault_ea == out[1][i].fault_ea &&
+                          out[0][i].ra == out[1][i].ra && out[0][i].hash == out[1][i].hash;
+        if (out[0][i].fault) ++faults;
+        CHECK(same);
+        if (!same && ++diffs <= 12) {
+            const step *st = NULL; size_t k = 0;
+            for (const step &q : seq) { if (q.kind == 0) { if (k == i) { st = &q; break; } ++k; } }
+            fprintf(stderr, "sub-store step %zu op=%08x ra=%08x: fault %u/%u ea %08x/%08x ra' %08x/%08x hash %s\n", i, st ? st->op : 0, st ? st->ra_val : 0,
+                out[0][i].fault, out[1][i].fault, out[0][i].fault_ea, out[1][i].fault_ea, out[0][i].ra, out[1][i].ra, out[0][i].hash == out[1][i].hash ? "same" : "DIFF");
+        }
+    }
+    printf("sub-store sweep: %zu ops, %u faults, %u data-TLB hits in the fast run\n", out[0].size(), faults, fast_hits_after - fast_hits_before);
+    CHECK(fast_hits_after - fast_hits_before > 100);
+    mmu.reset(); nw_jit_set_code_pages(0,0,0,0); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,span + 0x2000);
+    return failed ? 1 : 0;
+}
+
+/* Throughput of tight guest loops through the real dispatch path (nw_jit_try + native chaining), in guest
+ * instructions per microsecond. Reports; asserts only that each kernel produced its expected result. Kernels: a byte
+ * copy (lbzu/stbu/bdnz), the ROM's BlockMove inner loop (lfd/stfd/bdnz), and a compare loop shaped like the MacBench
+ * integer test (several not-taken conditional branches per iteration, one taken back-edge), a short string-store
+ * routine and a sub-word store fill. NW_JIT_LEGACY in the environment still applies (set before start-up). */
+int ppc_core_test_access::loop_bench(powerpc_cpu *cpu)
+{
+    cpu->enable_guest_mmu(true); nw_jit_set_mode(NW_JIT_ON); nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+    const uint32 base = 0x10000000u, sentinel = base + 0x7000u;
+    const uint32 msr_run = 0x2000u | ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR;
+    ppc32_guest_mmu().reset(); ppc32_guest_mmu().set_msr(msr_run);
+    ppc32_guest_mmu().set_ibat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);
+    ppc32_guest_mmu().set_dbat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);
+    nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
+    const unsigned span = 0x8000;
+    void *const wanted = (void *)(VMBaseDiff+base);
+    void *const ram = mmap(wanted,span,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    CHECK(ram == wanted); if (ram != wanted) return 1;
+    nw_banks_set(NW_PA_RAM,base,span);
+    nw_jit_set_code_pages(base,span,0,0);
+    struct kernel { const char *name; std::vector<uint32> code; unsigned insns_per_iter; unsigned iters; };
+    auto lbzu = [](unsigned rd, unsigned ra, int d) { return (35u<<26)|(rd<<21)|(ra<<16)|uint16(d); };
+    auto stbu = [](unsigned rs, unsigned ra, int d) { return (39u<<26)|(rs<<21)|(ra<<16)|uint16(d); };
+    auto lfd = [](unsigned fd, unsigned ra, int d) { return (50u<<26)|(fd<<21)|(ra<<16)|uint16(d); };
+    auto stfd = [](unsigned fs, unsigned ra, int d) { return (54u<<26)|(fs<<21)|(ra<<16)|uint16(d); };
+    auto addi = [](unsigned rd, unsigned ra, int i) { return (14u<<26)|(rd<<21)|(ra<<16)|uint16(i); };
+    auto bdnz = [](int byte_disp) { return (16u<<26)|(16u<<21)|(uint16(byte_disp) & 0xfffcu); };
+    auto bc = [](unsigned bo, unsigned bi, int byte_disp) { return (16u<<26)|(bo<<21)|(bi<<16)|(uint16(byte_disp) & 0xfffcu); };
+    auto x31 = [](unsigned rd, unsigned ra, unsigned rb, unsigned xo) { return (31u<<26)|(rd<<21)|(ra<<16)|(rb<<11)|(xo<<1); };
+    const uint32 BLR = 0x4e800020u;
+    std::vector<kernel> kernels;
+    kernels.push_back({"byte copy      ", {lbzu(5,3,1), stbu(5,4,1), bdnz(-8), BLR}, 3, 3000});
+    kernels.push_back({"BlockMove loop ", {lfd(0,3,0), lfd(1,3,8), addi(3,3,16), stfd(0,4,0), stfd(1,4,8), addi(4,4,16), bdnz(-24), BLR}, 7, 200});
+    /* addi r10,r10,1; extsh r4,r9; cmpw r4,r6; bge exit; lha r0,0(r8); extsh r5,r10; cmpw r5,r0; bge exit;
+     * lbzx r4,r7,r4; lbzx r0,r7,r5; extsb r4,r4; extsb r0,r0; cmpw r4,r0; beq top; exit: blr */
+    kernels.push_back({"compare loop   ", {addi(10,10,1), x31(9,4,0,922), x31(0,4,6,0), bc(4,0,0x2c), (42u<<26)|(0u<<21)|(8u<<16),
+        x31(10,5,0,922), x31(0,5,0,0), bc(4,0,0x1c), x31(4,7,4,87), x31(0,7,5,87), x31(4,4,0,954), x31(0,0,0,954), x31(0,4,0,0), bc(12,2,-0x34), BLR}, 14, 2047});
+    for (kernel &k : kernels) {
+        const uint32 code = base + 0x6000u;
+        for (size_t i = 0; i < k.code.size(); ++i) vm_write_memory_4(code + uint32(i*4), k.code[i]);
+        for (unsigned i = 0; i < 0x4000; ++i) ((uint8 *)ram)[i] = 0;
+        for (unsigned i = 0; i < 4096; ++i) ((uint8 *)ram)[i] = uint8(i * 7);	/* copy source */
+        ((uint8 *)ram)[0x2000] = 0x07; ((uint8 *)ram)[0x2001] = 0xff;		/* lha r0,0(r8) = 0x07ff: the loop runs 2047 times */
+        double best = 1e30; uint64 insns = 0;
+        for (unsigned rep = 0; rep < 5; ++rep) {
+            nw_jit_invalidate_all(); nw_jit_itlb_flush(); nw_jit_itlb_fill(code, code);	/* the fetch path fills this in the emulator */
+            cpu->pc() = code; cpu->lr() = sentinel; cpu->ctr() = k.iters;
+            for (unsigned r = 0; r < 32; ++r) cpu->gpr(r) = 0;
+            cpu->gpr(3) = base - 1; cpu->gpr(4) = base + 0x1000u - 1;
+            if (k.code.size() == 8) { cpu->gpr(3) = base; cpu->gpr(4) = base + 0x1000u; }
+            if (k.code.size() == 15) { cpu->gpr(8) = base + 0x2000u; cpu->gpr(7) = base + 0x3000u; cpu->gpr(6) = 1; cpu->gpr(9) = 0; cpu->gpr(10) = 0;
+                cpu->gpr(4) = 0; /* unused: lbzx r4,r7,r4 reads base+0x3000 */ }
+            cpu->cr().set(0); cpu->xer().set(0); cpu->spcflags().init();
+            cpu->dec_ = 0x7fffffffu; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false;
+            ppc32_guest_mmu().set_msr(msr_run);
+            const unsigned batches = unsigned(4000000ull / (uint64(k.iters) * k.insns_per_iter)) + 1;
+            struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+            uint64 calls = 0;
+            for (unsigned batch = 0; batch < batches; ++batch) {
+                cpu->pc() = code; cpu->lr() = sentinel; cpu->ctr() = k.iters;
+                cpu->gpr(3) = k.code.size() == 8 ? base : base - 1; cpu->gpr(4) = k.code.size() == 8 ? base + 0x1000u : base + 0x1000u - 1;
+                if (k.code.size() == 15) { cpu->gpr(4) = 0; cpu->gpr(10) = 0; }
+                while (cpu->pc() != sentinel && calls < 20000000ull) {
+                    cpu->last_fetch_pa_ = cpu->pc();
+                    const uint32 op = vm_read_memory_4(cpu->pc());
+                    if (!cpu->nw_jit_try(op)) { CHECK(false); fprintf(stderr, "loop bench: nw_jit_try declined pc=%08x op=%08x supported=%d mode=%d msr=%08x pa=%08x\n", cpu->pc(), op, nw_jit_op_supported(op), nw_jit_mode(), ppc32_guest_mmu().msr(), cpu->last_fetch_pa_); break; }
+                    ++calls;
+                }
+            }
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            const double ns = (t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec);
+            insns = uint64(batches) * k.iters * k.insns_per_iter;
+            if (ns / insns < best) best = ns / insns;
+            CHECK(cpu->pc() == sentinel);
+            if (k.code.size() == 4) CHECK(vm_read_memory_1(base + 0x1000u + 10) == uint8(10 * 7));
+            if (k.code.size() == 15) CHECK(cpu->gpr(10) == k.iters);
+            if (calls >= 20000000ull) { CHECK(false); fprintf(stderr, "loop bench: %s did not finish: pc=%08x ctr=%u r3=%08x r10=%u\n", k.name, cpu->pc(), unsigned(cpu->ctr()), cpu->gpr(3), cpu->gpr(10)); break; }
+        }
+        { uint64 lf = 0, lm = 0; nw_jit_link_stats(&lf, &lm); printf("loop bench %s: %.1f guest insns/us (%.2f ns per insn)  [links made %llu, fast hops %llu, helper hops %llu, hop stops cap %llu nochain %llu pcmis %llu itlb %llu aline %llu cmiss %llu]\n", k.name, 1000.0 / best, best, (unsigned long long)lm, (unsigned long long)lf, (unsigned long long)nw_jit_chain_hops(), (unsigned long long)nw_jit_hop_stop_count(0), (unsigned long long)nw_jit_hop_stop_count(1), (unsigned long long)nw_jit_hop_stop_count(2), (unsigned long long)nw_jit_hop_stop_count(3), (unsigned long long)nw_jit_hop_stop_count(4), (unsigned long long)nw_jit_hop_stop_count(5)); }
+    }
+    nw_jit_invalidate_all(); nw_jit_set_code_pages(0,0,0,0); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,span);
+    return failed ? 1 : 0;
+}
+
+/* Direct block links and inline conditional/CTR branches against the all-through-the-helper path (NW_JIT_LEGACY_LINK).
+ * Random structured programs (straight code, forward skips on every BO form, counted CTR loops, CR-driven loops, calls
+ * and returns, stores into the program's own page followed by icbi) run to completion four times: cold and warm
+ * (links already made) in each mode, from the same initial registers and memory. Registers, CR, XER, LR, CTR and the
+ * data page must be identical. Some programs straddle a page boundary so exits cross pages. */
+int ppc_core_test_access::link_sweep(powerpc_cpu *cpu)
+{
+    cpu->enable_guest_mmu(true); nw_jit_set_mode(NW_JIT_ON); nw_jit_set_host_chain(powerpc_cpu::jit_host_chain);
+    const unsigned span = 0x20000;
+    const uint32 base = 0x10000000u, sentinel = base + 0x7000u, data = base + 0x1000u, code_base = base + 0x2000u;
+    const uint32 msr_run = 0x2000u | ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR;
+    ppc32_mmu &mmu = ppc32_guest_mmu();
+    mmu.reset(); mmu.set_msr(msr_run);
+    mmu.set_ibat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);
+    mmu.set_dbat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);
+    nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
+    void *const wanted = (void *)(VMBaseDiff+base);
+    void *const ram = mmap(wanted,span,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    CHECK(ram == wanted); if (ram != wanted) return 1;
+    nw_banks_set(NW_PA_RAM,base,span);
+    nw_jit_set_code_pages(base,span,0,0);
+    uint64 state = 0x853c49e6748fea9bULL;
+    auto next = [&]() { state ^= state >> 12; state ^= state << 25; state ^= state >> 27; return state * 0x2545f4914f6cdd1dULL; };
+    auto rnd = [&](unsigned n) { return unsigned(next() % n); };
+    auto x31 = [](unsigned rd, unsigned ra, unsigned rb, unsigned xo) { return (31u<<26)|(rd<<21)|(ra<<16)|(rb<<11)|(xo<<1); };
+    auto addi = [](unsigned rd, unsigned ra, int i) { return (14u<<26)|(rd<<21)|(ra<<16)|uint16(i); };
+    auto addis = [](unsigned rd, unsigned ra, int i) { return (15u<<26)|(rd<<21)|(ra<<16)|uint16(i); };
+    auto ori = [](unsigned ra, unsigned rs, unsigned u) { return (24u<<26)|(rs<<21)|(ra<<16)|(u & 0xffffu); };
+    auto bc = [](unsigned bo, unsigned bi, int byte_disp) { return (16u<<26)|(bo<<21)|(bi<<16)|(uint16(byte_disp) & 0xfffcu); };
+    const unsigned iterations = getenv("PPC_LINK_PROGRAMS") ? unsigned(strtoul(getenv("PPC_LINK_PROGRAMS"),NULL,10)) : 1500;
+    unsigned ran = 0, mismatches = 0, total_insns = 0, smc_loops = 0, smc_forward = 0;
+    struct pstate { uint32 gpr[32], cr, xer, lr, ctr, pc, srr0; uint64 hash; bool finished; };
+    auto check = [&](const std::vector<uint32> &w, uint32 start_off, unsigned prog, const std::function<void()> &init) {
+        const uint32 pc0 = code_base + start_off;
+    pstate res[4];
+    struct tr { uint32 pc, gpr[10], cr, ctr, lr; };
+    std::vector<tr> traces[4];
+    const bool only_this = !getenv("PPC_LINK_ONLY") || prog == unsigned(atoi(getenv("PPC_LINK_ONLY")));
+    if (!only_this) return;
+    for (unsigned variant = 0; variant < 4; ++variant) {
+        const bool legacy = variant >= 2;
+        const bool warm = variant & 1;
+        if (!warm) {
+            if (legacy) nw_jit_legacy |= NW_JIT_LEGACY_LINK; else nw_jit_legacy &= ~NW_JIT_LEGACY_LINK;
+            nw_jit_invalidate_all(); nw_jit_itlb_flush();
+            nw_jit_itlb_fill(code_base, code_base); nw_jit_itlb_fill(code_base + 0x1000u, code_base + 0x1000u);
+        }
+        uint64 s2 = 0x9e3779b97f4a7c15ULL ^ (uint64(prog) * 0x100000001b3ULL);
+        auto n2 = [&]() { s2 ^= s2 >> 12; s2 ^= s2 << 25; s2 ^= s2 >> 27; return s2 * 0x2545f4914f6cdd1dULL; };
+        /* program text (restored when a previous run's self-modifying store changed it) */
+        bool changed = false;
+        for (size_t i = 0; i < w.size(); ++i) if (vm_read_memory_4(pc0 + uint32(i * 4)) != w[i]) { changed = true; vm_write_memory_4(pc0 + uint32(i * 4), w[i]); }
+        if (changed && warm) nw_jit_invalidate_all();
+        for (unsigned i = 0; i < 0x1000; ++i) ((uint8 *)ram)[0x1000 + i] = uint8(n2() >> 56);
+        for (unsigned r = 0; r < 32; ++r) cpu->gpr(r) = uint32(n2()) & 0xff;
+        cpu->gpr(10) = data;
+        if (init) init();
+        cpu->cr().set(uint32(n2())); cpu->xer().set(uint32(n2()) & 0xe0000000u);
+        cpu->lr() = sentinel; cpu->ctr() = uint32(n2()) & 0xf;
+        cpu->pc() = pc0; cpu->spcflags().init();
+        cpu->dec_ = 0x7fffffffu; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false;
+        mmu.set_msr(msr_run);
+        uint64 calls_n = 0;
+        uint32 prev_pc = 0;
+        while (cpu->pc() != sentinel && calls_n < 300000) {
+            if (cpu->pc() < base || cpu->pc() >= base + span) { if (getenv("PPC_LINK_DUMP") || !calls_n) fprintf(stderr, "  pc left the program: %08x after %08x (variant %u, call %llu)\n", cpu->pc(), prev_pc, variant, (unsigned long long)calls_n); break; }
+            prev_pc = cpu->pc();
+            if (getenv("PPC_LINK_TRACE")) { tr t = {cpu->pc(), {0}, cpu->cr().get(), cpu->ctr(), cpu->lr()}; for (unsigned r = 0; r < 10; ++r) t.gpr[r] = cpu->gpr(r + 3); traces[variant].push_back(t); }
+            cpu->last_fetch_pa_ = cpu->pc();
+            const uint32 op = vm_read_memory_4(cpu->pc());
+            if (!cpu->nw_jit_try(op)) {
+                /* The translator declines an access it cannot prove mapped (a store into the executing page, a pointer at
+                 * the edge of memory); the emulator interprets that instruction, taking any DSI. */
+                instruction(cpu, op);
+            }
+            ++calls_n;
+        }
+        pstate &st = res[variant];
+        st.finished = cpu->pc() == sentinel;
+        for (unsigned r = 0; r < 32; ++r) st.gpr[r] = cpu->gpr(r);
+        st.cr = cpu->cr().get(); st.xer = cpu->xer().get(); st.lr = cpu->lr(); st.ctr = cpu->ctr(); st.pc = cpu->pc(); st.srr0 = cpu->srr0_;
+        uint64 h = 1469598103934665603ULL;
+        for (unsigned i = 0x1000; i < 0x2000; ++i) h = (h ^ ((uint8 *)ram)[i]) * 1099511628211ULL;
+        st.hash = h;
+        total_insns += unsigned(calls_n);
+    }
+    ++ran;
+    bool ok = true;
+    for (unsigned v = 1; v < 4; ++v) {
+        bool same = res[v].finished == res[0].finished && !memcmp(res[v].gpr, res[0].gpr, sizeof res[0].gpr) && res[v].cr == res[0].cr &&
+                    res[v].xer == res[0].xer && res[v].lr == res[0].lr && res[v].ctr == res[0].ctr && res[v].hash == res[0].hash &&
+                    res[v].pc == res[0].pc && res[v].srr0 == res[0].srr0;
+        ok &= same;
+    }
+    CHECK(ok);
+    if (!ok && ++mismatches <= 4) {
+        fprintf(stderr, "link sweep: program %u (%zu words, start +%x) differs or did not finish (finished %d %d %d %d)\n", prog, w.size(), start_off,
+            res[0].finished, res[1].finished, res[2].finished, res[3].finished);
+        for (unsigned v = 1; v < 4; ++v) {
+            for (unsigned r = 0; r < 32; ++r) if (res[v].gpr[r] != res[0].gpr[r]) fprintf(stderr, "  v%u r%u %08x vs %08x\n", v, r, res[v].gpr[r], res[0].gpr[r]);
+            if (res[v].cr != res[0].cr) fprintf(stderr, "  v%u cr %08x vs %08x\n", v, res[v].cr, res[0].cr);
+            if (res[v].ctr != res[0].ctr) fprintf(stderr, "  v%u ctr %08x vs %08x\n", v, res[v].ctr, res[0].ctr);
+            if (res[v].lr != res[0].lr) fprintf(stderr, "  v%u lr %08x vs %08x\n", v, res[v].lr, res[0].lr);
+            if (res[v].xer != res[0].xer) fprintf(stderr, "  v%u xer %08x vs %08x\n", v, res[v].xer, res[0].xer);
+            if (res[v].hash != res[0].hash) fprintf(stderr, "  v%u memory differs\n", v);
+        }
+        if (getenv("PPC_LINK_TRACE")) {
+            for (unsigned v = 1; v < 4; ++v) {
+                size_t k = 0; while (k < traces[0].size() && k < traces[v].size() && !memcmp(&traces[0][k], &traces[v][k], sizeof(tr))) ++k;
+                fprintf(stderr, "  trace v%u first differs at call %zu of %zu/%zu\n", v, k, traces[0].size(), traces[v].size());
+                for (size_t j = (k > 3 ? k - 3 : 0); j < k + 2; ++j) {
+                    if (j < traces[0].size()) fprintf(stderr, "    v0[%zu] pc=%08x r3..r12=%x %x %x %x %x %x %x %x %x %x cr=%08x ctr=%x lr=%08x\n", j, traces[0][j].pc, traces[0][j].gpr[0], traces[0][j].gpr[1], traces[0][j].gpr[2], traces[0][j].gpr[3], traces[0][j].gpr[4], traces[0][j].gpr[5], traces[0][j].gpr[6], traces[0][j].gpr[7], traces[0][j].gpr[8], traces[0][j].gpr[9], traces[0][j].cr, traces[0][j].ctr, traces[0][j].lr);
+                    if (j < traces[v].size()) fprintf(stderr, "    v%u[%zu] pc=%08x r3..r12=%x %x %x %x %x %x %x %x %x %x cr=%08x ctr=%x lr=%08x\n", v, j, traces[v][j].pc, traces[v][j].gpr[0], traces[v][j].gpr[1], traces[v][j].gpr[2], traces[v][j].gpr[3], traces[v][j].gpr[4], traces[v][j].gpr[5], traces[v][j].gpr[6], traces[v][j].gpr[7], traces[v][j].gpr[8], traces[v][j].gpr[9], traces[v][j].cr, traces[v][j].ctr, traces[v][j].lr);
+                }
+            }
+        }
+        if (getenv("PPC_LINK_DUMP")) { for (size_t i = 0; i < w.size(); ++i) fprintf(stderr, "    %08x: %08x\n", unsigned(code_base + start_off + i * 4), w[i]); }
+    }
+    };
+    for (unsigned prog = 0; prog < iterations; ++prog) {
+        std::vector<uint32> w;
+        std::vector<std::pair<size_t,size_t> > calls;	/* bl placeholder index, unused */
+        std::vector<size_t> call_sites;
+        struct smc { size_t store_at; };
+        std::vector<size_t> smc_sites, smc_loop;	/* site, innermost enclosing loop start (or npos) */
+        std::vector<size_t> loop_stack;
+        auto emit = [&](uint32 op) { w.push_back(op); };
+        auto data_reg = [&]() { return 3u + rnd(7); };	/* r3..r9 */
+        auto alu = [&]() {
+            const unsigned rd = data_reg(), ra = 3u + rnd(7), rb = 3u + rnd(7);
+            switch (rnd(12)) {
+            case 0: emit(addi(rd, ra, int(rnd(200)) - 100)); break;
+            case 1: emit(x31(rd, ra, rb, 266)); break;
+            case 2: emit(x31(rd, ra, rb, 40)); break;
+            case 3: emit(x31(ra, rd, rb, 444)); break;
+            case 4: emit(x31(ra, rd, rb, 28)); break;
+            case 5: emit(x31(ra, rd, rb, 316)); break;
+            case 6: emit((21u<<26)|(rd<<21)|(ra<<16)|(rnd(32)<<11)|(rnd(32)<<6)|(31u<<1)); break;
+            case 7: emit(x31(rd, ra, rb, 235)); break;
+            case 8: emit((13u<<26)|(rd<<21)|(ra<<16)|uint16(int(rnd(50)) - 25)); break;	/* addic. */
+            case 9: emit(x31(rd, ra, 0, 104)); break;				/* neg */
+            case 10: emit(ori(ra, rd, rnd(0x10000))); break;
+            default: emit(x31(rd, ra, rb, 24)); break;				/* slw */
+            }
+        };
+        auto mem = [&]() {
+            const unsigned r = data_reg();
+            if (rnd(80) == 0) { emit((32u<<26)|(r<<21)|0x20u); return; }	/* lwz r,0x20(0): unmapped, takes a DSI */
+            const unsigned form = rnd(6);
+            const unsigned d = (rnd(0x1f0) & ~3u);
+            static const unsigned prims[] = {32, 36, 34, 38, 40, 44};
+            const unsigned size = form == 0 || form == 1 ? 4 : form == 2 || form == 3 ? 1 : 2;
+            emit((prims[form]<<26)|(r<<21)|(10u<<16)|(d & ~(size - 1)));
+        };
+        auto cmp = [&](unsigned k) {
+            const unsigned ra = 3u + rnd(7), rb = 3u + rnd(7);
+            switch (rnd(4)) {
+            case 0: emit((31u<<26)|(k<<23)|(ra<<16)|(rb<<11)); break;
+            case 1: emit((11u<<26)|(k<<23)|(ra<<16)|uint16(int(rnd(100)) - 50)); break;
+            case 2: emit((31u<<26)|(k<<23)|(ra<<16)|(rb<<11)|(32u<<1)); break;
+            default: emit((10u<<26)|(k<<23)|(ra<<16)|rnd(100)); break;
+            }
+        };
+        auto emit_smc = [&]() { smc_sites.push_back(w.size()); smc_loop.push_back(loop_stack.empty() ? size_t(-1) : loop_stack.back()); for (int i = 0; i < 6; ++i) emit(0x60000000u); };
+        std::function<void(int, bool)> body, segment;
+        auto skip = [&](int depth, bool in_ctr) {
+            const unsigned k = rnd(8);
+            cmp(k);
+            const unsigned n = 1 + rnd(3);
+            static const unsigned bos[] = {12, 4, 13, 5, 20, 21};
+            static const unsigned bos_ctr[] = {16, 18, 8, 10, 0, 2, 17, 25};
+            const unsigned bo = !in_ctr && rnd(3) == 0 ? bos_ctr[rnd(8)] : bos[rnd(6)];
+            if (!in_ctr && (bo & 4) == 0) {	/* a CTR form: give CTR a small value first */
+                emit(addi(11, 0, 1 + rnd(4))); emit(x31(11, 9, 0, 467));
+            }
+            emit(bc(bo, 4 * k + rnd(4), int(n + 1) * 4));
+            for (unsigned i = 0; i < n; ++i) { if (rnd(4) == 0) mem(); else alu(); }
+            (void)depth;
+        };
+        body = [&](int depth, bool in_ctr) {
+            const unsigned n = 1 + rnd(4);
+            for (unsigned i = 0; i < n; ++i) {
+                switch (rnd(8)) {
+                case 0: case 1: alu(); break;
+                case 2: mem(); break;
+                case 3: skip(depth, in_ctr); break;
+                case 4: if (depth < 2) segment(depth + 1, in_ctr); else alu(); break;
+                case 5: if (!loop_stack.empty() && rnd(2)) emit_smc(); else alu(); break;
+                default: alu(); break;
+                }
+            }
+        };
+        segment = [&](int depth, bool in_ctr) {
+            switch (rnd(8)) {
+            case 0: case 1: {					/* CTR loop (bdnz and its other forms) */
+                if (in_ctr) { body(depth, in_ctr); break; }
+                emit(addi(11, 0, 1 + rnd(6))); emit(x31(11, 9, 0, 467));
+                const size_t start = w.size();
+                loop_stack.push_back(start);
+                body(depth, true);
+                loop_stack.pop_back();
+                static const unsigned loop_bo[] = {16, 17, 18 + 100};	/* bdnz, bdnz (hint), placeholder */
+                const unsigned bo = loop_bo[rnd(2)];
+                emit(bc(bo, 0, -int(w.size() - start) * 4));
+                break;
+            }
+            case 2: case 3: {					/* CR loop */
+                const unsigned counter = 24u + unsigned(depth);
+                emit(addi(counter, 0, 1 + rnd(5)));
+                const size_t start = w.size();
+                loop_stack.push_back(start);
+                body(depth, in_ctr);
+                loop_stack.pop_back();
+                emit(addi(counter, counter, -1));
+                const unsigned k = rnd(8);
+                emit((11u<<26)|(k<<23)|(counter<<16)|0);	/* cmpwi k,counter,0 */
+                const size_t b = w.size();
+                /* bgt (BO 12, bit gt) loops while counter > 0 */
+                emit(bc(12, 4 * k + 1, -int(b - start) * 4));
+                break;
+            }
+            case 4: {						/* forward unconditional jump over dead code */
+                const unsigned n = 1 + rnd(3);
+                emit((18u<<26)|((n + 1) * 4));
+                for (unsigned i = 0; i < n; ++i) alu();
+                break;
+            }
+            case 5:						/* call a leaf */
+                call_sites.push_back(w.size()); emit(0); break;
+            case 6:						/* store into the program's own page, then icbi */
+                emit_smc(); break;
+            default: skip(depth, in_ctr); break;
+            }
+        };
+        emit(x31(31, 8, 0, 339));						/* mflr r31 */
+        emit(addis(10, 0, int16(data >> 16))); emit(ori(10, 10, data & 0xffff));
+        emit(addis(13, 0, int16(code_base >> 16))); emit(ori(13, 13, code_base & 0xffff));
+        const unsigned nseg = 3 + rnd(6);
+        for (unsigned i = 0; i < nseg; ++i) segment(0, false);
+        emit(x31(31, 8, 0, 467));						/* mtlr r31 */
+        emit(0x4e800020u);							/* blr */
+        const size_t leaf = w.size();
+        for (unsigned i = 0, n = 1 + rnd(4); i < n; ++i) alu();
+        emit(0x4e800020u);
+        for (size_t site : call_sites) w[site] = (18u<<26)|uint32((int(leaf) - int(site)) * 4) & 0x3fffffcu | 1u;
+        for (size_t si = 0; si < smc_sites.size(); ++si) {
+            const size_t site = smc_sites[si];
+            /* Rewrite an addi with a different immediate: lis/ori the new word, stw it, icbi, isync. Inside a loop the target
+             * is an earlier instruction of that loop (already executed, so possibly linked); otherwise a later one. */
+            size_t target = 0;
+            auto addi_at = [&](size_t i) { return (w[i] >> 26) == 14 && ((w[i] >> 21) & 31) >= 3 && ((w[i] >> 21) & 31) <= 9 && ((w[i] >> 16) & 31) >= 3; };
+            if (smc_loop[si] != size_t(-1)) { for (size_t i = smc_loop[si]; i < site; ++i) if (addi_at(i)) { target = i; break; } }
+            else for (size_t i = site + 6; i < w.size(); ++i) if (addi_at(i)) { target = i; break; }
+            if (!target) continue;
+            if (smc_loop[si] != size_t(-1)) ++smc_loops; else ++smc_forward;
+            const uint32 nw = (w[target] & 0xffff0000u) | uint16(int(rnd(200)) - 100);
+            const uint32 off = uint32(target * 4) + 0;	/* offset from code_base (program offset added below) */
+            (void)off;
+            w[site + 0] = addis(20, 0, int16(nw >> 16)); w[site + 1] = ori(20, 20, nw & 0xffff);
+            w[site + 2] = (36u<<26)|(20u<<21)|(13u<<16);			/* stw r20, disp(r13): disp patched with the offset */
+            w[site + 3] = addi(21, 13, 0);					/* addi r21, r13, disp */
+            w[site + 4] = x31(0, 0, 21, 982);					/* icbi 0,r21 */
+            w[site + 5] = 0x4c00012cu;						/* isync */
+            w[site + 2] |= uint16(target * 4); w[site + 3] |= uint16(target * 4);
+        }
+        /* straddle the page boundary on some programs */
+        const uint32 start_off = rnd(3) == 0 ? (0x1000u - uint32(w.size() / 2) * 4u) & ~3u : 0u;
+        const uint32 pc0 = code_base + start_off;
+        /* patch the SMC displacements for the start offset */
+        for (size_t site : smc_sites) {
+            if ((w[site + 2] >> 26) != 36) continue;
+            const uint32 disp = uint16(w[site + 2]) + start_off;
+            w[site + 2] = (w[site + 2] & 0xffff0000u) | (disp & 0xffff);
+            w[site + 3] = (w[site + 3] & 0xffff0000u) | (disp & 0xffff);
+        }
+        check(w, start_off, prog, std::function<void()>());
+    }
+    /* Directed: a pointer walks off the start of the mapped bank inside a loop whose exits are already linked, so the fault
+     * arrives after many fast hops and must leave through the C helper (a pending fault never takes a link). */
+    {
+        auto stbu = [](unsigned rs, unsigned ra, int d) { return (39u<<26)|(rs<<21)|(ra<<16)|uint16(d); };
+        auto stwu = [](unsigned rs, unsigned ra, int d) { return (37u<<26)|(rs<<21)|(ra<<16)|uint16(d); };
+        auto bdnz = [](int byte_disp) { return (16u<<26)|(16u<<21)|(uint16(byte_disp) & 0xfffcu); };
+        const uint32 BLR = 0x4e800020u;
+        auto sthu = [](unsigned rs, unsigned ra, int d) { return (45u<<26)|(rs<<21)|(ra<<16)|uint16(d); };
+        std::vector<std::vector<uint32> > directed;
+        directed.push_back({stbu(5,3,-1), bdnz(-4), BLR});
+        directed.push_back({stwu(5,3,-4), addi(5,5,3), bdnz(-8), BLR});
+        directed.push_back({stbu(5,3,-1), x31(6,6,5,266), (11u<<26)|(5u<<16)|0x7eu, bc(12,1,8), addi(7,7,1), bdnz(-20), BLR});
+        directed.push_back({sthu(5,3,-2), stwu(5,4,4), x31(8,8,5,266), bdnz(-12), BLR});
+        for (unsigned d = 0; d < directed.size() * 6; ++d) {
+            const std::vector<uint32> &w = directed[d % directed.size()];
+            const uint32 back = 0x100u + (d / directed.size()) * 0x91u;		/* iterations before the pointer leaves the bank */
+            const uint32 start_off = (d / directed.size()) & 1 ? (0x1000u - uint32(w.size()) * 2u) & ~3u : 0u;
+            ran = ran;
+            check(w, start_off, 100000 + d, [&]() { cpu->gpr(3) = base + back; cpu->gpr(4) = data + 0x400; cpu->gpr(5) = 0x41; cpu->ctr() = 5000; });
+        }
+    }
+    nw_jit_legacy &= ~NW_JIT_LEGACY_LINK;
+    uint64 lf = 0, lm = 0; nw_jit_link_stats(&lf, &lm);
+    printf("link sweep: %u programs, %u native calls, %u mismatches, %llu links made, %llu fast hops, %u self-modifying stores inside loops, %u ahead of the store\n", ran, total_insns, mismatches, (unsigned long long)lm, (unsigned long long)lf, smc_loops, smc_forward);
+    CHECK(lm > 1000 && lf > 10000);
+    nw_jit_invalidate_all(); nw_jit_set_code_pages(0,0,0,0); mmu.reset(); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,span);
+    return failed ? 1 : 0;
+}
+
 int ppc_core_test_access::fp_fast_sweep(powerpc_cpu *cpu)
 {
     cpu->enable_guest_mmu(true); nw_jit_set_mode(NW_JIT_VERIFY);
@@ -983,7 +1494,12 @@ int ppc_core_test_access::fp_fast_sweep(powerpc_cpu *cpu)
         mmu.set_dbat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);
         nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
         uint32 mops[8];
-        for (unsigned i = 0; i < 4; ++i) { mops[2*i] = (48u<<26)|((1+i)<<21)|(3u<<16)|(i*4); mops[2*i+1] = (52u<<26)|((1+i)<<21)|(3u<<16)|(0x100+i*4); }
+        const char *mixmode = getenv("PPC_FP_BENCH_MIX");	/* "loads", "stores", or both (default) */
+        for (unsigned i = 0; i < 4; ++i) {
+            mops[2*i] = (48u<<26)|((1+i)<<21)|(3u<<16)|(i*4); mops[2*i+1] = (52u<<26)|((1+i)<<21)|(3u<<16)|(0x100+i*4);
+            if (mixmode && !strcmp(mixmode, "loads")) mops[2*i+1] = (48u<<26)|((5+i)<<21)|(3u<<16)|(0x100+i*4);
+            if (mixmode && !strcmp(mixmode, "stores")) mops[2*i] = (52u<<26)|((1+i)<<21)|(3u<<16)|(i*4);
+        }
         double mem_op[2] = {0, 0};
         for (unsigned v = 0; v < 2; ++v) {
             if (v) nw_jit_legacy |= NW_JIT_LEGACY_FP; else nw_jit_legacy &= ~NW_JIT_LEGACY_FP;
@@ -4351,6 +4867,9 @@ extern "C" int ppc_test_main(int argc, char **argv) {
         return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "--basic-special-p6")) { powerpc_cpu *cpu=new powerpc_cpu; int status=ppc_core_test_access::basic_special_p6(cpu); printf("P6 basic special tests: %u passed, %u failed\n",passed,failed); return status; }
+    if (argc == 2 && !strcmp(argv[1], "--link-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::link_sweep(cpu); printf("Link sweep: %u passed, %u failed\n",passed,failed); return status; }
+    if (argc == 2 && !strcmp(argv[1], "--loop-bench")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::loop_bench(cpu); printf("Loop bench: %u passed, %u failed\n",passed,failed); return status; }
+    if (argc == 2 && !strcmp(argv[1], "--sub-store-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::sub_store_sweep(cpu); printf("Sub-word store sweep: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--fp-fast-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::fp_fast_sweep(cpu); printf("FP fast sweep: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--multiply-p6")) { powerpc_cpu *cpu=new powerpc_cpu; int status=ppc_core_test_access::multiply_p6(cpu); printf("P6 multiply tests: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--frsp-p6")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::frsp_p6(cpu); printf("P6 frsp tests: %u passed, %u failed\n",passed,failed); return status; }

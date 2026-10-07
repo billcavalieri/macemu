@@ -791,12 +791,12 @@ static void kdp_probe_dump(const char *why, uint32 kdp, uint32 vectbl)
 #endif
 #endif
 
+static bool nw_jit_peek(uint32 ea, uint32 *opcode);
+
 void powerpc_cpu::take_program(uint32 srr1_bits)
 {
 	/* SRR1[46] trap = 0x00020000, [45] privileged = 0x00040000,
 	 * [44] illegal = 0x00080000. */
-	take_exception(NW_VEC_PROGRAM, pc(), srr1_bits);
-}
 #ifdef SHEEPSHAVER
 	{
 		/* Diagnostic (NW_VERBOSE=1): the first occurrence of each distinct (pc, cause) outside the 68k emulator's own
@@ -817,6 +817,8 @@ void powerpc_cpu::take_program(uint32 srr1_bits)
 		}
 	}
 #endif
+	take_exception(NW_VEC_PROGRAM, pc(), srr1_bits);
+}
 
 #ifdef SHEEPSHAVER
 /*
@@ -1540,14 +1542,12 @@ static bool nw_aline_dispatch_pa(uint32 pa)
 	       pa <= ROMBase + NW_EMU_ALINE_TOOL_AUTOPOP;
 }
 
-#if NW_BOOT_LOG
 /* CPU-thread-owned trap history: no guest writes or repeated callbacks.
- * Keep only a bounded ring and emit it on SysError, so a diagnostic run
- * records the File Manager calls preceding failure without log flooding. */
+ * Keep only a bounded ring and emit it on SysError, so any run (Release too)
+ * records the calls preceding a failure without log flooding. */
 struct nw_trap_record { uint32 trap, pc, d0, d1, a0, a1, a2, a6, sp; };
 static nw_trap_record nw_trap_history[128];
 static uint64 nw_trap_sequence;
-#endif
 
 uint32_t nw_trap_hist[65536];		// A-line trap counts, read by the NW_GUEST_PROF sampler
 volatile int nw_trap_prof_on;		// set by the sampler (NW_GUEST_PROF=1/2)
@@ -1609,14 +1609,12 @@ static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
 		nw_trapsite_add(trap & 0xffffu, ppc->gpr(24) - 2u);
 		nw_trap_prof_name(ppc, trap);
 	}
-#if NW_BOOT_LOG
-	static const bool keep_traps = getenv("NW_TEST_NK_STATE_PATH") != NULL;
-	if (keep_traps) {
+	/* Always keep the last 128 A-line traps: a SysError prints the tail, which names what the guest was doing. */
+	{
 		nw_trap_record &r = nw_trap_history[nw_trap_sequence++ % 128];
 		r = {trap, ppc->gpr(24) - 2u, ppc->gpr(8), ppc->gpr(9),
 			ppc->gpr(16), ppc->gpr(17), ppc->gpr(18), ppc->gpr(22), ppc->gpr(1)};
 	}
-#endif
 	if (trap == 0xa9c9) {
 		static int n_syserr;
 		if (n_syserr < 16) {
@@ -1642,6 +1640,18 @@ static void nw_aline_fastpath(powerpc_cpu *ppc, uint32 pa)
 					printf(" --------");
 			}
 			printf("\n");
+			printf("NW-BOOT SysError regs2 d2-d7=%08x %08x %08x %08x %08x %08x a3-a5=%08x %08x %08x\n",
+			       (unsigned)ppc->gpr(10), (unsigned)ppc->gpr(11), (unsigned)ppc->gpr(12), (unsigned)ppc->gpr(13),
+			       (unsigned)ppc->gpr(14), (unsigned)ppc->gpr(15), (unsigned)ppc->gpr(19), (unsigned)ppc->gpr(20), (unsigned)ppc->gpr(21));
+			if (n_syserr == 1) {
+				const uint64 first_trap = nw_trap_sequence > 40 ? nw_trap_sequence - 40 : 0;
+				for (uint64 j = first_trap; j < nw_trap_sequence; ++j) {
+					const nw_trap_record &r = nw_trap_history[j % 128];
+					printf("NW-BOOT SysError trap-history %04x pc=%08x d0=%08x d1=%08x a0=%08x a1=%08x a2=%08x a6=%08x sp=%08x\n",
+					       (unsigned)r.trap, (unsigned)r.pc, (unsigned)r.d0, (unsigned)r.d1, (unsigned)r.a0, (unsigned)r.a1,
+					       (unsigned)r.a2, (unsigned)r.a6, (unsigned)r.sp);
+				}
+			}
 #if NW_BOOT_LOG
 			const char *path = getenv("NW_TEST_NK_STATE_PATH");
 			if (path && (int16)ppc->gpr(8) > 0) {
@@ -2745,7 +2755,8 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 				  uint32 chain_pc, int *n2,
 				  int *uses_fpr, int *uses_vr,
 				  uint32 *dsi_pc, uint32 *chain2,
-				  int cur_fpr, int cur_vr)
+				  int cur_fpr, int cur_vr,
+				  struct nw_jit_chain_info *info)
 {
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
 	if (!ppc || !cpu || !ppc32_guest_mmu_enabled())
@@ -2778,7 +2789,12 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 	nw_68k_reference_chain(cpu->pc,
 		(cpu->gpr_live & (1u << 24) ? cpu->gpr[24] : ppc->gpr(24)) - 2u,
 		cpu->gpr_live & (1u << 29) ? cpu->gpr[29] : ppc->gpr(29));
-	nw_commit_gpr(cpu, ppc);
+	/* The live JIT registers stay in the JIT state across a hop; nw_jit_try() commits all of them once when the
+	 * chain returns (earlier audit: nothing reads a stale interpreter GPR/FPR between hops). NW_JIT_LEGACY=hop
+	 * restores the copy-out at every hop. */
+	const bool hop_commit = (nw_jit_legacy & NW_JIT_LEGACY_HOP) != 0;
+	if (hop_commit)
+		nw_commit_gpr(cpu, ppc);
 	nw_pull_gpr(cpu, ppc, sg);
 	ppc->cr().set(cpu->cr);
 	ppc->xer().set(cpu->xer);
@@ -2798,7 +2814,7 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 	 * block did not already have that class in jc. Copy-in on a live
 	 * VMX block overwrote glyph VRs with pre-block ppc and smeared
 	 * Finder/menu text. */
-	if (cur_fpr)
+	if (cur_fpr && hop_commit)
 		nw_commit_fpr(cpu, ppc, ppc->fpscr());
 	if (cur_vr) {
 		for (int i = 0; i < 32; i++) {
@@ -2832,6 +2848,11 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 		*dsi_pc = cpu->pc;
 	if (chain2)
 		*chain2 = ch2;
+	if (info) {
+		info->npa = npa;
+		info->gmask = sg;
+		info->fmask = f2 ? (sf ? sf : 0xffffffffu) : 0;
+	}
 	return (void *)next;
 }
 
@@ -3024,7 +3045,8 @@ void powerpc_cpu::jit_host_sth(void *host, uint32 ea, uint32 val, uint32 pc, int
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
 	uint32 pa;
 	(void)pc;
-	if (!ppc->guest_data_probe(ea, 2, true, &pa)) {
+	int via_bat = 0;
+	if (!ppc->guest_data_probe(ea, 2, true, &pa, &via_bat)) {
 		*fault = 1;
 		return;
 	}
@@ -3042,6 +3064,16 @@ void powerpc_cpu::jit_host_sth(void *host, uint32 ea, uint32 val, uint32 pc, int
 	vm_write_memory_2(pa, val);
 	if (kind == NW_PA_FB)
 		nw_fb_damage_store(pa, 2);
+	/* Same refill as jit_host_stw (the probe above proved the page writable): later byte/halfword stores to
+	 * this page hit the host-line table in nw_jit_helper_sth. The frame buffer keeps its damage tracking, and a page that
+	 * holds translated code keeps taking this invalidating path (the first store flushes it; later ones then fill). */
+	if (!(nw_jit_legacy & NW_JIT_LEGACY_SUBST) && kind != NW_PA_FB && !nw_jit_page_has_code(pa) && ppc32_guest_mmu_enabled() &&
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
+	{
+		const int pr = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0;
+		nw_jit_dtlb_fill(ea, pa, 1, (uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu), pr, via_bat);
+		nw_jit_dtlb_mark_store_rec(ea, pr);
+	}
 	if (kind != NW_PA_FB)
 		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
@@ -3084,7 +3116,8 @@ void powerpc_cpu::jit_host_stb(void *host, uint32 ea, uint32 val, uint32 pc, int
 	powerpc_cpu *ppc = (powerpc_cpu *)host;
 	uint32 pa;
 	(void)pc;
-	if (!ppc->guest_data_probe(ea, 1, true, &pa)) {
+	int via_bat = 0;
+	if (!ppc->guest_data_probe(ea, 1, true, &pa, &via_bat)) {
 		*fault = 1;
 		return;
 	}
@@ -3102,6 +3135,16 @@ void powerpc_cpu::jit_host_stb(void *host, uint32 ea, uint32 val, uint32 pc, int
 	vm_write_memory_1(pa, val);
 	if (kind == NW_PA_FB)
 		nw_fb_damage_store(pa, 1);
+	/* Same refill as jit_host_stw (the probe above proved the page writable): later byte/halfword stores to
+	 * this page hit the host-line table in nw_jit_helper_stb. The frame buffer keeps its damage tracking, and a page that
+	 * holds translated code keeps taking this invalidating path (the first store flushes it; later ones then fill). */
+	if (!(nw_jit_legacy & NW_JIT_LEGACY_SUBST) && kind != NW_PA_FB && !nw_jit_page_has_code(pa) && ppc32_guest_mmu_enabled() &&
+	    (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_DR))
+	{
+		const int pr = (ppc32_guest_mmu().msr() & ppc32_mmu::MSR_PR) != 0;
+		nw_jit_dtlb_fill(ea, pa, 1, (uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu), pr, via_bat);
+		nw_jit_dtlb_mark_store_rec(ea, pr);
+	}
 	if (kind != NW_PA_FB)
 		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
@@ -3768,8 +3811,13 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 					 * MSR[FP]/MSR[VEC] are only tested on the first op;
 					 * an lfd…lvx block with VEC off would run VMX with
 					 * no 0xf20, so the NK never saves VRs on switch. */
+					/* An FP-first block has already passed the MSR[FP] gate, so integer ops may follow
+					 * (the MP3 decoder's loops interleave them with FP ops, which otherwise made blocks of
+					 * two or three instructions). An FP op in a block that did not start with one must
+					 * wait for its own block and gate. NW_JIT_LEGACY=fp restores the strict split. */
 					if (is_altivec_insn(op) != is_altivec_insn(ops[0]) ||
-					    is_fp_insn(op) != is_fp_insn(ops[0])) {
+					    (is_fp_insn(op) && !is_fp_insn(ops[0])) ||
+					    (!is_fp_insn(op) && is_fp_insn(ops[0]) && (nw_jit_legacy & NW_JIT_LEGACY_FP))) {
 						cut = NW_JIT_CUT_CLASS_CHANGE;
 						break;
 					}

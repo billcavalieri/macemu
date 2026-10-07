@@ -382,6 +382,12 @@ bool nw68_cached_block(uint32_t pc, uint32_t context, uint32_t page,
 	return true;
 }
 
+int nw68_page_has_code(uint32_t page)
+{
+	const unsigned bit = page >> 12;
+	return (pagebits[bit >> 5].load(std::memory_order_acquire) & (1u << (bit & 31))) != 0;
+}
+
 void nw68_invalidate_page(uint32_t page)
 {
 	const unsigned bit = page >> 12;

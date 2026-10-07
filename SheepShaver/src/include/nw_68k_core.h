@@ -116,6 +116,7 @@ uint64_t nw68_code_generation();
 bool nw68_cached_block(uint32_t pc, uint32_t context, uint32_t physical_page,
 		 uint16_t opcode, uint16_t prefetch, nw68_instruction *, unsigned *count);
 void nw68_invalidate_page(uint32_t physical_page);
+int nw68_page_has_code(uint32_t physical_page);	/* a translated 68k block was built from this page */
 void nw68_invalidate_all();
 /* Mapping changes invalidate an in-flight preparation. Dispatch-local
  * previews never survive a context transition or expose a host pointer. */

@@ -923,7 +923,8 @@ static void nw_guest_prof_main(bool dump_words)
 				printf(" :");
 				for (uint32 w = 0; w < 16; w++) {
 					const ppc32_xlate_result xr = snap.translate(kv.second + w * 4u, PPC32_XLATE_IR, 4, false, false);
-					if (xr.ok && xr.pa >= RAMBase && (uint64_t)xr.pa + 4 <= (uint64_t)RAMBase + RAMSize)
+					const bool in_rom = xr.ok && xr.pa >= ROMBase && (uint64_t)xr.pa + 4 <= (uint64_t)ROMBase + ROM_AREA_SIZE;
+					if (xr.ok && ((xr.pa >= RAMBase && (uint64_t)xr.pa + 4 <= (uint64_t)RAMBase + RAMSize) || in_rom))
 						printf(" %08x", (unsigned)vm_read_memory_4(xr.pa));
 					else
 						printf(" --------");
@@ -1000,6 +1001,23 @@ static void nw_guest_prof_main(bool dump_words)
 			       (unsigned long long)(cs.invalidated - prev.invalidated), (unsigned long long)(cs.blocks - prev.blocks),
 			       (unsigned long long)(cs.block_instructions - prev.block_instructions), (unsigned long long)(cs.decoded_hits - prev.decoded_hits));
 			prev = cs; prev_native = nat; prev_fb = fb;
+		}
+		{
+			static uint64_t pb, pi, ph, plf, plm, pcut[NW_JIT_CUT_N], phop[NW_JIT_HOP_N];
+			const uint64_t b = nw_jit_exec_blocks(), i = nw_jit_exec_insns(), h = nw_jit_chain_hops();
+			uint64_t lf = 0, lm = 0;
+			nw_jit_link_stats(&lf, &lm);
+			printf("GPROFJIT blocks=%llu insns=%llu (%.1f/block) chain_hops=%llu link_fast=%llu links_made=%llu cuts:",
+			       (unsigned long long)(b - pb), (unsigned long long)(i - pi), b > pb ? double(i - pi) / double(b - pb) : 0.0,
+			       (unsigned long long)(h - ph), (unsigned long long)(lf - plf), (unsigned long long)(lm - plm));
+			plf = lf; plm = lm;
+			static const char *const cn[] = {"ends", "page", "peek", "class", "unsup", "mem0", "mem2", "max", "io"};
+			for (int r = 0; r < NW_JIT_CUT_N; r++) { const uint64_t c = nw_jit_cut_count(r); printf(" %s=%llu", cn[r], (unsigned long long)(c - pcut[r])); pcut[r] = c; }
+			printf(" hopstop:");
+			static const char *const hn[] = {"cap", "nochain", "pcmis", "itlb", "aline", "cmiss", "vec", "fp", "cnull"};
+			for (int r = 0; r < NW_JIT_HOP_N; r++) { const uint64_t c = nw_jit_hop_stop_count(r); printf(" %s=%llu", hn[r], (unsigned long long)(c - phop[r])); phop[r] = c; }
+			printf("\n");
+			pb = b; pi = i; ph = h;
 		}
 		fflush(stdout);
 		blocks.clear(); regions.clear(); pc68.clear(); total = idle = 0;
