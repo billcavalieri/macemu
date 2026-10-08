@@ -2,6 +2,7 @@
 # Builds the Sheep Shears guest side with Retro68 (not part of this repository): the tool, the control panel and the
 # installer, and from them the installer disk the SheepShaver app bundles.
 #   tools/shears/build.sh              everything; also refreshes SheepShaver/src/MacOSX/SheepApp/SheepShearsInstaller.hfv
+#                                      and guest/dist/SheepShears-extfs.zip
 #   tools/shears/build.sh --apps-only  just the three applications (the tests use this)
 #   tools/shears/build.sh --if-needed  what the Xcode build runs: does nothing when the .hfv is newer than every guest
 #                                      source, and only notes (never fails) when Retro68 is not installed
@@ -18,7 +19,7 @@ if [ "${1:-}" = "--if-needed" ]; then
         echo "note: Retro68 not found at $PREFIX; using the committed SheepShearsInstaller.hfv (see guest/README.md)"
         exit 0
     fi
-    if [ -f "$HFV" ] && [ -z "$(find "$ROOT/guest/sheepshears" "$ROOT/tools/shears/build.sh" -type f -newer "$HFV" | head -1)" ]; then
+    if [ -f "$HFV" ] && [ -f "$ROOT/guest/dist/SheepShears-extfs.zip" ] && [ -z "$(find "$ROOT/guest/sheepshears" "$ROOT/tools/shears/build.sh" -type f -newer "$HFV" | head -1)" ]; then
         exit 0
     fi
     echo "note: building the Sheep Shears guest tools and installer disk"
@@ -70,4 +71,6 @@ hattrib -t TEXT -c ttxt ":ReadMe"
 [ "${1:-}" = "--if-needed" ] || hls -lR
 humount > /dev/null
 cp "$IMG" "$HFV"
+# The same programs as a folder for SheepShaver's extfs (a Mac folder shared with the guest), zipped; see make_extfs.py.
+"$ROOT/tools/shears/make_extfs.py" "$ROOT/guest/dist/SheepShears-extfs.zip" "$OUT" > /dev/null
 [ "${1:-}" = "--if-needed" ] || ls -l "$IMG"

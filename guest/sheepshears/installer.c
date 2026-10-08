@@ -6,7 +6,8 @@
  *  Installing over an older copy quits the running tool first (Quit Apple event), then replaces it. Nothing needs a
  *  restart: the tool is started at the end.
  *
- *  If a file named "Sheep Shears Auto Install" is in the System Folder it installs without a window and quits;
+ *  If a file named "Sheep Shears Auto Install" is in the System Folder it installs without a window and quits (the file
+ *  may name the folder to install from);
  *  tools/shears/test.sh install uses that to test the copy logic headless.
  *
  *  (C) 2026 Bill Cavalieri
@@ -39,6 +40,7 @@ enum { itemInstall = 1, itemQuit = 2, itemRemove = 3, itemStatus = 4 };
 #define AUTO_NAME   "\pSheep Shears Auto Install"
 
 static FSSpec gHere;            /* this application */
+static Str255 gSourcePath;      /* auto mode only: where to read the files from instead of next to the installer */
 
 static OSErr FindSelf(void)
 {
@@ -56,7 +58,8 @@ static OSErr SourceSpec(ConstStr255Param name, FSSpec *spec)
 {
     FSSpec folder;
     CInfoPBRec pb;
-    OSErr err = FSMakeFSSpec(gHere.vRefNum, gHere.parID, FILES_NAME, &folder);
+    OSErr err = gSourcePath[0] ? FSMakeFSSpec(0, 0, gSourcePath, &folder)
+                               : FSMakeFSSpec(gHere.vRefNum, gHere.parID, FILES_NAME, &folder);
     if (err != noErr)
         return err;
     memset(&pb, 0, sizeof pb);
@@ -305,7 +308,24 @@ int main(void)
     if (FolderSpec(kSystemFolderType, AUTO_NAME, &autoFlag) == noErr && FSpGetFInfo(&autoFlag, &flagInfo) == noErr) {
         const char *message;
         char scratch[64];
-        OSErr err = Install(&message, scratch);
+        OSErr err;
+        short ref;
+        long count = 255;
+        /* The flag file may hold a folder path (e.g. Unix:Sheep Shears:Sheep Shears Files, a folder shared from
+           the host) to install from; tools/shears/test.sh extfs checks that route. */
+        if (FSpOpenDF(&autoFlag, fsRdPerm, &ref) == noErr) {
+            char path[256];
+            if (FSRead(ref, &count, path) == noErr || count > 0) {
+                long i;
+                while (count > 0 && (path[count - 1] == '\r' || path[count - 1] == '\n' || path[count - 1] == ' '))
+                    count--;
+                for (i = 0; i < count; i++)
+                    gSourcePath[i + 1] = (unsigned char)path[i];
+                gSourcePath[0] = (unsigned char)(count > 1 ? count : 0);   /* the one-byte file of the other test is no path */
+            }
+            FSClose(ref);
+        }
+        err = Install(&message, scratch);
         if (ShearsOpen()) {
             ShearsLog(err == noErr ? "installer: done" : "installer: failed");
             ShearsLog(message);
