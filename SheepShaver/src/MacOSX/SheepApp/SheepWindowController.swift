@@ -30,7 +30,7 @@ final class SheepWindow: NSWindow {
 }
 
 @MainActor
-final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSSplitViewDelegate {
+final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSSplitViewDelegate, NSMenuDelegate {
     let store = VirtualMachineStore()
     /// Sidebar width the window is built with. A later resize keeps this width
     /// unless the user has dragged the divider, and gives the rest to the picture.
@@ -111,16 +111,32 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         display.syncPointerToPicture()
         installSidebarMenu()
         if let name = store.document(id: store.selection)?.name {
+            baseSubtitle = name
             window.subtitle = name
         }
+        NotificationCenter.default.addObserver(self, selector: #selector(shearsStatusChanged(_:)),
+                                               name: .shearsStatusChanged, object: nil)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:)")
     }
 
+    /// The VM name shown under the title, plus "Sheep Shears" while the guest tool is running.
+    private var baseSubtitle = ""
+
     func setSubtitle(_ name: String) {
-        window?.subtitle = name
+        baseSubtitle = name
+        refreshSubtitle()
+    }
+
+    private func refreshSubtitle() {
+        let running = booted && ShearsHost.shared.status.toolRunning
+        window?.subtitle = running ? "\(baseSubtitle) · Sheep Shears" : baseSubtitle
+    }
+
+    @objc private func shearsStatusChanged(_ note: Notification) {
+        refreshSubtitle()
     }
 
     func logDisplayGeometry() {
@@ -154,6 +170,10 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if booted, ShearsHost.shared.status.toolRunning {
+            askShutDownOnClose(sender)
+            return false
+        }
         if booted {
             VideoHostRequestQuit()
         } else {
@@ -309,7 +329,137 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         if menuItem.action == #selector(toggleSidebar(_:)) {
             menuItem.title = sidebarShown ? "Hide Sidebar" : "Show Sidebar"
         }
+        if menuItem.action == #selector(shutDownGuest(_:)) {
+            let status = ShearsHost.shared.status
+            if case .requested = status.shutdown { return false }
+            return booted && status.toolRunning
+        }
         return true
+    }
+
+    /// Text for the first item of the Guest menu: whether the guest tool is running, and any shutdown in progress.
+    private func guestStatusLine() -> String {
+        guard booted else { return "Guest not started" }
+        let status = ShearsHost.shared.status
+        guard status.toolRunning else { return "Sheep Shears: not running in the guest" }
+        var line = "Sheep Shears: running (version \(status.toolVersion))"
+        switch status.shutdown {
+        case .idle: break
+        case .requested: line += " · shutdown requested"
+        case .sent: line += " · the guest was asked to shut down"
+        case .failed(let code): line += " · shutdown failed (error \(code))"
+        }
+        return line
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.items.first?.title = guestStatusLine()
+        let host = ShearsHost.shared.hostSwitches
+        let guest = ShearsHost.shared.guestSwitches
+        for item in menu.items {
+            guard let feature = Self.features[item.action.map(NSStringFromSelector) ?? ""] else { continue }
+            item.state = host.contains(feature.flag) ? .on : .off
+            item.title = feature.title + (guest.contains(feature.flag) ? "" : " (off in the guest's Sheep Shears control panel)")
+        }
+    }
+
+    private static let features: [String: (flag: ShearsFeatures, title: String)] = [
+        "toggleEdgeRelease:": (.edgeRelease, "Release the Mouse at the Screen Edge"),
+        "toggleClipboard:": (.clipboard, "Share the Clipboard"),
+    ]
+
+    @objc private func toggleEdgeRelease(_ sender: Any?) { ShearsHost.shared.hostSwitches.formSymmetricDifference(.edgeRelease) }
+    @objc private func toggleClipboard(_ sender: Any?) { ShearsHost.shared.hostSwitches.formSymmetricDifference(.clipboard) }
+
+    /// Guest > Install Sheep Shears. The installer is a disk image bundled in the app. It is copied next to the other
+    /// SheepShaver files and added to this VM's disks (read-only); after the next start of the guest, the user opens
+    /// the installer on it. A running guest cannot gain a disk, so the sheet says when it takes effect.
+    @objc private func installSheepShears(_ sender: Any?) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Install Sheep Shears in the guest"
+        alert.informativeText = "Sheep Shears releases the mouse at the screen edge and shares the clipboard with this Mac. Its installer is a small disk. It is added to this virtual machine; after the guest next starts, open “Install Sheep Shears” on the “Sheep Shears” disk and click Install. No restart is needed after that, and the disk can stay or be removed."
+        alert.addButton(withTitle: "Add Installer Disk")
+        alert.addButton(withTitle: "Show Disk in Finder")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            switch response {
+            case .alertFirstButtonReturn: self.addInstallerDisk(on: window)
+            case .alertSecondButtonReturn:
+                if let url = try? SheepShearsInstaller.stagedCopy() { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            default: break
+            }
+        }
+    }
+
+    private func addInstallerDisk(on window: NSWindow) {
+        func report(_ title: String, _ text: String) {
+            let note = NSAlert()
+            note.messageText = title
+            note.informativeText = text
+            note.beginSheetModal(for: window)
+        }
+        guard let doc = store.document(id: store.selection) ?? store.document(id: store.runningID) else {
+            return report("No virtual machine is selected", "Select the virtual machine in the sidebar first.")
+        }
+        do {
+            let url = try SheepShearsInstaller.stagedCopy()
+            let added = try SheepShearsInstaller.addDisk(url, toPrefsAt: doc.prefsPath)
+            report(added ? "The installer disk was added" : "The installer disk is already added",
+                   added ? "Restart “\(doc.name)” (quit and start it again). Then open “Install Sheep Shears” on the “Sheep Shears” disk."
+                         : "Open “Install Sheep Shears” on the “Sheep Shears” disk in the guest.")
+        } catch {
+            report("The installer disk could not be added", error.localizedDescription)
+        }
+    }
+
+    /// Closing the window while Sheep Shears runs: offer a proper shutdown first. "Quit Now" is the old behaviour.
+    private func askShutDownOnClose(_ window: NSWindow) {
+        let alert = NSAlert()
+        alert.messageText = "Shut down the guest before closing?"
+        alert.informativeText = "Quitting now stops the guest without saving, like pulling the plug. A shutdown asks every open application to quit and save first; this window closes when Mac OS has finished."
+        alert.addButton(withTitle: "Shut Down")
+        alert.addButton(withTitle: "Quit Now")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in
+            switch response {
+            case .alertFirstButtonReturn:
+                if !ShearsHost.shared.requestShutdown() {
+                    // Already asked, or the tool just went away: the user decides again on the next close.
+                    let note = NSAlert()
+                    note.messageText = "The guest could not be asked to shut down"
+                    note.informativeText = "A shutdown request may already be waiting. Close the window again to quit now."
+                    note.beginSheetModal(for: window)
+                }
+            case .alertSecondButtonReturn:
+                VideoHostRequestQuit()
+                window.close()
+            default:
+                break
+            }
+        }
+    }
+
+    /// Guest > Shut Down Guest. The tool in the guest asks the Finder to shut down, so Mac OS asks every application
+    /// to quit and save as it would for Special > Shut Down; the emulator quits when Mac OS has finished. Needs the
+    /// Sheep Shears tool running (the item is disabled otherwise).
+    @objc private func shutDownGuest(_ sender: Any?) {
+        guard booted, let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Shut down the guest?"
+        alert.informativeText = "Mac OS asks every open application to quit, as for Special > Shut Down. An application with unsaved work asks about it in the guest window. This window closes when Mac OS has finished."
+        alert.addButton(withTitle: "Shut Down")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            if !ShearsHost.shared.requestShutdown() {
+                let note = NSAlert()
+                note.messageText = "The guest could not be asked to shut down"
+                note.informativeText = "Sheep Shears is not running in the guest, or a shutdown request is already waiting. Use Special > Shut Down in the guest instead."
+                note.beginSheetModal(for: window)
+            }
+        }
     }
 
     private func refreshSidebarChrome() {
@@ -322,11 +472,44 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         }
     }
 
+    private func installGuestMenu(in main: NSMenu) {
+        guard !main.items.contains(where: { $0.title == "Guest" }) else { return }
+        let item = NSMenuItem()
+        item.title = "Guest"
+        let menu = NSMenu(title: "Guest")
+        menu.delegate = self
+        menu.autoenablesItems = true
+        let status = NSMenuItem(title: guestStatusLine(), action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        menu.addItem(status)
+        menu.addItem(.separator())
+        for (selector, title) in [(#selector(toggleEdgeRelease(_:)), "Release the Mouse at the Screen Edge"),
+                                  (#selector(toggleClipboard(_:)), "Share the Clipboard")] {
+            let toggle = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+            toggle.target = self
+            menu.addItem(toggle)
+        }
+        menu.addItem(.separator())
+        let install = NSMenuItem(title: "Install Sheep Shears…", action: #selector(installSheepShears(_:)), keyEquivalent: "")
+        install.target = self
+        menu.addItem(install)
+        let shutdown = NSMenuItem(title: "Shut Down Guest…", action: #selector(shutDownGuest(_:)), keyEquivalent: "")
+        shutdown.target = self
+        menu.addItem(shutdown)
+        item.submenu = menu
+        if let index = main.items.firstIndex(where: { $0.title == "Window" }) {
+            main.insertItem(item, at: index)
+        } else {
+            main.addItem(item)
+        }
+    }
+
     func installSidebarMenu() {
         let main = NSApp.mainMenu ?? NSMenu()
         if NSApp.mainMenu == nil {
             NSApp.mainMenu = main
         }
+        installGuestMenu(in: main)
         let viewItem: NSMenuItem
         if let existing = main.items.first(where: { $0.title == "View" }) {
             viewItem = existing

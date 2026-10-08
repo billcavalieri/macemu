@@ -34,6 +34,7 @@
 #include "cpu/ppc/ppc-operations.hpp"
 #include "cpu/ppc/ppc-instructions.hpp"
 #include "thunks.h"
+#include "shears.h"
 #include "sheepforce.h"
 #include "nw_boot_contract.h"
 #include "nw_devices.h"
@@ -1666,6 +1667,9 @@ void sheepshaver_cpu::execute_native_op(uint32 selector)
 		break;
 	case NATIVE_GET_1_RESOURCE:
 		get_resource(ReadMacInt32(XLM_GET_1_RESOURCE));
+		break;
+	case NATIVE_SHEARS:
+		gpr(3) = ShearsCall(gpr(3));
 		break;
 	case NATIVE_GET_IND_RESOURCE:
 		get_resource(ReadMacInt32(XLM_GET_IND_RESOURCE));

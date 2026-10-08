@@ -65,6 +65,7 @@ final class SheepHost: NSObject {
         wc.showWindow(nil)
         wc.display.setGuestSize(width: Int(width), height: Int(height))
         wc.display.inputEnabled = true
+        ShearsHost.shared.install()
         wc.window?.layoutIfNeeded()
         wc.display.applyMousePrefs()
         wc.logDisplayGeometry()
@@ -104,6 +105,11 @@ final class SheepHost: NSObject {
         hop {
             controller?.display.setGuestArrow(x: Int(x), y: Int(y), visible: visible != 0)
         }
+    }
+
+    /// A pointer position from the guest tool (Sheep Shears). The view decides whether it releases the grab.
+    class func guestPointerReported(_ report: ShearsPointerReport, at time: Double) {
+        controller?.display.guestPointerReported(report, at: time)
     }
 
     @objc nonisolated class func reloadEdgeGrab() {

@@ -7,9 +7,12 @@
  *  bounds, and it moves when the window resizes or the sidebar toggles.
  *  A click in the picture grabs. The host pointer stays put until ctrl-g.
  *  Movement is the physical delta, delivered to the guest. The guest
- *  clamps its arrow to the screen. This window does not keep a second
- *  position, and the picture edge does not release. mouse relative grabs
- *  on a click and releases the same way.
+ *  clamps its arrow to the screen. This window keeps no position of its
+ *  own. With the Sheep Shears guest tool running, the tool reports the
+ *  arrow's real position (PTR_POS), and pushing the host pointer through
+ *  an edge the arrow is on releases the grab (see ShearsPointer.swift).
+ *  Without the tool only ctrl-g releases. mouse relative grabs on a click
+ *  and releases with ctrl-g.
  *
  *  (C) 2026 Bill Cavalieri
  *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
@@ -74,6 +77,11 @@ final class GuestDisplayView: NSView {
     /// Buttons whose press grabbed the pointer. That click only grabs: it is not sent to the guest, and its
     /// release is dropped, so coming back into the window never clicks or drags something in the guest.
     private var swallowedUp = Set<Int>()
+    /// Set when the app or window lost focus while grabbed. The click that brings focus back must not reach the guest:
+    /// the guest arrow sits where it was left, so that click would land on whatever is there (often the desktop,
+    /// which brings the Finder forward).
+    private var returnedFromBackground = false
+    private var focusReturnedAt: TimeInterval = 0
     private let hint = NSTextField(labelWithString: "ctrl-g to release")
     private let guestArrow = GuestArrowView()
     private var arrowHotX: CGFloat = 1
@@ -83,6 +91,8 @@ final class GuestDisplayView: NSView {
     private var arrowVisible = false
     private var arrowHasPosition = false
     private var grabHold: Timer?
+    /// Edge release (Sheep Shears): the guest tool's pointer position plus the deltas this view sends.
+    private var shearsEdge = ShearsEdgeDetector()
     private var moveMonitor: Any?
     /// Ctrl-G is eaten on the way down. The matching G up must not reach the guest.
     private var suppressGuestKeyUp: UInt16?
@@ -151,6 +161,7 @@ final class GuestDisplayView: NSView {
 
     func setGaming(_ on: Bool) {
         attached = false
+        ShearsHost.shared.setPointerWanted(false)
         VideoHostMouseButton(0, 0)
         VideoHostMouseButton(1, 0)
         associateCursor()
@@ -208,9 +219,11 @@ final class GuestDisplayView: NSView {
         guard attached else { return }
         switch notification.name {
         case NSApplication.willResignActiveNotification, NSWindow.didResignKeyNotification:
+            returnedFromBackground = true
             pauseCapture()
         case NSApplication.didBecomeActiveNotification, NSWindow.didBecomeKeyNotification:
             guard captureIsForeground else { return }
+            focusReturnedAt = ProcessInfo.processInfo.systemUptime
             resumeCapture()
         default:
             break
@@ -346,6 +359,14 @@ final class GuestDisplayView: NSView {
         move(event)
     }
 
+    /// True for the click that returns focus to a grabbed view: it only re-captures, the guest does not see it.
+    private func isFocusReturnClick(_ event: NSEvent) -> Bool {
+        guard returnedFromBackground else { return false }
+        returnedFromBackground = false
+        guard attached, !gaming else { return false }
+        return event.timestamp - focusReturnedAt < 0.5
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard inputEnabled else { return }
         if gaming {
@@ -360,6 +381,10 @@ final class GuestDisplayView: NSView {
         }
         if !attached {
             grabAbsolute(event)
+            swallowedUp.insert(event.buttonNumber)
+            return
+        }
+        if isFocusReturnClick(event) {
             swallowedUp.insert(event.buttonNumber)
             return
         }
@@ -388,6 +413,10 @@ final class GuestDisplayView: NSView {
             swallowedUp.insert(event.buttonNumber)
             return
         }
+        if isFocusReturnClick(event) {
+            swallowedUp.insert(event.buttonNumber)
+            return
+        }
         press(event)
     }
 
@@ -410,6 +439,10 @@ final class GuestDisplayView: NSView {
         }
         if !attached {
             grabAbsolute(event)
+            swallowedUp.insert(event.buttonNumber)
+            return
+        }
+        if isFocusReturnClick(event) {
             swallowedUp.insert(event.buttonNumber)
             return
         }
@@ -506,6 +539,41 @@ final class GuestDisplayView: NSView {
         )
     }
 
+    /// The guest tool's own reading of where its pointer is. Only used while grabbed in absolute mode.
+    func guestPointerReported(_ report: ShearsPointerReport, at time: Double) {
+        guard attached, !gaming else { return }
+        shearsEdge.threshold = ShearsHost.shared.edgeReleaseThreshold
+        shearsEdge.guest(report, now: time)
+    }
+
+    /// The guest arrow is on `edge` and the host pointer has pushed through it: let go, and put the host pointer
+    /// just outside the picture at the matching place along that edge.
+    private func releaseAtEdge(_ edge: ShearsEdge) {
+        guard attached, !gaming, let r = shearsEdge.report, let window, let primary = primaryScreen(),
+              bounds.width > 1, bounds.height > 1 else { return }
+        // The report carries the size of the screen it was measured on, so a resolution change in the guest
+        // (or a report that lands just before this view hears about it) still maps to the right place.
+        let sx = bounds.width / CGFloat(r.width)
+        let sy = bounds.height / CGFloat(r.height)
+        let out: CGFloat = 3
+        var p = NSPoint(x: min(max(CGFloat(r.x) * sx, bounds.minX), bounds.maxX),
+                        y: min(max(bounds.height - CGFloat(r.y) * sy, bounds.minY), bounds.maxY))
+        switch edge {
+        case .left: p.x = bounds.minX - out
+        case .right: p.x = bounds.maxX + out
+        case .top: p.y = bounds.maxY + out
+        case .bottom: p.y = bounds.minY - out
+        }
+        logMouse("NW-BOOT mouse edge release edge=\(edge) guest=(\(r.x),\(r.y)) of \(r.width)x\(r.height)", status: true)
+        ungrab("edge")
+        let inWindow = convert(p, to: nil)
+        let cocoa = window.convertToScreen(NSRect(origin: inWindow, size: .zero))
+        let err = CGWarpMouseCursorPosition(CGPoint(x: cocoa.minX, y: primary.frame.height - cocoa.minY))
+        if err != .success {
+            noteCaptureError("warp", err)
+        }
+    }
+
     func releaseByHotkey(_ event: NSEvent) -> Bool {
         let hotkey = event.keyCode == 5 && event.modifierFlags.contains(.control)
         guard hotkey else { return false }
@@ -573,7 +641,10 @@ final class GuestDisplayView: NSView {
     private func ungrab(_ reason: String) {
         guard attached else { return }
         attached = false
+        shearsEdge.reset()
+        ShearsHost.shared.setPointerWanted(false)
         swallowedUp.removeAll()
+        returnedFromBackground = false
         stopGrabHold()
         VideoHostMouseButton(0, 0)
         VideoHostMouseButton(1, 0)
@@ -825,11 +896,21 @@ final class GuestDisplayView: NSView {
         fracY -= CGFloat(dy)
         if dx != 0 || dy != 0 {
             VideoHostMouseMove(dx, dy)
+            if let edge = shearsEdge.host(dx: Double(dx), dy: Double(dy), now: ProcessInfo.processInfo.systemUptime) {
+                releaseAtEdge(edge)
+            }
         }
     }
 
     private func grabAbsolute(_ event: NSEvent) {
         guard !attached, !gaming else { return }
+        // A grab only holds while this app is active and this window is key. If the click arrived without that
+        // (the window was behind another app's, or another window was key), make it so first; otherwise the grab
+        // pauses itself at once and the click appears to do nothing.
+        if !captureIsForeground {
+            NSApp.activate(ignoringOtherApps: true)
+            window?.makeKeyAndOrderFront(nil)
+        }
         let p = convert(event.locationInWindow, from: nil)
         if let mapped = absolutePoint(p) {
             let gx = Int32(min(max(mapped.x, 0), Int(guestW) - 1))
@@ -838,6 +919,8 @@ final class GuestDisplayView: NSView {
             VideoHostMouseAbs(gx, gy)
         }
         attached = true
+        shearsEdge.reset()
+        ShearsHost.shared.setPointerWanted(true)
         VideoHostSetRelMouse(0)
         disassociateCursor()
         hideHostCursor()
@@ -926,7 +1009,11 @@ final class GuestDisplayView: NSView {
             for x in 0..<16 {
                 let bit: UInt16 = 0x8000 >> x
                 let i = (y * 16 + x) * 4
-                if maskBits & bit == 0 {
+                // QuickDraw: data 1 + mask 1 black, data 0 + mask 1 white, data 0 + mask 0 clear, and data 1 +
+                // mask 0 inverts what is underneath. The I-beam is made of those. An invert cannot be drawn in an
+                // overlay, so it is drawn black (right on the white text areas it is used over).
+                let drawn = maskBits & bit != 0 || rowBits & bit != 0
+                if !drawn {
                     pixels[i] = 0
                     pixels[i + 1] = 0
                     pixels[i + 2] = 0

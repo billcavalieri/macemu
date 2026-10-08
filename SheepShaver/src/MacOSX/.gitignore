@@ -20,3 +20,4 @@ Mac OS ROM
 *.hfs
 prefs
 .sheepshaver_prefs
+!SheepApp/SheepShearsInstaller.hfv

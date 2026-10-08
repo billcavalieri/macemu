@@ -27,6 +27,7 @@
 #include <ApplicationServices/ApplicationServices.h>
 
 #include "clip.h"
+#include <atomic>
 #include "main.h"
 #include "cpu_emulation.h"
 #include "emul_op.h"
@@ -1217,8 +1218,21 @@ static void ConvertHostPasteboardToMacScrapIfChanged()
  *	Mac application reads clipboard
  */
 
+/*
+ *  Sheep Shears can switch the bridge off (the guest control panel or the Guest menu). The guest keeps its own
+ *  clipboard; nothing moves in either direction while this is false. Called from the emulation thread.
+ */
+static std::atomic<bool> g_clipboard_bridge_on(true);
+
+extern "C" void ClipboardSetBridgeEnabled(int on)
+{
+	g_clipboard_bridge_on.store(on != 0, std::memory_order_relaxed);
+}
+
 void GetScrap(void **handle, uint32_t type, int32_t offset)
 {
+	if (!g_clipboard_bridge_on.load(std::memory_order_relaxed))
+		return;
 	D(bug("GetScrap handle %p, type %4.4s, offset %d\n", handle, (char *)&type, offset));
 
 	AUTORELEASE_POOL {
@@ -1232,6 +1246,8 @@ void GetScrap(void **handle, uint32_t type, int32_t offset)
 
 void ZeroScrap()
 {
+	if (!g_clipboard_bridge_on.load(std::memory_order_relaxed))
+		return;
 	D(bug("ZeroScrap\n"));
 
 	we_put_this_data = false;
@@ -1247,6 +1263,8 @@ void ZeroScrap()
 
 void PutScrap(uint32_t type, void *scrap, int32_t length)
 {
+	if (!g_clipboard_bridge_on.load(std::memory_order_relaxed))
+		return;
 	D(bug("PutScrap type %4.4s, data %p, length %ld\n", (char *)&type, scrap, (long)length));
 
 	AUTORELEASE_POOL {
