@@ -82,6 +82,7 @@ static bool patch_nanokernel_boot(void);
 static bool patch_68k_emul(void);
 static bool patch_nanokernel(void);
 static bool patch_68k(void);
+static void patch_scrap(void);
 static void patch_rom_sound(void);
 static bool nw_patch_68k_drivers(void);
 
@@ -717,6 +718,7 @@ bool PatchROM(void)
 			return false;
 		}
 		NW_DIAG("NW-BOOT G1: patch_68k incomplete (New World, continuing)\n");
+		patch_scrap();
 	}
 	/* Sound component rewrite sits past the VIA search that fails on
 	 * this ROM. Run it anyway. */
@@ -1787,6 +1789,49 @@ static bool patch_nanokernel(void)
  *  68k boot routine patches
  */
 
+/*
+ *  Clipboard exchange with the host: ZeroScrap(), PutScrap() and GetScrap() are routed through EMUL_OPs first.
+ *  Separate from patch_68k() because that function gives up part-way through on the New World ROM, before it
+ *  reaches this point; PatchROM() calls it directly in that case.
+ */
+
+static void patch_scrap(void)
+{
+	uint16 *wp;
+	uint32 base;
+
+	// Patch ZeroScrap() for clipboard exchange with host OS
+	uint32 zero_scrap = find_rom_trap(0xa9fc);	// ZeroScrap()
+	wp = (uint16 *)(ROMBaseHost + ZERO_SCRAP_PATCH_SPACE);
+	*wp++ = htons(M68K_EMUL_OP_ZERO_SCRAP);
+	*wp++ = htons(M68K_JMP);
+	*wp++ = htons((ROMBase + zero_scrap) >> 16);
+	*wp++ = htons((ROMBase + zero_scrap) & 0xffff);
+	base = ROMBase + ReadMacInt32(ROMBase + 0x22);
+	WriteMacInt32(base + 4 * (0xa9fc & 0x3ff), ZERO_SCRAP_PATCH_SPACE);
+
+	// Patch PutScrap() for clipboard exchange with host OS
+	uint32 put_scrap = find_rom_trap(0xa9fe);	// PutScrap()
+	wp = (uint16 *)(ROMBaseHost + PUT_SCRAP_PATCH_SPACE);
+	*wp++ = htons(M68K_EMUL_OP_PUT_SCRAP);
+	*wp++ = htons(M68K_JMP);
+	*wp++ = htons((ROMBase + put_scrap) >> 16);
+	*wp++ = htons((ROMBase + put_scrap) & 0xffff);
+	base = ROMBase + ReadMacInt32(ROMBase + 0x22);
+	WriteMacInt32(base + 4 * (0xa9fe & 0x3ff), PUT_SCRAP_PATCH_SPACE);
+
+	// Patch GetScrap() for clipboard exchange with host OS
+	uint32 get_scrap = find_rom_trap(0xa9fd);	// GetScrap()
+	wp = (uint16 *)(ROMBaseHost + GET_SCRAP_PATCH_SPACE);
+	*wp++ = htons(M68K_EMUL_OP_GET_SCRAP);
+	*wp++ = htons(M68K_JMP);
+	*wp++ = htons((ROMBase + get_scrap) >> 16);
+	*wp++ = htons((ROMBase + get_scrap) & 0xffff);
+	base = ROMBase + ReadMacInt32(ROMBase + 0x22);
+	WriteMacInt32(base + 4 * (0xa9fd & 0x3ff), GET_SCRAP_PATCH_SPACE);
+}
+
+
 static bool patch_68k(void)
 {
 	uint32 *lp;
@@ -2610,35 +2655,7 @@ static bool patch_68k(void)
 		*wp = htons((level1_int - 12) & 0xffff);
 	}
 
-	// Patch ZeroScrap() for clipboard exchange with host OS
-	uint32 zero_scrap = find_rom_trap(0xa9fc);	// ZeroScrap()
-	wp = (uint16 *)(ROMBaseHost + ZERO_SCRAP_PATCH_SPACE);
-	*wp++ = htons(M68K_EMUL_OP_ZERO_SCRAP);
-	*wp++ = htons(M68K_JMP);
-	*wp++ = htons((ROMBase + zero_scrap) >> 16);
-	*wp++ = htons((ROMBase + zero_scrap) & 0xffff);
-	base = ROMBase + ReadMacInt32(ROMBase + 0x22);
-	WriteMacInt32(base + 4 * (0xa9fc & 0x3ff), ZERO_SCRAP_PATCH_SPACE);
-
-	// Patch PutScrap() for clipboard exchange with host OS
-	uint32 put_scrap = find_rom_trap(0xa9fe);	// PutScrap()
-	wp = (uint16 *)(ROMBaseHost + PUT_SCRAP_PATCH_SPACE);
-	*wp++ = htons(M68K_EMUL_OP_PUT_SCRAP);
-	*wp++ = htons(M68K_JMP);
-	*wp++ = htons((ROMBase + put_scrap) >> 16);
-	*wp++ = htons((ROMBase + put_scrap) & 0xffff);
-	base = ROMBase + ReadMacInt32(ROMBase + 0x22);
-	WriteMacInt32(base + 4 * (0xa9fe & 0x3ff), PUT_SCRAP_PATCH_SPACE);
-
-	// Patch GetScrap() for clipboard exchange with host OS
-	uint32 get_scrap = find_rom_trap(0xa9fd);	// GetScrap()
-	wp = (uint16 *)(ROMBaseHost + GET_SCRAP_PATCH_SPACE);
-	*wp++ = htons(M68K_EMUL_OP_GET_SCRAP);
-	*wp++ = htons(M68K_JMP);
-	*wp++ = htons((ROMBase + get_scrap) >> 16);
-	*wp++ = htons((ROMBase + get_scrap) & 0xffff);
-	base = ROMBase + ReadMacInt32(ROMBase + 0x22);
-	WriteMacInt32(base + 4 * (0xa9fd & 0x3ff), GET_SCRAP_PATCH_SPACE);
+	patch_scrap();
 
 	// Patch SynchIdleTime()
 	if (PrefsFindBool("idlewait")) {
