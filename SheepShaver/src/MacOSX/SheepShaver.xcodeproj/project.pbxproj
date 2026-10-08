@@ -68,6 +68,20 @@
 		5E0A50002000000000000005 /* ShearsHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000005 /* ShearsHost.swift */; };
 		5E0A50002000000000000006 /* ShearsSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000006 /* ShearsSession.swift */; };
 		5E0A50002000000000000007 /* ShearsInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000007 /* ShearsInstaller.swift */; };
+		5E0A50002000000000000009 /* ManagerDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000009 /* ManagerDetailView.swift */; };
+		5E0A50002000000000000023 /* VMControlServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000023 /* VMControlServer.swift */; };
+		5E0A50002000000000000038 /* LibraryImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000038 /* LibraryImport.swift */; };
+		5E0A50002000000000000037 /* AppSettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000037 /* AppSettingsWindowController.swift */; };
+		5E0A50002000000000000036 /* MCPStdioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000036 /* MCPStdioBridge.swift */; };
+		5E0A50002000000000000035 /* MCPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000035 /* MCPService.swift */; };
+		5E0A50002000000000000034 /* MCPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000034 /* MCPServer.swift */; };
+		5E0A50002000000000000033 /* VMControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000033 /* VMControlClient.swift */; };
+		5E0A50002000000000000032 /* MCPSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000032 /* MCPSettings.swift */; };
+		5E0A50002000000000000031 /* MCPHTTP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000031 /* MCPHTTP.swift */; };
+		5E0A50002000000000000030 /* MCPProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000030 /* MCPProtocol.swift */; };
+		5E0A50002000000000000022 /* VMControlProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000022 /* VMControlProtocol.swift */; };
+		5E0A50002000000000000021 /* GuestInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000021 /* GuestInput.swift */; };
+		5E0A50002000000000000020 /* GuestPixels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000020 /* GuestPixels.swift */; };
 		0856D07D14A99EF1000B1711 /* timer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CEC214A99EF0000B1711 /* timer.cpp */; };
 		0856D07E14A99EF1000B1711 /* about_window_unix.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CEC414A99EF0000B1711 /* about_window_unix.cpp */; };
 		0856D09814A99EF1000B1711 /* ether_unix.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CEE314A99EF0000B1711 /* ether_unix.cpp */; };
@@ -342,6 +356,20 @@
 		5E0A50001000000000000005 /* ShearsHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ShearsHost.swift; path = SheepApp/Shears/ShearsHost.swift; sourceTree = "<group>"; };
 		5E0A50001000000000000006 /* ShearsSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ShearsSession.swift; path = SheepApp/Shears/ShearsSession.swift; sourceTree = "<group>"; };
 		5E0A50001000000000000007 /* ShearsInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ShearsInstaller.swift; path = SheepApp/Shears/ShearsInstaller.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000009 /* ManagerDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ManagerDetailView.swift; path = SheepApp/ManagerDetailView.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000023 /* VMControlServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VMControlServer.swift; path = SheepApp/Control/VMControlServer.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000038 /* LibraryImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = LibraryImport.swift; path = SheepApp/LibraryImport.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000037 /* AppSettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppSettingsWindowController.swift; path = SheepApp/AppSettingsWindowController.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000036 /* MCPStdioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MCPStdioBridge.swift; path = SheepApp/MCP/MCPStdioBridge.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000035 /* MCPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MCPService.swift; path = SheepApp/MCP/MCPService.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000034 /* MCPServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MCPServer.swift; path = SheepApp/MCP/MCPServer.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000033 /* VMControlClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VMControlClient.swift; path = SheepApp/MCP/VMControlClient.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000032 /* MCPSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MCPSettings.swift; path = SheepApp/MCP/MCPSettings.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000031 /* MCPHTTP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MCPHTTP.swift; path = SheepApp/MCP/MCPHTTP.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000030 /* MCPProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MCPProtocol.swift; path = SheepApp/MCP/MCPProtocol.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000022 /* VMControlProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VMControlProtocol.swift; path = SheepApp/Control/VMControlProtocol.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000021 /* GuestInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = GuestInput.swift; path = SheepApp/Control/GuestInput.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000020 /* GuestPixels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = GuestPixels.swift; path = SheepApp/Control/GuestPixels.swift; sourceTree = "<group>"; };
 		0856CEC214A99EF0000B1711 /* timer.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = timer.cpp; path = ../timer.cpp; sourceTree = SOURCE_ROOT; };
 		0856CEC414A99EF0000B1711 /* about_window_unix.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = about_window_unix.cpp; sourceTree = "<group>"; };
 		0856CEE314A99EF0000B1711 /* ether_unix.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = ether_unix.cpp; sourceTree = "<group>"; };
@@ -898,6 +926,20 @@
 				5E0A50001000000000000005 /* ShearsHost.swift */,
 				5E0A50001000000000000006 /* ShearsSession.swift */,
 				5E0A50001000000000000007 /* ShearsInstaller.swift */,
+				5E0A50001000000000000009 /* ManagerDetailView.swift */,
+				5E0A50001000000000000023 /* VMControlServer.swift */,
+				5E0A50001000000000000037 /* AppSettingsWindowController.swift */,
+				5E0A50001000000000000038 /* LibraryImport.swift */,
+				5E0A50001000000000000036 /* MCPStdioBridge.swift */,
+				5E0A50001000000000000035 /* MCPService.swift */,
+				5E0A50001000000000000034 /* MCPServer.swift */,
+				5E0A50001000000000000033 /* VMControlClient.swift */,
+				5E0A50001000000000000032 /* MCPSettings.swift */,
+				5E0A50001000000000000031 /* MCPHTTP.swift */,
+				5E0A50001000000000000030 /* MCPProtocol.swift */,
+				5E0A50001000000000000022 /* VMControlProtocol.swift */,
+				5E0A50001000000000000021 /* GuestInput.swift */,
+				5E0A50001000000000000020 /* GuestPixels.swift */,
 				A1BEEF4420CF7E6D00FBE904 /* GuestDisplayView.swift */,
 				A1BEEF4520CF7E6D00FBE904 /* SheepWindowController.swift */,
 				A1BEEF4620CF7E6D00FBE904 /* PrefsBridge.swift */,
@@ -1383,6 +1425,20 @@
 				5E0A50002000000000000005 /* ShearsHost.swift in Sources */,
 				5E0A50002000000000000006 /* ShearsSession.swift in Sources */,
 				5E0A50002000000000000007 /* ShearsInstaller.swift in Sources */,
+				5E0A50002000000000000009 /* ManagerDetailView.swift in Sources */,
+				5E0A50002000000000000023 /* VMControlServer.swift in Sources */,
+				5E0A50002000000000000037 /* AppSettingsWindowController.swift in Sources */,
+				5E0A50002000000000000038 /* LibraryImport.swift in Sources */,
+				5E0A50002000000000000036 /* MCPStdioBridge.swift in Sources */,
+				5E0A50002000000000000035 /* MCPService.swift in Sources */,
+				5E0A50002000000000000034 /* MCPServer.swift in Sources */,
+				5E0A50002000000000000033 /* VMControlClient.swift in Sources */,
+				5E0A50002000000000000032 /* MCPSettings.swift in Sources */,
+				5E0A50002000000000000031 /* MCPHTTP.swift in Sources */,
+				5E0A50002000000000000030 /* MCPProtocol.swift in Sources */,
+				5E0A50002000000000000022 /* VMControlProtocol.swift in Sources */,
+				5E0A50002000000000000021 /* GuestInput.swift in Sources */,
+				5E0A50002000000000000020 /* GuestPixels.swift in Sources */,
 				0856D07D14A99EF1000B1711 /* timer.cpp in Sources */,
 				0856D07E14A99EF1000B1711 /* about_window_unix.cpp in Sources */,
 				E44C460720D262B0000583AE /* ip_icmp.c in Sources */,

@@ -40,6 +40,9 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
     private var sidebarItem: NSToolbarItem?
     let display = GuestDisplayView(frame: NSRect(x: 0, y: 0, width: 1024, height: 768))
     var booted = false
+    var sidebarIsShown: Bool { sidebarShown }
+    /// Manager mode only: covers the (unused) guest picture with the selected VM's state and a Start button.
+    private var detail: ManagerDetailView?
     private var sidebar: LibrarySidebar!
     private var split: NSSplitView!
     private var settings: SettingsSheet?
@@ -67,7 +70,10 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         sidebar = LibrarySidebar(
             store: store,
             onPlay: { [weak self] doc in self?.play(doc) },
-            onSelect: { [weak self] doc in self?.setSubtitle(doc.name) }
+            onSelect: { [weak self] doc in
+                self?.setSubtitle(doc.name)
+                self?.detail?.refresh()
+            }
         )
         sidebar.frame = NSRect(x: 0, y: 0, width: sidebarWidth, height: 768)
         display.frame = NSRect(x: sidebarWidth + 1, y: 0, width: 1024, height: 768)
@@ -110,6 +116,14 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         placePanes(in: split, sidebar: sidebarWidth)
         display.syncPointerToPicture()
         installSidebarMenu()
+        if SheepHost.isManager {
+            window.title = "SheepShaver"
+            let detail = ManagerDetailView(store: store) { [weak self] doc in self?.play(doc) }
+            detail.frame = display.bounds
+            detail.autoresizingMask = [.width, .height]
+            display.addSubview(detail)
+            self.detail = detail
+        }
         if let name = store.document(id: store.selection)?.name {
             baseSubtitle = name
             window.subtitle = name
@@ -160,12 +174,7 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
     func play(_ doc: VirtualMachineDocument) {
         store.selection = doc.id
         setSubtitle(doc.name)
-        if !booted {
-            BootGate.path = doc.prefsPath
-            store.runningID = doc.id
-            sidebar.reload()
-            return
-        }
+        // Every VM runs in its own process and window, so several can run at once; this window only starts them
         store.launch(doc)
     }
 
@@ -289,10 +298,20 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
             sidebarItem = item
             return item
         case .plus:
-            let item = NSToolbarItem(itemIdentifier: .plus)
-            item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New VM")
-            item.label = "New"
-            item.action = #selector(newMachine)
+            let item = NSMenuToolbarItem(itemIdentifier: .plus)
+            item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add a virtual machine")
+            item.label = "Add"
+            item.toolTip = "New Virtual Machine, or Add Existing"
+            item.showsIndicator = true
+            let menu = NSMenu()
+            let create = NSMenuItem(title: "New Virtual Machine…", action: #selector(newMachine), keyEquivalent: "")
+            let existing = NSMenuItem(title: "Add Existing…", action: #selector(addExistingMachine), keyEquivalent: "")
+            create.target = self
+            existing.target = self
+            menu.addItem(create)
+            menu.addItem(existing)
+            item.menu = menu
+            item.action = #selector(newMachine)   // a plain click on the button itself
             item.target = self
             return item
         case .settings:
@@ -504,11 +523,35 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         }
     }
 
+    private var appSettings: AppSettingsWindowController?
+
+    @objc func openAppSettings(_ sender: Any?) {
+        if appSettings == nil { appSettings = AppSettingsWindowController(store: store) }
+        appSettings?.present()
+    }
+
+    /// The library process's application menu: Settings… and Quit. A VM's process has neither (closing its window is
+    /// how a VM ends, and it asks about a clean shutdown first).
+    private func installAppMenu(in main: NSMenu) {
+        guard SheepHost.isManager, !main.items.contains(where: { $0.title == "SheepShaver" }) else { return }
+        let item = NSMenuItem()
+        item.title = "SheepShaver"
+        let menu = NSMenu(title: "SheepShaver")
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openAppSettings(_:)), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit SheepShaver", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        item.submenu = menu
+        main.insertItem(item, at: 0)
+    }
+
     func installSidebarMenu() {
         let main = NSApp.mainMenu ?? NSMenu()
         if NSApp.mainMenu == nil {
             NSApp.mainMenu = main
         }
+        installAppMenu(in: main)
         installGuestMenu(in: main)
         let viewItem: NSMenuItem
         if let existing = main.items.first(where: { $0.title == "View" }) {
@@ -557,6 +600,48 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         }
     }
 
+    /// Redraws the sidebar and the detail pane after the library changed.
+    func refreshLibrary() {
+        sidebar.reload()
+        detail?.refresh()
+        if let doc = store.document(id: store.selection) { setSubtitle(doc.name) }
+    }
+
+    /// Adds a VM that already has a prefs file (for example one you start with --config) to the library.
+    @objc private func addExistingMachine() {
+        guard let window else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Add Existing Virtual Machine"
+        panel.message = "Choose a SheepShaver prefs file, or a folder that contains one called “prefs”."
+        panel.prompt = "Add"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.treatsFilePackagesAsDirectories = true
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                var failure: String?
+                for url in panel.urls {
+                    do {
+                        try self.store.addExisting(url)
+                    } catch {
+                        failure = error.localizedDescription
+                    }
+                }
+                self.refreshLibrary()
+                if let failure, let window = self.window {
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "Could not add the virtual machine"
+                    alert.informativeText = failure
+                    alert.beginSheetModal(for: window)
+                }
+            }
+        }
+    }
+
     @objc private func openSettings() {
         guard let window else { return }
         let prefs = store.document(id: store.selection)?.prefsPath
@@ -593,7 +678,7 @@ private final class NewVMSheet: NSWindowController {
     init(onDone: @escaping (String?, String?, String?) -> Void) {
         self.onDone = onDone
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 180),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 180),
             styleMask: [.titled],
             backing: .buffered,
             defer: false
@@ -606,8 +691,8 @@ private final class NewVMSheet: NSWindowController {
         stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
         stack.addArrangedSubview(labeled("Name", nameField))
-        stack.addArrangedSubview(labeled("Disk", diskField))
-        stack.addArrangedSubview(labeled("ROM", romField))
+        stack.addArrangedSubview(labeled("Disk", diskField, browse: #selector(browseDisk)))
+        stack.addArrangedSubview(labeled("ROM", romField, browse: #selector(browseROM)))
         let buttons = NSStackView()
         buttons.orientation = .horizontal
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelSheet))
@@ -624,17 +709,37 @@ private final class NewVMSheet: NSWindowController {
         fatalError("init(coder:)")
     }
 
-    private func labeled(_ title: String, _ field: NSTextField) -> NSView {
+    private func labeled(_ title: String, _ field: NSTextField, browse: Selector? = nil) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
         let label = NSTextField(labelWithString: title)
         label.alignment = .right
         label.widthAnchor.constraint(equalToConstant: 48).isActive = true
-        field.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
+        field.widthAnchor.constraint(greaterThanOrEqualToConstant: browse == nil ? 400 : 310).isActive = true
         row.addArrangedSubview(label)
         row.addArrangedSubview(field)
+        if let browse {
+            row.addArrangedSubview(NSButton(title: "Browse…", target: self, action: browse))
+        }
         return row
     }
+
+    private func choose(into field: NSTextField, title: String) {
+        guard let win = window else { return }
+        let panel = NSOpenPanel()
+        panel.title = title
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.beginSheetModal(for: win) { response in
+            if response == .OK, let url = panel.url {
+                MainActor.assumeIsolated { field.stringValue = url.path }
+            }
+        }
+    }
+
+    @objc private func browseDisk() { choose(into: diskField, title: "Choose the disk image") }
+    @objc private func browseROM() { choose(into: romField, title: "Choose the ROM file") }
 
     @objc private func cancelSheet() {
         onDone(nil, nil, nil)

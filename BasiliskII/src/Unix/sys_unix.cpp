@@ -55,6 +55,10 @@
 #include "macos_util.h"
 #include "prefs.h"
 #include "user_strings.h"
+#if defined(__MACOSX__)
+// Provided by the SheepShaver app (video_macos.mm); absent in other programs that share this file
+extern "C" void HostReportProblem(const char *text) __attribute__((weak_import));
+#endif
 #include "sys.h"
 #include "disk_unix.h"
 #if defined(SHEEPSHAVER) && EMULATED_PPC
@@ -652,18 +656,26 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
 	open_flags |= (is_cdrom ? O_NONBLOCK : 0);
 #endif
 #if defined(__MACOSX__)
-	open_flags |= (is_file ? O_EXLOCK | O_NONBLOCK : 0);
+	// Read-only images (an install CD) take a shared lock so several VMs can use them at once; a disk that can be
+	// written is exclusive to one VM
+	open_flags |= (is_file ? ((read_only ? O_SHLOCK : O_EXLOCK) | O_NONBLOCK) : 0);
 #endif
 	int fd = open(name, open_flags);
 #if defined(__MACOSX__)
-	if (fd < 0 && (open_flags & O_EXLOCK)) {
+	if (fd < 0 && (open_flags & (O_EXLOCK | O_SHLOCK))) {
 		if (errno == EOPNOTSUPP) {
 			// File system does not support locking. Try again without.
-			open_flags &= ~O_EXLOCK;
+			open_flags &= ~(O_EXLOCK | O_SHLOCK);
 			fd = open(name, open_flags);
 		} else if (errno == EAGAIN) {
 			// File is likely already locked by another process.
 			printf("WARNING: Cannot open %s (%s)\n", name, strerror(errno));
+			if (HostReportProblem) {
+				// SheepShaver app: tell the user in a window instead of leaving a "?" floppy with no explanation
+				char message[1500];
+				snprintf(message, sizeof(message), "The disk image \"%s\" is in use by another virtual machine or program, so it was not mounted. Two virtual machines cannot use the same disk image; give each its own copy.", name);
+				HostReportProblem(message);
+			}
 			/* A scripted New World run clicking on the "?" floppy
 			 * after a second instance held O_EXLOCK is how the
 			 * 12 Sep volume was reported crashed. Exit instead. */

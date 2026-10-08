@@ -873,8 +873,25 @@ static void nw_pmu_host_power(int event, void *ctx)
 }
 #endif
 
+// Set by --vm-id and --background (see SheepHost.swift); --vm-dir sets xpram_dir_override (xpram_unix.cpp)
+extern const char *xpram_dir_override;
+static const char *launch_vm_id = NULL;
+static bool launch_background = false;
+extern "C" const char *HostLaunchVMID(void) { return launch_vm_id; }
+extern "C" int HostLaunchBackground(void) { return launch_background ? 1 : 0; }
+
+#ifdef USE_MACOS_VIDEO
+extern "C" int SheepMCPStdioMain(void);		// SheepApp/MCP/MCPStdioBridge.swift
+#endif
+
 int main(int argc, char **argv)
 {
+#ifdef USE_MACOS_VIDEO
+	// `SheepShaver --mcp-stdio`: a bridge between a client that starts MCP servers as programs and the app's MCP
+	// server. It must run before anything else starts (no window, no emulator).
+	if (argc > 1 && strcmp(argv[1], "--mcp-stdio") == 0)
+		return SheepMCPStdioMain();
+#endif
 #ifdef ENABLE_GTK3
 	GtkApplication *app = NULL;
 	int ret;
@@ -948,6 +965,34 @@ int main(int argc, char **argv)
 				gui_connection_path = argv[i];
 				argv[i] = NULL;
 			}
+		} else if (strcmp(argv[i], "--vm-dir") == 0) {
+			// The folder of a library virtual machine: its NVRAM lives there, so VMs running at the same time do
+			// not overwrite each other's (see xpram_unix.cpp)
+			argv[i++] = NULL;
+			if (i < argc) {
+				xpram_dir_override = argv[i];
+				argv[i] = NULL;
+			}
+		} else if (strcmp(argv[i], "--log") == 0) {
+			// Diagnostics: send this process's output to a file (a VM the manager started has no terminal)
+			argv[i++] = NULL;
+			if (i < argc) {
+				if (freopen(argv[i], "a", stdout)) {
+					dup2(fileno(stdout), fileno(stderr));
+					setvbuf(stdout, NULL, _IOLBF, 0);
+				}
+				argv[i] = NULL;
+			}
+		} else if (strcmp(argv[i], "--vm-id") == 0) {
+			argv[i++] = NULL;
+			if (i < argc) {
+				launch_vm_id = argv[i];
+				argv[i] = NULL;
+			}
+		} else if (strcmp(argv[i], "--background") == 0) {
+			// Started by the manager or a remote client: show the window without taking the focus
+			launch_background = true;
+			argv[i] = NULL;
 		} else if (strcmp(argv[i], "--config") == 0) {
 			argv[i++] = NULL;
 			if (i < argc) {
@@ -1016,6 +1061,24 @@ int main(int argc, char **argv)
 			const char *chosen = SheepHostWaitForConfig();
 			if (chosen && chosen[0])
 				UserPrefsPath = chosen;
+		}
+	}
+#endif
+
+#ifdef USE_MACOS_VIDEO
+	{
+		// A VM of the library (.../SheepShaver/VMs/<id>/prefs) keeps its NVRAM in its own folder, whichever way it
+		// was started, so VMs running at the same time do not share one file
+		extern std::string UserPrefsPath;
+		static std::string own_folder;
+		const std::string tail = "/prefs";
+		if (!xpram_dir_override && vmdir == NULL && UserPrefsPath.size() > tail.size() &&
+			UserPrefsPath.compare(UserPrefsPath.size() - tail.size(), tail.size(), tail) == 0) {
+			own_folder = UserPrefsPath.substr(0, UserPrefsPath.size() - tail.size());
+			size_t slash = own_folder.rfind('/');
+			std::string parent = (slash == std::string::npos) ? std::string() : own_folder.substr(0, slash);
+			if (parent.size() >= 4 && parent.compare(parent.size() - 4, 4, "/VMs") == 0)
+				xpram_dir_override = own_folder.c_str();
 		}
 	}
 #endif

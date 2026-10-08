@@ -51,6 +51,9 @@ final class LibrarySidebar: NSView, NSTableViewDataSource, NSTableViewDelegate {
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
         reload()
+        NotificationCenter.default.addObserver(forName: .vmRunStateChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reload() }
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -71,7 +74,7 @@ final class LibrarySidebar: NSView, NSTableViewDataSource, NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let machine = store.machines[row]
         if tableColumn?.identifier == Self.playColumn {
-            let button = NSButton(title: "Play", target: self, action: #selector(playClicked(_:)))
+            let button = NSButton(title: store.isRunning(machine.id) ? "Show" : "Play", target: self, action: #selector(playClicked(_:)))
             button.bezelStyle = .rounded
             button.controlSize = .small
             button.tag = row
@@ -87,7 +90,7 @@ final class LibrarySidebar: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let title = NSTextField(labelWithString: machine.name)
         title.lineBreakMode = .byTruncatingTail
         title.translatesAutoresizingMaskIntoConstraints = false
-        let status = NSTextField(labelWithString: machine.id == store.runningID ? "Running" : "")
+        let status = NSTextField(labelWithString: store.isRunning(machine.id) ? "Running" : "")
         status.textColor = .secondaryLabelColor
         status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         status.translatesAutoresizingMaskIntoConstraints = false

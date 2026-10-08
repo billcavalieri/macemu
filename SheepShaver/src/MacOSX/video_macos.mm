@@ -43,7 +43,16 @@
 + (void)applyMacCursor;
 + (void)moveMacCursorX:(int)x y:(int)y visible:(int)visible;
 + (const char *)waitForConfig;
++ (void)reportProblemText:(const char *)text;
 @end
+
+/* A problem the user should see in a window (for instance a disk image another VM holds). Safe from any thread;
+ * shown at once, or as soon as the window exists. */
+extern "C" void HostReportProblem(const char *text)
+{
+	if (text)
+		[SheepHost reportProblemText:text];
+}
 
 static void host_cursor_moved(int x, int y, int visible)
 {
@@ -274,8 +283,99 @@ void VideoVBL(void)
 	VideoHostPresent();
 }
 
+/*
+ *  Screenshots for the control channel (the MCP server). The guest picture is read from guest memory, not from the
+ *  window, so it works while the window is hidden or covered. The copy is made on the emulation thread, from
+ *  VideoHostPresent, after any GPU drawing still in flight has finished; the caller waits for it.
+ */
+struct snapshot_request {
+	std::atomic<bool> wanted{false};
+	dispatch_semaphore_t done = NULL;
+	uint8 *pixels = NULL;
+	uint32 length = 0;
+	int info[4] = {0, 0, 0, 0};		/* width, height, row bytes, depth in bits */
+	uint8 palette[256 * 3];
+} static g_snap;
+static dispatch_semaphore_t g_snap_lock;	/* one request at a time */
+
+static void service_snapshot(void)
+{
+	const int w = VModes[cur_mode].viXsize, h = VModes[cur_mode].viYsize;
+	const int rb = VModes[cur_mode].viRowBytes;
+	const uint8 *src = SheepForceEnabled() ? SheepForcePageHost(SheepForceVisiblePage()) : the_buffer;
+	g_snap.pixels = NULL;
+	if (src && w > 0 && h > 0 && rb > 0) {
+		SheepForceFlushCPU(NULL, 0, 0, 0);		/* wait for QuickDraw/GPU writes still in flight */
+		g_snap.length = (uint32)rb * (uint32)h;
+		g_snap.pixels = (uint8 *)malloc(g_snap.length);
+		if (g_snap.pixels)
+			memcpy(g_snap.pixels, src, g_snap.length);
+		g_snap.info[0] = w; g_snap.info[1] = h; g_snap.info[2] = rb;
+		g_snap.info[3] = depth_bits_for_mode(VModes[cur_mode].viAppleMode);
+		for (int i = 0; i < 256; i++) {
+			g_snap.palette[i * 3 + 0] = mac_gamma[mac_pal[i].red].red;
+			g_snap.palette[i * 3 + 1] = mac_gamma[mac_pal[i].green].green;
+			g_snap.palette[i * 3 + 2] = mac_gamma[mac_pal[i].blue].blue;
+		}
+	}
+	g_snap.wanted.store(false);
+	dispatch_semaphore_signal(g_snap.done);
+}
+
+/* Fills info (width, height, row bytes, depth), palette (256 RGB triples) and *pixels (malloc'd, rowbytes*height bytes;
+ * release with VideoHostSnapshotFree). Returns 0 on success, -1 when the guest did not answer in time. Any thread. */
+extern "C" int VideoHostSnapshot(int *info, uint8 *palette, uint8 **pixels, uint32 *length)
+{
+	if (!g_snap_lock) {
+		static dispatch_once_t once;
+		dispatch_once(&once, ^{ g_snap_lock = dispatch_semaphore_create(1); g_snap.done = dispatch_semaphore_create(0); });
+	}
+	if (dispatch_semaphore_wait(g_snap_lock, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0)
+		return -1;
+	g_snap.wanted.store(true);
+	int rc = 0;
+	if (dispatch_semaphore_wait(g_snap.done, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+		g_snap.wanted.store(false);
+		/* the request may be serviced right now; wait it out so the slot is clean for the next one */
+		dispatch_semaphore_wait(g_snap.done, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC));
+		rc = -1;
+	} else if (!g_snap.pixels) {
+		rc = -1;
+	} else {
+		memcpy(info, g_snap.info, sizeof(g_snap.info));
+		memcpy(palette, g_snap.palette, sizeof(g_snap.palette));
+		*pixels = g_snap.pixels;
+		*length = g_snap.length;
+		g_snap.pixels = NULL;
+	}
+	dispatch_semaphore_signal(g_snap_lock);
+	return rc;
+}
+
+extern "C" void VideoHostSnapshotFree(uint8 *pixels)
+{
+	free(pixels);
+}
+
+/* The guest screen as the guest sees it: size in pixels and depth in bits. Any thread. */
+extern "C" void VideoHostGuestScreen(int *width, int *height, int *depth)
+{
+	*width = VModes[cur_mode].viXsize;
+	*height = VModes[cur_mode].viYsize;
+	*depth = depth_bits_for_mode(VModes[cur_mode].viAppleMode);
+}
+
+/* The guest's cursor position (low-memory Mouse, a Point: v then h), in guest pixels. Any thread. */
+extern "C" void VideoHostGuestMouse(int *x, int *y)
+{
+	*y = (int16)ReadMacInt16(0x830);
+	*x = (int16)ReadMacInt16(0x832);
+}
+
 void VideoHostPresent(void)
 {
+	if (g_snap.wanted.load(std::memory_order_acquire))
+		service_snapshot();
 	if (g_quit_requested)
 		QuitEmulator();
 	if (g_in_present)
