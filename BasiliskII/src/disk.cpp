@@ -94,6 +94,10 @@ static drive_vec drives;
 // Icon address (Mac address space, set by PatchROM())
 uint32 DiskIconAddr;
 
+/* Drive numbers 1 and 2 belong to the floppy drives: tools such as Disk First Aid describe any drive with a number
+ * of 1 or 2 as a floppy drive, so hard disks and CD-ROMs are numbered from 3. */
+static const int FirstHardDriveNumber = 3;
+
 // Flag: Control(accRun) has been called, interrupt routine is now active
 static bool acc_run_called = false;
 
@@ -259,7 +263,7 @@ int16 DiskOpen(uint32 pb, uint32 dce)
 	drive_vec::iterator info, end = drives.end();
 	for (info = drives.begin(); info != end; ++info) {
 
-		info->num = FindFreeDriveNumber(1);
+		info->num = FindFreeDriveNumber(FirstHardDriveNumber);
 		info->to_be_mounted = false;
 
 		if (info->fh) {
@@ -421,11 +425,9 @@ int16 DiskControl(uint32 pb, uint32 dce)
 			return noErr;
 
 		case 23:	// Get drive info
-			if (ReadMacInt8(info->status + dsDiskInPlace) == 8)
-				WriteMacInt32(pb + csParam, 0x0601);	// Unspecified fixed SCSI disk
-			else
-				WriteMacInt32(pb + csParam, 0x0201);	// Unspecified SCSI disk
-			return noErr;
+			/* A floppy-driver call (the Sony driver answers it with a drive type 2..4). Disk First Aid labels any
+			 * drive that answers it "Internal/External Floppy Drive"; hard disk drivers do not answer it. */
+			return controlErr;
 
 		case 24:	// Get partition size
 			if (ReadMacInt8(info->status + dsDiskInPlace) > 0) {

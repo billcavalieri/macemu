@@ -513,7 +513,7 @@ int16 CDROMOpen(uint32 pb, uint32 dce)
 	drive_vec::iterator info, end = drives.end();
 	for (info = drives.begin(); info != end; ++info) {
 		
-		info->num = FindFreeDriveNumber(1);
+		info->num = FindFreeDriveNumber(3);	// 1 and 2 are the floppy drives (see disk.cpp)
 		info->to_be_mounted = false;
 		
 		if (info->fh || info->init_null) {
@@ -710,8 +710,7 @@ int16 CDROMControl(uint32 pb, uint32 dce)
 			return noErr;
 			
 		case 23:		// GetDriveInfo
-			WriteMacInt32(pb + csParam, 0x00000b01);	// Unspecified external removable SCSI disk
-			return noErr;
+			return controlErr;	// floppy-driver call: Disk First Aid would list the CD-ROM as a floppy drive
 		
 		// TODO: revisit this section, is it necessary with DriverGestalt also in Status section?
 		case 43: {		// DriverGestalt
