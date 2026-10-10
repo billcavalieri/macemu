@@ -147,6 +147,9 @@
 		A10F9210BC10000000000084 /* prefs.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0856CE8B14A99EF0000B1711 /* prefs.cpp */; };
 		A1B2C3D4E5F60718293A4B02 /* sheepforce.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B01 /* sheepforce.cpp */; };
 		A1B2C3D4E5F60718293A4B04 /* qt_codec.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */; };
+		5E0A6000000000000000A001 /* nw_sound_input.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A6000000000000000A002 /* nw_sound_input.cpp */; };
+		5E0A6000000000000000A003 /* mic_capture_macosx.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A6000000000000000A004 /* mic_capture_macosx.cpp */; };
+		5E0A6000000000000000A005 /* mic_permission_macosx.mm in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A6000000000000000A006 /* mic_permission_macosx.mm */; };
 		A1B2C3D4E5F60718293A4B21 /* rave.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B20 /* rave.cpp */; };
 		A1B2C3D4E5F60718293A4B72 /* sheepforce_remote.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B71 /* sheepforce_remote.mm */; };
 		A1B2C3D4E5F60718293A4B06 /* sheepforce_metal.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B05 /* sheepforce_metal.mm */; };
@@ -475,6 +478,9 @@
 		A10F9210BC10000000000081 /* nw_68k_jit.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_68k_jit.cpp; path = ../nw_68k_jit.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B01 /* sheepforce.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = sheepforce.cpp; path = ../sheepforce.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B20 /* rave.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = rave.cpp; path = ../rave.cpp; sourceTree = SOURCE_ROOT; };
+		5E0A6000000000000000A006 /* mic_permission_macosx.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = mic_permission_macosx.mm; sourceTree = "<group>"; };
+		5E0A6000000000000000A004 /* mic_capture_macosx.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = mic_capture_macosx.cpp; path = mic_capture_macosx.cpp; sourceTree = "<group>"; };
+		5E0A6000000000000000A002 /* nw_sound_input.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = nw_sound_input.cpp; path = ../nw_sound_input.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = qt_codec.cpp; path = ../qt_codec.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B22 /* sheepforce_rave.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = sheepforce_rave.mm; sourceTree = "<group>"; };
 		A1B2C3D4E5F60718293A4B71 /* sheepforce_remote.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = sheepforce_remote.mm; sourceTree = "<group>"; };
@@ -638,6 +644,7 @@
 				0856CD8D14A99EEF000B1711 /* gfxaccel.cpp */,
 				A1B2C3D4E5F60718293A4B01 /* sheepforce.cpp */,
 				A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */,
+				5E0A6000000000000000A002 /* nw_sound_input.cpp */,
 				A1B2C3D4E5F60718293A4B20 /* rave.cpp */,
 				0856CD8E14A99EEF000B1711 /* include */,
 				0856CDB114A99EEF000B1711 /* kpx_cpu */,
@@ -925,6 +932,8 @@
 				5DDE950E2255C8B3004D0E79 /* audio_macosx.cpp */,
 				5DDE94FD2255C740004D0E79 /* AudioBackEnd.h */,
 				5DDE94FF2255C74C004D0E79 /* AudioBackEnd.cpp */,
+				5E0A6000000000000000A004 /* mic_capture_macosx.cpp */,
+				5E0A6000000000000000A006 /* mic_permission_macosx.mm */,
 				5DDE95082255C88E004D0E79 /* AudioDevice.cpp */,
 				5DDE950B2255C895004D0E79 /* AudioBackEnd.h */,
 				E456E2AC20C82B60006C8DC2 /* clip_macosx64.mm */,
@@ -1406,6 +1415,7 @@
 				0856CFF414A99EF0000B1711 /* gfxaccel.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B02 /* sheepforce.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B04 /* qt_codec.cpp in Sources */,
+				5E0A6000000000000000A001 /* nw_sound_input.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B21 /* rave.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B06 /* sheepforce_metal.mm in Sources */,
 				A1B2C3D4E5F60718293A4B72 /* sheepforce_remote.mm in Sources */,
@@ -1446,6 +1456,8 @@
 				0856D06114A99EF1000B1711 /* scsi.cpp in Sources */,
 				5DDE95102255C8B3004D0E79 /* audio_macosx.cpp in Sources */,
 				5DDE95112255C74C004D0E79 /* AudioBackEnd.cpp in Sources */,
+				5E0A6000000000000000A003 /* mic_capture_macosx.cpp in Sources */,
+				5E0A6000000000000000A005 /* mic_permission_macosx.mm in Sources */,
 				5DDE95122255C88E004D0E79 /* AudioDevice.cpp in Sources */,
 				5DDE95132255C712004D0E79 /* MacOSX_sound_if.cpp in Sources */,
 				0856D06614A99EF1000B1711 /* serial.cpp in Sources */,
@@ -1808,6 +1820,8 @@
 					ServiceManagement,
 					"-framework",
 					UniformTypeIdentifiers,
+					"-framework",
+					AVFoundation,
 				);
 				"OTHER_LDFLAGS[arch=arm64]" = (
 					"-lkpx_cpu",
@@ -1817,6 +1831,8 @@
 					ServiceManagement,
 					"-framework",
 					UniformTypeIdentifiers,
+					"-framework",
+					AVFoundation,
 				);
 				"OTHER_LDFLAGS[arch=x86_64]" = (
 					"-lkpx_cpu",
@@ -1826,6 +1842,8 @@
 					ServiceManagement,
 					"-framework",
 					UniformTypeIdentifiers,
+					"-framework",
+					AVFoundation,
 				);
 				PRECOMPS_INCLUDE_HEADERS_FROM_BUILT_PRODUCTS_DIR = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = com.billcavalieri.sheepshaver;
@@ -1909,6 +1927,8 @@
 					ServiceManagement,
 					"-framework",
 					UniformTypeIdentifiers,
+					"-framework",
+					AVFoundation,
 				);
 				"OTHER_LDFLAGS[arch=arm64]" = (
 					"-lkpx_cpu",
@@ -1918,6 +1938,8 @@
 					ServiceManagement,
 					"-framework",
 					UniformTypeIdentifiers,
+					"-framework",
+					AVFoundation,
 				);
 				"OTHER_LDFLAGS[arch=x86_64]" = (
 					"-lkpx_cpu",
@@ -1927,6 +1949,8 @@
 					ServiceManagement,
 					"-framework",
 					UniformTypeIdentifiers,
+					"-framework",
+					AVFoundation,
 				);
 				PRECOMPS_INCLUDE_HEADERS_FROM_BUILT_PRODUCTS_DIR = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = com.billcavalieri.sheepshaver;

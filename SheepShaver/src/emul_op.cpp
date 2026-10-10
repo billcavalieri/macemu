@@ -55,6 +55,7 @@ extern int SheepForceRaveProbeTick(void);
 #include "name_registry.h"
 #include "user_strings.h"
 #include "emul_op.h"
+#include "nw_sound_input.h"
 #include "thunks.h"
 
 #define DEBUG 0
@@ -278,6 +279,8 @@ static void nw_register_output(void)
 			WriteMacInt8(p + 1 + i, (uint8)s[i]);
 	}
 	NW_DIAG("NW-BOOT G1: audio-reg name=%08x\n", (unsigned)name_h);
+	if (nw_sound_input_wanted())
+		nw_sound_input_install();
 	fflush(stdout);
 	/* RegisterComponent(cd, entry, global=1, name, nil, nil).
 	 * D0 is the selector ($7001). A parameter block with D0=0 is not
@@ -359,7 +362,7 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 	/* Only install Trap Manager hooks here. Component registration itself
 	 * runs from the event loop, never inside a driver or resource callback. */
 	bool sb_op = selector == OP_AUDIO_DISPATCH || selector == OP_SHEEPBLASTER ||
-		selector == OP_SHEEPBLASTER_TICK;
+		selector == OP_SHEEPBLASTER_TICK || selector == OP_SPB || selector == OP_SPB_TICK;
 	if (!sb_op)
 		nw_components_install_hooks();
 	if (nw_debug_arm && !sb_op) {
@@ -515,6 +518,14 @@ void EmulOp(M68kRegisters *r, uint32 pc, int selector)
 
 		case OP_AUDIO_DISPATCH:		// Audio component functions
 			r->d[0] = AudioDispatch(r->a[3], r->a[4]);
+			break;
+
+		case OP_SPB:				// Sound Manager SPB call (sound input)
+			nw_spb_dispatch(r);
+			break;
+
+		case OP_SPB_TICK:			// sound input Time Manager task
+			r->d[0] = nw_spb_tick(&r->a[0]);
 			break;
 
 		case OP_SHEEPBLASTER_TICK:	// SheepBlaster Time Manager task

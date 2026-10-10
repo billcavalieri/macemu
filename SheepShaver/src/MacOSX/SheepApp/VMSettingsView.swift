@@ -344,6 +344,9 @@ extension SettingsSheet {
             ]),
             Page(title: "Sound", symbol: "speaker.wave.2", sections: [
                 Section(title: nil, settings: [toggle("nosound", "Play sound", true, inverted: true), toggle("bootchime", "Play the startup chime", true)]),
+                Section(title: "Sound Input", settings: [
+                    toggle("mic", "Let the virtual machine record from the microphone", false),
+                ]),
             ]),
             Page(title: "Input", symbol: "computermouse", sections: [
                 Section(title: "Mouse", settings: [

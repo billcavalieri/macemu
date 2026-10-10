@@ -99,6 +99,7 @@
 
 #include "sysdeps.h"
 #include "nw_log.h"
+#include "nw_sound_input.h"
 #include "main.h"
 #include "version.h"
 #include "prefs.h"
@@ -1843,15 +1844,18 @@ static void *tick_func(void *arg)
 			uint32_t sb_min = 0, sb_max = 0, sb_sub = 0, sb_rate = 0;
 			SheepBlasterTakeStats(&sb_in, &sb_out, &sb_full, &sb_unsent, &sb_min, &sb_max,
 					      &sb_sub, &sb_src, &sb_rate);
+			uint64_t mic_in = 0, mic_out = 0, mic_drop = 0;
+			nw_mic_take_stats(&mic_in, &mic_out, &mic_drop);
 			nw_jit_prof_tick();
-			NW_DIAG("PLAY presents=%llu present_max_us=%llu pictures=%llu audio_cb=%llu audio_cb_max_us=%llu short_pulls=%llu sb_in=%llu sb_out=%llu sb_min=%u sb_max=%u sb_full=%llu sb_unsent=%llu sb_sub=%u sb_src=%llu sb_rate=%u\n",
+			NW_DIAG("PLAY presents=%llu present_max_us=%llu pictures=%llu audio_cb=%llu audio_cb_max_us=%llu short_pulls=%llu sb_in=%llu sb_out=%llu sb_min=%u sb_max=%u sb_full=%llu sb_unsent=%llu sb_sub=%u sb_src=%llu sb_rate=%u mic_in=%llu mic_out=%llu mic_drop=%llu\n",
 			       (unsigned long long)presents, (unsigned long long)present_us,
 			       (unsigned long long)pictures, (unsigned long long)cbs,
 			       (unsigned long long)cb_us, (unsigned long long)AudioShortPulls(),
 			       (unsigned long long)sb_in, (unsigned long long)sb_out,
 			       (unsigned)sb_min, (unsigned)sb_max,
 			       (unsigned long long)sb_full, (unsigned long long)sb_unsent,
-			       (unsigned)sb_sub, (unsigned long long)sb_src, (unsigned)sb_rate);
+			       (unsigned)sb_sub, (unsigned long long)sb_src, (unsigned)sb_rate,
+			       (unsigned long long)mic_in, (unsigned long long)mic_out, (unsigned long long)mic_drop);
 			fflush(stdout);
 		}
 #endif

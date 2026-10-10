@@ -60,6 +60,7 @@ prefs_desc common_prefs_items[] = {
 	{"nocdrom", TYPE_BOOLEAN, false,    "don't install CD-ROM driver"},
 	{"nonet", TYPE_BOOLEAN, false,      "don't use Ethernet"},
 	{"nosound", TYPE_BOOLEAN, false,    "don't enable sound output"},
+	{"mic", TYPE_BOOLEAN, false,        "let the guest record from the host microphone (sound input)"},
 	{"bootchime", TYPE_BOOLEAN, false,  "play host startup chime at Mac reset"},
 	{"nogui", TYPE_BOOLEAN, false,      "disable GUI"},
 	{"noclipconversion", TYPE_BOOLEAN, false, "don't convert clipboard contents"},
@@ -114,6 +115,7 @@ void AddPrefsDefaults(void)
 	PrefsAddBool("nocdrom", false);
 	PrefsAddBool("nonet", false);
 	PrefsAddBool("nosound", false);
+	PrefsAddBool("mic", false);
 	PrefsAddBool("bootchime", true);
 	PrefsAddBool("nogui", false);
 	PrefsAddBool("noclipconversion", false);

@@ -100,3 +100,114 @@ Measured on the full song, 255 samples. `itunes-cost` `host_per_audio` was 2.3 t
 - SimpleSound first, then the Sound panel.
 - Quit SimpleSound with Cmd-Q, then play an alert from the Sound panel.
 - Several alerts in a row in each program.
+
+## Sound input (the host microphone)
+
+Off by default. Turn it on with the VM setting "Let the virtual machine record from the microphone" (pref `mic true`).
+Code: `nw_sound_input.cpp` (the guest side and the sample ring), `MacOSX/mic_capture_macosx.cpp` (CoreAudio capture),
+`MacOSX/mic_permission_macosx.mm` (the macOS permission question).
+
+Checked: the Sound control panel's Input tab lists the device and its level meter moves (with the real microphone
+too); SimpleSound's File > New records, shows the level, plays the take back and saves it; `tools/shears/test.sh mic`
+(25 checks in a guest program) and `tools/shears/test.sh recdlg` (the Sound Manager's record window opened and
+cancelled by a guest program). Not working: Speech Recognition still says it cannot start; it opens the device, reads
+its name and source, closes it and never records.
+
+### Why it is not a SheepBlaster input
+
+None of the things that look like a way in work on a New World Mac OS 9:
+
+- The guest finds its input through a native driver for AWACS hardware this machine does not have, so the Sound
+  panel's Input tab lists nothing ("... the device is in use by another application").
+- Registering SheepBlaster with the input flag bits (`0x0f0f`) locks the panel (attempt 9 above).
+- The classic `.AppleSoundInput` driver replacement (`SoundIn*` in `audio.cpp`) is installed by the `vCheckLoad` patch,
+  which the 9.2.1 ROM does not have. Such a driver put into the unit table by hand is opened and closed once at boot and
+  then ignored; with driver flags `0x4d04` the boot stalls. The Input tab never asks the Device Manager for it.
+
+What every caller does reach is the Sound Manager's SPB routines (SPBGetIndexedDevice, SPBOpenDevice, SPBRecord, ...).
+They are 68k code behind `_SoundDispatch` (0xA800), `D0 = (selector << 16) | group`. The group picks a part of the
+Sound Manager: SPB is 0x14; 0x08, 0x0c and 0x18 are other parts whose selectors look the same (0x022c in group 0x18 is not
+SPBResumeRecording). The selector's high byte is the argument size in words (SPBOpenDevice is 0x0518: ten bytes).
+
+A PowerPC program reaches them through InterfaceLib's glue (Mixed Mode), and that glue does not read the trap table: it
+calls routine descriptors that lead into the dispatcher's code. So `SetToolTrapAddress` is not enough, and the patch is in
+the dispatcher itself, at the address the trap table holds. Its first eight bytes
+(`movea.l ($2b6).w,a0 / movea.l $110(a0),a0`) are replaced by `jmp stub`. The stub saves the registers and runs the
+EmulOp `OP_SPB`. The handler's answer comes back in the saved registers (D0 = -1 for "answered here", D1 = the
+argument bytes to pop), not in memory: the Time Manager and the Sound Manager's own interrupt-time code can call the
+dispatcher while the stub is running, and a shared flag word was overwritten by them. When the call is not ours the
+stub runs the two displaced instructions and jumps back. The patch checks the eight bytes first and does nothing if they
+are not the ones expected. Calls it does not know in group 0x14 (SndRecord, SndRecordToFile, SetupAIFFHeader, ...) go on
+to the Sound Manager, which implements them on top of the SPB calls that come back here.
+
+`Gestalt('snd ')` gets the "built-in input, has an input device, play and record, 16-bit" bits through a replaced
+selector function (it calls the old one and adds them). Without the "has an input device" bit SimpleSound greys out
+New. `ReplaceGestalt` wants the function in the system heap (gestaltLocationErr, -5553, otherwise): a six-byte jump.
+
+### What it does
+
+- One device and one source, both called "SheepBlaster". One writer at a time (a second SPBOpenDevice with write
+  permission gets siDeviceBusyErr, -227). The capture runs only while a writer has the device open: the Sound panel
+  opens it for reading every few seconds.
+- The default is what a Mac of that era had: 22254.5 Hz, 8-bit offset-binary samples, mono. SPBSetDeviceInfo takes
+  any rate from 4000 to 48000 Hz, 8 or 16 bit, one or two channels, a gain (0.5 to 1.5), and the quality names.
+- SPBRecord: synchronous (the guest waits, as on a real Mac), or asynchronous with a completion routine and, for
+  continuous recording (count and milliseconds 0), an interrupt routine called every `bufferLength` bytes. They run in
+  a guest Time Manager task (`OP_SPB_TICK`, every 10 ms while recording), never from a host timer, like the output
+  pull above. SPBStopRecording ends a recording and runs the completion routine without an error.
+- SPBRecordToFile: the samples go to the open file at its mark. The tick only queues them; the File Manager is not safe
+  at interrupt time, so the write happens at the start of the next SPB call (a normal context), and a recording that
+  reached its count is finished there too. With no buffer in the SPB (SimpleSound passes none) a 32 KB one is used.
+- The level meter works without a recording: siLevelMeterOnOff returns two integers, the state and the level
+  (0 to 255), and SPBGetRecordingStatus returns the level too; both measure what has come in since the last look.
+- Not done: compression other than none, the options dialog, play-through.
+- The samples come from a ring of about a second and a half at 44100 Hz stereo 16-bit. The source is the host
+  microphone (one AUHAL unit on the default input device) or, with `NW_MIC_TONE=<hz>`, a test tone made on a host thread.
+  The guest's rate and format are made when the samples are taken out (linear interpolation). A recording starts with
+  what the microphone hears now.
+- The `PLAY` line has `mic_in` (frames the source made), `mic_out` (frames the guest took) and `mic_drop`.
+- `NW_MIC_TRACE=1` (with `NW_VERBOSE=1`) logs every `_SoundDispatch` call, its first arguments and whether it was
+  answered here. It slows the guest: a record window polls the level in a tight loop.
+
+### What the programs expect that the documentation does not shout about
+
+Each of these broke something real.
+
+- **The reference SPBOpenDevice returns is a Device Manager reference number**, a negative 16-bit number in a long,
+  and code inside the Sound Manager (its record window) hands it to the Device Manager as well. The first scheme here
+  counted up from 0x4d1c0001; the low word 2 is a file reference number, the System file's, and the record window closed
+  it. SimpleSound quit with a type 2 or 3 error when the window went away and the desktop fell apart. The references are
+  now units far past the end of the unit table (0xffffbffe downwards), which the Device Manager refuses with badUnitErr.
+- **The SPB's `error` field is above 0 while an asynchronous recording runs** (like an ioResult) and 0 or negative when
+  it is over. SimpleSound's record window has no completion routine and watches that field: with 0 in it the recording
+  stopped ten milliseconds after it began.
+- **siNumberChannels is `'chan'`**; SPBGetIndexedDevice past the last device must return siBadSoundInDevice (-221), or the
+  Sound panel walks the list for ever.
+- A record window asks for siAsync, siRecordingQuality, siOSTypeInputSource (`'inpt'`, answered `'mic '`),
+  siDeviceConnected, siInputAvailable and the gain range (`'igmn'`, `'igmx'`).
+
+### Things that bit during the work
+
+- `SheepMem::Reserve` is a stack that other code releases in order (`SheepVar`). A block taken from it inside
+  `nw_register_output` was handed out again when that function's `SheepVar` went away. Anything that has to live as
+  long as the guest comes from the system heap (`NewPtrSysClear`, trap 0xA71E; 0xA713 is not it and hangs the boot).
+- File Manager position modes: fsAtMark is 0. With 1 (fsFromStart) every write landed at the start of the file.
+- InterfaceLib returns a NumVersion (SPBVersion, SndSoundManagerVersion) through a pointer the caller passes in r3.
+  Retro68's compiler expects it in a register and passes nothing, so a guest test that calls SPBVersion() as declared
+  makes the glue store through whatever r3 held and takes a system error more often than not. That cost a long hunt
+  for an emulator bug that was not there. `miccheck.c` calls it through a cast.
+- Keeping the Apple Mixer open across the output component's Close (tried as a cure for a crash that turned out to be
+  the reference numbers) hangs the guest after the first channel is disposed. `tools/shears/test.sh sndchan` shows it.
+  The output code is as it was.
+
+### A crash this work did not cause and did not fix
+
+`tools/shears/test.sh sndchan` (a guest program that opens a sound channel, plays a quarter-second tone and disposes
+of the channel, four times, sound input off) took a system error in one run of four: reported at 68k pc 002029fa, like
+the crash at the end of songs in iTunes. It is the quickest way found so far to bring that crash out.
+
+### Permission
+
+The app has the `com.apple.security.device.audio-input` entitlement and `NSMicrophoneUsageDescription`. The first time
+a guest opens the input for recording with the setting on, macOS asks to allow the microphone for SheepShaver. Until it
+is allowed (and if it is refused) the guest records silence, and a warning line is printed.

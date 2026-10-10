@@ -43,6 +43,8 @@
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.6</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>A virtual machine can record from the microphone when its Mac OS software asks for sound input. This only happens if you turn on the microphone for that virtual machine.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>SMPrivilegedExecutables</key>
