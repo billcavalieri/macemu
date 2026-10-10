@@ -26,11 +26,73 @@ final class VirtualMachineStore {
     private var launching = Set<String>()
     private var terminationObserver: NSObjectProtocol?
 
+    /// VMs found running by asking their control sockets (started by this manager, an earlier one, or by hand).
+    private(set) var answering = Set<String>()
+
+    /// Whether a VM the library starts shows in the library window (the default) or opens its own window.
+    /// Settings key `SheepOpenInLibraryWindow`; NW_NO_EMBED=1 forces windows (tests, diagnostics only).
+    static var opensInLibraryWindow: Bool {
+        if nwDiagnosticsOn, ProcessInfo.processInfo.environment["NW_NO_EMBED"] == "1" { return false }
+        return UserDefaults.standard.object(forKey: "SheepOpenInLibraryWindow") as? Bool ?? true
+    }
+
+    /// Whether a VM's display socket is there (it runs embedded and is up).
+    static func hasDisplaySocket(_ id: String) -> Bool {
+        FileManager.default.fileExists(atPath: DisplayPaths.socketPath(vmID: id))
+    }
+
     /// Whether a VM is running, here or in a process the manager started.
     func isRunning(_ id: String) -> Bool {
-        if id == runningID || launching.contains(id) { return true }
+        if id == runningID || launching.contains(id) || answering.contains(id) { return true }
         if let app = launched[id] { return !app.isTerminated }
         return false
+    }
+
+    /// Asks every library VM's control socket whether it answers (off the main thread), then tells the library
+    /// when something changed. The manager calls this every couple of seconds while its window is open.
+    func pollRunning() {
+        let ids = machines.map(\.id)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let found = Set(ids.filter { VMControlClient.isRunning(vmID: $0) })
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, found != self.answering else { return }
+                    self.answering = found
+                    NotificationCenter.default.post(name: .vmRunStateChanged, object: nil)
+                }
+            }
+        }
+    }
+
+    /// Asks a running VM to shut down: a clean Mac OS shutdown when the Sheep Shears tool is running in it. The
+    /// completion gets nil on success, else the VM's own explanation (for example that the tool is not running).
+    func shutDown(_ doc: VirtualMachineDocument, force: Bool, completion: @escaping @MainActor (String?) -> Void) {
+        let id = doc.id
+        DispatchQueue.global(qos: .userInitiated).async {
+            var failure: String?
+            do { _ = try VMControlClient.call(vmID: id, op: "shutdown", args: ["force": force], timeout: 10) }
+            catch { failure = (error as? ControlError)?.message ?? error.localizedDescription }
+            DispatchQueue.main.async { MainActor.assumeIsolated { completion(failure) } }
+        }
+    }
+
+    /// Renames a VM in the library (its folder and disks are untouched).
+    func rename(_ id: String, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let dir = machines.first(where: { $0.id == id }).map({ URL(fileURLWithPath: $0.prefsPath).deletingLastPathComponent() }) else { return }
+        let meta = dir.appendingPathComponent("vm.json")
+        var json = (try? Data(contentsOf: meta)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] } ?? [:]
+        json["name"] = trimmed
+        if let data = try? JSONSerialization.data(withJSONObject: json) { try? data.write(to: meta) }
+        reload()
+    }
+
+    /// Takes a VM out of the library: its folder (prefs and NVRAM) goes to the Trash. Disk images are never touched.
+    func remove(_ id: String) throws {
+        guard let doc = machines.first(where: { $0.id == id }) else { return }
+        try FileManager.default.trashItem(at: URL(fileURLWithPath: doc.prefsPath).deletingLastPathComponent(), resultingItemURL: nil)
+        if selection == id { selection = nil }
+        reload()
     }
 
     private func watchTermination() {
@@ -94,18 +156,17 @@ final class VirtualMachineStore {
         let dir = Self.root.appendingPathComponent(id, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let prefs = dir.appendingPathComponent("prefs")
-        let body = """
-        disk \(disk)
-        rom \(rom)
-        screen win/1024/768
-        ramsize 536870912
-        jit true
-        sheepforce true
-        qtcodec true
-        mouse absolute
-        gfxaccel true
-        """
-        try? body.write(to: prefs, atomically: true, encoding: .utf8)
+        var doc = PrefsDocument()
+        doc.set("disk", disk)
+        if !rom.isEmpty { doc.set("rom", rom) }         // empty: SheepShaver finds the "Mac OS ROM" file in the startup disk
+        doc.set("screen", "win/1024/768")
+        doc.set("ramsize", 536870912)
+        doc.set("jit", true)
+        doc.set("sheepforce", true)
+        doc.set("qtcodec", true)
+        doc.set("mouse", "absolute")
+        doc.set("gfxaccel", true)
+        try? doc.text.write(to: prefs, atomically: true, encoding: .utf8)
         let meta = ["name": name]
         if let data = try? JSONSerialization.data(withJSONObject: meta) {
             try? data.write(to: dir.appendingPathComponent("vm.json"))
@@ -176,7 +237,8 @@ final class VirtualMachineStore {
     /// Starts the VM in its own process and window. Returns false when it is already running (that window is
     /// brought forward instead). `background` shows its window without taking the focus (used by remote clients).
     @discardableResult
-    func launch(_ doc: VirtualMachineDocument, background: Bool = false, completion: (@MainActor (Bool) -> Void)? = nil) -> Bool {
+    func launch(_ doc: VirtualMachineDocument, background: Bool = false, embedded: Bool = false,
+                completion: (@MainActor (Bool) -> Void)? = nil) -> Bool {
         if doc.id == runningID {
             return false
         }
@@ -195,6 +257,8 @@ final class VirtualMachineStore {
         config.arguments = ["--config", doc.prefsPath, "--vm-id", doc.id,
                             "--vm-dir", URL(fileURLWithPath: doc.prefsPath).deletingLastPathComponent().path]
         if background { config.arguments.append("--background") }
+        // Embedded: no window of its own; the library window shows the picture and takes the keyboard and mouse
+        if embedded { config.arguments.append("--embedded") }
         if nwDiagnosticsOn {
             // Test runs: the VM inherits the diagnostic environment and writes its output to a file
             config.environment = ProcessInfo.processInfo.environment

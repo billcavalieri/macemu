@@ -44,6 +44,7 @@ private:
 	entry *						cache_tags[HASH_SIZE];
 	entry *						active;
 	entry *						dormant;
+	bool						tags_dirty;	// a block was entered in cache_tags since the table was last cleared
 
 	uint32 cacheline(uintptr addr) const {
 		return (addr >> 2) & HASH_MASK;
@@ -76,7 +77,7 @@ public:
 
 template< class block_info, template<class T> class block_allocator >
 block_cache< block_info, block_allocator >::block_cache()
-	: active(NULL), dormant(NULL)
+	: active(NULL), dormant(NULL), tags_dirty(true)
 {
 	initialize();
 }
@@ -90,8 +91,13 @@ block_cache< block_info, block_allocator >::~block_cache()
 template< class block_info, template<class T> class block_allocator >
 void block_cache< block_info, block_allocator >::initialize()
 {
+	// A cache that never held a block is already clear: this runs on every dcbz, and walking the 32768 tags was
+	// 2% of a boot.
+	if (!tags_dirty)
+		return;
 	for (int i = 0; i < HASH_SIZE; i++)
 		cache_tags[i] = NULL;
+	tags_dirty = false;
 }
 
 template< class block_info, template<class T> class block_allocator >
@@ -216,6 +222,7 @@ void block_cache< block_info, block_allocator >::add_to_cl_list(block_info *bi)
 {
 	entry * bce = (entry *)bi;
 	const uint32 cl = cacheline(bi->pc);
+	tags_dirty = true;
 	if (cache_tags[cl])
 		cache_tags[cl]->prev_same_cl_p = &bce->next_same_cl;
 	bce->next_same_cl = cache_tags[cl];

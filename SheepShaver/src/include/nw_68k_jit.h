@@ -3,8 +3,10 @@
 #include <stdint.h>
 class powerpc_cpu;
 void nw_log_mkdir(const char *dir);
-void nw_68k_hist_note(uint32_t ppc_pc, uint32_t opcode_pc);
-bool nw_68k_hist_enabled();
+void nw_68k_hist_note_slow(uint32_t ppc_pc, uint32_t opcode_pc);
+extern bool nw_68k_hist_on;	/* NW_JIT68K_HIST=1 */
+static inline void nw_68k_hist_note(uint32_t ppc_pc, uint32_t opcode_pc) { if (nw_68k_hist_on) nw_68k_hist_note_slow(ppc_pc, opcode_pc); }
+static inline bool nw_68k_hist_enabled() { return nw_68k_hist_on; }
 void nw_68k_note_exit(uint16_t opcode, unsigned reason);
 void nw_68k_note_exit_at(uint16_t opcode, unsigned reason, uint32_t pc);
 void nw_68k_measure_begin(uint32_t first, uint32_t end);

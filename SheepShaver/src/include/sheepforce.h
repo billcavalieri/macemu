@@ -43,6 +43,15 @@ extern bool SheepForceOwns(uint32 mac_addr);
 extern bool SheepForceAdoptHostFB(uint8 *host, uint32 bytes);
 
 extern void SheepForceStartup(void *sdl_window);
+/* Scanout into shared memory for a viewer in another process (display_shm.h), instead of a window. Call after
+ * SheepForceStartup(NULL). The region is sized for pictures up to max_w x max_h. */
+extern bool SheepForceShmCreate(const char *name, int max_w, int max_h);
+extern void SheepForceShmDestroy(void);
+extern bool SheepForceShmActive(void);
+/* Switch the scanout target while the VM runs: a window's view, or back to shared memory. Main thread; the switch happens
+ * at the emulation thread's next present (SheepForceShmActive() turns false / true when it has). */
+extern void SheepForceRequestWindowSink(void *ns_view);
+extern void SheepForceRequestShmSink(void);
 extern void SheepForceShutdown(void);
 extern void SheepForceSync(void);
 /* Wait for an in-flight GPU write that overlaps this CPU rectangle.

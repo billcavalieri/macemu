@@ -79,7 +79,28 @@ struct bus_context {
 	uint32_t read_addresses[64]; uint8_t read_widths[64]; unsigned nreads;
 	uint32_t resolved_ea, resolved_pa; unsigned resolved_width;
 	bool resolved_store, resolved_valid;
+	/* The last physical pages found to be plain memory for a load / a store: nw_pa_kind() once per page per dispatch. */
+	uint32_t plain_read_page, plain_write_page;
 };
+/* Only the counts and memos need clearing: every array is read up to its count. (A zero-initialised context was 750 bytes
+ * written per dispatch.) */
+inline void init_context(bus_context &c, powerpc_cpu *cpu, uint32_t pc, uint16_t opcode, uint16_t prefetched)
+{
+	c.translations.count = 0;
+	c.cpu = cpu; c.pc = pc; c.opcode = opcode; c.prefetched = prefetched;
+	c.npages = c.nwrites = c.nreads = 0;
+	c.resolved_ea = c.resolved_pa = 0; c.resolved_width = 0; c.resolved_store = false; c.resolved_valid = false;
+	c.plain_read_page = c.plain_write_page = 1;	/* page addresses have their low 12 bits clear */
+}
+/* The context only grows during a dispatch (translations, code pages, write pages, recorded reads are appended), so
+ * returning to an earlier point is resetting the counts. */
+struct context_mark { unsigned translations, npages, nwrites, nreads; };
+inline context_mark mark_context(const bus_context &c) { return { c.translations.count, c.npages, c.nwrites, c.nreads }; }
+inline void restore_context(bus_context &c, const context_mark &m)
+{
+	c.translations.count = m.translations; c.npages = m.npages; c.nwrites = m.nwrites; c.nreads = m.nreads;
+	c.resolved_valid = false;
+}
 bool preview_page(void *opaque, uint32_t ea, bool store, uint32_t *pa)
 {
 	powerpc_cpu *cpu = ((bus_context *)opaque)->cpu;
@@ -122,7 +143,14 @@ bool probe(bus_context &c, uint32_t ea, unsigned width, bool store, uint32_t *pa
 	c.resolved_valid = false;
 	if ((uint64_t)ea + width > (uint64_t)UINT32_MAX + 1 || (width > 1 && (ea & 1))) return false;
 	uint32_t first;
-	if (!nw68_page_translate(c.translations, &c, preview_page, ea, store, &first) || !plain_memory(first, store)) return false;
+	if (!nw68_page_translate_fast(c.translations, &c, preview_page, ea, store, &first)) return false;
+	{
+		uint32_t &memo = store ? c.plain_write_page : c.plain_read_page;
+		if (memo != (first & ~4095u)) {
+			if (!plain_memory(first, store)) return false;
+			if (!(nw_jit_legacy & NW_JIT_LEGACY_XLATE)) memo = first & ~4095u;
+		}
+	}
 	/* Word-aligned long operands are supported by the NK's alignment fixup.
 	 * They may cross a page: re-probe bytes on the second page and require
 	 * contiguous, permitted physical memory before reading or staging.
@@ -130,6 +158,8 @@ bool probe(bus_context &c, uint32_t ea, unsigned width, bool store, uint32_t *pa
 	 * Its page previews therefore share a fixed SR/BAT/protection context,
 	 * with read/write permissions kept distinct. Still check
 	 * every physical byte against host memory-bank permissions. */
+	if (!(((ea + width - 1u) ^ ea) & ~4095u) && !(nw_jit_legacy & NW_JIT_LEGACY_XLATE))
+		goto same_page;		/* nothing to check byte by byte: the whole access is on the page already validated */
 	for (unsigned j = 1; j < width; ++j) {
 		if (((ea + j) ^ ea) & ~4095u) {
 			uint32_t next;
@@ -143,6 +173,7 @@ bool probe(bus_context &c, uint32_t ea, unsigned width, bool store, uint32_t *pa
 	/* A journaled PTE store would change translation before later accesses
 	 * in the real NK. Delegate it before effects rather than previewing the
 	 * rest of a block against the old hash table. */
+same_page:
 	if (store && nw68_hash_table_overlap(first, width, ppc32_guest_mmu().sdr1())) return false;
 	*pa = first;
 	c.resolved_ea = ea; c.resolved_pa = first; c.resolved_width = width;
@@ -445,8 +476,7 @@ int nw_68k_dispatch(powerpc_cpu *cpu)
 	const uint64_t generation = nw68_code_generation();
 	const uint32_t translation_context = ppc32_guest_mmu().msr() &
 		(ppc32_mmu::MSR_IR | ppc32_mmu::MSR_DR | ppc32_mmu::MSR_PR);
-	bus_context context = {}; context.cpu = cpu; context.pc = state.pc;
-	context.opcode = op; context.prefetched = (uint16_t)nk.gpr[27];
+	bus_context context; init_context(context, cpu, state.pc, op, (uint16_t)nk.gpr[27]);
 	nw68_bus bus = { &context, code_read, data_read, write_probe, data_write, code_fetch, resolve_address };
 	static const bool blocks_enabled = []() -> bool {
 		const char *e = getenv("NW_JIT68K_BLOCKS"); return !e || strcmp(e, "0");
@@ -454,9 +484,28 @@ int nw_68k_dispatch(powerpc_cpu *cpu)
 	static const bool decoded_enabled = []() -> bool {
 		const char *e = getenv("NW_JIT68K_DECODED"); return !e || strcmp(e, "0");
 	}();
+	static const bool check_blocks = []() -> bool {
+		const char *e = getenv("NW_JIT68K_CHECK_BLOCKS"); return e && !strcmp(e, "1");
+	}();
 	nw68_instruction block[NW68_BLOCK_MAX];
 	unsigned count = 1;
 	uint16_t current; uint32_t physical;
+	nw68_frame result;
+	nw68_cached_run ran;
+	bool native_done = false;
+	unsigned flag_mask = 0;
+	/* The common case: this block was decoded and translated before. One call validates the cache entry and runs it,
+	 * without copying the decoded block out or hashing its words again. Anything but a clean native exit starts over
+	 * on the decode path below, which handles every refusal. */
+	if (m == ON && blocks_enabled && decoded_enabled && !check_blocks && !(nw_jit_legacy & NW_JIT_LEGACY_D68) &&
+	    code_read(&context, state.pc, &current, &physical)) {
+		if (nw68_run_cached(state.pc, translation_context, physical & ~4095u, op, (uint16_t)nk.gpr[27], state, bus, result, generation, &ran)) {
+			active_samples = nullptr;
+			if (result.exit == NW68_EXIT_NATIVE) { native_done = true; count = ran.count; flag_mask = ran.flag_mask; }
+		}
+		if (!native_done) init_context(context, cpu, state.pc, op, (uint16_t)nk.gpr[27]);
+	}
+	if (!native_done) {
 	const bool cached = m == ON && blocks_enabled && decoded_enabled &&
 		code_read(&context, state.pc, &current, &physical) &&
 		nw68_cached_block(state.pc, translation_context, physical & ~4095u,
@@ -465,7 +514,7 @@ int nw_68k_dispatch(powerpc_cpu *cpu)
 		nw_68k_note_exit_at(op, NW68_EXIT_SERVICE, nk.gpr[24] - 2u); return 0;
 	}
 	const nw68_instruction instruction = block[0];
-	const bus_context single_context = context;
+	const context_mark single_mark = mark_context(context);
 	if (!cached && m == ON && blocks_enabled && context.npages == 1) {
 		while (count < NW68_BLOCK_MAX) {
 			const nw68_instruction &previous = block[count-1];
@@ -474,18 +523,13 @@ int nw_68k_dispatch(powerpc_cpu *cpu)
 			if (previous.control && (previous.operation != NW68_BRANCH || previous.condition != 0)) break;
 			const uint32_t next = previous.control ? previous.pc + 2u + (uint32_t)previous.displacement : previous.pc + previous.length;
 			if ((next ^ state.pc) & ~4095u) break;
-			nw68_instruction candidate; const bus_context saved = context;
+			nw68_instruction candidate; const context_mark saved = mark_context(context);
 			if (!nw68_decode(next, bus, candidate) ||
-			    context.npages != 1 || ((next + candidate.length - 1u) ^ state.pc) & ~4095u) { context = saved; break; }
+			    context.npages != 1 || ((next + candidate.length - 1u) ^ state.pc) & ~4095u) { restore_context(context, saved); break; }
 			block[count++] = candidate;
 		}
 	}
-	unsigned flag_mask = 0;
 	for (unsigned n = 0; n < count; ++n) flag_mask |= block[n].flags;
-	nw68_frame result;
-	static const bool check_blocks = []() -> bool {
-		const char *e = getenv("NW_JIT68K_CHECK_BLOCKS"); return e && !strcmp(e, "1");
-	}();
 	captured_reads samples;
 	if (check_blocks && m == ON && count > 1) active_samples = &samples;
 	nw68_exit exit = nw68_run_block(block, count, state, bus, translation_context, context.pages, context.npages, result, generation);
@@ -494,7 +538,7 @@ int nw_68k_dispatch(powerpc_cpu *cpu)
 		/* A later unsafe operand must not deny native execution to the
 		 * current safe instruction. Preparation has no guest side effects,
 		 * so retry only that instruction with its original dependency set. */
-		context = single_context; count = 1; flag_mask = instruction.flags;
+		restore_context(context, single_mark); count = 1; flag_mask = instruction.flags;
 		exit = nw68_run(instruction, state, bus, translation_context, context.pages, context.npages, result, generation);
 	}
 	if (exit != NW68_EXIT_NATIVE) { nw_68k_note_exit_at(op, exit, nk.gpr[24] - 2u); return 0; }
@@ -568,6 +612,7 @@ int nw_68k_dispatch(powerpc_cpu *cpu)
 		v.serial = cpu->nw_68k_exception_serial();
 		return 0;
 	}
+	}	// !native_done
 	// Commit PTE read references only after the complete instruction/block
 	// and successor prefetch are safe. Store C bits are set by data_write.
 	const dtlb_ctx rc = dtlb_context();
@@ -581,8 +626,10 @@ int nw_68k_dispatch(powerpc_cpu *cpu)
 	nw68_export(nk, result.state, flag_mask, result.next_op, result.next_prefetch);
 	cpu->nw_68k_restore(nk); nw_68k_note_exit_at(op, NW68_EXIT_NATIVE, state.pc);
 	for (unsigned j = 1; j < result.completed; ++j) {
-		nw_68k_hist_note(0x68080000u + ((uint32_t)block[j].opcode << 3), block[j].pc);
-		nw_68k_note_exit_at(block[j].opcode, NW68_EXIT_NATIVE, block[j].pc);
+		const uint16_t jop = native_done ? ran.opcodes[j] : block[j].opcode;
+		const uint32_t jpc = native_done ? ran.pcs[j] : block[j].pc;
+		nw_68k_hist_note(0x68080000u + ((uint32_t)jop << 3), jpc);
+		nw_68k_note_exit_at(jop, NW68_EXIT_NATIVE, jpc);
 	}
 	return 1;
 }

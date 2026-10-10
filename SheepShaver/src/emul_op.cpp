@@ -110,7 +110,10 @@ static void nw_audio_debug_scan(void)
 	static const uint8 desc[8] = {
 		0x73, 0x64, 0x65, 0x76, 0x61, 0x77, 0x61, 0x63 /* sdevawac */
 	};
-	if (pass >= 3 || RAMBaseHost == 0 || RAMSize < sizeof nw_sift_prefix)
+	/* Its only output is diagnostic lines: each pass scans all of guest RAM twice (0.4 s of a boot). Opt in with
+	 * NW_AUDIO_SCAN=1 (and NW_VERBOSE=1 to see the lines). */
+	static const int wanted = getenv("NW_AUDIO_SCAN") != NULL;
+	if (!wanted || !nw_log_on() || pass >= 3 || RAMBaseHost == 0 || RAMSize < sizeof nw_sift_prefix)
 		return;
 	pass++;
 	uint8 *base = RAMBaseHost;

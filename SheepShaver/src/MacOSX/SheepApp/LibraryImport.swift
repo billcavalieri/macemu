@@ -48,3 +48,31 @@ enum LibraryImport {
         return false
     }
 }
+
+/// What the detail pane says about a VM, read from its prefs (pure, so it can be tested).
+struct VMSummary: Equatable {
+    var memory: String
+    var display: String
+    var disks: [String]
+    var cdImages: [String]
+    var rom: String
+    var sharedFolder: String?
+
+    init(prefs: PrefsDocument) {
+        let bytes = prefs.int("ramsize", 536_870_912)
+        memory = bytes >= 1 << 30 && bytes % (1 << 30) == 0 ? "\(bytes >> 30) GB" : "\(max(bytes >> 20, 1)) MB"
+        let parts = prefs.string("screen", "win/1024/768").split(separator: "/")
+        display = parts.count == 3 && Int(parts[1]) != nil && Int(parts[2]) != nil ? "\(parts[1]) × \(parts[2])" : prefs.string("screen", "1024 × 768")
+        disks = prefs.values("disk").map { Self.name($0) }
+        cdImages = prefs.values("cdrom").map { Self.name($0) }
+        let romPath = prefs.string("rom")
+        rom = romPath.isEmpty ? "From the startup disk" : Self.name(romPath)
+        let shared = prefs.string("extfs")
+        sharedFolder = shared.isEmpty ? nil : Self.name(shared)
+    }
+
+    private static func name(_ path: String) -> String {
+        let last = URL(fileURLWithPath: path).lastPathComponent
+        return last.isEmpty ? path : last
+    }
+}

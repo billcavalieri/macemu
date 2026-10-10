@@ -36,6 +36,8 @@
 #include <math.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <dlfcn.h>
+#include <unistd.h>
 #include "nw_jit_vmx_integer.h"
 #ifdef __APPLE__
 #include <libkern/OSCacheControl.h>
@@ -196,7 +198,7 @@ static unsigned nw_parse_legacy(void)
 	if (!e)
 		return 0;
 	if (strstr(e, "all"))
-		m = NW_JIT_LEGACY_CLOCK | NW_JIT_LEGACY_SYNC | NW_JIT_LEGACY_LOAD | NW_JIT_LEGACY_INDEX | NW_JIT_LEGACY_XLATE | NW_JIT_LEGACY_FP | NW_JIT_LEGACY_HOP | NW_JIT_LEGACY_SUBST | NW_JIT_LEGACY_LINK | NW_JIT_LEGACY_MEM | NW_JIT_LEGACY_BCLR | NW_JIT_LEGACY_IBTC;
+		m = NW_JIT_LEGACY_CLOCK | NW_JIT_LEGACY_SYNC | NW_JIT_LEGACY_LOAD | NW_JIT_LEGACY_INDEX | NW_JIT_LEGACY_XLATE | NW_JIT_LEGACY_FP | NW_JIT_LEGACY_HOP | NW_JIT_LEGACY_SUBST | NW_JIT_LEGACY_LINK | NW_JIT_LEGACY_MEM | NW_JIT_LEGACY_BCLR | NW_JIT_LEGACY_IBTC | NW_JIT_LEGACY_DCOUNT | NW_JIT_LEGACY_ARENA | NW_JIT_LEGACY_REAL | NW_JIT_LEGACY_D68 | NW_JIT_LEGACY_EPOCH | NW_JIT_LEGACY_SYSNOP | NW_JIT_LEGACY_ITLB;
 	if (strstr(e, "clock")) m |= NW_JIT_LEGACY_CLOCK;
 	if (strstr(e, "sync")) m |= NW_JIT_LEGACY_SYNC;
 	if (strstr(e, "load")) m |= NW_JIT_LEGACY_LOAD;
@@ -209,6 +211,13 @@ static unsigned nw_parse_legacy(void)
 	if (strstr(e, "mem")) m |= NW_JIT_LEGACY_MEM;
 	if (strstr(e, "bclr")) m |= NW_JIT_LEGACY_BCLR;
 	if (strstr(e, "ibtc")) m |= NW_JIT_LEGACY_IBTC;
+	if (strstr(e, "dcount")) m |= NW_JIT_LEGACY_DCOUNT;
+	if (strstr(e, "arena")) m |= NW_JIT_LEGACY_ARENA;
+	if (strstr(e, "real")) m |= NW_JIT_LEGACY_REAL;
+	if (strstr(e, "d68")) m |= NW_JIT_LEGACY_D68;
+	if (strstr(e, "epoch")) m |= NW_JIT_LEGACY_EPOCH;
+	if (strstr(e, "sysnop")) m |= NW_JIT_LEGACY_SYSNOP;
+	if (strstr(e, "itlb")) m |= NW_JIT_LEGACY_ITLB;
 	fprintf(stderr, "NW_JIT_LEGACY=%s (mask %u)\n", e, m);
 	return m;
 }
@@ -256,9 +265,11 @@ static uint8_t g_pagebit_rom[(NW_JIT_ROM_PAGES + 7) / 8];
 static std::vector<uint32_t> g_page_slots[NW_JIT_RAM_PAGES + NW_JIT_ROM_PAGES];
 static uint32_t g_page_slots_cap[NW_JIT_RAM_PAGES + NW_JIT_ROM_PAGES];	/* size that triggers a compaction; 0 = default */
 static uint32_t g_ram_base, g_ram_size, g_rom_base, g_rom_size;
+uint64_t nw_idle_sleeps, nw_idle_timeouts, nw_idle_resumes;	/* the idle loop (Unix/timer_unix.cpp) counts its sleeps; reported by the profile */
 static uint64_t g_flush;
 static uint64_t g_flush_src[NW_JIT_FL_N];	/* entries dropped, by cause */
 static uint64_t g_flush_calls[NW_JIT_FL_N];	/* invalidate calls, by cause */
+static uint64_t g_arena_compacts, g_arena_compact_ns, g_arena_compact_bytes, g_arena_bank_wipes, g_arena_evicts;	/* code-arena upkeep (profile) */
 static uint64_t g_compiles;
 static uint64_t g_evict, g_recompile_n;
 static uint64_t g_exec_blocks, g_exec_insns;
@@ -272,7 +283,15 @@ static uint32_t g_tail_dsi_pc;
  * lookup, state sync: about 30 ns). A link is valid while its generation equals g_link_gen, which every event that can
  * invalidate or move translated code increments, and the hop budget returns to the helper every NW_JIT_LINK_BUDGET + 1
  * hops so that interrupts, the decrementer and the hop cap are still looked at. NW_JIT_LEGACY=link turns it all off. */
-enum { NW_JIT_LINK_BUDGET = 31 };
+enum { NW_JIT_LINK_BUDGET_DEFAULT = 255 };	/* was 31: 255 was 1.4% / 3.3% better on a busy / idle desktop (5 alternating runs) */
+/* Fast hops between two trips through the C helper. NW_JIT_BUDGET=<n> overrides it. */
+static const unsigned g_link_budget_n = []() -> unsigned {
+	const char *e = getenv("NW_JIT_BUDGET");
+	const int n = e ? atoi(e) : 0;
+	return n >= 1 && n <= 4095 ? (unsigned)n : (unsigned)NW_JIT_LINK_BUDGET_DEFAULT;
+}();
+#define NW_JIT_LINK_BUDGET (g_link_budget_n)
+unsigned nw_jit_link_budget(void) { return g_link_budget_n; }
 struct nw_jit_link {
 	uint64_t target;	/* successor body entry; 0 = unlinked */
 	uint32_t gen;		/* g_link_gen when linked */
@@ -286,6 +305,7 @@ static uint32_t g_link_gen = 1;
 static int g_link_body_off;	/* bytes from a block's entry to the end of its prologue, set at the first compile */
 static uint32_t g_emit_phys_page = 0xffffffffu;
 static uint64_t g_link_fast, g_link_made;
+static uint64_t g_chain_cause[6], g_chain_cause_base[6];	/* profile: chain-helper calls by cause (computed, unlinked, never linked, stale generation, budget or masks) */
 /* Indirect branch target cache: block exits to a computed address (blr, bctr, ...) are resolved by the C chain helper
  * the first time; the helper then records the successor here, and later exits to the same address test the entry in
  * compiled code and jump straight into the successor's body, like a linked exit but across pages. Unlike a link, an
@@ -370,12 +390,32 @@ enum { NW_JIT_DTLB_WAYS = 2 };
 static struct nw_jit_dtlb_ent g_dtlb[NW_JIT_DTLB_N][NW_JIT_DTLB_WAYS];
 static_assert(sizeof(struct nw_jit_dtlb_ent) == 32, "dtlb entry is 32 bytes");
 static uint64_t g_dtlb_hit, g_dtlb_miss;
+static struct nw_jit_rtlb_ent g_rtlb[NW_JIT_RTLB_N];
+static_assert(sizeof(struct nw_jit_rtlb_ent) == 32, "the generated code indexes the real-mode table by <<5");
+static_assert(NW_JIT_RTLB_N == 1024, "ubfx #12,#10");
+static_assert((offsetof(struct nw_jit_cpu, jit_rtlb) & 7) == 0, "jit_rtlb 8-aligned");
+void nw_jit_rtlb_fill(uint32_t pa, uint64_t host, int writable)
+{
+	struct nw_jit_rtlb_ent &e = g_rtlb[(pa >> 12) & (NW_JIT_RTLB_N - 1u)];
+	const uint32_t page = pa & ~0xfffu;
+	if (e.tag != page || !e.host_r)
+		e.host_w = 0;		/* a different page took the slot: nothing it proved carries over */
+	e.tag = page;
+	e.host_r = host;
+	if (writable)
+		e.host_w = host;
+}
+static int g_count_dtlb_hits;
+void nw_jit_count_dtlb_hits(int on)
+{
+	g_count_dtlb_hits = on;
+}
 enum { DTLB_WHY_SR = 0, DTLB_WHY_BAT, DTLB_WHY_CONFLICT, DTLB_WHY_PR, DTLB_WHY_OTHER, DTLB_WHY_N };
 static uint64_t g_dtlb_why[DTLB_WHY_N];
 /* VSID|Ks|Kp|N: translation-relevant SR bits. T and reserved noise does not drop. */
 enum { NW_JIT_SR_XLATE = 0x70ffffffu };
 static uint32_t g_sr_gen[16];
-static uint64_t g_mtsr_total, g_mtsr_vsid;
+static uint64_t g_mtsr_total, g_mtsr_vsid, g_mtsr_by_seg[16];
 static uint32_t g_bat_gen;
 static uint64_t g_bat_total, g_bat_bumps;
 
@@ -384,7 +424,13 @@ static struct {
 	uint32_t pa_page;
 	uint32_t flags;
 	uint32_t sr_gen;
-} g_itlb[NW_JIT_ITLB_N];
+} g_itlb_set[4][NW_JIT_ITLB_N];
+/* One table per instruction-translation context (MSR[IR], MSR[PR]): the NanoKernel runs with translation off and the
+ * 68k emulator and applications with it on, so a busy desktop switches context 175,000 times a second, and every switch
+ * used to empty the single table (56% of lookups missed). g_itlb_ctx follows the guest's MSR through
+ * nw_jit_itlb_note_msr. NW_JIT_LEGACY=itlb restores the single table that is cleared on every switch. */
+static int g_itlb_ctx;
+#define g_itlb (g_itlb_set[g_itlb_ctx])
 static uint32_t g_itlb_sticky_ea, g_itlb_sticky_pa;
 static int g_itlb_sticky;
 static uint64_t g_itlb_hit, g_itlb_miss;
@@ -665,6 +711,7 @@ static bool system_spr_user_read(unsigned s)
     return s == 1 || s == 8 || s == 9 || s == 256 || s == 268 || s == 269 ||
            s == 928 || (s >= 935 && s <= 942);
 }
+static void prof_system_note(uint32_t op, uint32_t a);
 static void nw_jit_helper_system(nw_jit_cpu *c, uint32_t op)
 {
     // The standalone emitter API also supports legacy synthetic host callbacks.
@@ -673,6 +720,7 @@ static void nw_jit_helper_system(nw_jit_cpu *c, uint32_t op)
     if (!c->verify_mem && !g_host_system) { (void)nw_jit_interp_one(c,op); return; }
     if (c->host && !c->verify_mem && g_host_msr) c->msr = g_host_msr(c->host);
     uint32_t a, b; nw_jit_system_operands(c, op, &a, &b);
+    if (nw_jit_prof_on) prof_system_note(op, a);
     const unsigned p = op >> 26, x = (op >> 1) & 1023, d = (op >> 21) & 31;
     bool priv = false;
     if (p == 19 && x == 50) priv = true;
@@ -772,6 +820,7 @@ void nw_jit_mtsr_note(unsigned sr, uint32_t old_val, uint32_t new_val)
 	if (((old_val ^ new_val) & (uint32_t)NW_JIT_SR_XLATE) == 0)
 		return;
 	g_mtsr_vsid++;
+	g_mtsr_by_seg[sr & 0xfu]++;
 	nw68_context_changed();
 	g_sr_gen[sr & 0xfu]++;
 	g_itlb_sticky = 0;
@@ -2777,6 +2826,8 @@ void nw_jit_reset(void)
 	g_bat_gen = 0;
 	g_bat_total = g_bat_bumps = 0;
 	nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_RESET);
+	g_itlb_ctx = 0;
+	memset(g_rtlb, 0, sizeof(g_rtlb));
 	memset(g_dtlb_fl, 0, sizeof(g_dtlb_fl));
 	g_dtlb_hit = g_dtlb_miss = 0;
 	memset(g_dtlb_why, 0, sizeof(g_dtlb_why));
@@ -2798,7 +2849,15 @@ void nw_jit_invalidate_page_src(uint32_t phys_page, int src)
 		src = NW_JIT_FL_OTHER;
 	if (!page_may_have_code(phys_page))
 		return;
-	link_epoch();
+	/* A store into a page of translated code kills every block of that page at once. A direct link to a block of the
+	 * same page can only be followed by a block of that page, which is dead too (the block that did the store leaves
+	 * through the SMC exit), so only the links and cached targets that cross pages need to be invalidated: the global
+	 * link generation, which every block of every page checks, stays put. Every other cause (icbi, host, a moved or
+	 * evicted block) still bumps it. NW_JIT_LEGACY=epoch bumps it for stores too. */
+	if ((src == NW_JIT_FL_STORE || src == NW_JIT_FL_ISTORE) && !(nw_jit_legacy & NW_JIT_LEGACY_EPOCH))
+		ibtc_epoch(0);
+	else
+		link_epoch();
 	g_flush_calls[src]++;
 	std::vector<uint32_t> *list = (nw_jit_legacy & NW_JIT_LEGACY_INDEX) ? NULL : page_slots(phys_page, NULL);
 	if (list) {
@@ -2895,6 +2954,7 @@ static void pagebit_rebuild(void)
 
 static void invalidate_bank(int bank)
 {
+	g_arena_bank_wipes++;
 	link_epoch();
 	g_flush_calls[NW_JIT_FL_WRAP]++;
 	for (int i = 0; i < NW_JIT_CACHE; i++) {
@@ -3866,7 +3926,8 @@ static void link_site(struct nw_jit_cpu *cpu, struct nw_jit_link *site, void *ne
 	static const long link_max = getenv("NW_JIT_LINK_MAX") ? atol(getenv("NW_JIT_LINK_MAX")) : -1;
 	if (link_max >= 0 && (long)g_link_made >= link_max)
 		return;
-	if (getenv("NW_JIT_LINK_LOG"))
+	static const int link_log = getenv("NW_JIT_LINK_LOG") != NULL;	/* once: a getenv per link was 1.6% of the host time in a busy desktop */
+	if (link_log)
 		fprintf(stderr, "link #%llu site %p -> pc %08x (block %p) gmask %08x fmask %08x\n", (unsigned long long)g_link_made, (void *)site, pc, next, ci.gmask, ci.fmask);
 #ifdef __APPLE__
 	pthread_jit_write_protect_np(0);
@@ -3918,6 +3979,10 @@ void *nw_jit_helper_chain(struct nw_jit_cpu *cpu, uint32_t chain_pc, uint32_t cu
 	if (g_mode != NW_JIT_ON || !cpu || cpu->fault)
 		return NULL;
 	const int dynamic = chain_pc == NW_JIT_CHAIN_DYNAMIC;
+	if (nw_jit_prof_on) {	/* why the exit came here instead of jumping straight to its successor */
+		const int cause = dynamic ? (cpu->link_budget == 0 ? 5 : 0) : !site ? 1 : !site->target ? 2 : site->gen != g_link_gen ? 3 : cpu->link_budget == 0 ? 5 : 4;
+		g_chain_cause[cause]++;
+	}
 	if (dynamic) chain_pc = cpu->pc;
 	if (!chain_pc || cpu->pc != chain_pc)
 		return NULL;
@@ -4073,13 +4138,16 @@ void nw_jit_cpu_bind(struct nw_jit_cpu *c)
 		static struct nw_jit_dtlb_ent empty[NW_JIT_DTLB_N][NW_JIT_DTLB_WAYS];
 		static uint64_t hits;
 		static uint32_t generations[16];
+		static struct nw_jit_rtlb_ent empty_real[NW_JIT_RTLB_N];
 		c->jit_dtlb = empty;
 		c->jit_dtlb_hit = &hits;
 		c->jit_sr_gen = generations;
+		c->jit_rtlb = empty_real;
 	} else {
 		c->jit_dtlb = g_dtlb;
 		c->jit_dtlb_hit = &g_dtlb_hit;
 		c->jit_sr_gen = g_sr_gen;
+		c->jit_rtlb = g_rtlb;
 	}
 	c->jit_link_gen = &g_link_gen;
 	c->jit_ibtc = g_ibtc;
@@ -4152,6 +4220,12 @@ void nw_jit_dtlb_mark_store_rec(uint32_t ea, int pr)
 void nw_jit_dtlb_demote_pa(uint32_t pa)
 {
 	pa &= ~0xfffu;
+	{
+		/* The page now holds translated code: a store must go through the helper that invalidates it. */
+		struct nw_jit_rtlb_ent &r = g_rtlb[(pa >> 12) & (NW_JIT_RTLB_N - 1u)];
+		if (r.tag == pa)
+			r.host_w = 0;
+	}
 	for (unsigned i = 0; i < NW_JIT_DTLB_N; i++) {
 		for (int w = 0; w < NW_JIT_DTLB_WAYS; w++) {
 			if ((g_dtlb[i][w].flags & NW_JIT_DTLB_CREC) && g_dtlb[i][w].pa_page == pa) {
@@ -4369,9 +4443,11 @@ int nw_jit_cache_slots(void)
 
 /* The instruction TLB is emptied; cached branch targets (g_ibtc, cross-page links) stay valid. For a change of MSR[IR|DR|PR]:
  * those bits are part of what an entry was resolved under and are compared when it is used. */
+static uint64_t g_itlb_clears;	/* profile: how often the instruction TLB was emptied */
 static void itlb_clear(void)
 {
-	memset(g_itlb, 0, sizeof(g_itlb));
+	g_itlb_clears++;
+	memset(g_itlb_set, 0, sizeof(g_itlb_set));
 	g_itlb_sticky = 0;
 }
 
@@ -4421,15 +4497,32 @@ void nw_jit_itlb_drop_page(uint32_t ea)
 	ibtc_epoch(2);
 	g_itlb_sticky = 0;
 	const unsigned i = (ea >> 12) & (NW_JIT_ITLB_N - 1u);
-	if (g_itlb[i].flags && g_itlb[i].ea_page == (ea & ~0xfffu))
-		g_itlb[i].flags = 0;
+	for (int c = 0; c < 4; c++)
+		if (g_itlb_set[c][i].flags && g_itlb_set[c][i].ea_page == (ea & ~0xfffu))
+			g_itlb_set[c][i].flags = 0;
 }
 
 void nw_jit_itlb_note_msr(uint32_t old_msr, uint32_t new_msr)
 {
 	/* Instruction mappings and execute permissions depend on IR and PR. */
-	if ((old_msr ^ new_msr) & 0x00004020u)
-		itlb_clear();
+	if (nw_jit_legacy & NW_JIT_LEGACY_ITLB) {
+		if ((old_msr ^ new_msr) & 0x00004020u)
+			itlb_clear();
+		return;
+	}
+	g_itlb_ctx = (int)(((new_msr >> 4) & 2u) | ((new_msr >> 14) & 1u));
+	g_itlb_sticky = 0;
+}
+
+/* Safety net for any path that changes the MSR without telling the instruction TLB: the callers that already hold the
+ * MSR pass its PR bit. */
+void nw_jit_itlb_sync_msr(uint32_t msr)
+{
+	const int ctx = (int)(((msr >> 4) & 2u) | ((msr >> 14) & 1u));
+	if (ctx != g_itlb_ctx && !(nw_jit_legacy & NW_JIT_LEGACY_ITLB)) {
+		g_itlb_ctx = ctx;
+		g_itlb_sticky = 0;
+	}
 }
 
 uint64_t nw_jit_itlb_hits(void)
@@ -4576,11 +4669,20 @@ static int spr_is_user(uint32_t spr)
 	       spr == NW_PPC_SPR_CTR || spr == NW_PPC_SPR_XER;
 }
 
+/* SRR0, SRR1 and SPRG0..3: plain storage in the CPU. In supervisor state a read or write is a load or store of one word
+ * (nw_jit_cpu::jit_oea points at the six words), so generated code does it inline and the instruction does not end the
+ * block; user state takes the C system service, which raises the program exception. NW_JIT_LEGACY=sysnop turns it off. */
+static int spr_is_oea_inline(uint32_t spr)
+{
+	return !(nw_jit_legacy & NW_JIT_LEGACY_SYSNOP) &&
+	       (spr == 26 || spr == 27 || (spr >= NW_PPC_SPR_SPRG0 && spr <= NW_PPC_SPR_SPRG3));
+}
+
 static int spr_is_mfspr_ext(uint32_t spr)
 {
 	return spr == NW_PPC_SPR_TBL || spr == NW_PPC_SPR_TBU ||
 	       spr == NW_PPC_SPR_PVR || spr == NW_PPC_SPR_VRSAVE ||
-	       (spr >= NW_PPC_SPR_SPRG0 && spr <= NW_PPC_SPR_SPRG3);
+	       (spr >= NW_PPC_SPR_SPRG0 && spr <= NW_PPC_SPR_SPRG3) || spr_is_oea_inline(spr);
 }
 
 static int nw_vmx_op_supported(uint32_t op)
@@ -5470,7 +5572,8 @@ void nw_jit_pc_hot_dump(const char *why)
 int nw_jit_op_ends_block(uint32_t op)
 {
     if ((op >> 26) == 31 && ((op >> 1) & 1023) == 467 && nw_jit_op_system(op) &&
-        (((op >> 16) & 31) | ((op >> 6) & 992)) != 256) return 1;
+        (((op >> 16) & 31) | ((op >> 6) & 992)) != 256 &&
+        !spr_is_oea_inline(((op >> 16) & 31) | ((op >> 6) & 992))) return 1;
 	const int prim = (int)(op >> 26);
 	const int xo = (int)((op >> 1) & 0x3ff);
 	return prim == 16 || prim == 18 || prim == 17 ||
@@ -9232,10 +9335,16 @@ struct emit {
 static int emit_imm32(struct emit *e, int rd, uint32_t v);
 static int emit_imm64(struct emit *e, int xd, uint64_t v);
 
+static void prof_emit_call_count(struct emit *e, uint32_t blr);
+
 static int emit_w(struct emit *e, uint32_t w)
 {
 	e->just_set_pc = 0;
 	e->last_st_r = -1;
+	if (e->p >= e->end)
+		return 0;
+	if (nw_jit_prof_on && (w & 0xfffffc1fu) == 0xd63f0000u)
+		prof_emit_call_count(e, w);			/* profile mode: count executions of this helper call */
 	if (e->p >= e->end)
 		return 0;
 	*e->p++ = w;
@@ -9630,7 +9739,42 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store)
 	uint32_t *to_inline = e->p;
 	if (!emit_w(e, a64_b(0)))
 		return 0;
-	/* MSR[DR] off: PA = EA, no translated cache. */
+	/* MSR[DR] off: PA = EA. Plain RAM/ROM pages are served from the real-mode page cache (nw_jit_rtlb_ent) without a call;
+	 * a miss, I/O, a store to a page that holds translated code, and anything else take the helper below. */
+	uint32_t *rt_p = e->p, *rt_miss_tag = NULL, *rt_miss_host = NULL, *rt_join = NULL;
+	const int real_inline = !(nw_jit_legacy & NW_JIT_LEGACY_REAL);
+	if (real_inline) {
+		if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_rtlb))) ||
+		    !emit_w(e, a64_ubfx(W9, W8, 12, 10)) ||
+		    !emit_w(e, a64_add_x_lsl(X11, X10, 9, 5)) ||
+		    !emit_w(e, a64_and_imm_page(W13, W8)) ||
+		    !emit_w(e, a64_ldr_w(W12, X11, 0)) ||
+		    !emit_w(e, a64_cmp_w(W12, W13)))
+			return 0;
+		rt_miss_tag = e->p;
+		if (!emit_w(e, a64_b_cond(1, 0)))
+			return 0;
+		if (!emit_w(e, a64_ldr_x(X12, X11, is_store ? (uint32_t)offsetof(struct nw_jit_rtlb_ent, host_w) : (uint32_t)offsetof(struct nw_jit_rtlb_ent, host_r))))
+			return 0;
+		rt_miss_host = e->p;
+		if (!emit_w(e, a64_cbz64(X12, 0)))
+			return 0;
+		if (!emit_w(e, a64_and_imm_off12(W13, W8)) ||
+		    !emit_w(e, 0x8b2d418cu))			/* ADD X12, X12, W13, UXTW */
+			return 0;
+		if (is_store) {
+			if (!emit_w(e, 0x5ac00840u) ||		/* REV W0, W2 */
+			    !emit_w(e, a64_str_w(W0, X12, 0)))
+				return 0;
+		} else {
+			if (!emit_w(e, a64_ldr_w(W0, X12, 0)) ||
+			    !emit_w(e, 0x5ac00800u))		/* REV W0, W0 */
+				return 0;
+		}
+		rt_join = e->p;
+		if (!emit_w(e, a64_b(0)))
+			return 0;
+	}
 	uint32_t *ident_p = e->p;
 	if (!emit_w(e, a64_orr_reg(W1, 31, W8)))
 		return 0;
@@ -9668,14 +9812,16 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store)
 		if (!emit_w(e, 0x5ac00800u))		/* REV W0, W0 */
 			return 0;
 	}
-	if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_dtlb_hit))))
-		return 0;
-	if (!emit_w(e, 0xf940014du))			/* LDR X13, [X10] */
-		return 0;
-	if (!emit_w(e, 0x910005adu))			/* ADD X13, X13, #1 */
-		return 0;
-	if (!emit_w(e, 0xf900014du))			/* STR X13, [X10] */
-		return 0;
+	if (g_count_dtlb_hits || nw_jit_prof_on || (nw_jit_legacy & NW_JIT_LEGACY_DCOUNT)) {
+		if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_dtlb_hit))))
+			return 0;
+		if (!emit_w(e, 0xf940014du))			/* LDR X13, [X10] */
+			return 0;
+		if (!emit_w(e, 0x910005adu))			/* ADD X13, X13, #1 */
+			return 0;
+		if (!emit_w(e, 0xf900014du))			/* STR X13, [X10] */
+			return 0;
+	}
 	uint32_t *inline_join = e->p;
 	if (!emit_w(e, a64_b(0)))
 		return 0;
@@ -9687,7 +9833,12 @@ static int emit_dtlb_and_helpers(struct emit *e, int is_store)
 	if (!emit_blr_x19(e, off_hit))
 		return 0;
 	uint32_t *join = e->p;
-	*dr_off = a64_tbz(W12, 4, (int)(ident_p - dr_off));
+	*dr_off = a64_tbz(W12, 4, (int)((real_inline ? rt_p : ident_p) - dr_off));
+	if (real_inline) {
+		*rt_miss_tag = a64_b_cond(1, (int)(ident_p - rt_miss_tag));
+		*rt_miss_host = a64_cbz64(X12, (int)(ident_p - rt_miss_host));
+		*rt_join = a64_b((int)(join - rt_join));
+	}
 	*tag_ne = a64_b_cond(1, (int)(miss_p - tag_ne));
 	*nv = a64_tbz(W12, 0, (int)(miss_p - nv));
 	*pr_ne = a64_b_cond(1, (int)(miss_p - pr_ne));
@@ -12131,6 +12282,11 @@ static void nw_jit_log_wake(struct nw_jit_cpu *cpu, uint32_t pc)
 
 static int emit_wake_log(struct emit *e, uint32_t pc)
 {
+#if !NW_BOOT_LOG
+	/* The helper does nothing in a Release build: do not call it (it ran 20,000 times a second on an idle desktop). */
+	(void)e; (void)pc;
+	return 1;
+#endif
 	if (pc != 0x50324634u && pc != 0x50324638u && pc != 0x50324664u &&
 	    pc != 0x50324668u && pc != 0x5032466cu &&
 	    pc != 0x503141f0u && pc != 0x5031423cu && pc != 0x50314280u &&
@@ -12152,6 +12308,56 @@ static int emit_wake_log(struct emit *e, uint32_t pc)
 
 static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 {
+	if ((op >> 26) == 31 && !(nw_jit_legacy & NW_JIT_LEGACY_SYSNOP) && nw_jit_mode() != NW_JIT_VERIFY) {
+		/* Instructions whose whole effect on this machine is a memory barrier or nothing: they were a call into the C
+		 * system service (operand fetch, privilege tests, the host callback) each, 6.3 million of them in a boot. The
+		 * host's service does nothing for dcbst, dcbf, dcbtst and dcbt (no cache is modelled and the access hints
+		 * cannot fault there); sync and eieio order guest memory, so the barrier stays. */
+		const unsigned x = (op >> 1) & 1023;
+		if (x == 598 || x == 854)
+			return emit_w(e, 0xd5033bbfu);			/* dmb ish */
+		if (x == 54 || x == 86 || x == 246 || x == 278)
+			return 1;
+	}
+	if (nw_jit_op_system(op) && (op >> 26) == 31 && (((op >> 1) & 1023) == 339 || ((op >> 1) & 1023) == 467) &&
+	    spr_is_oea_inline(spr_num(op)) && nw_jit_mode() != NW_JIT_VERIFY) {
+		const unsigned x = (op >> 1) & 1023;
+		const int rd = (int)((op >> 21) & 0x1f);
+		const uint32_t spr = spr_num(op);
+		const uint32_t word = (spr == 26 ? 0u : spr == 27 ? 1u : 2u + (spr - NW_PPC_SPR_SPRG0)) * 4u;
+		uint32_t *to_slow1, *to_slow2;
+		/* supervisor state only (MSR[PR] clear), and only when the host published the words */
+		if (!emit_w(e, a64_ldr_w(W9, X19, (uint32_t)offsetof(struct nw_jit_cpu, msr))))
+			return 0;
+		to_slow1 = e->p;
+		if (!emit_w(e, a64_tbz(W9, 14, 0) | 0x01000000u))			/* tbnz w9, #14, slow */
+			return 0;
+		if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_oea))))
+			return 0;
+		to_slow2 = e->p;
+		if (!emit_w(e, a64_cbz64(X10, 0)))
+			return 0;
+		if (x == 339) {
+			if (!emit_w(e, a64_ldr_w(W8, X10, word)) || !emit_store_gpr(e, W8, rd))
+				return 0;
+		} else {
+			if (!emit_load_gpr(e, W8, rd) || !emit_w(e, a64_str_w(W8, X10, word)))
+				return 0;
+		}
+		uint32_t *done = e->p;
+		if (!emit_w(e, a64_b(0)))
+			return 0;
+		uint32_t *slow = e->p;
+		*to_slow1 = a64_tbz(W9, 14, (int)(slow - to_slow1)) | 0x01000000u;
+		*to_slow2 = a64_cbz64(X10, (int)(slow - to_slow2));
+		if (!emit_set_pc(e, pc) || !emit_w(e, 0xaa1303e0u) || !emit_imm32(e, W1, op) ||
+		    !emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_system) || !emit_w(e, 0xd63f0120u) || !emit_w(e, 0xaa1303e0u))
+			return 0;
+		if (!emit_fault_check(e))
+			return 0;
+		*done = a64_b((int)(e->p - done));
+		return 1;
+	}
 	if (nw_jit_op_system(op)) {
 		if (!emit_set_pc(e, pc) || !emit_w(e, 0xaa1303e0u) || !emit_imm32(e, W1, op) ||
 		    !emit_imm64(e, X9, (uint64_t)(uintptr_t)nw_jit_helper_system) || !emit_w(e, 0xd63f0120u) || !emit_w(e, 0xaa1303e0u)) return 0;
@@ -14750,6 +14956,7 @@ static int compact_code(void)
 		g_code_spare = (uint8_t *)m;
 	}
 	link_epoch();
+	const uint64_t compact_t0 = nw_nsnow();
 	const size_t before = g_code_used;
 	size_t used = 0;
 	int live = 0;
@@ -14789,12 +14996,17 @@ static int compact_code(void)
 #ifdef __APPLE__
 	sys_icache_invalidate(g_code_spare, used ? used : 4);
 	pthread_jit_write_protect_np(1);
+	/* __builtin___clear_cache is the same call again: a second walk over every line of the arena */
+	if (nw_jit_legacy & NW_JIT_LEGACY_ARENA)
 #endif
 	__builtin___clear_cache((char *)g_code_spare, (char *)g_code_spare + (used ? used : 4));
 	uint8_t *old = g_code;
 	g_code = g_code_spare;
 	g_code_spare = old;
 	g_code_used = used;
+	g_arena_compacts++;
+	g_arena_compact_bytes += used;
+	g_arena_compact_ns += nw_nsnow() - compact_t0;
 	if (dropped)
 		pagebit_rebuild();
 	if (nw_jit_stats_wanted()) {
@@ -14860,6 +15072,7 @@ static size_t evict_cold(size_t want)
 	link_epoch();
 	size_t freed = 0;
 	int n = 0;
+	g_arena_evicts++;
 	for (int i = 0; i < NW_JIT_CACHE && freed < want; i++) {
 		if (!movable_block(i) || g_cache[i].hits > cut)
 			continue;
@@ -14923,7 +15136,9 @@ static int ensure_code_room(size_t need)
 	 * appeared, so cold blocks are tombstoned before the pack. */
 	const size_t live = live_movable_bytes();
 	const size_t holes = g_code_used > live ? g_code_used - live : 0;
-	const size_t want = (size_t)NW_JIT_BANK_SIZE;
+	/* Every pass copies the whole live set, so free a quarter of the arena each time: at one bank (1/16) the busy desktop
+	 * packed 63 MB about five times a second. */
+	const size_t want = (nw_jit_legacy & NW_JIT_LEGACY_ARENA) ? (size_t)NW_JIT_BANK_SIZE : (size_t)NW_JIT_CODE_SIZE / 4;
 	if (holes < want && evict_cold(want - holes) == 0 && holes < need) {
 		g_jit_no_room = 1;
 		return 0;
@@ -14945,6 +15160,345 @@ static int ensure_code_room(size_t need)
 	return g_code_used + need <= NW_JIT_CODE_SIZE;
 }
 
+/* ---- Profiler (NW_JIT_PROFILE=<file>) -------------------------------------------------------------------------------
+ * Answers "where does the guest time go and what does the JIT do with it": every compiled block gets an execution counter
+ * (an increment at the start of its body, so direct links and the C dispatcher are both counted), and every emitted guest
+ * instruction is classified by what its code does (inline only, or calls a C helper, and which one). Instructions the
+ * JIT does not compile run in the interpreter; those are counted by opcode at the interpreter's one call site
+ * (nw_jit_prof_interp). The file is written at exit, or whenever "<file>.now" appears (it is removed), and "<file>.reset"
+ * zeroes the counters, so a run can be split into phases. Nothing here changes the code the JIT emits unless it is on:
+ * the only effect is four extra instructions at each block's start. tools/perf/jit_report.py turns the file into tables.
+ */
+int nw_jit_prof_on;
+enum { PROF_MAX_BLOCKS = 1 << 20, PROF_MAX_OPS = 1 << 24, PROF_MAX_HELPERS = 4096 };
+struct prof_block { uint32_t pc; uint16_t n; uint16_t pad; uint32_t first; uint32_t reserved; };
+static uint64_t *g_prof_count;
+static struct prof_block *g_prof_blocks;
+static uint32_t *g_prof_ops;
+static uint16_t (*g_prof_help)[4];		/* per op: up to four helper ids (index + 1), 0 = none */
+static uint8_t *g_prof_ncalls;			/* per op: number of call instructions in its code */
+static uint16_t *g_prof_words;			/* per op: words of code it emitted (saturated) */
+static uint64_t g_prof_helper_addr[PROF_MAX_HELPERS];
+static uint32_t g_prof_nhelpers, g_prof_nblocks, g_prof_nops;
+static uint64_t g_prof_interp[64 * 1024];	/* ops the interpreter executed, by (primary opcode << 10 | extended opcode) */
+static uint64_t g_prof_interp_total;
+static const char *g_prof_path;
+static int g_prof_atexit;
+
+static void prof_dump(const char *why);
+
+/* The run-wide counters the dump reports; "reset" records them so a phase's numbers are the difference. */
+static uint64_t g_prof_link_base, g_prof_idle_base[3];
+static uint64_t g_prof_base[9], g_prof_flush_base[2][NW_JIT_FL_N], g_prof_arena_base[5];
+static void prof_snapshot(uint64_t *v)
+{
+	v[0] = g_exec_blocks; v[1] = g_exec_insns; v[2] = g_chain_hops; v[3] = g_compiles; v[4] = g_flush;
+	v[5] = g_dtlb_hit; v[6] = g_dtlb_miss; v[7] = g_itlb_hit; v[8] = g_itlb_miss;
+}
+
+static void prof_init(void)
+{
+	static int done;
+	if (done)
+		return;
+	done = 1;
+	const char *path = getenv("NW_JIT_PROFILE");
+	if (!path || !*path)
+		return;
+	g_prof_path = strdup(path);
+	g_prof_count = (uint64_t *)mmap(NULL, sizeof(uint64_t) * PROF_MAX_BLOCKS, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	g_prof_blocks = (struct prof_block *)mmap(NULL, sizeof(struct prof_block) * PROF_MAX_BLOCKS, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	g_prof_ops = (uint32_t *)mmap(NULL, sizeof(uint32_t) * PROF_MAX_OPS, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	g_prof_help = (uint16_t (*)[4])mmap(NULL, sizeof(uint16_t) * 4 * PROF_MAX_OPS, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	g_prof_ncalls = (uint8_t *)mmap(NULL, PROF_MAX_OPS, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	g_prof_words = (uint16_t *)mmap(NULL, sizeof(uint16_t) * PROF_MAX_OPS, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	if (g_prof_count == MAP_FAILED || g_prof_blocks == MAP_FAILED || g_prof_ops == MAP_FAILED || g_prof_help == MAP_FAILED ||
+	    g_prof_ncalls == MAP_FAILED || g_prof_words == MAP_FAILED) {
+		g_prof_count = NULL;
+		return;
+	}
+	nw_jit_prof_on = 1;
+	if (!g_prof_atexit) {
+		g_prof_atexit = 1;
+		atexit([] { prof_dump("exit"); });
+	}
+	fprintf(stdout, "NW-JIT profile on: %s\n", g_prof_path);
+	fflush(stdout);
+}
+
+/* Calls into nw_jit_helper_system by instruction (and, for mfspr/mtspr, by register). */
+static uint64_t g_prof_sys_n[64 * 1024], g_prof_spr_n[2][1024], g_prof_sys_base_dummy;
+static void prof_system_note(uint32_t op, uint32_t a)
+{
+	const uint32_t p = op >> 26, x = (op >> 1) & 1023;
+	if (p == 31 && (x == 339 || x == 467))
+		g_prof_spr_n[x == 467][a & 1023]++;
+	else
+		g_prof_sys_n[(p << 10) | x]++;
+}
+static uint64_t g_prof_hcount[PROF_MAX_HELPERS + 1];	/* executions of each helper call, by helper id (0: target not readable) */
+static int g_prof_in_compile;
+static uint32_t g_prof_cur_op;				/* the guest instruction being emitted */
+
+/* A name for an op: primary opcode, plus the extended opcode where the encoding has one (D-form ops have none: those bits are an offset). */
+static uint32_t prof_op_key(uint32_t op)
+{
+	const uint32_t prim = op >> 26;
+	const int has_xo = prim == 4 || prim == 19 || prim == 31 || prim == 59 || prim == 63;
+	return (prim << 10) | (has_xo ? ((op >> 1) & 0x3ffu) : 0u);
+}
+static uint64_t g_prof_compile_ns;			/* time spent in compile_block */
+
+static uint32_t prof_helper_id(uint64_t target)
+{
+	if (!target)
+		return 0;
+	for (uint32_t k = 0; k < g_prof_nhelpers; k++)
+		if (g_prof_helper_addr[k] == target)
+			return k + 1;
+	if (g_prof_nhelpers < PROF_MAX_HELPERS) {
+		g_prof_helper_addr[g_prof_nhelpers] = target;
+		return ++g_prof_nhelpers;
+	}
+	return 0;
+}
+
+static uint64_t prof_call_target(const uint32_t *from, const uint32_t *w);
+
+/* In profile mode every helper call is preceded by ++count[helper] (x10/x11 are scratch: arguments are in x0-x7 and the
+ * call clobbers everything else), so the report has exact call counts instead of call sites. */
+static void prof_emit_call_count(struct emit *e, uint32_t blr)
+{
+	if (!g_prof_in_compile || e->p + 8 >= e->end)
+		return;
+	const uint32_t *from = e->p - 12 < e->start ? e->start : e->p - 12;
+	const uint32_t synthetic = blr;
+	/* the target is read from the words already emitted; prof_call_target looks backwards from a call at e->p */
+	uint64_t target = prof_call_target(from, e->p);
+	(void)synthetic;
+	if (!target)					/* an indirect call (function pointer loaded from memory): name it after the guest op */
+	{
+		/* ldr x9, [x19, #off]: which of the cpu struct's function pointers (data-TLB miss, real-mode access, ...) */
+		const uint32_t prev = e->p[-1];
+		const uint64_t off = (prev & 0xffc003ffu) == 0xf9400269u ? ((prev >> 10) & 0xfffu) * 8u : 0u;
+		target = 0xdead000000000000ull | (off << 20) | prof_op_key(g_prof_cur_op);
+	}
+	const uint32_t id = prof_helper_id(target);
+	const uint64_t addr = (uint64_t)(uintptr_t)&g_prof_hcount[id];
+	*e->p++ = a64_movz64(X10, (uint32_t)(addr & 0xffffu), 0);
+	*e->p++ = a64_movk64(X10, (uint32_t)((addr >> 16) & 0xffffu), 1);
+	*e->p++ = a64_movk64(X10, (uint32_t)((addr >> 32) & 0xffffu), 2);
+	*e->p++ = a64_movk64(X10, (uint32_t)((addr >> 48) & 0xffffu), 3);
+	*e->p++ = a64_ldr_x(X11, X10, 0);
+	*e->p++ = 0x9100056bu;				/* add x11, x11, #1 */
+	*e->p++ = 0xf900014bu;				/* str x11, [x10] */
+}
+
+/* The helper a call instruction at `w` goes to: the constant loaded into its register just before (movz/movk x, #imm). */
+static uint64_t prof_call_target(const uint32_t *from, const uint32_t *w)
+{
+	/* `w` may point at the first free word (the call is being emitted): then the register is the one most recently loaded */
+	int rn = (int)((*w >> 5) & 31u);
+	if ((*w & 0xfffffc1fu) != 0xd63f0000u) {
+		rn = 9;					/* helper calls are blr x9 */
+		for (const uint32_t *q = w - 1; q >= from && w - q <= 10; q--)
+			if ((*q & 0xff800000u) == 0xd2800000u) { rn = (int)(*q & 31u); break; }
+	}
+	uint64_t value = 0;
+	unsigned have = 0;
+	for (const uint32_t *q = w - 1; q >= from && w - q <= 10; q--) {
+		const uint32_t x = *q;
+		const int is_movz = (x & 0xff800000u) == 0xd2800000u, is_movk = (x & 0xff800000u) == 0xf2800000u;
+		if (!is_movz && !is_movk)
+			continue;
+		if ((int)(x & 31u) != rn)
+			continue;
+		const unsigned hw = (x >> 21) & 3u;
+		value |= (uint64_t)((x >> 5) & 0xffffu) << (16 * hw);
+		have |= 1u << hw;
+		if (is_movz)
+			return have ? value : 0;
+	}
+	return 0;
+}
+
+/* Called after each guest instruction is emitted: what did its code (the words in [from, to)) do? */
+static void prof_note_op(uint32_t block, uint32_t op, const uint32_t *from, const uint32_t *to)
+{
+	const uint32_t i = g_prof_nops;
+	if (i >= PROF_MAX_OPS)
+		return;
+	g_prof_ops[i] = op;
+	unsigned nhelp = 0, ncall = 0;
+	uint16_t ids[4] = {0, 0, 0, 0};
+	for (const uint32_t *w = from; w < to; w++) {
+		if ((*w & 0xfffffc1fu) != 0xd63f0000u)
+			continue;
+		ncall++;
+		uint64_t target = prof_call_target(from, w);
+		if (!target)
+			target = 0xdead000000000000ull | prof_op_key(op);
+		const uint32_t id = prof_helper_id(target);
+		if (nhelp < 4)
+			ids[nhelp++] = (uint16_t)id;		/* 0: a call whose target could not be read */
+	}
+	for (int k = 0; k < 4; k++)
+		g_prof_help[i][k] = ids[k];
+	g_prof_ncalls[i] = (uint8_t)(ncall > 255 ? 255 : ncall);
+	const size_t words = (size_t)(to - from);
+	g_prof_words[i] = (uint16_t)(words > 65535 ? 65535 : words);
+	g_prof_nops = i + 1;
+	g_prof_blocks[block].n++;
+}
+
+/* Reserves a block record and returns its index, or -1 (profiling off or full). */
+static int prof_begin_block(uint32_t guest_pc)
+{
+	if (!nw_jit_prof_on || g_prof_nblocks >= PROF_MAX_BLOCKS || g_prof_nops + 64 >= PROF_MAX_OPS)
+		return -1;
+	const uint32_t b = g_prof_nblocks;
+	g_prof_blocks[b].pc = guest_pc;
+	g_prof_blocks[b].n = 0;
+	g_prof_blocks[b].first = g_prof_nops;
+	g_prof_count[b] = 0;
+	return (int)b;
+}
+
+static void prof_commit_block(int b)
+{
+	if (b >= 0)
+		__atomic_store_n(&g_prof_nblocks, (uint32_t)b + 1, __ATOMIC_RELEASE);
+}
+
+void nw_jit_prof_interp(uint32_t op)
+{
+	g_prof_interp[((op >> 26) << 10) | ((op >> 1) & 0x3ffu)]++;
+	g_prof_interp_total++;
+}
+
+static void prof_dump(const char *why)
+{
+	if (!nw_jit_prof_on || !g_prof_path)
+		return;
+	char tmp[1024];
+	snprintf(tmp, sizeof tmp, "%s.tmp", g_prof_path);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	fprintf(f, "T\twhy\t%s\n", why);
+	uint64_t cur[9];
+	prof_snapshot(cur);
+	fprintf(f, "S\tblocks_exec_c\t%llu\nS\tinsns_exec_c\t%llu\nS\tchain_hops\t%llu\nS\tcompiles\t%llu\nS\tflush\t%llu\nS\tdtlb_hit\t%llu\nS\tdtlb_miss\t%llu\nS\titlb_hit\t%llu\nS\titlb_miss\t%llu\nS\tinterp_total\t%llu\n",
+		(unsigned long long)(cur[0] - g_prof_base[0]), (unsigned long long)(cur[1] - g_prof_base[1]), (unsigned long long)(cur[2] - g_prof_base[2]),
+		(unsigned long long)(cur[3] - g_prof_base[3]), (unsigned long long)(cur[4] - g_prof_base[4]), (unsigned long long)(cur[5] - g_prof_base[5]),
+		(unsigned long long)(cur[6] - g_prof_base[6]), (unsigned long long)(cur[7] - g_prof_base[7]), (unsigned long long)(cur[8] - g_prof_base[8]),
+		(unsigned long long)g_prof_interp_total);
+	{
+		static const char *const src_name[NW_JIT_FL_N] = {"store", "icbi", "tlb", "sr", "bat", "sdr1", "wrap", "istore", "host", "other"};
+		for (int i = 0; i < NW_JIT_FL_N; i++)
+			fprintf(f, "S\tflush_calls_%s\t%llu\nS\tflush_entries_%s\t%llu\n", src_name[i], (unsigned long long)(g_flush_calls[i] - g_prof_flush_base[0][i]),
+				src_name[i], (unsigned long long)(g_flush_src[i] - g_prof_flush_base[1][i]));
+		static const char *const cause_name[6] = {"computed_target_miss", "no_site", "never_linked", "stale_generation", "register_masks", "hop_budget_spent"};
+		for (int i = 0; i < 6; i++)
+			fprintf(f, "S\tchain_%s\t%llu\n", cause_name[i], (unsigned long long)(g_chain_cause[i] - g_chain_cause_base[i]));
+		fprintf(f, "S\tidle_sleeps\t%llu\nS\tidle_timeouts\t%llu\nS\tidle_resumes\t%llu\n", (unsigned long long)(nw_idle_sleeps - g_prof_idle_base[0]),
+			(unsigned long long)(nw_idle_timeouts - g_prof_idle_base[1]), (unsigned long long)(nw_idle_resumes - g_prof_idle_base[2]));
+		fprintf(f, "S\tibtc_epochs_link_cumulative\t%llu\nS\tibtc_epochs_itlb_flush_cumulative\t%llu\nS\tibtc_epochs_itlb_drop_page_cumulative\t%llu\nS\tibtc_epochs_mtsr_cumulative\t%llu\nS\tibtc_fills_cumulative\t%llu\n",
+			(unsigned long long)g_ibtc_epochs[0], (unsigned long long)g_ibtc_epochs[1], (unsigned long long)g_ibtc_epochs[2], (unsigned long long)g_ibtc_epochs[3], (unsigned long long)g_ibtc_fill);
+		for (int i = 0; i < 16; i++)
+			if (g_mtsr_by_seg[i])
+				fprintf(f, "S\tmtsr_changes_segment_%x_cumulative\t%llu\n", i, (unsigned long long)g_mtsr_by_seg[i]);
+		fprintf(f, "S\titlb_clears_cumulative\t%llu\n", (unsigned long long)g_itlb_clears);
+		fprintf(f, "S\tmtsr_total_cumulative\t%llu\nS\tmtsr_xlate_changes_cumulative\t%llu\n", (unsigned long long)g_mtsr_total, (unsigned long long)g_mtsr_vsid);
+		fprintf(f, "S\tlinks_made\t%llu\n", (unsigned long long)(g_link_made - g_prof_link_base));
+		fprintf(f, "S\tarena_compacts\t%llu\nS\tarena_compact_ns\t%llu\nS\tarena_compact_bytes\t%llu\nS\tarena_bank_wipes\t%llu\nS\tarena_evicts\t%llu\n",
+			(unsigned long long)(g_arena_compacts - g_prof_arena_base[0]), (unsigned long long)(g_arena_compact_ns - g_prof_arena_base[1]),
+			(unsigned long long)(g_arena_compact_bytes - g_prof_arena_base[2]), (unsigned long long)(g_arena_bank_wipes - g_prof_arena_base[3]),
+			(unsigned long long)(g_arena_evicts - g_prof_arena_base[4]));
+	}
+	for (uint32_t k = 0; k < 64 * 1024; k++)
+		if (g_prof_sys_n[k])
+			fprintf(f, "Y\t%u\t%llu\n", k, (unsigned long long)g_prof_sys_n[k]);
+	for (int w = 0; w < 2; w++)
+		for (uint32_t k = 0; k < 1024; k++)
+			if (g_prof_spr_n[w][k])
+				fprintf(f, "R\t%d\t%u\t%llu\n", w, k, (unsigned long long)g_prof_spr_n[w][k]);
+	const uint32_t nh = g_prof_nhelpers;
+	for (uint32_t k = 0; k < nh; k++) {
+		Dl_info info;
+		char synthetic[64];
+		const char *name = "?";
+		if ((g_prof_helper_addr[k] >> 48) == 0xdead) {
+			const uint32_t off = (uint32_t)((g_prof_helper_addr[k] >> 20) & 0xfffu);
+			const char *via = off == offsetof(struct nw_jit_cpu, jit_lwz) ? "dtlb-miss-load" : off == offsetof(struct nw_jit_cpu, jit_stw) ? "dtlb-miss-store" :
+				off == offsetof(struct nw_jit_cpu, jit_lwz_pa) ? "real-mode-load" : off == offsetof(struct nw_jit_cpu, jit_stw_pa) ? "real-mode-store" : "indirect";
+			snprintf(synthetic, sizeof synthetic, "%s@%u/%u", via, (unsigned)((g_prof_helper_addr[k] >> 10) & 0x3f), (unsigned)(g_prof_helper_addr[k] & 0x3ff));
+			name = synthetic;
+		} else if (dladdr((void *)(uintptr_t)g_prof_helper_addr[k], &info) && info.dli_sname)
+			name = info.dli_sname;
+		fprintf(f, "H\t%u\t%llx\t%s\n", k + 1, (unsigned long long)g_prof_helper_addr[k], name);
+	}
+	for (uint32_t k = 0; k <= nh; k++)
+		if (g_prof_hcount[k])
+			fprintf(f, "C\t%u\t%llu\n", k, (unsigned long long)g_prof_hcount[k]);
+	fprintf(f, "S\tcompile_ns\t%llu\nS\twx_ns\t%llu\nS\ticache_ns\t%llu\nS\twx_n\t%llu\n", (unsigned long long)g_prof_compile_ns,
+		(unsigned long long)g_wx_ns, (unsigned long long)g_icache_ns, (unsigned long long)g_wx_n);
+	for (unsigned k = 0; k < 64 * 1024; k++)
+		if (g_prof_interp[k])
+			fprintf(f, "I\t%u\t%u\t%llu\n", k >> 10, k & 0x3ffu, (unsigned long long)g_prof_interp[k]);
+	const uint32_t nb = __atomic_load_n(&g_prof_nblocks, __ATOMIC_ACQUIRE);
+	for (uint32_t b = 0; b < nb; b++) {
+		const uint64_t count = __atomic_load_n(&g_prof_count[b], __ATOMIC_RELAXED);
+		if (!count)
+			continue;
+		fprintf(f, "B\t%08x\t%u\t%llu\n", g_prof_blocks[b].pc, g_prof_blocks[b].n, (unsigned long long)count);
+		for (uint32_t i = 0; i < g_prof_blocks[b].n; i++) {
+			const uint32_t o = g_prof_blocks[b].first + i;
+			fprintf(f, "O\t%08x\t%u\t%u", g_prof_ops[o], g_prof_ncalls[o], g_prof_words[o]);
+			for (int k = 0; k < 4; k++)
+				if (g_prof_ncalls[o] > (uint32_t)k)
+					fprintf(f, "\t%u", g_prof_help[o][k]);
+			fputc('\n', f);
+		}
+	}
+	fclose(f);
+	rename(tmp, g_prof_path);
+}
+
+/* Called about once a second from the timer thread: honours "<file>.now" (dump) and "<file>.reset" (zero the counters). */
+void nw_jit_prof_tick(void)
+{
+	if (!nw_jit_prof_on || !g_prof_path)
+		return;
+	char path[1100];
+	snprintf(path, sizeof path, "%s.reset", g_prof_path);
+	if (access(path, F_OK) == 0) {
+		unlink(path);
+		const uint32_t nb = __atomic_load_n(&g_prof_nblocks, __ATOMIC_ACQUIRE);
+		for (uint32_t b = 0; b < nb; b++)
+			__atomic_store_n(&g_prof_count[b], 0, __ATOMIC_RELAXED);
+		memset(g_prof_interp, 0, sizeof g_prof_interp);
+		memset(g_prof_hcount, 0, sizeof g_prof_hcount);
+		memset(g_prof_sys_n, 0, sizeof g_prof_sys_n);
+		memset(g_prof_spr_n, 0, sizeof g_prof_spr_n);
+		g_prof_interp_total = 0;
+		prof_snapshot(g_prof_base);
+		g_prof_link_base = g_link_made;
+		g_prof_idle_base[0] = nw_idle_sleeps; g_prof_idle_base[1] = nw_idle_timeouts; g_prof_idle_base[2] = nw_idle_resumes;
+		memcpy(g_chain_cause_base, g_chain_cause, sizeof g_chain_cause);
+		memcpy(g_prof_flush_base[0], g_flush_calls, sizeof g_flush_calls);
+		memcpy(g_prof_flush_base[1], g_flush_src, sizeof g_flush_src);
+		g_prof_arena_base[0] = g_arena_compacts; g_prof_arena_base[1] = g_arena_compact_ns; g_prof_arena_base[2] = g_arena_compact_bytes;
+		g_prof_arena_base[3] = g_arena_bank_wipes; g_prof_arena_base[4] = g_arena_evicts;
+		g_prof_compile_ns = g_wx_ns = g_icache_ns = g_wx_n = 0;
+	}
+	snprintf(path, sizeof path, "%s.now", g_prof_path);
+	if (access(path, F_OK) == 0) {
+		unlink(path);
+		prof_dump("now");
+	}
+}
+
 static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc,
 			       size_t *code_bytes)
 {
@@ -14958,6 +15512,7 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc,
 		if (!ensure_code_room(need))
 			return NULL;
 	}
+	g_prof_in_compile = 0;
 	g_compiles++;
 	if ((g_compiles & (NW_JIT_HITS_AGE - 1u)) == 0) {
 		for (int i = 0; i < NW_JIT_CACHE; i++)
@@ -15024,14 +15579,33 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc,
 		return NULL;
 	}
 	g_link_body_off = (int)((uint8_t *)e.p - (uint8_t *)start);
-	for (int i = 0; i < n; i++) {
-		if (!emit_op(&e, ops[i], guest_pc + (uint32_t)i * 4, i == n - 1)) {
+	prof_init();
+	const int prof_block = prof_begin_block(guest_pc);
+	g_prof_in_compile = prof_block >= 0;
+	if (prof_block >= 0) {
+		/* ++counter[block], in the body so a direct link into it counts too */
+		if (!emit_imm64(&e, X10, (uint64_t)(uintptr_t)&g_prof_count[prof_block]) || !emit_w(&e, a64_ldr_x(X11, X10, 0)) ||
+		    !emit_w(&e, 0x9100056bu) || !emit_w(&e, 0xf900014bu)) {
 #ifdef __APPLE__
 			pthread_jit_write_protect_np(1);
 #endif
 			return NULL;
 		}
 	}
+	for (int i = 0; i < n; i++) {
+		const uint32_t *op_from = e.p;
+		g_prof_cur_op = ops[i];
+		if (!emit_op(&e, ops[i], guest_pc + (uint32_t)i * 4, i == n - 1)) {
+#ifdef __APPLE__
+			pthread_jit_write_protect_np(1);
+#endif
+			return NULL;
+		}
+		if (prof_block >= 0)
+			prof_note_op((uint32_t)prof_block, ops[i], op_from, e.p);
+	}
+	prof_commit_block(prof_block);
+	g_prof_in_compile = 0;
 	if (!is_term(ops[n - 1])) {
 		if (!emit_set_pc(&e, guest_pc + (uint32_t)n * 4)) {
 #ifdef __APPLE__
@@ -15085,13 +15659,14 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc,
 		sys_icache_invalidate(start, bytes);
 		g_icache_ns += nw_nsnow() - t0;
 	}
+	if (nw_jit_legacy & NW_JIT_LEGACY_ARENA)
 #endif
 	__builtin___clear_cache((char *)start, (char *)e.p);
 	return (nw_jit_fn)start;
 }
 
-nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
-			uint32_t phys_page, uint32_t msr_ir, uint32_t endian)
+static nw_jit_fn nw_jit_compile_impl(const uint32_t *ops, int n, uint32_t guest_pc,
+				     uint32_t phys_page, uint32_t msr_ir, uint32_t endian)
 {
 	if (endian != 0)
 		return NULL;
@@ -15152,11 +15727,26 @@ nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
 	return fn;
 }
 
+nw_jit_fn nw_jit_compile(const uint32_t *ops, int n, uint32_t guest_pc,
+			uint32_t phys_page, uint32_t msr_ir, uint32_t endian)
+{
+	if (!nw_jit_prof_on)
+		return nw_jit_compile_impl(ops, n, guest_pc, phys_page, msr_ir, endian);
+	const uint64_t t0 = nw_nsnow();
+	nw_jit_fn fn = nw_jit_compile_impl(ops, n, guest_pc, phys_page, msr_ir, endian);
+	g_prof_compile_ns += nw_nsnow() - t0;
+	return fn;
+}
+
 #else
 
 nw_jit_fn nw_jit_compile(const uint32_t *, int, uint32_t, uint32_t, uint32_t, uint32_t)
 {
 	return NULL;
 }
+
+int nw_jit_prof_on;
+void nw_jit_prof_interp(uint32_t) {}
+void nw_jit_prof_tick(void) {}
 
 #endif

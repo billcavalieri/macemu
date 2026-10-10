@@ -26,10 +26,15 @@ waitfor a 300; check "VM a, started by the manager, reaches the Sheep Shears too
 waitfor b 300; check "VM b, started by the manager, reaches the Sheep Shears tool" $?
 sleep 2
 [ "$(grep -ac 'NW-BOOT NewWorld Boot' "$WORK/logs/a.log")" = 1 ]; check "starting a VM that is already running does not start it twice" $?
-i=0; while [ $i -lt 360 ] && pgrep -f "$WORK/VMs/a/prefs --vm-id" > /dev/null; do sleep 0.5; i=$((i+1)); done
+i=0; while [ $i -lt 360 ] && pgrep -f "$WORK/VMs/[ab]/prefs --vm-id" > /dev/null; do sleep 0.5; i=$((i+1)); done
 ! pgrep -f "$WORK/VMs/[ab]/prefs --vm-id" > /dev/null; check "both VM processes quit by themselves after the guest shut down" $?
 kill -0 $M 2>/dev/null; check "the manager is still running after its VMs quit" $?
 [ -s "$WORK/VMs/a/nvram.flash" ] && [ -s "$WORK/VMs/b/nvram.flash" ]; check "each VM kept its NVRAM in its own folder" $?
+# The menu bars (listed in each process's output with diagnostics on): the library has the standard shortcuts; a VM's
+# menus have none, because Mac OS 9 applications use Command-Q, -W, -N, -comma and -M themselves
+grep -aq "^NW-MENU SheepShaver / Quit SheepShaver  cmd-q$" "$WORK/manager.log" && grep -aq "^NW-MENU File / New Virtual Machine…  cmd-n$" "$WORK/manager.log" \
+    && grep -aq "^NW-MENU SheepShaver / Settings…  cmd-,$" "$WORK/manager.log"; check "the library's menu bar has Quit, New and Settings with their shortcuts" $?
+grep -aq "^NW-MENU Guest / " "$WORK/logs/a.log" && ! grep -aE "^NW-MENU .*  (cmd-)?[^ ]+$" "$WORK/logs/a.log" | grep -q .; check "a VM's menus (Guest menu included) have no keyboard shortcuts" $?
 echo "---"; grep -ah "guest tool connected\|NVRAM:" "$WORK"/logs/*.log | head
 [ $fail -eq 0 ] && echo "manager test: passed" || echo "manager test: FAILED"
 exit $fail

@@ -186,6 +186,71 @@ static void QuitTool(void)
     }
 }
 
+static Boolean FindBySignature(OSType signature, ProcessSerialNumber *psn)
+{
+    ProcessInfoRec info;
+    psn->highLongOfPSN = 0;
+    psn->lowLongOfPSN = kNoProcess;
+    while (GetNextProcess(psn) == noErr) {
+        info.processInfoLength = sizeof info;
+        info.processName = NULL;
+        info.processAppSpec = NULL;
+        if (GetProcessInformation(psn, &info) == noErr && info.processSignature == signature)
+            return true;
+    }
+    return false;
+}
+
+/* What a double-click on the control panel does: the Finder is asked to open it. Reports (in the host's log) whether
+ * the panel started within eight seconds, then quits it again. A control panel application must have the file type
+ * 'APPC' in capitals, like every Mac OS 9 control panel; with any other type the Finder treats the file as a document
+ * and answers "the application program that created it could not be found", so this catches a wrong type. */
+static void TryOpenPanel(const FSSpec *panel)
+{
+    AEAddressDesc target;
+    AppleEvent event, reply;
+    OSType finderSig = 'MACS';
+    ProcessSerialNumber psn;
+    unsigned long until;
+    Boolean opened = false;
+    if (AECreateDesc(typeApplSignature, &finderSig, sizeof finderSig, &target) != noErr)
+        return;
+    if (AECreateAppleEvent(kCoreEventClass, kAEOpenDocuments, &target, kAutoGenerateReturnID, kAnyTransactionID, &event) == noErr) {
+        AEDescList list;
+        if (AECreateList(NULL, 0, false, &list) == noErr) {
+            AEPutPtr(&list, 1, typeFSS, panel, sizeof(FSSpec));
+            AEPutParamDesc(&event, keyDirectObject, &list);
+            AEDisposeDesc(&list);
+        }
+        reply.descriptorType = typeNull;
+        reply.dataHandle = NULL;
+        AESend(&event, &reply, kAENoReply, kAENormalPriority, kAEDefaultTimeout, NULL, NULL);
+        AEDisposeDesc(&event);
+    }
+    AEDisposeDesc(&target);
+    until = TickCount() + 8 * 60;
+    while (TickCount() < until && !opened) {
+        EventRecord ev;
+        WaitNextEvent(0, &ev, 10, NULL);
+        opened = FindBySignature('ShSp', &psn);
+    }
+    if (ShearsOpen())
+        ShearsLog(opened ? "installer: panel opens from the Finder" : "installer: the Finder did not open the panel");
+    if (opened) {
+        AEAddressDesc panelTarget;
+        AppleEvent quit, quitReply;
+        if (AECreateDesc(typeProcessSerialNumber, &psn, sizeof psn, &panelTarget) == noErr) {
+            if (AECreateAppleEvent(kCoreEventClass, kAEQuitApplication, &panelTarget, kAutoGenerateReturnID, kAnyTransactionID, &quit) == noErr) {
+                quitReply.descriptorType = typeNull;
+                quitReply.dataHandle = NULL;
+                AESend(&quit, &quitReply, kAENoReply, kAENormalPriority, kAEDefaultTimeout, NULL, NULL);
+                AEDisposeDesc(&quit);
+            }
+            AEDisposeDesc(&panelTarget);
+        }
+    }
+}
+
 static OSErr StartTool(const FSSpec *tool)
 {
     LaunchParamBlockRec lp;
@@ -227,6 +292,8 @@ static const char *Describe(OSErr err, char *buffer)
 }
 
 /* Returns noErr, and a message for the dialog. */
+static FSSpec gInstalledPanel;
+
 static OSErr Install(const char **message, char *scratch)
 {
     FSSpec srcTool, srcPanel, dstTool, dstPanel;
@@ -248,6 +315,7 @@ static OSErr Install(const char **message, char *scratch)
         *message = Describe(err, scratch);
         return err;
     }
+    gInstalledPanel = dstPanel;
     err = StartTool(&dstTool);
     *message = err == noErr
         ? "Installed. The tool is running now and starts every time the guest starts. The Control Panel is called Sheep Shears."
@@ -330,6 +398,8 @@ int main(void)
             ShearsLog(err == noErr ? "installer: done" : "installer: failed");
             ShearsLog(message);
         }
+        if (err == noErr)
+            TryOpenPanel(&gInstalledPanel);
         return 0;
     }
 

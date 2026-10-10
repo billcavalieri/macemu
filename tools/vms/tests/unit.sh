@@ -7,5 +7,5 @@ M="$ROOT/SheepShaver/src/MacOSX/SheepApp/MCP"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 cp "$ROOT/tools/vms/tests/unit_tests.swift" "$OUT/main.swift"
-swiftc -O -o "$OUT/control_tests" "$D/GuestPixels.swift" "$D/GuestInput.swift" "$D/VMControlProtocol.swift" "$M/MCPProtocol.swift" "$M/MCPHTTP.swift" "$ROOT/SheepShaver/src/MacOSX/SheepApp/LibraryImport.swift" "$OUT/main.swift"
+swiftc -O -o "$OUT/control_tests" "$D/GuestPixels.swift" "$D/GuestInput.swift" "$D/VMControlProtocol.swift" "$D/DisplayProtocol.swift" "$M/MCPProtocol.swift" "$M/MCPHTTP.swift" "$ROOT/SheepShaver/src/MacOSX/SheepApp/LibraryImport.swift" "$ROOT/SheepShaver/src/MacOSX/SheepApp/PrefsDocument.swift" "$OUT/main.swift"
 "$OUT/control_tests"

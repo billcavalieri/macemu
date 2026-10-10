@@ -32,33 +32,14 @@ let nwDiagnosticsOn: Bool = {
     #endif
 }()
 
-@_silgen_name("VideoHostKey")
-private func VideoHostKey(_ code: Int32, _ down: Int32)
-
-@_silgen_name("VideoHostMouseAbs")
-private func VideoHostMouseAbs(_ x: Int32, _ y: Int32)
-
-@_silgen_name("VideoHostMouseMove")
-private func VideoHostMouseMove(_ dx: Int32, _ dy: Int32)
-
-@_silgen_name("VideoHostMouseButton")
-private func VideoHostMouseButton(_ button: Int32, _ down: Int32)
-
-@_silgen_name("VideoHostSetRelMouse")
-private func VideoHostSetRelMouse(_ on: Int32)
-
-@_silgen_name("VideoHostCursorBytes")
-private func VideoHostCursorBytes() -> UnsafePointer<UInt8>?
-
-@_silgen_name("VideoGuestCursorHidesHost")
-private func VideoGuestCursorHidesHost() -> Int32
-
 private final class GuestArrowView: NSImageView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 @MainActor
-final class GuestDisplayView: NSView {
+class GuestDisplayView: NSView {
+    /// How this view reaches the emulator: directly (the VM's own window) or over the display socket (the library window).
+    var link: any GuestLink = LocalGuestLink()
     var inputEnabled = false
     private var attached = false
     private var gaming = false
@@ -151,7 +132,7 @@ final class GuestDisplayView: NSView {
     /// A click in the picture grabs. ctrl-g releases it.
     /// `mouse relative` grabs on a click and releases the same way.
     func applyMousePrefs() {
-        let games = PrefsBridge.string("mouse") == "relative"
+        let games = link.prefString("mouse") == "relative"
         if appliedGames != games {
             appliedGames = games
             setGaming(games)
@@ -161,12 +142,12 @@ final class GuestDisplayView: NSView {
 
     func setGaming(_ on: Bool) {
         attached = false
-        ShearsHost.shared.setPointerWanted(false)
-        VideoHostMouseButton(0, 0)
-        VideoHostMouseButton(1, 0)
+        link.setPointerWanted(false)
+        link.button(0, down: false)
+        link.button(1, down: false)
         associateCursor()
         showHostCursor()
-        VideoHostSetRelMouse(0)
+        link.setRelativeMouse(false)
         hint.isHidden = true
         stopGrabHold()
         gaming = on
@@ -234,11 +215,11 @@ final class GuestDisplayView: NSView {
         // The guest arrow stays put until the click that grabs. The host
         // arrow has to remain visible so that click can land, including
         // on the menu bar. Once grabbed, the guest draws the only arrow.
-        if attached && !PrefsBridge.bool("hardcursor") {
+        if attached && !link.prefBool("hardcursor") {
             addCursorRect(bounds, cursor: Self.blankCursor)
             return
         }
-        if PrefsBridge.bool("hardcursor") {
+        if link.prefBool("hardcursor") {
             addCursorRect(bounds, cursor: macCursor ?? .arrow)
             return
         }
@@ -457,13 +438,13 @@ final class GuestDisplayView: NSView {
     override func keyDown(with event: NSEvent) {
         if releaseByHotkey(event) { return }
         guard inputEnabled else { return }
-        VideoHostKey(adbCode(event.keyCode), 1)
+        link.key(adbCode(event.keyCode), down: true)
     }
 
     override func keyUp(with event: NSEvent) {
         if consumeHotkeyUp(event) { return }
         guard inputEnabled else { return }
-        VideoHostKey(adbCode(event.keyCode), 0)
+        link.key(adbCode(event.keyCode), down: false)
     }
 
     override func flagsChanged(with event: NSEvent) {
@@ -501,7 +482,7 @@ final class GuestDisplayView: NSView {
     }
 
     func applyMacCursor() {
-        macCursor = Self.makeMacCursor()
+        macCursor = Self.makeMacCursor(link.cursorBytes)
         if let macCursor {
             guestArrow.image = macCursor.image
             arrowHotX = macCursor.hotSpot.x
@@ -542,7 +523,7 @@ final class GuestDisplayView: NSView {
     /// The guest tool's own reading of where its pointer is. Only used while grabbed in absolute mode.
     func guestPointerReported(_ report: ShearsPointerReport, at time: Double) {
         guard attached, !gaming else { return }
-        shearsEdge.threshold = ShearsHost.shared.edgeReleaseThreshold
+        shearsEdge.threshold = link.edgeReleaseThreshold
         shearsEdge.guest(report, now: time)
     }
 
@@ -579,7 +560,7 @@ final class GuestDisplayView: NSView {
         guard hotkey else { return false }
         if !attached { return gaming && event.isARepeat }
         if modifiers.contains(.control) {
-            VideoHostKey(0x36, 0)
+            link.key(0x36, down: false)
         }
         suppressGuestKeyUp = event.keyCode
         ungrab("hotkey")
@@ -597,7 +578,7 @@ final class GuestDisplayView: NSView {
         let was = modifiers.contains(flag)
         let isOn = now.contains(flag)
         if was != isOn {
-            VideoHostKey(code, isOn ? 1 : 0)
+            link.key(code, down: isOn)
         }
     }
 
@@ -626,7 +607,7 @@ final class GuestDisplayView: NSView {
     private func grabGaming() {
         attached = true
         logMouse("NW-BOOT mouse grab")
-        VideoHostSetRelMouse(1)
+        link.setRelativeMouse(true)
         disassociateCursor()
         warpToCenter()
         hideHostCursor()
@@ -638,17 +619,33 @@ final class GuestDisplayView: NSView {
         startGrabHold()
     }
 
+    /// Lets go of a grab and puts the host pointer back (the view is going away, or the VM was detached).
+    func releaseCapture(_ reason: String) {
+        ungrab(reason)
+        if gaming { setGaming(true) }
+    }
+
+    /// While the pointer is grabbed the guest owns the keyboard: a Command combination (Command-Q, -W, -N, -comma …) must
+    /// reach Mac OS and not trigger the host's menu. Ctrl-G lets go, and the host's shortcuts work again.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if (attached || gaming), inputEnabled, event.modifierFlags.contains(.command) {
+            if event.type == .keyDown { keyDown(with: event) } else { keyUp(with: event) }
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     private func ungrab(_ reason: String) {
         guard attached else { return }
         attached = false
         shearsEdge.reset()
-        ShearsHost.shared.setPointerWanted(false)
+        link.setPointerWanted(false)
         swallowedUp.removeAll()
         returnedFromBackground = false
         stopGrabHold()
-        VideoHostMouseButton(0, 0)
-        VideoHostMouseButton(1, 0)
-        VideoHostSetRelMouse(0)
+        link.button(0, down: false)
+        link.button(1, down: false)
+        link.setRelativeMouse(false)
         associateCursor()
         showHostCursor()
         hint.isHidden = true
@@ -857,14 +854,14 @@ final class GuestDisplayView: NSView {
         guard inputEnabled else { return }
         place(event)
         let which: Int32 = event.buttonNumber == 1 ? 1 : 0
-        VideoHostMouseButton(which, 1)
+        link.button(which, down: true)
     }
 
     private func release(_ event: NSEvent) {
         guard inputEnabled else { return }
         place(event)
         let which: Int32 = event.buttonNumber == 1 ? 1 : 0
-        VideoHostMouseButton(which, 0)
+        link.button(which, down: false)
     }
 
     /// Coordinates in this view. `convert(_:from: nil)` is the window point
@@ -895,7 +892,7 @@ final class GuestDisplayView: NSView {
         fracX -= CGFloat(dx)
         fracY -= CGFloat(dy)
         if dx != 0 || dy != 0 {
-            VideoHostMouseMove(dx, dy)
+            link.mouseMove(dx, dy)
             if let edge = shearsEdge.host(dx: Double(dx), dy: Double(dy), now: ProcessInfo.processInfo.systemUptime) {
                 releaseAtEdge(edge)
             }
@@ -915,13 +912,13 @@ final class GuestDisplayView: NSView {
         if let mapped = absolutePoint(p) {
             let gx = Int32(min(max(mapped.x, 0), Int(guestW) - 1))
             let gy = Int32(min(max(mapped.y, 0), Int(guestH) - 1))
-            VideoHostSetRelMouse(0)
-            VideoHostMouseAbs(gx, gy)
+            link.setRelativeMouse(false)
+            link.mouseAbs(gx, gy)
         }
         attached = true
         shearsEdge.reset()
-        ShearsHost.shared.setPointerWanted(true)
-        VideoHostSetRelMouse(0)
+        link.setPointerWanted(true)
+        link.setRelativeMouse(false)
         disassociateCursor()
         hideHostCursor()
         hint.isHidden = false
@@ -942,7 +939,7 @@ final class GuestDisplayView: NSView {
         fracX -= CGFloat(dx)
         fracY -= CGFloat(dy)
         if dx != 0 || dy != 0 {
-            VideoHostMouseMove(dx, dy)
+            link.mouseMove(dx, dy)
         }
     }
 
@@ -950,7 +947,7 @@ final class GuestDisplayView: NSView {
         guard inputEnabled else { return }
         place(event)
         if gaming { return }
-        let hide = VideoGuestCursorHidesHost() != 0
+        let hide = link.cursorHidesHost
         if hide != hidHost {
             hidHost = hide
             setHostCursor()
@@ -985,8 +982,8 @@ final class GuestDisplayView: NSView {
         return NSCursor(image: image, hotSpot: .zero)
     }()
 
-    private static func makeMacCursor() -> NSCursor? {
-        guard let raw = VideoHostCursorBytes() else { return nil }
+    private static func makeMacCursor(_ raw: [UInt8]?) -> NSCursor? {
+        guard let raw, raw.count >= 68 else { return nil }
         let hotX = Int(raw[2])
         let hotY = Int(raw[3])
         guard let rep = NSBitmapImageRep(

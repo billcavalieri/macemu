@@ -38,7 +38,7 @@
 #include <vector>
 
 #ifdef SHEEPSHAVER
-struct nw_jit_cpu;
+#include "nw_jit.h"
 struct nw_jit_verify_trace;
 struct nw68_nk_state;
 #endif
@@ -107,6 +107,9 @@ protected:
 	void increment_pc(int o)	{ pc() += o; }
 
 	friend struct ppc_core_test_access;
+#ifdef SHEEPSHAVER
+	uint32 *oea_words() { static_assert(sizeof(uint32) == 4, "words"); return &srr0_; }
+#endif
 	friend class pc_operand;
 	friend class lr_operand;
 	friend class ctr_operand;
@@ -116,8 +119,16 @@ protected:
 
 public:
 
+#ifdef SHEEPSHAVER
+	/* The general registers live in the JIT's own state block (nw_jc_), so generated code and the interpreter use one
+	 * copy and nothing has to be pulled in at the start of a chain or committed back at its end. powerpc_registers::gpr
+	 * is not used (HandleInterrupt's copy of it is only read by the Old World path, which New World returns before). */
+	uint32 & gpr(int i)			{ log_reg(i); return nw_jc_->gpr[i]; }
+	uint32 gpr(int i) const		{ log_reg(i); return nw_jc_->gpr[i]; }
+#else
 	uint32 & gpr(int i)			{ log_reg(i); return regs().gpr[i]; }
 	uint32 gpr(int i) const		{ log_reg(i); return regs().gpr[i]; }
+#endif
 	double & fpr(int i)			{ return regs().fpr[i].d; }
 	double fpr(int i) const		{ return regs().fpr[i].d; }
 	uint64 & fpr_dw(int i)		{ return regs().fpr[i].j; }
@@ -259,13 +270,15 @@ private:
 	int execute_depth;
 
 	/* OEA exception/SPRG state for HotInts DataStorageInt. */
+	/* srr0_, srr1_ and sprg_[0..3] are consecutive: generated code reads and writes them as one array of six words
+	 * (nw_jit_cpu::jit_oea points at srr0_), see the mfspr/mtspr fast path in nw_jit.cpp. */
 	uint32 srr0_;
 	uint32 srr1_;
+	uint32 sprg_[4];
 	uint32 fpu_retry_pc_;
 	int fpu_retry_on_;
 	uint32 dar_;
 	uint32 dsisr_;
-	uint32 sprg_[4];
 	uint32 dec_;
 	uint64 dec_tb_base_;	/* timebase when dec_ was last sampled */
 	bool dec_pending_;

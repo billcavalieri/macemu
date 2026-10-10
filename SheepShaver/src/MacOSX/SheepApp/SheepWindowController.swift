@@ -1,6 +1,6 @@
 /*
- *  SheepWindowController.swift - One window. Toolbar on the window,
- *  split view with the VM list and the Metal screen.
+ *  SheepWindowController.swift - The window of one running virtual machine: the Mac OS picture, a small toolbar
+ *  (shut down, settings) and the Guest menu. The library lives in the manager process (ManagerWindowController).
  *
  *  (C) 2026 Bill Cavalieri
  *  Part of SheepShaver (C) 1997-2008 Christian Bauer and Marc Hellwig
@@ -30,104 +30,40 @@ final class SheepWindow: NSWindow {
 }
 
 @MainActor
-final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSSplitViewDelegate, NSMenuDelegate {
+final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSMenuDelegate, NSMenuItemValidation, NSToolbarItemValidation {
     let store = VirtualMachineStore()
-    /// Sidebar width the window is built with. A later resize keeps this width
-    /// unless the user has dragged the divider, and gives the rest to the picture.
-    private let sidebarWidth: CGFloat = 220
-    private var savedSidebarWidth: CGFloat = 220
-    private var sidebarShown = true
-    private var sidebarItem: NSToolbarItem?
     let display = GuestDisplayView(frame: NSRect(x: 0, y: 0, width: 1024, height: 768))
     var booted = false
-    var sidebarIsShown: Bool { sidebarShown }
-    /// Manager mode only: covers the (unused) guest picture with the selected VM's state and a Start button.
-    private var detail: ManagerDetailView?
-    private var sidebar: LibrarySidebar!
-    private var split: NSSplitView!
     private var settings: SettingsSheet?
-    private var newSheet: NewVMSheet?
     private var loggedPlacement = false
+
+    private static let attachItem = NSToolbarItem.Identifier("attach")
+    private static let shutDownItem = NSToolbarItem.Identifier("shutdown")
+    private static let settingsItem = NSToolbarItem.Identifier("settings")
 
     init() {
         let window = SheepWindow(
-            contentRect: NSRect(x: 80, y: 120, width: 1245, height: 768),
+            contentRect: NSRect(x: 80, y: 120, width: 1024, height: 768),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "SheepShaver — ctrl-g to release"
-        window.titleVisibility = .visible
-        window.titlebarAppearsTransparent = false
-        window.titlebarSeparatorStyle = .none
+        window.title = "SheepShaver"
         window.isRestorable = false
         window.isReleasedWhenClosed = false
-        window.styleMask.remove(.fullSizeContentView)
         super.init(window: window)
         window.delegate = self
         window.guestDisplay = display
+        window.contentView = display
+        window.contentMinSize = NSSize(width: 320, height: 240)
 
-        sidebar = LibrarySidebar(
-            store: store,
-            onPlay: { [weak self] doc in self?.play(doc) },
-            onSelect: { [weak self] doc in
-                self?.setSubtitle(doc.name)
-                self?.detail?.refresh()
-            }
-        )
-        sidebar.frame = NSRect(x: 0, y: 0, width: sidebarWidth, height: 768)
-        display.frame = NSRect(x: sidebarWidth + 1, y: 0, width: 1024, height: 768)
-
-        let split = NSSplitView()
-        split.isVertical = true
-        split.dividerStyle = .thin
-        split.delegate = self
-        split.translatesAutoresizingMaskIntoConstraints = false
-        split.addArrangedSubview(sidebar)
-        split.addArrangedSubview(display)
-        split.setHoldingPriority(.defaultHigh + 1, forSubviewAt: 0)
-        split.setHoldingPriority(.defaultLow, forSubviewAt: 1)
-        self.split = split
-
-        let root = NSView()
-        root.addSubview(split)
-        window.contentView = root
-        let guide = window.contentLayoutGuide as! NSLayoutGuide
-        NSLayoutConstraint.activate([
-            split.topAnchor.constraint(equalTo: guide.topAnchor),
-            split.bottomAnchor.constraint(equalTo: guide.bottomAnchor),
-            split.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
-            split.trailingAnchor.constraint(equalTo: guide.trailingAnchor)
-        ])
-        updateMinSize()
-
-        let toolbar = NSToolbar(identifier: "SheepToolbar")
+        let toolbar = NSToolbar(identifier: "SheepShaverVMToolbar")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
-        window.toolbarStyle = .expanded
-        window.styleMask.remove(.fullSizeContentView)
-        // Toolbar is on before the first layout, so the content size used
-        // below is the size the window actually has.
-        placePanes(in: split, sidebar: sidebarWidth)
-        split.setPosition(sidebarWidth, ofDividerAt: 0)
         window.layoutIfNeeded()
-        placePanes(in: split, sidebar: sidebarWidth)
         display.syncPointerToPicture()
-        installSidebarMenu()
-        if SheepHost.isManager {
-            window.title = "SheepShaver"
-            let detail = ManagerDetailView(store: store) { [weak self] doc in self?.play(doc) }
-            detail.frame = display.bounds
-            detail.autoresizingMask = [.width, .height]
-            display.addSubview(detail)
-            self.detail = detail
-        }
-        if let name = store.document(id: store.selection)?.name {
-            baseSubtitle = name
-            window.subtitle = name
-        }
         NotificationCenter.default.addObserver(self, selector: #selector(shearsStatusChanged(_:)),
                                                name: .shearsStatusChanged, object: nil)
     }
@@ -136,21 +72,26 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         fatalError("init(coder:)")
     }
 
-    /// The VM name shown under the title, plus "Sheep Shears" while the guest tool is running.
-    private var baseSubtitle = ""
+    // MARK: title
 
-    func setSubtitle(_ name: String) {
-        baseSubtitle = name
+    /// The VM's name: its library name, else the name of its prefs file or folder.
+    private(set) var vmName = "SheepShaver"
+
+    func setVMName(_ name: String) {
+        vmName = name
+        window?.title = name
         refreshSubtitle()
     }
 
+    /// "Sheep Shears" under the title while the guest tool is running.
     private func refreshSubtitle() {
         let running = booted && ShearsHost.shared.status.toolRunning
-        window?.subtitle = running ? "\(baseSubtitle) · Sheep Shears" : baseSubtitle
+        window?.subtitle = running ? "Sheep Shears" : ""
     }
 
     @objc private func shearsStatusChanged(_ note: Notification) {
         refreshSubtitle()
+        window?.toolbar?.validateVisibleItems()
     }
 
     func logDisplayGeometry() {
@@ -171,12 +112,7 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         }
     }
 
-    func play(_ doc: VirtualMachineDocument) {
-        store.selection = doc.id
-        setSubtitle(doc.name)
-        // Every VM runs in its own process and window, so several can run at once; this window only starts them
-        store.launch(doc)
-    }
+    // MARK: window
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if booted, ShearsHost.shared.status.toolRunning {
@@ -192,167 +128,56 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
     }
 
     func windowDidResize(_ notification: Notification) {
-        guard let split else { return }
-        placePanes(in: split, sidebar: sidebarShown ? savedSidebarWidth : 0)
         display.syncPointerToPicture()
     }
 
-    /// Picture fills whatever width is left after the sidebar. At startup the
-    /// sidebar is `sidebarWidth`. After a drag, a resize keeps that dragged width.
-    /// Hidden, the picture is the full content width and the divider is gone.
-    private func placePanes(in splitView: NSSplitView, sidebar side: CGFloat) {
-        let height = splitView.bounds.height
-        let width = splitView.bounds.width
-        guard width > 1, height > 1 else { return }
-        if !sidebarShown {
-            sidebar.isHidden = true
-            sidebar.setFrameOrigin(.zero)
-            sidebar.setFrameSize(NSSize(width: 0, height: height))
-            display.setFrameOrigin(.zero)
-            display.setFrameSize(NSSize(width: width, height: height))
-            return
-        }
-        sidebar.isHidden = false
-        let divider = splitView.dividerThickness
-        let clamped = min(max(side, 180), min(320, width - divider - 160))
-        let picture = max(160, width - divider - clamped)
-        sidebar.setFrameOrigin(.zero)
-        sidebar.setFrameSize(NSSize(width: clamped, height: height))
-        display.setFrameOrigin(NSPoint(x: clamped + divider, y: 0))
-        display.setFrameSize(NSSize(width: picture, height: height))
-    }
+    // MARK: toolbar
 
-    private func updateMinSize() {
-        guard let split, let window else { return }
-        let width = sidebarShown ? 180 + split.dividerThickness + 160 : 160
-        window.contentMinSize = NSSize(width: width, height: 160)
-    }
-
-    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
-        let side = sidebarShown ? savedSidebarWidth : 0
-        placePanes(in: splitView, sidebar: side)
-    }
-
-    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
-        sidebarShown ? 180 : 0
-    }
-
-    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
-        320
-    }
-
-    func splitView(
-        _ splitView: NSSplitView,
-        constrainSplitPosition proposedPosition: CGFloat,
-        ofSubviewAt dividerIndex: Int
-    ) -> CGFloat {
-        guard sidebarShown else { return 0 }
-        let minP = self.splitView(splitView, constrainMinCoordinate: proposedPosition, ofSubviewAt: dividerIndex)
-        let maxP = self.splitView(splitView, constrainMaxCoordinate: proposedPosition, ofSubviewAt: dividerIndex)
-        let clamped = min(max(proposedPosition, minP), maxP)
-        savedSidebarWidth = clamped
-        return clamped
-    }
-
-    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
-        subview === sidebar
-    }
-
-    func splitView(_ splitView: NSSplitView, shouldHideDividerAt dividerIndex: Int) -> Bool {
-        !sidebarShown
-    }
-
-    func splitViewDidResizeSubviews(_ notification: Notification) {
-        if sidebarShown {
-            let width = sidebar.frame.width
-            if width >= 180 && width <= 320 {
-                savedSidebarWidth = width
-            }
-        }
-        display.syncPointerToPicture()
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        // A VM that was started embedded can go back to the library window
+        SheepHost.isEmbedded ? [.flexibleSpace, Self.attachItem, Self.shutDownItem, Self.settingsItem]
+                             : [.flexibleSpace, Self.shutDownItem, Self.settingsItem]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .plus, .flexibleSpace, .settings]
+        toolbarDefaultItemIdentifiers(toolbar)
     }
 
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .plus, .flexibleSpace, .settings]
-    }
-
-    func toolbar(
-        _ toolbar: NSToolbar,
-        itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
-        willBeInsertedIntoToolbar flag: Bool
-    ) -> NSToolbarItem? {
-        switch itemIdentifier {
-        case .toggleSidebar:
-            let item = NSToolbarItem(itemIdentifier: .toggleSidebar)
-            item.image = NSImage(systemSymbolName: "sidebar.leading", accessibilityDescription: "Hide Sidebar")
-            item.label = "Toggle Sidebar"
-            item.paletteLabel = "Toggle Sidebar"
-            item.toolTip = "Hide Sidebar"
-            item.isNavigational = true
-            item.action = #selector(toggleSidebar(_:))
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        func make(_ label: String, _ symbol: String, _ tip: String, _ action: Selector) -> NSToolbarItem {
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.label = label
+            item.paletteLabel = label
+            item.toolTip = tip
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
             item.target = self
-            sidebarItem = item
+            item.action = action
             return item
-        case .plus:
-            let item = NSMenuToolbarItem(itemIdentifier: .plus)
-            item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add a virtual machine")
-            item.label = "Add"
-            item.toolTip = "New Virtual Machine, or Add Existing"
-            item.showsIndicator = true
-            let menu = NSMenu()
-            let create = NSMenuItem(title: "New Virtual Machine…", action: #selector(newMachine), keyEquivalent: "")
-            let existing = NSMenuItem(title: "Add Existing…", action: #selector(addExistingMachine), keyEquivalent: "")
-            create.target = self
-            existing.target = self
-            menu.addItem(create)
-            menu.addItem(existing)
-            item.menu = menu
-            item.action = #selector(newMachine)   // a plain click on the button itself
-            item.target = self
-            return item
-        case .settings:
-            let item = NSToolbarItem(itemIdentifier: .settings)
-            item.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings")
-            item.label = "Settings"
-            item.action = #selector(openSettings)
-            item.target = self
-            return item
+        }
+        switch id {
+        case Self.attachItem:
+            return make("Attach", "arrow.down.backward.square", "Move this virtual machine back into the library window", #selector(attachToLibrary(_:)))
+        case Self.shutDownItem:
+            return make("Shut Down", "power", "Shut down the guest (needs Sheep Shears in the guest)", #selector(shutDownGuest(_:)))
+        case Self.settingsItem:
+            return make("Settings", "gearshape", "Settings for this virtual machine", #selector(openSettings(_:)))
         default:
             return nil
         }
     }
 
-    /// Leading toolbar button, and View > Hide Sidebar (⌃⌘S).
-    /// The picture takes the full content width while the sidebar is hidden.
-    @objc func toggleSidebar(_ sender: Any?) {
-        if sidebarShown {
-            let width = sidebar.frame.width
-            if width >= 180 { savedSidebarWidth = width }
-            sidebarShown = false
-        } else {
-            sidebarShown = true
-        }
-        guard let split else { return }
-        updateMinSize()
-        placePanes(in: split, sidebar: sidebarShown ? savedSidebarWidth : 0)
-        window?.layoutIfNeeded()
-        display.syncPointerToPicture(recenterRelative: true)
-        refreshSidebarChrome()
+    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
+        item.action == #selector(shutDownGuest(_:)) ? canShutDownGuest : true
+    }
+
+    private var canShutDownGuest: Bool {
+        let status = ShearsHost.shared.status
+        if case .requested = status.shutdown { return false }
+        return booted && status.toolRunning
     }
 
     @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(toggleSidebar(_:)) {
-            menuItem.title = sidebarShown ? "Hide Sidebar" : "Show Sidebar"
-        }
-        if menuItem.action == #selector(shutDownGuest(_:)) {
-            let status = ShearsHost.shared.status
-            if case .requested = status.shutdown { return false }
-            return booted && status.toolRunning
-        }
+        if menuItem.action == #selector(shutDownGuest(_:)) { return canShutDownGuest }
         return true
     }
 
@@ -395,42 +220,7 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
     /// the installer on it. A running guest cannot gain a disk, so the sheet says when it takes effect.
     @objc private func installSheepShears(_ sender: Any?) {
         guard let window else { return }
-        let alert = NSAlert()
-        alert.messageText = "Install Sheep Shears in the guest"
-        alert.informativeText = "Sheep Shears releases the mouse at the screen edge and shares the clipboard with this Mac. Its installer is a small disk. It is added to this virtual machine; after the guest next starts, open “Install Sheep Shears” on the “Sheep Shears” disk and click Install. No restart is needed after that, and the disk can stay or be removed."
-        alert.addButton(withTitle: "Add Installer Disk")
-        alert.addButton(withTitle: "Show Disk in Finder")
-        alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard let self else { return }
-            switch response {
-            case .alertFirstButtonReturn: self.addInstallerDisk(on: window)
-            case .alertSecondButtonReturn:
-                if let url = try? SheepShearsInstaller.stagedCopy() { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-            default: break
-            }
-        }
-    }
-
-    private func addInstallerDisk(on window: NSWindow) {
-        func report(_ title: String, _ text: String) {
-            let note = NSAlert()
-            note.messageText = title
-            note.informativeText = text
-            note.beginSheetModal(for: window)
-        }
-        guard let doc = store.document(id: store.selection) ?? store.document(id: store.runningID) else {
-            return report("No virtual machine is selected", "Select the virtual machine in the sidebar first.")
-        }
-        do {
-            let url = try SheepShearsInstaller.stagedCopy()
-            let added = try SheepShearsInstaller.addDisk(url, toPrefsAt: doc.prefsPath)
-            report(added ? "The installer disk was added" : "The installer disk is already added",
-                   added ? "Restart “\(doc.name)” (quit and start it again). Then open “Install Sheep Shears” on the “Sheep Shears” disk."
-                         : "Open “Install Sheep Shears” on the “Sheep Shears” disk in the guest.")
-        } catch {
-            report("The installer disk could not be added", error.localizedDescription)
-        }
+        ShearsInstallFlow.run(on: window, prefsPath: PrefsBridge.path(), vmName: vmName)
     }
 
     /// Closing the window while Sheep Shears runs: offer a proper shutdown first. "Quit Now" is the old behaviour.
@@ -481,16 +271,6 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         }
     }
 
-    private func refreshSidebarChrome() {
-        let title = sidebarShown ? "Hide Sidebar" : "Show Sidebar"
-        sidebarItem?.toolTip = title
-        sidebarItem?.image?.accessibilityDescription = title
-        guard let menu = NSApp.mainMenu?.item(withTitle: "View")?.submenu else { return }
-        for item in menu.items where item.action == #selector(toggleSidebar(_:)) {
-            item.title = title
-        }
-    }
-
     private func installGuestMenu(in main: NSMenu) {
         guard !main.items.contains(where: { $0.title == "Guest" }) else { return }
         let item = NSMenuItem()
@@ -523,229 +303,35 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         }
     }
 
-    private var appSettings: AppSettingsWindowController?
 
-    @objc func openAppSettings(_ sender: Any?) {
-        if appSettings == nil { appSettings = AppSettingsWindowController(store: store) }
-        appSettings?.present()
-    }
+    // MARK: menus
 
-    /// The library process's application menu: Settings… and Quit. A VM's process has neither (closing its window is
-    /// how a VM ends, and it asks about a clean shutdown first).
-    private func installAppMenu(in main: NSMenu) {
-        guard SheepHost.isManager, !main.items.contains(where: { $0.title == "SheepShaver" }) else { return }
-        let item = NSMenuItem()
-        item.title = "SheepShaver"
-        let menu = NSMenu(title: "SheepShaver")
-        let settings = NSMenuItem(title: "Settings…", action: #selector(openAppSettings(_:)), keyEquivalent: ",")
-        settings.target = self
-        menu.addItem(settings)
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit SheepShaver", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        item.submenu = menu
-        main.insertItem(item, at: 0)
-    }
-
-    func installSidebarMenu() {
-        let main = NSApp.mainMenu ?? NSMenu()
-        if NSApp.mainMenu == nil {
-            NSApp.mainMenu = main
-        }
-        installAppMenu(in: main)
+    /// The VM's menu bar: the standard menus (no shortcuts, see AppMenu) with the Guest menu before Window.
+    func installMenus() {
+        let main = AppMenu.installVM(self)
         installGuestMenu(in: main)
-        let viewItem: NSMenuItem
-        if let existing = main.items.first(where: { $0.title == "View" }) {
-            viewItem = existing
-        } else {
-            viewItem = NSMenuItem()
-            viewItem.title = "View"
-            viewItem.submenu = NSMenu(title: "View")
-            if let index = main.items.firstIndex(where: { $0.title == "Window" }) {
-                main.insertItem(viewItem, at: index)
-            } else {
-                main.addItem(viewItem)
-            }
-        }
-        let menu = viewItem.submenu ?? NSMenu(title: "View")
-        viewItem.submenu = menu
-        if menu.items.contains(where: { $0.action == #selector(toggleSidebar(_:)) }) {
-            refreshSidebarChrome()
-            return
-        }
-        let item = NSMenuItem(
-            title: "Hide Sidebar",
-            action: #selector(toggleSidebar(_:)),
-            keyEquivalent: "s"
-        )
-        item.keyEquivalentModifierMask = [.command, .control]
-        item.target = self
-        menu.addItem(item)
+        AppMenu.reportVM(main)
     }
 
-    @objc private func newMachine() {
-        guard let window else { return }
-        let sheet = NewVMSheet { [weak self] name, disk, rom in
-            if let win = self?.newSheet?.window {
-                self?.window?.endSheet(win)
-            }
-            self?.newSheet = nil
-            if let name, let disk, let rom, !name.isEmpty {
-                _ = self?.store.create(name: name, disk: disk, rom: rom)
-                self?.sidebar.reload()
-            }
-        }
-        newSheet = sheet
-        if let win = sheet.window {
-            window.beginSheet(win)
-        }
+    /// Back to the library window (View > Attach to Library Window, or the toolbar button).
+    @objc func attachToLibrary(_ sender: Any?) {
+        SheepHost.attachToLibrary()
     }
 
-    /// Redraws the sidebar and the detail pane after the library changed.
-    func refreshLibrary() {
-        sidebar.reload()
-        detail?.refresh()
-        if let doc = store.document(id: store.selection) { setSubtitle(doc.name) }
+    @objc func closeMachine(_ sender: Any?) {
+        window?.performClose(sender)
     }
 
-    /// Adds a VM that already has a prefs file (for example one you start with --config) to the library.
-    @objc private func addExistingMachine() {
-        guard let window else { return }
-        let panel = NSOpenPanel()
-        panel.title = "Add Existing Virtual Machine"
-        panel.message = "Choose a SheepShaver prefs file, or a folder that contains one called “prefs”."
-        panel.prompt = "Add"
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = true
-        panel.treatsFilePackagesAsDirectories = true
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK else { return }
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                var failure: String?
-                for url in panel.urls {
-                    do {
-                        try self.store.addExisting(url)
-                    } catch {
-                        failure = error.localizedDescription
-                    }
-                }
-                self.refreshLibrary()
-                if let failure, let window = self.window {
-                    let alert = NSAlert()
-                    alert.alertStyle = .warning
-                    alert.messageText = "Could not add the virtual machine"
-                    alert.informativeText = failure
-                    alert.beginSheetModal(for: window)
-                }
-            }
-        }
-    }
-
-    @objc private func openSettings() {
-        guard let window else { return }
-        let prefs = store.document(id: store.selection)?.prefsPath
-        let live = booted && store.selection == store.runningID
-        let sheet = SettingsSheet(prefsPath: prefs, live: live) { [weak self] saved in
-            if let win = self?.settings?.window {
-                self?.window?.endSheet(win)
-            }
-            self?.settings = nil
-            if saved && live {
-                self?.display.applyMousePrefs()
-            }
+    @objc func openSettings(_ sender: Any?) {
+        guard let window, settings == nil else { return }
+        let prefs = PrefsBridge.path()
+        let sheet = SettingsSheet(prefsPath: prefs.isEmpty ? nil : prefs, running: booted, live: booted) { [weak self] saved in
+            guard let self else { return }
+            if let win = self.settings?.window { self.window?.endSheet(win) }
+            self.settings = nil
+            if saved && self.booted { self.display.applyMousePrefs() }
         }
         settings = sheet
-        if let win = sheet.window {
-            window.beginSheet(win)
-        }
-    }
-
-}
-
-private extension NSToolbarItem.Identifier {
-    static let plus = NSToolbarItem.Identifier("plus")
-    static let settings = NSToolbarItem.Identifier("settings")
-}
-
-@MainActor
-private final class NewVMSheet: NSWindowController {
-    private let onDone: (String?, String?, String?) -> Void
-    private let nameField = NSTextField(string: "Mac OS 9")
-    private let diskField = NSTextField(string: "")
-    private let romField = NSTextField(string: "")
-
-    init(onDone: @escaping (String?, String?, String?) -> Void) {
-        self.onDone = onDone
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 180),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        win.title = "New Virtual Machine"
-        super.init(window: win)
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        stack.addArrangedSubview(labeled("Name", nameField))
-        stack.addArrangedSubview(labeled("Disk", diskField, browse: #selector(browseDisk)))
-        stack.addArrangedSubview(labeled("ROM", romField, browse: #selector(browseROM)))
-        let buttons = NSStackView()
-        buttons.orientation = .horizontal
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelSheet))
-        let create = NSButton(title: "Create", target: self, action: #selector(createVM))
-        create.keyEquivalent = "\r"
-        buttons.addArrangedSubview(NSView())
-        buttons.addArrangedSubview(cancel)
-        buttons.addArrangedSubview(create)
-        stack.addArrangedSubview(buttons)
-        win.contentView = stack
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:)")
-    }
-
-    private func labeled(_ title: String, _ field: NSTextField, browse: Selector? = nil) -> NSView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        let label = NSTextField(labelWithString: title)
-        label.alignment = .right
-        label.widthAnchor.constraint(equalToConstant: 48).isActive = true
-        field.widthAnchor.constraint(greaterThanOrEqualToConstant: browse == nil ? 400 : 310).isActive = true
-        row.addArrangedSubview(label)
-        row.addArrangedSubview(field)
-        if let browse {
-            row.addArrangedSubview(NSButton(title: "Browse…", target: self, action: browse))
-        }
-        return row
-    }
-
-    private func choose(into field: NSTextField, title: String) {
-        guard let win = window else { return }
-        let panel = NSOpenPanel()
-        panel.title = title
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.beginSheetModal(for: win) { response in
-            if response == .OK, let url = panel.url {
-                MainActor.assumeIsolated { field.stringValue = url.path }
-            }
-        }
-    }
-
-    @objc private func browseDisk() { choose(into: diskField, title: "Choose the disk image") }
-    @objc private func browseROM() { choose(into: romField, title: "Choose the ROM file") }
-
-    @objc private func cancelSheet() {
-        onDone(nil, nil, nil)
-    }
-
-    @objc private func createVM() {
-        onDone(nameField.stringValue, diskField.stringValue, romField.stringValue)
+        if let win = sheet.window { window.beginSheet(win) }
     }
 }

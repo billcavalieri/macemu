@@ -74,6 +74,7 @@ final class VMControlServer: @unchecked Sendable {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
         guard bound == 0, listen(fd, 8) == 0 else { close(fd); return }
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)              // a restarted guest re-executes this process: nothing may leak into it
         chmod(socketPath, 0o600)
         listener = fd
         path = socketPath
@@ -121,6 +122,7 @@ final class VMControlServer: @unchecked Sendable {
             }
             var one: Int32 = 1
             setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+            _ = fcntl(client, F_SETFD, FD_CLOEXEC)
             let thread = Thread { [self] in serve(client) }
             thread.name = "sheepshaver.control.client"
             thread.start()
@@ -179,6 +181,10 @@ final class VMControlServer: @unchecked Sendable {
             return try screenshot(maxWidth: maxWidth)
         case .shutdown(let force):
             return try shutdown(force: force)
+        case .features(let edge, let clip):
+            return features(edgeRelease: edge, clipboard: clip)
+        case .display(let mode):
+            return try display(mode)
         default:
             return try input.sync { try performInput(op) }
         }
@@ -208,7 +214,8 @@ final class VMControlServer: @unchecked Sendable {
         }
         return ["id": context.id, "name": context.name(), "state": "running",
                 "width": s.w, "height": s.h, "depth": s.depth, "cursor": ["x": c.x, "y": c.y],
-                "sheep_shears": ["running": shears.toolRunning, "version": Int(shears.toolVersion), "shutdown": shutdown]]
+                "sheep_shears": ["running": shears.toolRunning, "version": Int(shears.toolVersion), "shutdown": shutdown],
+                "display": SheepHost.displayMode.rawValue]
     }
 
     private func screenshot(maxWidth: Int?) throws -> [String: Any] {
@@ -228,6 +235,40 @@ final class VMControlServer: @unchecked Sendable {
         }
         return ["png_base64": png.base64EncodedString(), "width": scaled.width, "height": scaled.height,
                 "guest_width": frame.width, "guest_height": frame.height]
+    }
+
+    /// Moves the picture between the library window and the VM's own window, or reports where it is. Main thread.
+    private func display(_ mode: DisplayMode?) throws -> [String: Any] {
+        var failure: String?
+        let current: String = DispatchQueue.main.sync {
+            MainActor.assumeIsolated {
+                if let mode {
+                    if !SheepHost.isEmbedded {
+                        failure = "this virtual machine was not started embedded; it always has its own window"
+                    } else if mode == .window {
+                        SheepHost.detachToWindow()
+                    } else {
+                        SheepHost.attachToLibrary()
+                    }
+                }
+                return SheepHost.isEmbedded ? (SheepHost.displayMode == .embedded ? "embedded" : "window") : "window"
+            }
+        }
+        if let failure { throw ControlError(failure) }
+        return ["mode": mode?.rawValue ?? current, "embedded_launch": SheepHost.isEmbedded]
+    }
+
+    private func features(edgeRelease: Bool?, clipboard: Bool?) -> [String: Any] {
+        let shears = ShearsHost.shared
+        var host = shears.hostSwitches
+        if let edgeRelease { if edgeRelease { host.insert(.edgeRelease) } else { host.remove(.edgeRelease) } }
+        if let clipboard { if clipboard { host.insert(.clipboard) } else { host.remove(.clipboard) } }
+        if host != shears.hostSwitches { shears.hostSwitches = host }
+        func dictionary(_ f: ShearsFeatures) -> [String: Any] {
+            ["edge_release": f.contains(.edgeRelease), "clipboard": f.contains(.clipboard)]
+        }
+        return ["host": dictionary(shears.hostSwitches), "guest": dictionary(shears.guestSwitches), "effective": dictionary(shears.features),
+                "tool_running": shears.status.toolRunning]
     }
 
     private func shutdown(force: Bool) throws -> [String: Any] {

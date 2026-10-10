@@ -70,6 +70,16 @@
 		5E0A50002000000000000007 /* ShearsInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000007 /* ShearsInstaller.swift */; };
 		5E0A50002000000000000009 /* ManagerDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000009 /* ManagerDetailView.swift */; };
 		5E0A50002000000000000023 /* VMControlServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000023 /* VMControlServer.swift */; };
+		5E0A50002000000000000039 /* PrefsDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000039 /* PrefsDocument.swift */; };
+		5E0A5000200000000000003A /* NewVMSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A5000100000000000003A /* NewVMSheet.swift */; };
+		5E0A5000200000000000003B /* AppMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A5000100000000000003B /* AppMenu.swift */; };
+		5E0A5000200000000000003C /* ManagerWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A5000100000000000003C /* ManagerWindowController.swift */; };
+		5E0A5000200000000000003D /* DisplayProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A5000100000000000003D /* DisplayProtocol.swift */; };
+		5E0A5000200000000000003E /* DisplayServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A5000100000000000003E /* DisplayServer.swift */; };
+		5E0A5000200000000000003F /* GuestLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A5000100000000000003F /* GuestLink.swift */; };
+		5E0A50002000000000000040 /* RemoteDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000040 /* RemoteDisplayView.swift */; };
+		5E0A50002000000000000041 /* DisplayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000041 /* DisplayClient.swift */; };
+		5E0A50002000000000000042 /* ShearsInstallFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000042 /* ShearsInstallFlow.swift */; };
 		5E0A50002000000000000038 /* LibraryImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000038 /* LibraryImport.swift */; };
 		5E0A50002000000000000037 /* AppSettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000037 /* AppSettingsWindowController.swift */; };
 		5E0A50002000000000000036 /* MCPStdioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A50001000000000000036 /* MCPStdioBridge.swift */; };
@@ -138,6 +148,7 @@
 		A1B2C3D4E5F60718293A4B02 /* sheepforce.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B01 /* sheepforce.cpp */; };
 		A1B2C3D4E5F60718293A4B04 /* qt_codec.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */; };
 		A1B2C3D4E5F60718293A4B21 /* rave.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B20 /* rave.cpp */; };
+		A1B2C3D4E5F60718293A4B72 /* sheepforce_remote.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B71 /* sheepforce_remote.mm */; };
 		A1B2C3D4E5F60718293A4B06 /* sheepforce_metal.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B05 /* sheepforce_metal.mm */; };
 		A1B2C3D4E5F60718293A4B23 /* sheepforce_rave.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B22 /* sheepforce_rave.mm */; };
 		A1B2C3D4E5F60718293A4B08 /* SheepForce.metal in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B07 /* SheepForce.metal */; };
@@ -358,6 +369,16 @@
 		5E0A50001000000000000007 /* ShearsInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ShearsInstaller.swift; path = SheepApp/Shears/ShearsInstaller.swift; sourceTree = "<group>"; };
 		5E0A50001000000000000009 /* ManagerDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ManagerDetailView.swift; path = SheepApp/ManagerDetailView.swift; sourceTree = "<group>"; };
 		5E0A50001000000000000023 /* VMControlServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VMControlServer.swift; path = SheepApp/Control/VMControlServer.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000039 /* PrefsDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PrefsDocument.swift; path = SheepApp/PrefsDocument.swift; sourceTree = "<group>"; };
+		5E0A5000100000000000003A /* NewVMSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NewVMSheet.swift; path = SheepApp/NewVMSheet.swift; sourceTree = "<group>"; };
+		5E0A5000100000000000003B /* AppMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppMenu.swift; path = SheepApp/AppMenu.swift; sourceTree = "<group>"; };
+		5E0A5000100000000000003C /* ManagerWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ManagerWindowController.swift; path = SheepApp/ManagerWindowController.swift; sourceTree = "<group>"; };
+		5E0A5000100000000000003D /* DisplayProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DisplayProtocol.swift; path = SheepApp/Control/DisplayProtocol.swift; sourceTree = "<group>"; };
+		5E0A5000100000000000003E /* DisplayServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DisplayServer.swift; path = SheepApp/Control/DisplayServer.swift; sourceTree = "<group>"; };
+		5E0A5000100000000000003F /* GuestLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = GuestLink.swift; path = SheepApp/GuestLink.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000040 /* RemoteDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = RemoteDisplayView.swift; path = SheepApp/RemoteDisplayView.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000041 /* DisplayClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DisplayClient.swift; path = SheepApp/Control/DisplayClient.swift; sourceTree = "<group>"; };
+		5E0A50001000000000000042 /* ShearsInstallFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ShearsInstallFlow.swift; path = SheepApp/Shears/ShearsInstallFlow.swift; sourceTree = "<group>"; };
 		5E0A50001000000000000038 /* LibraryImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = LibraryImport.swift; path = SheepApp/LibraryImport.swift; sourceTree = "<group>"; };
 		5E0A50001000000000000037 /* AppSettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppSettingsWindowController.swift; path = SheepApp/AppSettingsWindowController.swift; sourceTree = "<group>"; };
 		5E0A50001000000000000036 /* MCPStdioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MCPStdioBridge.swift; path = SheepApp/MCP/MCPStdioBridge.swift; sourceTree = "<group>"; };
@@ -456,6 +477,7 @@
 		A1B2C3D4E5F60718293A4B20 /* rave.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = rave.cpp; path = ../rave.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B03 /* qt_codec.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = qt_codec.cpp; path = ../qt_codec.cpp; sourceTree = SOURCE_ROOT; };
 		A1B2C3D4E5F60718293A4B22 /* sheepforce_rave.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = sheepforce_rave.mm; sourceTree = "<group>"; };
+		A1B2C3D4E5F60718293A4B71 /* sheepforce_remote.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = sheepforce_remote.mm; sourceTree = "<group>"; };
 		A1B2C3D4E5F60718293A4B05 /* sheepforce_metal.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = sheepforce_metal.mm; sourceTree = "<group>"; };
 		A1B2C3D4E5F60718293A4B07 /* SheepForce.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = SheepForce.metal; sourceTree = "<group>"; };
 		A1B2C3D4E5F60718293A4B09 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
@@ -916,6 +938,7 @@
 				0873A80014AC515D004F12B7 /* utils_macosx.h */,
 				0873A80114AC515D004F12B7 /* utils_macosx.mm */,
 				A1B2C3D4E5F60718293A4B05 /* sheepforce_metal.mm */,
+				A1B2C3D4E5F60718293A4B71 /* sheepforce_remote.mm */,
 				A1B2C3D4E5F60718293A4B22 /* sheepforce_rave.mm */,
 				A1BEEF0020CF7E6D00FBE901 /* video_macos.mm */,
 				A1BEEF4020CF7E6D00FBE903 /* VMLibraryView.swift */,
@@ -930,6 +953,16 @@
 				5E0A50001000000000000023 /* VMControlServer.swift */,
 				5E0A50001000000000000037 /* AppSettingsWindowController.swift */,
 				5E0A50001000000000000038 /* LibraryImport.swift */,
+				5E0A50001000000000000042 /* ShearsInstallFlow.swift */,
+				5E0A50001000000000000041 /* DisplayClient.swift */,
+				5E0A50001000000000000040 /* RemoteDisplayView.swift */,
+				5E0A5000100000000000003F /* GuestLink.swift */,
+				5E0A5000100000000000003E /* DisplayServer.swift */,
+				5E0A5000100000000000003D /* DisplayProtocol.swift */,
+				5E0A5000100000000000003C /* ManagerWindowController.swift */,
+				5E0A5000100000000000003B /* AppMenu.swift */,
+				5E0A5000100000000000003A /* NewVMSheet.swift */,
+				5E0A50001000000000000039 /* PrefsDocument.swift */,
 				5E0A50001000000000000036 /* MCPStdioBridge.swift */,
 				5E0A50001000000000000035 /* MCPService.swift */,
 				5E0A50001000000000000034 /* MCPServer.swift */,
@@ -1375,6 +1408,7 @@
 				A1B2C3D4E5F60718293A4B04 /* qt_codec.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B21 /* rave.cpp in Sources */,
 				A1B2C3D4E5F60718293A4B06 /* sheepforce_metal.mm in Sources */,
+				A1B2C3D4E5F60718293A4B72 /* sheepforce_remote.mm in Sources */,
 				A1B2C3D4E5F60718293A4B23 /* sheepforce_rave.mm in Sources */,
 				A1B2C3D4E5F60718293A4B08 /* SheepForce.metal in Sources */,
 				0856D00914A99EF0000B1711 /* macos_util.cpp in Sources */,
@@ -1429,6 +1463,16 @@
 				5E0A50002000000000000023 /* VMControlServer.swift in Sources */,
 				5E0A50002000000000000037 /* AppSettingsWindowController.swift in Sources */,
 				5E0A50002000000000000038 /* LibraryImport.swift in Sources */,
+				5E0A50002000000000000042 /* ShearsInstallFlow.swift in Sources */,
+				5E0A50002000000000000041 /* DisplayClient.swift in Sources */,
+				5E0A50002000000000000040 /* RemoteDisplayView.swift in Sources */,
+				5E0A5000200000000000003F /* GuestLink.swift in Sources */,
+				5E0A5000200000000000003E /* DisplayServer.swift in Sources */,
+				5E0A5000200000000000003D /* DisplayProtocol.swift in Sources */,
+				5E0A5000200000000000003C /* ManagerWindowController.swift in Sources */,
+				5E0A5000200000000000003B /* AppMenu.swift in Sources */,
+				5E0A5000200000000000003A /* NewVMSheet.swift in Sources */,
+				5E0A50002000000000000039 /* PrefsDocument.swift in Sources */,
 				5E0A50002000000000000036 /* MCPStdioBridge.swift in Sources */,
 				5E0A50002000000000000035 /* MCPService.swift in Sources */,
 				5E0A50002000000000000034 /* MCPServer.swift in Sources */,

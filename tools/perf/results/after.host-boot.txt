@@ -1,0 +1,67 @@
+sample s.sample.boot.txt: 286567 thread-samples in 26 threads
+  other thread (unnamed)                                  1404 samples (7.9% of a core)
+  other thread AudioSession - RootQueue                   1291 samples (7.3% of a core)
+  (23 other threads were blocked the whole time or ran under 1%)
+
+emulation thread: 17742 samples, 97 idle (0.5%), 17645 busy
+
+Busy time by area (self time, % of busy):
+  68k layer (nw68)                             8542   48.4%
+  JIT code (generated)                         3787   21.5%
+  other                                        2167   12.3%
+  JIT chain / dispatch                          714    4.0%
+  JIT helpers (loads/stores/system/...)         692    3.9%
+  MMU / translate                               688    3.9%
+  JIT compile / invalidate                      662    3.8%
+  memory ops (memcpy/memset/memcmp)             167    0.9%
+  guest events / timers / idle                  118    0.7%
+  video (present, hash, flush)                  108    0.6%
+
+Top functions by self time (% of busy):
+  ???                                                            3787  21.46%
+  (anonymous namespace)::probe((anonymous namespace)::bus_cont   1613   9.14%
+  nw68_prepare                                                   1032   5.85%
+  nw68_finish                                                    1007   5.71%
+  (anonymous namespace)::read_code(void*, unsigned int, unsign    884   5.01%
+  nw68_run_cached                                                 586   3.32%
+  nw_68k_dispatch                                                 447   2.53%
+  (anonymous namespace)::read(nw68_frame&, unsigned int, unsig    359   2.03%
+  ppc32_mmu::translate                                            308   1.75%
+  nw_pa_kind                                                      305   1.73%
+  nw68_run_block                                                  286   1.62%
+  nw_jit_helper_stw                                               276   1.56%
+  sys_icache_invalidate                                           257   1.46%
+  (anonymous namespace)::block_progress(nw68_frame*, nw68_inst    248   1.41%
+  pread                                                           234   1.33%
+  nw_jit_helper_lwz                                               194   1.10%
+  pthread_jit_write_protect_np                                    184   1.04%
+  (anonymous namespace)::data_read(void*, unsigned int, unsign    183   1.04%
+  powerpc_cpu::nw_68k_snapshot                                    177   1.00%
+  powerpc_cpu::nw_68k_restore                                     169   0.96%
+  nw68_export                                                     169   0.96%
+  (anonymous namespace)::preview_page(void*, unsigned int, boo    168   0.95%
+  nw_jit_dtlb_lookup_pr                                           168   0.95%
+  powerpc_cpu::jit_host_chain                                     165   0.94%
+  dtlb_sync_msr                                                   156   0.88%
+  (anonymous namespace)::write_probe(void*, unsigned int, unsi    152   0.86%
+  nw_jit_itlb_lookup                                              137   0.78%
+  nw_jit_dtlb_demote_pa                                           136   0.77%
+  powerpc_cpu::nw_jit_try                                         131   0.74%
+  nw_68k_note_exit_at                                             126   0.71%
+  (anonymous namespace)::put(nw68_frame&, unsigned int, unsign    121   0.69%
+  _tlv_get_addr                                                   118   0.67%
+  _platform_memcmp                                                118   0.67%
+  nw_jit_dtlb_take_rec                                            116   0.66%
+  (anonymous namespace)::compatible_nk()                          110   0.62%
+  nw68_decode                                                     108   0.61%
+  powerpc_cpu::execute                                            103   0.58%
+  pthread_mutex_lock                                              102   0.58%
+  (anonymous namespace)::address(nw68_frame&, nw68_ea const&,     102   0.58%
+  (anonymous namespace)::resolve_address(void*, unsigned int,      99   0.56%
+  (anonymous namespace)::data_write(void*, unsigned int, unsig     97   0.55%
+  nw68_commit                                                      85   0.48%
+  (anonymous namespace)::flags(nw68_frame&, unsigned int, bool     77   0.44%
+  nw_jit_helper_chain                                              73   0.41%
+  nw_jit_cache_get                                                 72   0.41%
+  mach_absolute_time                                               68   0.39%
+  nw_jit_dtlb_store_rec                                            67   0.38%

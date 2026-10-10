@@ -114,7 +114,27 @@ struct nw_jit_cpu {
 	struct nw_jit_ibtc *jit_ibtc;
 	uint32_t *jit_ibtc_gen;	/* &g_ibtc_gen: an entry is valid only while its generation matches */
 	uint32_t *jit_fetch_pa;	/* where the host keeps the physical page of the block being executed (last_fetch_pa_) */
+	/* Real-mode (MSR[DR]=0) access cache, see nw_jit_rtlb_ent; bound by nw_jit_cpu_bind. Appended: generated code reads it via x19. */
+	void *jit_rtlb;
+	/* srr0, srr1, sprg0..sprg3 of the host CPU as six consecutive words (null: use the C system service). */
+	uint32_t *jit_oea;
 };
+
+/* Physical-page cache for data accesses made with translation off (the NanoKernel, interrupt handlers, early boot),
+ * where the effective address is the physical address. Direct-mapped by page. A load entry holds the host pointer of
+ * a RAM or ROM page; a store entry additionally holds host_w, set only for plain RAM that holds no translated code
+ * (neither PPC nor 68k), so a store through it never skips the invalidation of translated code. Pages that get
+ * translated code lose host_w (nw_jit_dtlb_demote_pa). Nothing else changes a physical mapping, so no MSR, segment,
+ * BAT or tlbie event touches this table. */
+enum { NW_JIT_RTLB_N = 1024 };
+struct nw_jit_rtlb_ent {
+	uint32_t tag;		/* physical page address */
+	uint32_t pad;
+	uint64_t host_r;	/* host pointer to the page; 0 = empty */
+	uint64_t host_w;	/* same, only if stores may go straight to it; 0 otherwise */
+	uint64_t pad2;
+};
+void nw_jit_rtlb_fill(uint32_t pa, uint64_t host, int writable);
 
 /* Typed observations cover modeled SPR/MMU/cache services. Native code owns
  * operand formation, privilege/trap predicates, PC/MSR and exception entry. */
@@ -373,7 +393,14 @@ enum {
 	NW_JIT_LEGACY_LINK  = 256u,	/* every block exit goes through the C chain helper; conditional/CTR branches are out-of-line helper calls */
 	NW_JIT_LEGACY_MEM   = 512u,	/* byte/halfword/doubleword loads and stores are C helper calls instead of the inline data-TLB sequence */
 	NW_JIT_LEGACY_BCLR  = 1024u,	/* bclr/bcctr (blr, bctr, conditional returns) are evaluated by a C helper call */
-	NW_JIT_LEGACY_IBTC  = 2048u	/* block exits to a computed address (blr, bctr) always take the C chain helper */
+	NW_JIT_LEGACY_IBTC  = 2048u,	/* block exits to a computed address (blr, bctr) always take the C chain helper */
+	NW_JIT_LEGACY_DCOUNT = 4096u,	/* every data-TLB hit in generated code also increments a counter in memory (statistics only) */
+	NW_JIT_LEGACY_ARENA = 8192u,	/* code arena: free 4 MB per compaction (not a quarter of the arena) and invalidate the icache twice per translation */
+	NW_JIT_LEGACY_REAL = 16384u,	/* loads and stores with translation off (MSR[DR]=0) always call a C helper */
+	NW_JIT_LEGACY_D68 = 32768u,	/* the 68k dispatch always copies the cached block out and runs it through the hashing path */
+	NW_JIT_LEGACY_EPOCH = 65536u,	/* a store into translated code invalidates every direct link, not only the ones that cross pages */
+	NW_JIT_LEGACY_SYSNOP = 262144u,	/* sync, eieio, dcbst, dcbf, dcbt and dcbtst call the C system service like every other system instruction */
+	NW_JIT_LEGACY_ITLB = 524288u	/* one instruction TLB, emptied whenever MSR[PR] changes (see g_itlb_set) */
 };
 extern unsigned nw_jit_legacy;
 void nw_jit_dtlb_flush(void);
@@ -399,6 +426,12 @@ void nw_jit_dtlb_demote_pa(uint32_t pa);
 /* A PPC block or a translated 68k block was built from this physical page: a store must take the invalidating path. */
 int nw_jit_page_has_code(uint32_t pa);
 uint64_t nw_jit_dtlb_hits(void);
+/* Generated code counts data-TLB hits only when asked to (profiling, NW_JIT_LEGACY=dcount, or this call, which the test
+ * harnesses use); it was four extra instructions and a store-to-load dependency on every guest load and store. Affects
+ * blocks translated after the call. */
+void nw_jit_count_dtlb_hits(int on);
+/* Fast hops between two trips through the C chain helper (NW_JIT_BUDGET=<n>, default 255). */
+unsigned nw_jit_link_budget(void);
 uint64_t nw_jit_dtlb_misses(void);
 uint64_t nw_jit_mtsr_total(void);
 uint64_t nw_jit_mtsr_vsid(void);
@@ -409,6 +442,7 @@ int nw_jit_cache_slots(void);
  * guest_fetch hits here before ppc32_mmu::translate. Drop on tlbie,
  * SR VSID/Ks/Kp, IBAT, and IR change. Size is not the JIT code cache. */
 enum { NW_JIT_ITLB_N = 256 };
+void nw_jit_itlb_sync_msr(uint32_t msr);	/* the MSR the caller holds: picks the instruction TLB for its IR and PR */
 void nw_jit_itlb_flush(void);
 void nw_jit_itlb_fill(uint32_t ea, uint32_t pa);
 int nw_jit_itlb_lookup(uint32_t ea, uint32_t *pa);
@@ -486,6 +520,12 @@ uint64_t nw_jit_compile_count(void);
 uint64_t nw_jit_wrap_count(void);
 size_t nw_jit_code_used(void);
 void nw_jit_stats_print(const char *why);
+
+/* Profiler (NW_JIT_PROFILE=<file>, see nw_jit.cpp): the interpreter counts the ops it executes by opcode, and the timer
+ * thread lets the profiler dump or reset its counters on request. */
+extern int nw_jit_prof_on;
+void nw_jit_prof_interp(uint32_t op);
+void nw_jit_prof_tick(void);
 
 /* PPC instruction constructors for the harness. */
 uint32_t nw_ppc_addi(int rd, int ra, int simm);

@@ -1,0 +1,68 @@
+sample s.sample.gui.txt: 332353 thread-samples in 26 threads
+  other thread DispatchQueue_416: sheepshaver.control.i  13578 samples (67.1% of a core)
+  other thread (unnamed)                                  8456 samples (41.8% of a core)
+  other thread sheepshaver.control.client                 6664 samples (32.9% of a core)
+  (22 other threads were blocked the whole time or ran under 1%)
+
+emulation thread: 20240 samples, 8346 idle (41.2%), 11894 busy
+
+Busy time by area (self time, % of busy):
+  JIT code (generated)                         4130   34.7%
+  68k layer (nw68)                             3969   33.4%
+  other                                        1388   11.7%
+  JIT chain / dispatch                          678    5.7%
+  JIT compile / invalidate                      590    5.0%
+  JIT helpers (loads/stores/system/...)         420    3.5%
+  MMU / translate                               399    3.4%
+  memory ops (memcpy/memset/memcmp)             144    1.2%
+  video (present, hash, flush)                   92    0.8%
+  guest events / timers / idle                   84    0.7%
+
+Top functions by self time (% of busy):
+  ???                                                            4130  34.72%
+  (anonymous namespace)::probe((anonymous namespace)::bus_cont    688   5.78%
+  nw68_prepare                                                    496   4.17%
+  nw68_finish                                                     473   3.98%
+  (anonymous namespace)::read_code(void*, unsigned int, unsign    349   2.93%
+  nw68_run_cached                                                 289   2.43%
+  nw_68k_dispatch                                                 269   2.26%
+  ppc32_mmu::translate                                            205   1.72%
+  pthread_jit_write_protect_np                                    195   1.64%
+  sys_icache_invalidate                                           190   1.60%
+  powerpc_cpu::jit_host_chain                                     179   1.50%
+  nw68_run_block                                                  162   1.36%
+  powerpc_cpu::nw_jit_try                                         160   1.35%
+  (anonymous namespace)::read(nw68_frame&, unsigned int, unsig    155   1.30%
+  nw_pa_kind                                                      142   1.19%
+  (anonymous namespace)::block_progress(nw68_frame*, nw68_inst    126   1.06%
+  nw_jit_itlb_lookup                                              123   1.03%
+  nw_jit_cache_get                                                120   1.01%
+  powerpc_cpu::execute                                             95   0.80%
+  nw_jit_dtlb_lookup_pr                                            93   0.78%
+  nw_jit_helper_chain                                              92   0.77%
+  powerpc_cpu::nw_68k_snapshot                                     89   0.75%
+  (anonymous namespace)::data_read(void*, unsigned int, unsign     84   0.71%
+  (anonymous namespace)::preview_page(void*, unsigned int, boo     81   0.68%
+  powerpc_cpu::nw_68k_restore                                      80   0.67%
+  mach_absolute_time                                               77   0.65%
+  nw_jit_dtlb_take_rec                                             75   0.63%
+  pagebit_set                                                      72   0.61%
+  (anonymous namespace)::write_probe(void*, unsigned int, unsi     69   0.58%
+  nw_jit_helper_stw                                                68   0.57%
+  nw_jit_dtlb_demote_pa                                            68   0.57%
+  nw68_decode                                                      68   0.57%
+  nw_jit_helper_system                                             67   0.56%
+  _platform_memcmp                                                 67   0.56%
+  SheepForcePresentedHash                                          67   0.56%
+  nw_jit_compile_impl                                              64   0.54%
+  _platform_memmove                                                61   0.51%
+  (anonymous namespace)::address(nw68_frame&, nw68_ea const&,      56   0.47%
+  nw68_export                                                      55   0.46%
+  nw_68k_note_exit_at                                              55   0.46%
+  (anonymous namespace)::compatible_nk()                           53   0.45%
+  _tlv_get_addr                                                    49   0.41%
+  (anonymous namespace)::data_write(void*, unsigned int, unsig     48   0.40%
+  (anonymous namespace)::put(nw68_frame&, unsigned int, unsign     45   0.38%
+  powerpc_cpu::guest_fetch                                         45   0.38%
+  powerpc_cpu::guest_idle_wait                                     44   0.37%
+  nw_jit_helper_lwz                                                44   0.37%

@@ -17,6 +17,10 @@ void nw_log_mkdir(const char *dir)
 	}
 	mkdir(path, 0755);
 }
+bool nw_68k_hist_on = []() -> bool {
+	const char *e = getenv("NW_JIT68K_HIST");
+	return e && (strcmp(e, "1") == 0 || strcmp(e, "on") == 0);
+}();
 namespace {
 uint64_t op_count[65536], op_native[65536], op_exit[65536], total, native_count, fallback_count, dropped, verified;
 uint64_t reasons[16];
@@ -26,12 +30,7 @@ uint32_t measured_first, measured_end;
 uint64_t measured_native;
 int enabled()
 {
-	static int on = -1;
-	if (on < 0) {
-		const char *e = getenv("NW_JIT68K_HIST");
-		on = e ? strcmp(e, "1") == 0 || strcmp(e, "on") == 0 : 0;
-	}
-	return on;
+	return nw_68k_hist_on;
 }
 void write_hist()
 {
@@ -74,8 +73,7 @@ void write_hist()
 	if (fclose(f) == 0) rename(tmp, path);
 }
 }
-bool nw_68k_hist_enabled() { return enabled() != 0; }
-void nw_68k_hist_note(uint32_t ppc_pc, uint32_t opcode_pc)
+void nw_68k_hist_note_slow(uint32_t ppc_pc, uint32_t opcode_pc)
 {
 	if (!enabled() || ppc_pc < 0x68080000u || ppc_pc >= 0x68100000u || (ppc_pc & 7)) return;
 	if (!registered) { registered = true; atexit(write_hist); }
@@ -94,8 +92,9 @@ void nw_68k_hist_note(uint32_t ppc_pc, uint32_t opcode_pc)
 }
 void nw_68k_note_exit(uint16_t op, unsigned reason)
 {
-	if (reason == NW68_EXIT_NATIVE) { ++native_count; ++op_native[op]; }
-	else { ++fallback_count; ++op_exit[op]; }
+	/* The per-opcode tables are two 512 KB arrays: a cache miss per dispatch, for numbers only the histogram file reads. */
+	if (reason == NW68_EXIT_NATIVE) { ++native_count; if (nw_68k_hist_on) ++op_native[op]; }
+	else { ++fallback_count; if (nw_68k_hist_on) ++op_exit[op]; }
 	if (reason == NW68_EXIT_VERIFIED) ++verified;
 	if (reason < 16) ++reasons[reason];
 }

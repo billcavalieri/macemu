@@ -37,8 +37,11 @@
 #include <string.h>
 #include <unistd.h>
 
+extern "C" int HostLaunchEmbedded(void);
+
 @interface SheepHost : NSObject
 + (NSView *)showWithWidth:(int)width height:(int)height;
++ (const char *)showEmbeddedWithWidth:(int)width height:(int)height;
 + (void)setGuestWidth:(int)width height:(int)height;
 + (void)applyMacCursor;
 + (void)moveMacCursorX:(int)x y:(int)y visible:(int)visible;
@@ -193,6 +196,11 @@ static void apply_guest_mode(int index)
 	SheepForceMarkDirty();
 }
 
+/* The scanout target of an embedded VM (Swift: SheepHost.detachToWindow / attachToLibrary) */
+extern "C" void VideoHostRequestWindowSink(void *ns_view) { SheepForceRequestWindowSink(ns_view); }
+extern "C" void VideoHostRequestShmSink(void) { SheepForceRequestShmSink(); }
+extern "C" int VideoHostShmSinkActive(void) { return SheepForceShmActive() ? 1 : 0; }
+
 extern "C" void VideoHostRun(void)
 {
 	[NSApp run];
@@ -258,9 +266,20 @@ bool VideoInit(void)
 	mac_pal[0].red = mac_pal[0].green = mac_pal[0].blue = 255;
 	mac_pal[1].red = mac_pal[1].green = mac_pal[1].blue = 0;
 
-	NSView *display = [SheepHost showWithWidth:width height:height];
+	/* Embedded VM: no window; the picture goes to shared memory for the library window (display_shm.h) */
+	NSView *display = nil;
+	const char *shm_name = NULL;
+	if (HostLaunchEmbedded())
+		shm_name = [SheepHost showEmbeddedWithWidth:width height:height];
+	else
+		display = [SheepHost showWithWidth:width height:height];
 	apply_guest_mode(cur_mode);
 	SheepForceStartup((__bridge void *)display);
+	if (shm_name) {
+		if (!SheepForceShmCreate(shm_name, width, height))
+			printf("SheepForce: could not create the shared memory scanout %s\n", shm_name);
+		free((void *)shm_name);
+	}
 	SheepForceAdoptHostFB(the_buffer, the_buffer_size);
 	SheepForceLoadPalette();
 	/* Stay absolute until a click grab. Ctrl-G is the release. */

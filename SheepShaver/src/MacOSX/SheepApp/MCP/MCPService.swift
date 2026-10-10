@@ -37,7 +37,7 @@ final class MCPAppBackend: MCPBackend, @unchecked Sendable {
             return result
         }
         guard let document = onMain({ store.document(id: vmID) }) else { throw ControlError("no such virtual machine") }
-        let launched = onMain { store.launch(document, background: true) }
+        let launched = onMain { store.launch(document, background: true, embedded: VirtualMachineStore.opensInLibraryWindow) }
         guard launched else { return ["started": false, "already_running": true] }
         let began = Date()
         // The process is up when its control socket answers

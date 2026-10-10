@@ -44,7 +44,7 @@ try:
     (top / FILES).mkdir(parents=True)
     for src, name, dest, type_ in [('SheepShearsInstaller.bin', 'Install Sheep Shears', top, None),
                                    ('SheepShears.bin', 'Sheep Shears Tool', top / FILES, None),
-                                   ('SheepShearsPanel.bin', 'Sheep Shears', top / FILES, b'appc')]:    # a control panel application
+                                   ('SheepShearsPanel.bin', 'Sheep Shears', top / FILES, b'APPC')]:    # a control panel application
         m = macbinary(build / src)
         put(dest, name, m['data'], type_ or m['type'], m['creator'], m['flags'], m['rsrc'])
     readme = build / 'ReadMe.txt'

@@ -1,0 +1,66 @@
+sample prof.sample.idle.txt: 221416 thread-samples in 25 threads
+  other thread (unnamed)                                 10680 samples (81.1% of a core)
+  (23 other threads were blocked the whole time or ran under 1%)
+
+emulation thread: 13169 samples, 8957 idle (68.0%), 4212 busy
+
+Busy time by area (self time, % of busy):
+  68k layer (nw68)                             1330   31.6%
+  JIT code (generated)                          842   20.0%
+  other                                         622   14.8%
+  JIT chain / dispatch                          501   11.9%
+  JIT helpers (loads/stores/system/...)         285    6.8%
+  MMU / translate                               250    5.9%
+  memory ops (memcpy/memset/memcmp)             149    3.5%
+  JIT compile / invalidate                      139    3.3%
+  video (present, hash, flush)                   62    1.5%
+  guest events / timers / idle                   32    0.8%
+
+Top functions by self time (% of busy):
+  ???                                                             842  19.99%
+  powerpc_cpu::nw_jit_try                                         156   3.70%
+  (anonymous namespace)::probe((anonymous namespace)::bus_cont    150   3.56%
+  nw68_finish                                                     148   3.51%
+  nw68_cached_block                                               122   2.90%
+  nw68_prepare                                                    121   2.87%
+  nw68_run_block                                                  118   2.80%
+  ppc32_mmu::translate                                            114   2.71%
+  nw_pa_kind                                                      106   2.52%
+  powerpc_cpu::jit_host_chain                                     105   2.49%
+  nw_68k_dispatch                                                 104   2.47%
+  (anonymous namespace)::read_code(void*, unsigned int, unsign     95   2.26%
+  nw68_page_translate                                              85   2.02%
+  nw_pull_gpr                                                      74   1.76%
+  nw_jit_helper_chain                                              73   1.73%
+  nw_jit_helper_system                                             67   1.59%
+  nw_jit_cache_get                                                 63   1.50%
+  SheepForcePresentedHash                                          53   1.26%
+  _platform_memset                                                 52   1.23%
+  powerpc_cpu::execute                                             51   1.21%
+  _platform_memmove                                                49   1.16%
+  nw_jit_itlb_lookup                                               47   1.12%
+  (anonymous namespace)::block_progress(nw68_frame*, nw68_inst     45   1.07%
+  _platform_memcmp                                                 42   1.00%
+  getxattr                                                         41   0.97%
+  nw68_decode                                                      36   0.85%
+  nw_commit_gpr                                                    35   0.83%
+  sys_icache_invalidate                                            35   0.83%
+  pthread_jit_write_protect_np                                     33   0.78%
+  __findenv_locked                                                 32   0.76%
+  nw_jit_invalidate_page_src                                       31   0.74%
+  (anonymous namespace)::read(nw68_frame&, unsigned int, unsig     31   0.74%
+  nw_jit_helper_lwz_pa                                             30   0.71%
+  nw_jit_dtlb_take_rec                                             30   0.71%
+  nw_jit_helper_stw_pa                                             29   0.69%
+  powerpc_cpu::nw_68k_snapshot                                     27   0.64%
+  nw68_invalidate_page                                             24   0.57%
+  ppc32_mmu::bat_hit                                               24   0.57%
+  nw_jit_dtlb_demote_pa                                            24   0.57%
+  link_site                                                        22   0.52%
+  access                                                           22   0.52%
+  nw_68k_note_exit_at                                              21   0.50%
+  powerpc_cpu::nw_68k_restore                                      20   0.47%
+  nw_jit_dtlb_lookup_pr                                            18   0.43%
+  mach_absolute_time                                               17   0.40%
+  nw_jit_helper_stw                                                17   0.40%
+  nw68_export                                                      17   0.40%

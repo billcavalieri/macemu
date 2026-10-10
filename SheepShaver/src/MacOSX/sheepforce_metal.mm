@@ -28,6 +28,12 @@
 #include <stdlib.h>
 #include <math.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <time.h>
+
+#include "display_shm.h"
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -430,6 +436,32 @@ static void on_main(void (^block)(void))
 		dispatch_sync(dispatch_get_main_queue(), block);
 }
 
+/* Makes `view` the scanout target: its layer is the CAMetalLayer the present pass draws into (main thread, or
+ * synchronously from another). Also used when a VM that was embedded opens its own window. */
+static void attach_view_layer(NSView *view)
+{
+	on_main(^{
+		g_view = view;
+		[view setWantsLayer:YES];
+		CAMetalLayer *layer = [view.layer isKindOfClass:[CAMetalLayer class]] ?
+			(CAMetalLayer *)view.layer : [CAMetalLayer layer];
+		if (view.layer != layer) {
+			[view setLayer:layer];
+			[view setWantsLayer:YES];
+		}
+		g_layer = layer;
+		g_layer.device = g_dev;
+		g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+		g_layer.framebufferOnly = YES;
+		g_layer.opaque = YES;
+		g_layer.allowsNextDrawableTimeout = YES;
+		g_layer.contentsGravity = kCAGravityResize;
+		g_layer.magnificationFilter = kCAFilterNearest;
+		g_layer.minificationFilter = kCAFilterNearest;
+		SheepForceLayoutDisplay();
+	});
+}
+
 void SheepForceStartup(void *ns_view)
 {
 	if (g_dev)
@@ -452,33 +484,13 @@ void SheepForceStartup(void *ns_view)
 		return;
 	}
 	NSView *view = (__bridge NSView *)ns_view;
-	if (!view)
-		return;
-	on_main(^{
-		g_view = view;
-		[view setWantsLayer:YES];
-		CAMetalLayer *layer = [view.layer isKindOfClass:[CAMetalLayer class]] ?
-			(CAMetalLayer *)view.layer : [CAMetalLayer layer];
-		if (view.layer != layer) {
-			[view setLayer:layer];
-			[view setWantsLayer:YES];
-		}
-		g_layer = layer;
-		g_layer.device = g_dev;
-		g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-		g_layer.framebufferOnly = YES;
-		g_layer.opaque = YES;
-		g_layer.allowsNextDrawableTimeout = YES;
-		g_layer.contentsGravity = kCAGravityResize;
-		g_layer.magnificationFilter = kCAFilterNearest;
-		g_layer.minificationFilter = kCAFilterNearest;
-		SheepForceLayoutDisplay();
-	});
+	if (view)
+		attach_view_layer(view);
 	g_meta = [g_dev newBufferWithLength:5 * sizeof(uint) options:MTLResourceStorageModeShared];
 	g_pal = [g_dev newBufferWithLength:256 * 4 options:MTLResourceStorageModeShared];
 	memset(g_pal.contents, 0, 256 * 4);
 	g_dirty = true;
-	printf("SheepForce: Metal scanout on the window\n");
+	printf(view ? "SheepForce: Metal scanout on the window\n" : "SheepForce: no window, scanout into shared memory\n");
 }
 
 void SheepForceLayoutDisplay(void)
@@ -511,6 +523,7 @@ void SheepForceLayoutDisplay(void)
 void SheepForceShutdown(void)
 {
 	SheepForceFlushCPU(NULL, 0, 0, 0);
+	SheepForceShmDestroy();
 	g_view = nil;
 	g_layer = nil;
 	g_fb = nil;
@@ -882,8 +895,277 @@ bool SheepForceTryBlit(const SheepForceBlitOp *op)
 	return true;
 }
 
+/* ---- Shared-memory scanout: the library window (another process) shows this VM's picture (display_shm.h) ----
+ * The same present pass, rendered into a guest-sized slot of a shared-memory region instead of a drawable. The slots
+ * are no-copy Metal buffers over the shared pages, so there is no CPU copy; a frame is published when the GPU is done.
+ * Nothing is drawn while no viewer is looking (its heartbeat in the header is stale), and no more often than the
+ * viewer's refresh interval. The detached window path (SheepForcePresent below) is not touched by any of this. */
+static DisplayShmHeader *g_shm;
+static bool g_shm_active;		/* the shared-memory region is the scanout target (not a window) */
+static uint8 *g_shm_base;
+static size_t g_shm_total;
+static NSUInteger g_shm_slot_bytes;
+static char g_shm_name[64];
+static id<MTLBuffer> g_shm_buf[DISPLAY_SHM_SLOTS];
+static id<MTLTexture> g_shm_tex[DISPLAY_SHM_SLOTS];
+static int g_shm_tex_w, g_shm_tex_h;
+static uint32_t g_shm_pending;		/* bit per slot: GPU still rendering into it (touched by the emulation thread and handlers) */
+static uint64_t g_shm_last_ns;
+
+static uint64_t shm_now_ns(void)
+{
+	return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
+
+bool SheepForceShmActive(void)
+{
+	return g_shm_active;
+}
+
+/* ---- Switching between the two scanout targets while the VM runs (a VM in the library window opens its own window, or
+ * goes back). Requested from the main thread; the emulation thread makes the switch at the start of its next present,
+ * so it is never in the middle of drawing to the target being replaced. */
+static int g_sink_request;		/* 0 none, 1 a window (g_sink_view), 2 shared memory; atomic */
+static NSView *g_sink_view;
+
+void SheepForceRequestWindowSink(void *ns_view)
+{
+	g_sink_view = (__bridge NSView *)ns_view;
+	__atomic_store_n(&g_sink_request, 1, __ATOMIC_RELEASE);
+}
+
+void SheepForceRequestShmSink(void)
+{
+	__atomic_store_n(&g_sink_request, 2, __ATOMIC_RELEASE);
+}
+
+static void apply_sink_request(void)
+{
+	const int request = __atomic_exchange_n(&g_sink_request, 0, __ATOMIC_ACQ_REL);
+	if (request == 1 && g_sink_view) {
+		NSView *view = g_sink_view;
+		g_sink_view = nil;
+		g_shm_active = false;
+		attach_view_layer(view);
+		g_dirty = true;
+	} else if (request == 2 && g_shm) {
+		on_main(^{
+			g_view = nil;
+			g_layer = nil;
+		});
+		g_shm_last_ns = 0;
+		g_shm_active = true;
+	}
+}
+
+void SheepForceShmDestroy(void)
+{
+	if (!g_shm)
+		return;
+	for (unsigned i = 0; i < DISPLAY_SHM_SLOTS; i++) {
+		g_shm_tex[i] = nil;
+		g_shm_buf[i] = nil;
+	}
+	munmap(g_shm_base, g_shm_total);
+	shm_unlink(g_shm_name);
+	g_shm = NULL;
+	g_shm_active = false;
+	g_shm_base = NULL;
+	g_shm_tex_w = g_shm_tex_h = 0;
+}
+
+static void shm_atexit(void)
+{
+	if (g_shm)
+		shm_unlink(g_shm_name);
+}
+
+/* Creates the region (replacing a stale one) sized for pictures up to max_w x max_h and makes it the scanout target.
+ * Call after SheepForceStartup. */
+bool SheepForceShmCreate(const char *name, int max_w, int max_h)
+{
+	if (!g_dev || !name || max_w < 1 || max_h < 1 || strlen(name) >= sizeof g_shm_name)
+		return false;
+	SheepForceShmDestroy();
+	strlcpy(g_shm_name, name, sizeof g_shm_name);
+	const NSUInteger align = [g_dev minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm];
+	const NSUInteger page = (NSUInteger)getpagesize();
+	const NSUInteger bpr = (((NSUInteger)max_w * 4) + align - 1) / align * align;
+	g_shm_slot_bytes = (bpr * (NSUInteger)max_h + page - 1) / page * page;
+	g_shm_total = DISPLAY_SHM_HEADER_BYTES + (size_t)DISPLAY_SHM_SLOTS * g_shm_slot_bytes;
+	shm_unlink(name);
+	const int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+	if (fd < 0) {
+		printf("SheepForce: shared memory %s: %s\n", name, strerror(errno));
+		return false;
+	}
+	if (ftruncate(fd, (off_t)g_shm_total) != 0) {
+		close(fd);
+		shm_unlink(name);
+		return false;
+	}
+	void *base = mmap(NULL, g_shm_total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	close(fd);
+	if (base == MAP_FAILED) {
+		shm_unlink(name);
+		return false;
+	}
+	g_shm_base = (uint8 *)base;
+	g_shm = (DisplayShmHeader *)base;
+	memset(g_shm, 0, DISPLAY_SHM_HEADER_BYTES);
+	g_shm->version = DISPLAY_SHM_VERSION;
+	g_shm->slots = DISPLAY_SHM_SLOTS;
+	g_shm->slotBytes = g_shm_slot_bytes;
+	g_shm->headerBytes = DISPLAY_SHM_HEADER_BYTES;
+	g_shm->maxWidth = (uint32_t)max_w;
+	g_shm->maxHeight = (uint32_t)max_h;
+	g_shm->pixelFormat = (uint32_t)MTLPixelFormatBGRA8Unorm;
+	g_shm->latestSlot = DISPLAY_SHM_NO_SLOT;
+	g_shm->readingSlot = DISPLAY_SHM_NO_SLOT;
+	g_shm->vmPid = (uint32_t)getpid();
+	for (unsigned i = 0; i < DISPLAY_SHM_SLOTS; i++) {
+		g_shm_buf[i] = [g_dev newBufferWithBytesNoCopy:g_shm_base + DISPLAY_SHM_HEADER_BYTES + (size_t)i * g_shm_slot_bytes
+							length:g_shm_slot_bytes options:MTLResourceStorageModeShared deallocator:nil];
+		if (!g_shm_buf[i]) {
+			SheepForceShmDestroy();
+			return false;
+		}
+	}
+	__atomic_store_n(&g_shm->magic, DISPLAY_SHM_MAGIC, __ATOMIC_RELEASE);	/* the viewer waits for this */
+	static bool registered;
+	if (!registered) {
+		registered = true;
+		atexit(shm_atexit);
+	}
+	g_shm_pending = 0;
+	g_shm_last_ns = 0;
+	g_shm_active = true;
+	printf("SheepForce: shared memory scanout %s, slots of %lu bytes\n", name, (unsigned long)g_shm_slot_bytes);
+	fflush(stdout);
+	return true;
+}
+
+/* Buffer-backed render-target textures for the current picture size; a new size bumps the generation. */
+static bool shm_prepare_textures(int gw, int gh)
+{
+	if (g_shm_tex[0] && g_shm_tex_w == gw && g_shm_tex_h == gh)
+		return true;
+	if (__atomic_load_n(&g_shm_pending, __ATOMIC_ACQUIRE) != 0)
+		return false;			/* wait until the frames in flight are published */
+	const NSUInteger align = [g_dev minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm];
+	const NSUInteger bpr = (((NSUInteger)gw * 4) + align - 1) / align * align;
+	if (bpr * (NSUInteger)gh > g_shm_slot_bytes)
+		return false;			/* larger than the region was made for */
+	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+								width:(NSUInteger)gw height:(NSUInteger)gh mipmapped:NO];
+	d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	d.storageMode = MTLStorageModeShared;
+	for (unsigned i = 0; i < DISPLAY_SHM_SLOTS; i++) {
+		g_shm_tex[i] = [g_shm_buf[i] newTextureWithDescriptor:d offset:0 bytesPerRow:bpr];
+		if (!g_shm_tex[i])
+			return false;
+	}
+	g_shm_tex_w = gw;
+	g_shm_tex_h = gh;
+	g_shm->width = (uint32_t)gw;
+	g_shm->height = (uint32_t)gh;
+	g_shm->bytesPerRow = (uint32_t)bpr;
+	__atomic_add_fetch(&g_shm->generation, 1, __ATOMIC_RELEASE);
+	return true;
+}
+
+static bool SheepForcePresentShm(void)
+{
+	if (!g_present_pipe || SheepForceWidth() <= 0)
+		return false;
+	if (!SheepForceBindFB() || !g_fb || !g_meta)
+		return false;
+	SheepForceCommitOpen();
+	g_presented = NULL;
+	g_presented_bytes = 0;
+	const int gw = SheepForceWidth();
+	const int gh = SheepForceHeight();
+	const int row = SheepForceRowBytes();
+	const int depth = SheepForceDepth();
+	const int page = SheepForceVisiblePage();
+	if (!g_fb_nocopy && g_fb_host) {
+		SheepForceFlushCPU(NULL, 0, 0, 0);
+		uint32 bytes = SheepForcePageBytes() * (uint32)SheepForcePageCount();
+		if (bytes > g_fb.length)
+			bytes = (uint32)g_fb.length;
+		memcpy(g_fb.contents, g_fb_host, bytes);
+	}
+	{
+		const uint32 pb = SheepForcePageBytes();
+		const uint32 off = (uint32)page * pb;
+		const uint8 *base = (const uint8 *)g_fb.contents;
+		if (base && pb >= 64 && off + pb <= (uint32)g_fb.length) {
+			g_presented = base + off;
+			g_presented_bytes = pb;
+		}
+	}
+	/* Nobody is looking, or not yet time for the viewer's next refresh: the picture is tracked (above) but not drawn. */
+	const uint64_t now = shm_now_ns();
+	const uint64_t heartbeat = __atomic_load_n(&g_shm->viewerHeartbeatNs, __ATOMIC_ACQUIRE);
+	if (heartbeat == 0 || now - heartbeat > DISPLAY_SHM_HEARTBEAT_NS)
+		return true;
+	const uint64_t interval = __atomic_load_n(&g_shm->viewerIntervalNs, __ATOMIC_RELAXED);
+	if (g_shm_last_ns && interval && now - g_shm_last_ns < interval - interval / 8)
+		return true;
+	if (!shm_prepare_textures(gw, gh))
+		return true;
+	/* A slot that is not the latest, not being read and not being rendered */
+	const uint32_t latest = __atomic_load_n(&g_shm->latestSlot, __ATOMIC_ACQUIRE);
+	const uint32_t reading = __atomic_load_n(&g_shm->readingSlot, __ATOMIC_ACQUIRE);
+	const uint32_t pending = __atomic_load_n(&g_shm_pending, __ATOMIC_ACQUIRE);
+	int slot = -1;
+	for (unsigned i = 0; i < DISPLAY_SHM_SLOTS; i++) {
+		if (i != latest && i != reading && !(pending & (1u << i))) {
+			slot = (int)i;
+			break;
+		}
+	}
+	if (slot < 0)
+		return true;			/* the viewer is behind: drop this frame */
+	uint *meta = (uint *)g_meta.contents;
+	meta[0] = (uint)gw;
+	meta[1] = (uint)gh;
+	meta[2] = (uint)row;
+	meta[3] = (uint)depth;
+	meta[4] = (uint)page * SheepForcePageBytes();
+	g_meta_depth = meta[3];
+	MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture = g_shm_tex[slot];
+	rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;	/* the pass covers every pixel */
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	[enc setRenderPipelineState:g_present_pipe];
+	[enc setFragmentBuffer:g_pal offset:0 atIndex:0];
+	[enc setFragmentBuffer:g_fb offset:0 atIndex:2];
+	[enc setFragmentBuffer:g_meta offset:0 atIndex:3];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+	DisplayShmHeader *hdr = g_shm;
+	__atomic_or_fetch(&g_shm_pending, 1u << slot, __ATOMIC_RELEASE);
+	[cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+		__atomic_store_n(&hdr->latestSlot, (uint32_t)slot, __ATOMIC_RELEASE);
+		__atomic_store_n(&hdr->publishNs, shm_now_ns(), __ATOMIC_RELEASE);
+		__atomic_add_fetch(&hdr->frameCounter, 1, __ATOMIC_RELEASE);
+		__atomic_and_fetch(&g_shm_pending, ~(1u << slot), __ATOMIC_RELEASE);
+	}];
+	[cb commit];
+	g_shm_last_ns = now;
+	g_dirty = false;
+	return true;
+}
+
 bool SheepForcePresent(int x, int y, int w, int h)
 {
+	if (__atomic_load_n(&g_sink_request, __ATOMIC_ACQUIRE) != 0)
+		apply_sink_request();
+	if (g_shm_active)
+		return SheepForcePresentShm();
 	(void)x; (void)y; (void)w; (void)h;
 	if (!g_layer || !g_present_pipe || SheepForceWidth() <= 0)
 		return false;

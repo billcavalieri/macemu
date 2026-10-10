@@ -3613,7 +3613,7 @@ int ppc_core_test_access::run()
                 const uint32 before = cpu->gpr(3); const uint64 hops = nw_jit_chain_hops();
                 CHECK(cpu->nw_jit_try(ops[0]) == 1 && cpu->pc() == start);
                 if (!cached) CHECK(cpu->gpr(3) == before + steps && nw_jit_chain_hops() == hops + steps - 1);
-                else CHECK(cpu->gpr(3) - before >= steps && cpu->gpr(3) - before <= steps * 32u && nw_jit_chain_hops() == hops + steps - 1);
+                else CHECK(cpu->gpr(3) - before >= steps && cpu->gpr(3) - before <= steps * (nw_jit_link_budget() + 1u) && nw_jit_chain_hops() == hops + steps - 1);
             }
             nw_jit_legacy = saved_legacy;
         }
@@ -4488,7 +4488,7 @@ int ppc_core_test_access::run()
             CHECK(cpu->pc() == start + (stop ? 0x40 : 0xc0));
             CHECK(nw_jit_chain_hops() == hops + (stop ? 0 : 2));
             CHECK(nw_jit_tail_n() == (!stop && native_tail ? 5 : 0));
-            CHECK(cpu->nw_jc_->gpr_live == ((1u<<3)|(1u<<20)|(1u<<21)|(1u<<22)));
+            CHECK(cpu->nw_jc_->gpr_live == 0xffffffffu);	/* the interpreter and the JIT share one register file: every register is always live */
             for (unsigned r = 0; r < 32; ++r) {
                 uint32 value = before.gpr[r];
                 if (r == 3) value += 7;
@@ -5021,6 +5021,7 @@ static int replay_capture(const char *path)
 }
 
 extern "C" int ppc_test_main(int argc, char **argv) {
+    nw_jit_count_dtlb_hits(1);	/* several checks below count data-TLB hits in generated code */
     if (argc == 2 && !strcmp(argv[1], "--vmx-policy")) {
         for (unsigned prim : {4u,31u})
         for (unsigned low = 0; low < 2048; ++low)

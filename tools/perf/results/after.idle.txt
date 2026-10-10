@@ -1,0 +1,217 @@
+
+== Run: after, idle ==
+blocks compiled 9317 (distinct records), recompiled/flushed 1570, flush calls 685
+guest instructions in JIT blocks      156,500,625
+guest instructions in interpreter           3,789  (0.0024% of all)
+block executions                       29,533,786   average block length 5.30 instructions
+  entered through the C dispatcher      1,886,104   (6.4%)   the rest were direct/native chain hops
+  C chain-loop hops                     1,935,701
+data TLB  hit 35,491,425 miss 186,908 (0.52% miss)
+instr TLB hit 10,817,520 miss 1,075,440 (9.04% miss)
+JIT compile time            0.02 s over 1,570 compiles (12.8 us each), of which write-protect toggles 0.00 s, icache invalidate 0.00 s
+
+== Code-cache upkeep: why translations are thrown away ==
+  dropped by store           497 translations in 69 invalidations
+  dropped by icbi            188 translations in 53 invalidations
+  indirect-target cache (cumulative since start): 8,487,497 fills; epochs (every entry and cross-page link invalidated) by link/compaction 16,830, ITLB flush 67,560, tlbie 545, mtsr 275,452
+  instruction-TLB flushes so far: 106,492
+  chain-helper calls by cause: hops 1,935,701, computed_target_miss 1,793,396, no_site 6,840, never_linked 459,255, stale_generation 125,598, register_masks 607,786, hop_budget_spent 17,079
+  idle loop: 1,819 sleeps (0 ended by the timeout, the rest by an event), 2,482 wake-up requests from other threads
+  direct block links made: 607,908
+  code arena: 1 compactions (62.6 MB copied, 0.01 s), 1 bank wipes, 0 cold evictions
+
+== Instruction mix: what runs, and what the JIT does with it ==
+op                 executed       %    cum%    w/ helper calls/ex   words
+lwz              32,200,130  20.58%   20.6%   32,200,130     2.00    93.9
+stw              22,441,055  14.34%   34.9%   22,441,055     2.00    93.8
+bc               16,243,652  10.38%   45.3%   16,243,652     1.08    68.0
+addi             11,496,433   7.35%   52.6%            0     0.00     6.6
+mtspr             7,137,588   4.56%   57.2%    1,342,950     0.19     7.1
+rlwinm            5,569,850   3.56%   60.8%            0     0.00    11.4
+b                 5,557,521   3.55%   64.3%    5,557,521     1.00    66.7
+mfspr             5,390,214   3.44%   67.8%    2,439,249     0.45    14.4
+bclr              4,874,031   3.11%   70.9%    4,874,031     1.00    72.6
+twi               4,193,432   2.68%   73.5%    4,193,432     1.00    21.0
+cmpli             4,094,241   2.62%   76.2%            0     0.00    20.2
+or                3,665,521   2.34%   78.5%            0     0.00     7.3
+cmpi              3,612,542   2.31%   80.8%            0     0.00    20.3
+rlwimi            2,942,109   1.88%   82.7%            0     0.00    11.0
+bcctr             1,826,495   1.17%   83.9%    1,826,495     1.00    71.5
+stwu              1,762,662   1.13%   85.0%    1,762,662     2.00   103.2
+mtcrf             1,678,981   1.07%   86.1%            0     0.00     8.7
+lbz               1,269,663   0.81%   86.9%    1,269,663     1.00    57.7
+lhau              1,154,035   0.74%   87.6%    1,154,035     1.00    65.9
+add               1,147,143   0.73%   88.3%            0     0.00     6.0
+ori               1,138,500   0.73%   89.1%            0     0.00     6.8
+andi.             1,137,902   0.73%   89.8%            0     0.00    23.6
+cmp               1,051,497   0.67%   90.5%            0     0.00    19.8
+lwzx              1,049,986   0.67%   91.1%    1,049,986     2.00    93.1
+stmw                888,524   0.57%   91.7%      888,524     1.00    26.8
+mfcr                819,102   0.52%   92.2%            0     0.00     4.0
+lwzu                806,548   0.52%   92.7%      806,548     2.00    98.0
+cmpl                804,113   0.51%   93.3%            0     0.00    19.5
+lha                 792,097   0.51%   93.8%      792,097     1.00    61.6
+lmw                 758,715   0.48%   94.3%      758,715     1.00    26.2
+lhz                 679,542   0.43%   94.7%      679,542     1.00    60.9
+extsh               551,197   0.35%   95.0%            0     0.00    16.8
+addis               504,113   0.32%   95.4%            0     0.00     5.9
+crxor               350,723   0.22%   95.6%            0     0.00    14.0
+lbzx                345,267   0.22%   95.8%      345,267     1.00    57.9
+addic.              342,388   0.22%   96.0%            0     0.00    32.0
+sync                330,235   0.21%   96.2%            0     0.00     1.0
+stb                 304,060   0.19%   96.4%      304,060     1.00    56.4
+lfd                 295,100   0.19%   96.6%      295,100     1.00    60.2
+rfi                 288,856   0.18%   96.8%      288,856     1.00    24.0
+stwcx.              288,034   0.18%   97.0%      288,034     1.00    25.0
+lwarx               288,021   0.18%   97.2%      288,021     1.00    25.0
+xoris               254,712   0.16%   97.3%            0     0.00     7.0
+stfd                250,154   0.16%   97.5%      250,154     1.00    60.1
+and                 234,443   0.15%   97.6%            0     0.00    15.1
+cror                233,597   0.15%   97.8%            0     0.00    14.0
+sth                 231,351   0.15%   97.9%      231,351     1.00    59.1
+xor                 209,221   0.13%   98.1%            0     0.00     6.4
+cntlzw              200,749   0.13%   98.2%            0     0.00     4.7
+subf                175,153   0.11%   98.3%            0     0.00    10.1
+neg                 156,507   0.10%   98.4%            0     0.00     4.0
+addc                145,550   0.09%   98.5%            0     0.00    32.2
+andis.              133,880   0.09%   98.6%            0     0.00    24.0
+slw                 130,851   0.08%   98.7%            0     0.00     9.7
+dcbtst              126,686   0.08%   98.8%            0     0.00     0.0
+subfe               123,686   0.08%   98.8%            0     0.00    19.1
+dcbt                122,910   0.08%   98.9%            0     0.00     0.0
+addic               122,875   0.08%   99.0%            0     0.00    13.6
+subfc                96,201   0.06%   99.1%            0     0.00    15.4
+crand                95,949   0.06%   99.1%            0     0.00    14.0
+instructions whose emitted code contains a helper call: 103,340,754 (66.0% of executed)
+
+== C helpers called from JIT code: exact call counts (profile mode counts every call at its call site) ==
+total helper calls 9,076,442  (0.06 per guest instruction)
+helper                                      calls       %  emitted by (op, weight)
+nw_jit_helper_chain                     2,659,574   29.3%  
+nw_jit_helper_bc                        1,347,408   14.8%  
+nw_jit_helper_system                    1,279,066   14.1%  
+nw_jit_helper_stmw                        758,712    8.4%  
+nw_jit_helper_lmw                         758,684    8.4%  
+nw_jit_helper_lb                          384,528    4.2%  
+nw_jit_helper_stwcx                       288,005    3.2%  
+nw_jit_helper_lwarx                       288,005    3.2%  
+nw_jit_helper_stfd_ea                     231,012    2.5%  
+nw_jit_helper_lfd_ea                      230,877    2.5%  
+dtlb-miss-load@32/0                       134,015    1.5%  
+real-mode-load@32/0                       128,191    1.4%  
+nw_jit_helper_lh                          119,272    1.3%  
+nw_jit_helper_sraw                        117,115    1.3%  
+nw_jit_helper_stb                          66,779    0.7%  
+dtlb-miss-store@36/0                       38,000    0.4%  
+nw_jit_helper_fsub                         36,566    0.4%  
+nw_jit_helper_stswx                        28,909    0.3%  
+nw_jit_helper_lswx                         28,909    0.3%  
+nw_jit_helper_sth                          20,004    0.2%  
+nw_jit_helper_fadd                         16,716    0.2%  
+nw_jit_helper_adde                         14,408    0.2%  
+nw_jit_helper_fmul                         11,792    0.1%  
+nw_jit_helper_fcmpu                        10,016    0.1%  
+nw_jit_helper_fabs                          9,416    0.1%  
+nw_jit_helper_fneg                          7,869    0.1%  
+dtlb-miss-load@31/23                        7,200    0.1%  
+nw_jit_helper_mtfsf                         7,086    0.1%  
+nw_jit_helper_mffs                          7,079    0.1%  
+nw_jit_helper_addze                         7,059    0.1%  
+
+== nw_jit_helper_system calls by instruction (exact) ==
+rfi                             288,854   22.6%
+mfspr spr 256                   254,986   19.9%
+twi                             252,686   19.8%
+mtspr spr 256                   126,947    9.9%
+mtsr                             74,656    5.8%
+isync                            67,416    5.3%
+mftb                             44,901    3.5%
+sc                               23,387    1.8%
+mfspr spr 287                    20,486    1.6%
+mtmsr                            19,619    1.5%
+mfmsr                            17,567    1.4%
+mtspr spr 22                      9,592    0.7%
+mtspr spr 538                     9,332    0.7%
+mtspr spr 536                     9,332    0.7%
+mtspr spr 530                     9,332    0.7%
+mtspr spr 528                     9,332    0.7%
+icbi                              6,773    0.5%
+mtspr spr 539                     4,666    0.4%
+mtspr spr 537                     4,666    0.4%
+mtspr spr 531                     4,666    0.4%
+mtspr spr 529                     4,666    0.4%
+mtsrin                            4,206    0.3%
+mfspr spr 22                      2,946    0.2%
+mtspr spr 1008                    2,326    0.2%
+mfsrin                            2,118    0.2%
+mfspr spr 1008                    1,163    0.1%
+twi                               1,142    0.1%
+twi                               1,068    0.1%
+dcbz                                210    0.0%
+mfspr spr 18                         10    0.0%
+
+== Instructions the interpreter executed (not compiled) ==
+op                 executed
+?6/26                 1,748
+?6/0                  1,018
+?6/65                 1,018
+lwz                       5
+
+== Blocks: length and how they end (weighted by executions) ==
+block ends with                              executions       % avg length
+bc                                           16,243,652   55.0%       5.15
+b/bl                                          5,557,521   18.8%       4.42
+bclr                                          4,874,031   16.5%       5.90
+bcctr                                         1,826,495    6.2%       6.09
+cut (page end or unsupported next op)           652,404    2.2%       5.60
+rfi                                             288,856    1.0%      15.54
+isync                                            67,437    0.2%       2.13
+sc                                               23,390    0.1%       3.33
+blocks of 1-4 instructions: 58.2% of executions; 5-8: 28.6%; 9-16: 7.9%; 17-32: 5.3%
+
+== Hottest blocks (by instructions executed) ==
+pc          len     executions % insns  ops
+50312b68   28        251,571   4.50%  lwz stw stw stw stw lwz stw stw stw stw stw stw stw stw ...
+6806e8c4   40        126,405   3.23%  twi twi twi twi twi twi twi twi twi twi twi twi twi twi ...
+50312be0   18        251,571   2.89%  stw lwz stw xoris rlwimi or rlwimi andi. lwz lwz stw lwz lwz mtspr ...
+5032363c   16        275,468   2.82%  mfspr rlwinm rlwimi mtspr mtcrf lwz lwz lwz lwz lwz lwz lwz lwz lwz ...
+50312c4c   28        126,405   2.26%  mtspr lwz lwz lwz lwz lwz stw lwz lwz lwz lwz lwz lwz lwz ...
+50312c50   27        125,166   2.16%  lwz lwz lwz lwz lwz stw lwz lwz lwz lwz lwz lwz lwz lwz ...
+50313d64   21        149,158   2.00%  stw mfspr stw lwz stw stw stw stw stw stw stw stw addi mfspr ...
+6806e1a0   21        126,410   1.70%  lwz lwz lbz lwz lwz lwz lwz lwz lwz lwz lwz cmpi lwz lwz ...
+6806e120   32         75,859   1.55%  lwz ori mfcr lwz rlwinm stw lwz mtcrf stw stw stw stw stw stw ...
+50312c28    9        251,571   1.45%  lwarx sync stwcx. lwz lwz cmpi stw lwz bc
+6806e8c0   18        125,118   1.44%  twi twi twi twi twi twi twi twi twi twi twi twi twi twi ...
+50312b38    8        251,571   1.29%  mfspr stw stw stw mfspr stw stw bc
+50323620    7        275,468   1.23%  lwz mfspr mtspr mtspr mtspr rlwinm bc
+1ebd8f94    7        258,079   1.15%  stmw mfspr or addi stw stwu bc
+ffced3c4    5        339,401   1.08%  addic. addi lwz cmp bc
+1ebd9010    6        258,079   0.99%  lwz addi or lmw mtspr bclr
+6806e128   30         49,259   0.94%  mfcr lwz rlwinm stw lwz mtcrf stw stw stw stw stw stw stw stw ...
+503233fc    5        274,290   0.88%  lbz rlwinm lwz cmpi bc
+6806c410   14         90,574   0.81%  eieio or rlwimi cmpl rlwimi addi and cmpi crand lbz lwz cmpi rlwinm bc
+50312b0c    5        251,571   0.80%  mfspr lwz stw stw bc
+6806cdd8   10        125,118   0.80%  rlwinm rlwimi rlwinm mtspr rlwimi lhau rlwinm mtcrf mtspr bclr
+50314800    9        127,423   0.73%  add lwz lwz addi stw mtspr or rlwimi bclr
+ffced8e0   15         75,859   0.73%  mfspr stw addi stw addi stmw lwz lwz stw stw addis stw xor stw ...
+503143e4    9        126,405   0.73%  addi mtspr lwz mtcrf mfspr rlwinm stw stw b
+50312cbc    4        274,290   0.70%  addi stw stw b
+1ebd8fc8    5        205,075   0.66%  addi stw lwz cmpi bc
+50322eb0    4        254,606   0.65%  mfspr lwz cmpli bclr
+50313c30    8        125,118   0.64%  addi lwz cmpli addi stw mfspr rlwimi bc
+1ebd7e78   10         97,291   0.62%  stmw mfspr addi addi stw stwu lwz lwz cmpl bc
+ffced0e8    7        129,701   0.58%  crxor mfcr crxor mfspr rlwinm cmpli bc
+
+== Guest code regions (64 KB) by instructions executed ==
+50310000-5031ffff     38,781,099  24.78%
+68060000-6806ffff     35,611,381  22.75%
+1ebd0000-1ebdffff     22,706,281  14.51%
+ffce0000-ffceffff     19,054,739  12.18%
+50320000-5032ffff     14,461,692   9.24%
+00ed0000-00edffff      2,470,433   1.58%
+ffd10000-ffd1ffff      2,064,049   1.32%
+ffde0000-ffdeffff      1,797,783   1.15%
+1ebc0000-1ebcffff      1,740,553   1.11%
+00000000-0000ffff      1,292,280   0.83%
+00ec0000-00ecffff      1,147,797   0.73%
+00050000-0005ffff      1,079,578   0.69%

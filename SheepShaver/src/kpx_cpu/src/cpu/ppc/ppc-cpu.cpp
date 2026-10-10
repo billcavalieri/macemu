@@ -1728,6 +1728,7 @@ bool powerpc_cpu::guest_fetch(uint32 *opcode)
 #ifdef SHEEPSHAVER
 	{
 		uint32_t ipa;
+		nw_jit_itlb_sync_msr(ppc32_guest_mmu().msr());
 		if (nw_jit_itlb_lookup(pc(), &ipa)) {
 			last_fetch_pa_ = ipa;
 			const uint32 pa = ipa;
@@ -1989,7 +1990,9 @@ powerpc_cpu::powerpc_cpu(task_struct *parent_task)
 	spcflags().init();
 	++ppc_refcount;
 #ifdef SHEEPSHAVER
-	nw_jc_ = 0;
+	nw_jc_ = (struct nw_jit_cpu *)calloc(1, sizeof(*nw_jc_));	/* also the general registers: see gpr() */
+	if (!nw_jc_)
+		abort();
 	nw_verify_trace_ = NULL;
 	nw_verify_ea_ = 0;
 	mm_ppc_pending_ = 0;
@@ -2315,6 +2318,10 @@ uint32 powerpc_cpu::jit_host_lwz_pa(void *host, uint32 pa, uint32 pc, int *fault
 		*fault = 1;
 		return 0;
 	}
+	/* Translation is off: the physical page can be served from the real-mode cache next time, without this call. */
+	if ((kind == NW_PA_RAM || kind == NW_PA_ROM) && !(nw_jit_legacy & NW_JIT_LEGACY_REAL) &&
+	    nw_pa_kind(pa & ~0xfffu) == kind && nw_pa_kind(pa | 0xfffu) == kind)	/* the whole page is one kind */
+		nw_jit_rtlb_fill(pa, (uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu), 0);
 	return vm_read_memory_4(pa);
 }
 
@@ -2340,6 +2347,11 @@ void powerpc_cpu::jit_host_stw_pa(void *host, uint32 pa, uint32 val, uint32 pc, 
 		nw_jit_invalidate_page_src(pa, NW_JIT_FL_STORE);
 	if ((pa & ~0xfffu) == (ppc->last_fetch_pa_ & ~0xfffu))
 		*fault = NW_JIT_FAULT_SMC;
+	else if (kind == NW_PA_RAM && !(nw_jit_legacy & NW_JIT_LEGACY_REAL) && !nw_jit_page_has_code(pa) &&
+		 nw_pa_kind(pa & ~0xfffu) == kind && nw_pa_kind(pa | 0xfffu) == kind)
+		/* Plain RAM with no translated code (the invalidation above just removed any): later stores to this page can skip
+		 * the call. A block translated from the page later demotes the entry again (nw_jit_dtlb_demote_pa). */
+		nw_jit_rtlb_fill(pa, (uint64_t)(uintptr_t)vm_do_get_real_address(pa & ~0xfffu), 1);
 }
 
 void powerpc_cpu::jit_host_system(void *host, nw_jit_cpu *c, uint32 op,
@@ -2666,6 +2678,8 @@ void powerpc_cpu::jit_host_rfi(void *host, struct nw_jit_cpu *cpu)
 static void nw_commit_gpr(struct nw_jit_cpu *jc, powerpc_cpu *ppc)
 {
 	const uint32_t mask = jc->gpr_live;
+	if (jc->gpr == &ppc->gpr(0))	/* the interpreter's registers are these registers */
+		return;
 	if (mask == 0xffffffffu) {
 		for (int i = 0; i < 32; i++)
 			ppc->gpr(i) = jc->gpr[i];
@@ -2773,6 +2787,7 @@ void *powerpc_cpu::jit_host_chain(void *host, struct nw_jit_cpu *cpu,
 	const uint32 hmsr_ir = ((hmsr & ppc32_mmu::MSR_IR) ? 1u : 0u) |
 			       ((hmsr & ppc32_mmu::MSR_DR) ? 2u : 0u) |
 			       ((hmsr & ppc32_mmu::MSR_PR) ? 4u : 0u);
+	nw_jit_itlb_sync_msr(hmsr);
 	uint32_t npa = 0;
 	if (!nw_jit_itlb_lookup(cpu->pc, &npa))
 		return NULL;
@@ -3886,13 +3901,15 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		}
 	}
 
-	if (!nw_jc_) {
-		nw_jc_ = (struct nw_jit_cpu *)calloc(1, sizeof(*nw_jc_));
-		if (!nw_jc_)
+	const int full = (mode == NW_JIT_VERIFY);
+	/* Verify mode runs the block on a private copy and replays it in the interpreter, so it cannot share the registers. */
+	static struct nw_jit_cpu *verify_jc;
+	if (full && !verify_jc) {
+		verify_jc = (struct nw_jit_cpu *)calloc(1, sizeof(*verify_jc));
+		if (!verify_jc)
 			return 0;
 	}
-	struct nw_jit_cpu &jc = *nw_jc_;
-	const int full = (mode == NW_JIT_VERIFY);
+	struct nw_jit_cpu &jc = full ? *verify_jc : *nw_jc_;
 	if (!hit) {
 		uses_fpr = 0;
 		for (int i = 0; i < n; i++) {
@@ -3907,9 +3924,18 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 			fpr_mask |= nw_jit_op_fpr_mask(ops[i]);
 		}
 	}
+	/* FP registers are still copied in lazily; walk the chain for the FP registers it will need only while FP code has
+	 * been running (the walk costs a TLB and cache lookup per block, at every entry). */
+	static unsigned fp_recent;
+	if (uses_fpr)
+		fp_recent = 64;
+	else if (fp_recent)
+		--fp_recent;
 	if (full) {
 		gpr_mask = 0xffffffffu;
 		fpr_mask = 0xffffffffu;
+	} else if (!(uses_fpr || fp_recent)) {
+		gpr_mask = 0xffffffffu;
 	} else {
 		uint32_t wpc = chain_pc;
 		for (int t = 0; t < nw_jit_tail_max() && wpc && wpc != NW_JIT_CHAIN_DYNAMIC; t++) {
@@ -3948,17 +3974,12 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	jc.nstore = 0;
 	jc.reserve_valid = 0;
 	jc.reserve_ea = 0;
-	jc.gpr_live = 0;
+	jc.gpr_live = 0xffffffffu;	/* the registers are the interpreter's own (see gpr()); a verify copy is filled below */
 	jc.fpr_live = 0;
-	if (gpr_mask == 0xffffffffu) {
+	if (full) {
+		/* (the loop above leaves gpr_mask all-ones in verify mode) */
 		for (int i = 0; i < 32; i++)
-			jc.gpr[i] = gpr(i);
-		jc.gpr_live = 0xffffffffu;
-	} else {
-		for (int i = 0; i < 32; i++)
-			if (gpr_mask & (1u << i))
-				jc.gpr[i] = gpr(i);
-		jc.gpr_live = gpr_mask;
+			jc.gpr[i] = nw_jc_->gpr[i];
 	}
 	if (full || uses_vr) {
 		for (int i = 0; i < 32; i++) {
@@ -3990,7 +4011,9 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	jc.pc = pc();
 	jc.dec = dec_;
 	jc.msr = ppc32_guest_mmu().msr();
+	nw_jit_itlb_sync_msr(jc.msr);
 	jc.host = this;
+	jc.jit_oea = full ? NULL : oea_words();
 	jc.verify_mem = NULL;
 	jc.verify_system = NULL;
 	jc.verify_xlate = NULL;
@@ -4000,7 +4023,9 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 	if (mode == NW_JIT_VERIFY) return nw_jit_verify_block(jc, fn, ops, n, compiled_first);
 
 	auto commit = [&]() {
-		nw_commit_gpr(&jc, this);
+		if (full)
+			for (int i = 0; i < 32; i++)
+				nw_jc_->gpr[i] = jc.gpr[i];
 		if (full || uses_vr) {
 			for (int i = 0; i < 32; i++) {
 				vr(i).w[0] = jc.vr[i][0];
@@ -4576,6 +4601,10 @@ void powerpc_cpu::execute(uint32 entry)
 		assert(ii->execute.default_call_conv_ptr() != 0);
 #else
 		assert(ii->execute.ptr() != 0);
+#endif
+#ifdef SHEEPSHAVER
+		if (nw_jit_prof_on)
+			nw_jit_prof_interp(opcode);
 #endif
 		ii->execute(this, opcode);
 #if defined(SHEEPSHAVER) && NW_BOOT_LOG

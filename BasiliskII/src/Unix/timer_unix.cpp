@@ -359,6 +359,13 @@ static int idle_sem_ok = -1;
 #endif
 #endif
 
+#ifdef SHEEPSHAVER
+extern uint64_t nw_idle_sleeps, nw_idle_timeouts, nw_idle_resumes;	/* statistics for NW_JIT_PROFILE (nw_jit.cpp) */
+#define NW_IDLE_COUNT(x) (x)++
+#else
+#define NW_IDLE_COUNT(x) ((void)0)
+#endif
+
 void idle_wait(void)
 {
 #ifdef IDLE_USES_COND_WAIT
@@ -372,8 +379,11 @@ void idle_wait(void)
 		ts.tv_nsec -= 1000000000L;
 	}
 	pthread_mutex_lock(&idle_lock);
-	if (!idle_pending)
-		pthread_cond_timedwait(&idle_cond, &idle_lock, &ts);
+	if (!idle_pending) {
+		NW_IDLE_COUNT(nw_idle_sleeps);
+		if (pthread_cond_timedwait(&idle_cond, &idle_lock, &ts) != 0)
+			NW_IDLE_COUNT(nw_idle_timeouts);
+	}
 	idle_pending = 0;
 	pthread_mutex_unlock(&idle_lock);
 #else
@@ -404,6 +414,7 @@ void idle_resume(void)
 {
 #ifdef IDLE_USES_COND_WAIT
 	pthread_mutex_lock(&idle_lock);
+	NW_IDLE_COUNT(nw_idle_resumes);
 	idle_pending = 1;
 	pthread_cond_signal(&idle_cond);
 	pthread_mutex_unlock(&idle_lock);

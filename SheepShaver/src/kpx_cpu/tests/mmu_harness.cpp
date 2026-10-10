@@ -749,6 +749,7 @@ enum { JIT_AV_SWEEP_N = (int)(sizeof(jit_av_sweep_cases)/sizeof(jit_av_sweep_cas
 
 int main()
 {
+	nw_jit_count_dtlb_hits(1);	/* checks below count data-TLB hits in generated code */
 	/* ---- G1 New World boot contract (no guest ROM) ---- */
 	{
 		CHECK(strcmp(nw_root_compatible(), "MacRISC2") == 0);

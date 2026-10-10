@@ -1,6 +1,6 @@
 /*
  *  panel.c - Sheep Shears control panel (PowerPC, built with Retro68). Lets the user switch the mouse edge release
- *  and the clipboard sharing off or on; both are on by default. A control panel application ('appc'), so it
+ *  and the clipboard sharing off or on; both are on by default. A control panel application (type 'APPC', capitals: the Finder does not launch a lowercase 'appc'), so it
  *  opens from the Control Panels folder like any other.
  *
  *  The choices are saved in "Sheep Shears Prefs" in the Preferences folder (read by the tool when it starts) and

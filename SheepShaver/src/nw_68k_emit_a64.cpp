@@ -268,11 +268,57 @@ bool nw68_register_instruction(const nw68_instruction &i)
 	}
 }
 
+/* A zeroed frame, without zeroing the 512-byte write journal (only entries below nwrite are ever read). */
+static inline void frame_init(nw68_frame &f, const nw68_state &state, const nw68_bus &bus)
+{
+	f.state = state; f.bus = bus; f.instruction = 0;
+	f.src = f.dst = f.result = f.destination = 0;
+	f.next_op = f.next_prefetch = 0;
+	f.nwrite = 0; f.completed = 0;
+	f.destination_memory = false; f.so_raised = false; f.refetch = false;
+	f.exit = NW68_EXIT_UNAVAILABLE;
+}
+
+bool nw68_run_cached(uint32_t pc, uint32_t context, uint32_t page, uint16_t opcode, uint16_t prefetch,
+		 const nw68_state &state, const nw68_bus &bus, nw68_frame &f, uint64_t generation, nw68_cached_run *info)
+{
+	if (executing) return false;
+	std::lock_guard<std::mutex> lock(mutex);
+	if (generation != nw68_code_generation()) return false;
+	const unsigned slot = decoded_slots[decoded_index(pc, context, page)];
+	if (!slot) return false;
+	entry &e = entries[slot - 1];
+	if (!e.used || e.context != context || e.npages != 1 || e.pages[0] != page ||
+	    e.instruction.pc != pc || e.instruction.opcode != opcode ||
+	    ((pc ^ (pc + e.instruction.length - 1u)) & ~4095u)) return false;
+	if (e.instruction.word_count > 1 && e.instruction.words[1] != prefetch) return false;
+	if (e.count > 1 && e.instruction.length == 2 && !e.instruction.control &&
+	    e.following[0].opcode != prefetch) return false;
+	frame_init(f, state, bus);
+	++stats.decoded_hits; ++stats.hits;
+	executing = true;
+	e.fn(&f);
+	executing = false;
+	if (deferred_invalidation) {
+		clear_entries(); deferred_invalidation = false; f.exit = NW68_EXIT_CODE;
+	}
+	if (generation != nw68_code_generation()) f.exit = NW68_EXIT_CODE;
+	if (e.count > 1 && f.exit == NW68_EXIT_NATIVE) stats.block_instructions += f.completed;
+	if (info) {
+		info->count = e.count; info->flag_mask = 0;
+		for (unsigned n = 0; n < e.count; ++n) {
+			const nw68_instruction &i = instruction_at(e, n);
+			info->flag_mask |= i.flags; info->opcodes[n] = i.opcode; info->pcs[n] = i.pc;
+		}
+	}
+	return true;
+}
+
 nw68_exit nw68_run_block(const nw68_instruction *instructions, unsigned count, const nw68_state &state,
 		  const nw68_bus &bus, uint32_t context, const uint32_t *pages,
 		  unsigned npages, nw68_frame &f, uint64_t generation)
 {
-	memset(&f, 0, sizeof f); f.state = state; f.bus = bus; f.exit = NW68_EXIT_UNAVAILABLE;
+	frame_init(f, state, bus);
 	if (!generation) generation = nw68_code_generation();
 	if (executing) return f.exit = NW68_EXIT_REENTRY;
 	if (!instructions || !count || count > NW68_BLOCK_MAX) return f.exit = NW68_EXIT_SERVICE;

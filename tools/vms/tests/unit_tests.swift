@@ -154,6 +154,11 @@ do {
     check(error(#"{"op":"press_key","key":"zzz"}"#) != nil && error(#"{"op":"press_key","key":"a","modifiers":["hyper"]}"#) != nil && error(#"{"op":"press_key","key":"a","modifiers":"command"}"#) != nil, "bad key and modifiers")
     check(op(#"{"op":"shutdown"}"#) == .shutdown(force: false) && op(#"{"op":"shutdown","force":true}"#) == .shutdown(force: true), "shutdown")
     check(error(#"{"op":"shutdown","force":"yes"}"#) != nil, "force must be a boolean")
+    check(op(#"{"op":"features"}"#) == .features(edgeRelease: nil, clipboard: nil), "features with no arguments reads the switches")
+    check(op(#"{"op":"features","edge_release":false,"clipboard":true}"#) == .features(edgeRelease: false, clipboard: true), "features sets the switches it is given")
+    check(op(#"{"op":"display"}"#) == .display(mode: nil) && op(#"{"op":"display","mode":"window"}"#) == .display(mode: .window) && op(#"{"op":"display","mode":"embedded"}"#) == .display(mode: .embedded), "display reads or sets where the picture is")
+    check(error(#"{"op":"display","mode":"fullscreen"}"#) != nil && error(#"{"op":"display","mode":3}"#) != nil, "display modes are checked")
+    check(error(#"{"op":"features","clipboard":"on"}"#) != nil && error(#"{"op":"features","edge_release":"false"}"#) != nil, "feature switches must be booleans")
     check(error(#"{"op":"format_disk"}"#)?.contains("unknown op") == true, "unknown op")
     check(error(#"{"id":1}"#) != nil && error("not json") != nil && error("[1,2]") != nil, "malformed requests")
     check(ControlProtocol.id(of: Data(#"{"id":7,"op":"zzz"}"#.utf8)) == 7 && ControlProtocol.id(of: Data("junk".utf8)) == 0, "id recovered for an error reply")
@@ -341,6 +346,89 @@ do {
     check(LibraryImport.suggestedName(for: URL(fileURLWithPath: "/a/My Mac/prefs")) == "My Mac", "a file called prefs is named after its folder")
     check(LibraryImport.suggestedName(for: URL(fileURLWithPath: "/a/prefs-1024-qcow2")) == "prefs-1024-qcow2", "any other file is named after itself")
     check(LibraryImport.looksLikePrefs("disk /x\nrom /y\n") && !LibraryImport.looksLikePrefs("hello world\nfoo bar\n") && !LibraryImport.looksLikePrefs(""), "prefs detection")
+}
+
+// ---- PrefsDocument (editing a prefs file without losing anything) ----
+do {
+    let original = "# my Mac\ndisk /a/one.img\ndisk /a/two.qcow2\ncdrom /cd.iso\nrom \nscreen win/1024/768\nramsize 536870912\nfuture_key some value\njit true\n"
+    var doc = PrefsDocument(text: original)
+    check(doc.text == original, "a prefs file comes back byte for byte when nothing is changed")
+    check(doc.values("disk") == ["/a/one.img", "/a/two.qcow2"], "repeated keys keep every value, in order")
+    check(doc.string("screen") == "win/1024/768" && doc.int("ramsize") == 536870912 && doc.bool("jit"), "typed reads")
+    check(doc.string("rom") == "" && doc.has("rom") && !doc.has("nogui") && doc.bool("nogui", true) && doc.string("zzz", "d") == "d", "empty values, missing keys and fallbacks")
+    doc.set("ramsize", 268435456)
+    check(doc.text == original.replacingOccurrences(of: "ramsize 536870912", with: "ramsize 268435456"), "changing one value changes only that line")
+    doc.set("jit", false)
+    check(doc.text.contains("jit false\n") && doc.text.contains("# my Mac\n") && doc.text.contains("future_key some value\n"), "comments and keys the app does not know are kept")
+    doc.setValues("disk", ["/a/two.qcow2", "/a/three.img", "/a/four.img"])
+    check(doc.values("disk") == ["/a/two.qcow2", "/a/three.img", "/a/four.img"], "a list is replaced as a whole")
+    check(doc.text.hasPrefix("# my Mac\ndisk /a/two.qcow2\ndisk /a/three.img\ndisk /a/four.img\ncdrom"), "…at the place the first old line was")
+    doc.setValues("disk", ["/only.img"])
+    check(doc.values("disk") == ["/only.img"] && doc.text.components(separatedBy: "\n").filter { $0.hasPrefix("disk") }.count == 1, "a shorter list leaves no old lines behind")
+    doc.set("nogui", true)
+    check(doc.text.hasSuffix("jit false\nnogui true\n"), "a new key is added at the end")
+    doc.remove("cdrom"); doc.remove("not_there")
+    check(!doc.has("cdrom") && !doc.text.contains("cdrom"), "remove")
+    doc.setValues("disk", [])
+    check(!doc.has("disk"), "an empty list removes the key")
+    let crlf = PrefsDocument(text: "disk /x\r\nrom /y\r\n")
+    check(crlf.values("disk") == ["/x"] && crlf.string("rom") == "/y", "Windows line endings are read")
+    check(PrefsDocument(text: "").text == "" && PrefsDocument(text: "\n").text == "\n", "empty files")
+    var fresh = PrefsDocument()
+    fresh.set("disk", "/d.img"); fresh.set("screen", "win/800/600")
+    check(fresh.text == "disk /d.img\nscreen win/800/600\n", "a new file")
+    check(PrefsDocument(text: "nogui\n").bool("nogui"), "a key with no value reads as true")
+}
+
+// ---- DisplayProtocol (input and events between the library window and a VM process) ----
+do {
+    func roundTrip(_ input: DisplayInput) -> DisplayInput? {
+        var buffer = DisplayWire.encode(input); var out: DisplayInput?
+        try? DisplayWire.take(&buffer) { kind, payload in out = DisplayWire.decodeInput(kind, payload) }
+        return buffer.isEmpty ? out : nil
+    }
+    func roundTrip(_ event: DisplayEvent) -> DisplayEvent? {
+        var buffer = DisplayWire.encode(event); var out: DisplayEvent?
+        try? DisplayWire.take(&buffer) { kind, payload in out = DisplayWire.decodeEvent(kind, payload) }
+        return buffer.isEmpty ? out : nil
+    }
+    let inputs: [DisplayInput] = [.key(code: 0x38, down: true), .key(code: 0, down: false), .mouseMove(dx: -3, dy: 7), .mouseMove(dx: 32767, dy: -32768),
+                                  .mouseAbs(x: 1023, y: 767), .button(number: 1, down: true), .button(number: 0, down: false),
+                                  .setRelativeMouse(true), .pointerWanted(false)]
+    check(inputs.allSatisfy { roundTrip($0) == $0 }, "every input message survives encoding and decoding")
+    let cursor = (0..<68).map { UInt8($0 * 3 & 255) }
+    let events: [DisplayEvent] = [.guestMode(width: 1024, height: 768, depth: 32, generation: 70_000), .cursor(image: cursor), .cursorHidesHost(true),
+                                  .arrow(x: -1, y: 300, visible: true), .shearsPointer(x: 5, y: -6, width: 1024, height: 768, buttons: 0x8000_0001),
+                                  .shearsStatus(toolRunning: true, version: 1), .edgeThreshold(milli: 8_500), .features(host: 3, guest: 1), .displayMode(inOwnWindow: true), .displayMode(inOwnWindow: false), .problem(text: "Disk in use — “Mac OS”")]
+    check(events.allSatisfy { roundTrip($0) == $0 }, "every event survives encoding and decoding (negative numbers, big generation, UTF-8)")
+    check(DisplayWire.encode(DisplayInput.mouseMove(dx: 1, dy: 2)) == [5, 2, 1, 0, 2, 0], "a mouse move is 6 bytes on the wire (little-endian)")
+    check(DisplayWire.encode(DisplayInput.key(code: 0x24, down: true)) == [3, 1, 0x24, 1], "a key is 4 bytes")
+    check(inputs.allSatisfy { DisplayWire.encode($0).count <= 10 }, "input messages stay tiny")
+    // framing
+    var stream = DisplayWire.encode(DisplayInput.mouseMove(dx: 1, dy: 1)) + DisplayWire.encode(DisplayInput.button(number: 0, down: true))
+    let whole = stream
+    var seen = 0
+    var partial = Array(whole.prefix(9))                  // one whole message and part of the next
+    try? DisplayWire.take(&partial) { _, _ in seen += 1 }
+    check(seen == 1 && partial.count == 3, "a partial message is kept until the rest arrives")
+    partial += whole.suffix(from: 9)
+    try? DisplayWire.take(&partial) { _, _ in seen += 1 }
+    check(seen == 2 && partial.isEmpty, "…and then delivered")
+    stream = [0, 1, 2]
+    var threw = false
+    do { try DisplayWire.take(&stream) { _, _ in } } catch { threw = true }
+    check(threw, "a zero length byte is a protocol error")
+    // hostile or damaged input is ignored, never trusted
+    check(DisplayWire.decodeInput(1, [1, 2, 3]) == nil && DisplayWire.decodeInput(99, [1]) == nil && DisplayWire.decodeInput(4, [2, 1]) == nil, "wrong sizes, unknown kinds and a button other than 0/1 decode to nothing")
+    check(DisplayWire.decodeInput(1, [0xff, 1]) == .key(code: 0x7f, down: true), "an ADB key code is limited to 7 bits")
+    check(DisplayWire.decodeEvent(0x87, ArraySlice(Array(repeating: UInt8(65), count: 201))) == nil, "an over-long problem text is refused")
+    let longText = String(repeating: "x", count: 500)
+    if case .problem(let text)? = roundTrip(DisplayEvent.problem(text: longText)) { check(text.utf8.count == DisplayWire.maxProblemText, "a long problem text is cut to the limit") } else { check(false, "a long problem text round-trips") }
+    check(DisplayWire.decodeEvent(0x82, ArraySlice([1, 2, 3])) == nil, "a cursor image of the wrong size is refused")
+    // names
+    check(DisplayPaths.sharedMemoryName(vmID: "ab/../cd ef", uid: 501) == "/sheep.501.ab..cdef".replacingOccurrences(of: "..", with: ""), "a shared memory name has no slashes, dots or spaces from the VM id")
+    check(DisplayPaths.sharedMemoryName(vmID: "0123456789abcdefXYZ", uid: 501) == "/sheep.501.0123456789ab", "…and at most 12 characters of it")
+    check(DisplayPaths.socketPath(vmID: "abc", uid: 501) == "/tmp/sheepshaver-501/abc.disp", "the display socket sits beside the control socket")
 }
 
 print("control tests: \(checks) checks, \(failures) failed")

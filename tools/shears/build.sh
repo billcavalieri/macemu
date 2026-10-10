@@ -65,7 +65,7 @@ hcopy -m "$OUT/SheepShears.bin" ":Sheep Shears Files:"
 hrename ":Sheep Shears Files:SheepShears" ":Sheep Shears Files:Sheep Shears Tool"
 hcopy -m "$OUT/SheepShearsPanel.bin" ":Sheep Shears Files:"
 hrename ":Sheep Shears Files:SheepShearsPanel" ":Sheep Shears Files:Sheep Shears"
-hattrib -t appc ":Sheep Shears Files:Sheep Shears"      # a control panel application
+hattrib -t APPC ":Sheep Shears Files:Sheep Shears"      # a control panel application
 hcopy -t "$README" ":ReadMe"
 hattrib -t TEXT -c ttxt ":ReadMe"
 [ "${1:-}" = "--if-needed" ] || hls -lR

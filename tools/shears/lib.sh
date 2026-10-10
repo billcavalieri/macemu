@@ -7,6 +7,8 @@
 #   SHEARS_TEST_PREFS   a prefs file to base the run on (default: a minimal generated one; its `disk` line is replaced)
 #   RETRO68_PREFIX      Retro68 toolchain (for hmount/hcopy and the guest build; default ~/Retro68-build/toolchain)
 #   SHEARS_ALLOW_STALE  1 to run even if the app is older than the sources it should contain
+#   SHEARS_ALLOW_RUNNING 1 to run while another SheepShaver (for example your library window) is open; the tests only
+#                       start and stop processes of their own
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PREFIX="${RETRO68_PREFIX:-$HOME/Retro68-build/toolchain}"
@@ -37,7 +39,7 @@ shears_check_environment() {
         exit 1
     fi
     [ -x "$PREFIX/bin/hmount" ] || { echo "Retro68 not found at $PREFIX (set RETRO68_PREFIX; see SHEEP-SHEARS-PLAN.md)." >&2; exit 1; }
-    if pgrep -x SheepShaver > /dev/null; then
+    if [ "${SHEARS_ALLOW_RUNNING:-0}" != 1 ] && pgrep -x SheepShaver > /dev/null; then
         echo "SheepShaver is running. Quit it first: these tests start their own copy." >&2
         exit 1
     fi

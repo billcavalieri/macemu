@@ -127,6 +127,11 @@ void SheepForceStartup(void *)
 	}
 }
 void SheepForceShutdown(void) {}
+bool SheepForceShmCreate(const char *, int, int) { return false; }
+void SheepForceShmDestroy(void) {}
+bool SheepForceShmActive(void) { return false; }
+void SheepForceRequestWindowSink(void *) {}
+void SheepForceRequestShmSink(void) {}
 void SheepForceSync(void) {}
 void SheepForceFlushCPU(uint8 *, int, int, int) {}
 void SheepForceLayoutDisplay(void) {}

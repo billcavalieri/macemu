@@ -30,6 +30,15 @@ enum ControlOp: Equatable {
     case typeText(String)
     case pressKey(key: String, modifiers: [String])
     case shutdown(force: Bool)
+    /// The Sheep Shears switches on the host side: both nil reads them, a value sets that one.
+    case features(edgeRelease: Bool?, clipboard: Bool?)
+    /// Where the picture is: in the library window (embedded) or in the VM's own window. nil reads it.
+    case display(mode: DisplayMode?)
+}
+
+enum DisplayMode: String, Equatable {
+    case embedded      // no window of its own; the library window shows the picture
+    case window        // the VM's own window
 }
 
 struct ControlRequest: Equatable {
@@ -148,6 +157,17 @@ enum ControlProtocol {
         case "shutdown":
             if let raw = args["force"], !(raw is Bool) { throw ControlError("\"force\" must be true or false") }
             return .shutdown(force: args["force"] as? Bool ?? false)
+        case "display":
+            guard let raw = args["mode"] else { return .display(mode: nil) }
+            guard let name = raw as? String, let mode = DisplayMode(rawValue: name) else {
+                throw ControlError("\"mode\" must be \"embedded\" (shown in the library window) or \"window\" (its own window)")
+            }
+            return .display(mode: mode)
+        case "features":
+            for key in ["edge_release", "clipboard"] where args[key] != nil && !(args[key] is Bool) {
+                throw ControlError("\"\(key)\" must be true or false")
+            }
+            return .features(edgeRelease: args["edge_release"] as? Bool, clipboard: args["clipboard"] as? Bool)
         default:
             throw ControlError("unknown op \"\(name)\"")
         }

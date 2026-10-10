@@ -858,6 +858,9 @@ static void gui_activate (GtkApplication *app)
 static char **nw_saved_argv;
 static volatile sig_atomic_t nw_pmu_restart_after_quit;
 
+// Diagnostics (SheepHost.swift, NW_RESTART_AFTER with NW_VERBOSE=1): the next quit restarts the process like Special > Restart
+extern "C" void HostRestartAfterQuit(void) { nw_pmu_restart_after_quit = 1; }
+
 static void nw_pmu_host_power(int event, void *ctx)
 {
 	(void)ctx;
@@ -877,7 +880,10 @@ static void nw_pmu_host_power(int event, void *ctx)
 extern const char *xpram_dir_override;
 static const char *launch_vm_id = NULL;
 static bool launch_background = false;
+static bool launch_embedded = false;
 extern "C" const char *HostLaunchVMID(void) { return launch_vm_id; }
+// --embedded: no window of its own; the picture goes to shared memory and the library window shows it
+extern "C" int HostLaunchEmbedded(void) { return launch_embedded ? 1 : 0; }
 extern "C" int HostLaunchBackground(void) { return launch_background ? 1 : 0; }
 
 #ifdef USE_MACOS_VIDEO
@@ -992,6 +998,9 @@ int main(int argc, char **argv)
 		} else if (strcmp(argv[i], "--background") == 0) {
 			// Started by the manager or a remote client: show the window without taking the focus
 			launch_background = true;
+			argv[i] = NULL;
+		} else if (strcmp(argv[i], "--embedded") == 0) {
+			launch_embedded = true;
 			argv[i] = NULL;
 		} else if (strcmp(argv[i], "--config") == 0) {
 			argv[i++] = NULL;
@@ -1536,6 +1545,15 @@ static void Quit(void)
 		unsetenv("NW_SCRIPT_RESTART");
 		fflush(stdout);
 		fflush(stderr);
+		// The restarted process is the same process. Every descriptor that is still open (the control and display
+		// sockets and the viewers connected to them, for one) would stay open in it, with nobody serving it: a
+		// library window showing this VM would keep a dead connection and its control socket would look alive but not
+		// answer. Close them all at the exec so the new image starts clean and the viewers see the restart.
+		for (int fd = 3; fd < 1024; fd++) {
+			const int flags = fcntl(fd, F_GETFD);
+			if (flags >= 0)
+				fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+		}
 		execv(nw_saved_argv[0], nw_saved_argv);
 		fprintf(stderr, "NW-BOOT G1: PMU restart execv failed: %s\n", strerror(errno));
 	}
@@ -1825,6 +1843,7 @@ static void *tick_func(void *arg)
 			uint32_t sb_min = 0, sb_max = 0, sb_sub = 0, sb_rate = 0;
 			SheepBlasterTakeStats(&sb_in, &sb_out, &sb_full, &sb_unsent, &sb_min, &sb_max,
 					      &sb_sub, &sb_src, &sb_rate);
+			nw_jit_prof_tick();
 			NW_DIAG("PLAY presents=%llu present_max_us=%llu pictures=%llu audio_cb=%llu audio_cb_max_us=%llu short_pulls=%llu sb_in=%llu sb_out=%llu sb_min=%u sb_max=%u sb_full=%llu sb_unsent=%llu sb_sub=%u sb_src=%llu sb_rate=%u\n",
 			       (unsigned long long)presents, (unsigned long long)present_us,
 			       (unsigned long long)pictures, (unsigned long long)cbs,

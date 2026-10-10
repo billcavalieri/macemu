@@ -68,6 +68,19 @@ struct nw68_page_cache {
 typedef bool (*nw68_page_probe)(void *, uint32_t, bool, uint32_t *);
 bool nw68_page_translate(nw68_page_cache &, void *, nw68_page_probe,
 			uint32_t ea, bool store, uint32_t *pa);
+/* The same lookup, inlined for the dispatcher (the call was most of its cost: a short scan of at most sixteen entries). */
+static inline bool nw68_page_translate_fast(nw68_page_cache &cache, void *opaque, nw68_page_probe probe,
+			uint32_t ea, bool store, uint32_t *pa)
+{
+	const uint32_t page = ea & ~4095u;
+	for (unsigned j = 0; j < cache.count; ++j) {
+		const nw68_page_cache::mapping &m = cache.pages[j];
+		if (m.ea == page && m.store == store) { *pa = m.pa | (ea & 4095u); return true; }
+	}
+	if (!probe || !probe(opaque, ea, store, pa)) return false;
+	if (cache.count < 16) cache.pages[cache.count++] = {page, *pa & ~4095u, store};
+	return true;
+}
 bool nw68_hash_table_overlap(uint32_t pa, unsigned width, uint32_t sdr1);
 bool nw68_decode(uint32_t pc, const nw68_bus &, nw68_instruction &);
 nw68_policy nw68_opcode_policy(uint16_t opcode);
@@ -115,6 +128,20 @@ uint64_t nw68_code_generation();
  * and pass the generation captured before this lookup to run_block(). */
 bool nw68_cached_block(uint32_t pc, uint32_t context, uint32_t physical_page,
 		 uint16_t opcode, uint16_t prefetch, nw68_instruction *, unsigned *count);
+/* What a cached run reports about the block it ran. */
+struct nw68_cached_run {
+	unsigned count, flag_mask;
+	uint16_t opcodes[NW68_BLOCK_MAX];
+	uint32_t pcs[NW68_BLOCK_MAX];
+};
+/* nw68_cached_block + flag union + nw68_run_block in one call: one lock, no copy of the decoded block, and no rehash of
+ * its words (the entry was just validated by its decode-slot lookup, and no entry can change between the two steps:
+ * only this thread adds or replaces entries, and any invalidation on another thread bumps the generation, which is
+ * checked under the lock). Returns false, having run nothing, when there is no matching entry (or the generation moved,
+ * or a run is already in progress); the caller then takes the decode path. When it returns true, f.exit says how the
+ * block ended, and f.instruction is null. */
+bool nw68_run_cached(uint32_t pc, uint32_t context, uint32_t physical_page, uint16_t opcode, uint16_t prefetch,
+		 const nw68_state &, const nw68_bus &, nw68_frame &, uint64_t generation, nw68_cached_run *);
 void nw68_invalidate_page(uint32_t physical_page);
 int nw68_page_has_code(uint32_t physical_page);	/* a translated 68k block was built from this page */
 void nw68_invalidate_all();
