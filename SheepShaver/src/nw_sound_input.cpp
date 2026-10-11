@@ -179,7 +179,7 @@ static void source_stop(void)
 enum {	// OSType info selectors of SPBGetDeviceInfo / SPBSetDeviceInfo
 	siSampleRate = 'srat', siSampleSize = 'ssiz', siNumberChannels = 'chan', siCompressionType = 'comp',
 	siChannelAvailable = 'chav', siSampleRateAvailable = 'srav', siSampleSizeAvailable = 'ssav',
-	siCompressionAvailable = 'cmav', siContinuous = 'cont', siAsync = 'asyn', siInputSource = 'sour', siInputAvailable = 'inav', siInputGainMin = 'igmn', siInputGainMax = 'igmx', siOSTypeInputSource = 'inpt', siDeviceConnected = 'dcon',
+	siCompressionAvailable = 'cmav', siContinuous = 'cont', siAsync = 'asyn', siInputSource = 'sour', siInputAvailable = 'inav', siInputGainMin = 'igmn', siInputGainMax = 'igmx', siAGCOnOff = 'agc ', siOSTypeInputSource = 'inpt', siDeviceConnected = 'dcon',
 	siInputSourceNames = 'snam', siInputGain = 'gain', siPlayThruOnOff = 'plth', siLevelMeterOnOff = 'lmet',
 	siRecordingQuality = 'qual', siTwosComplementOnOff = 'twos', siDeviceBufferInfo = 'dbin',
 	siOptionsDialog = 'optd', siDeviceIcon = 'icon', siHardwareBusy = 'hwbs', siActiveChannels = 'chac',
@@ -215,6 +215,7 @@ struct Config {
 	uint32 gain = 0x00010000;	// Fixed
 	int16 playthru = 0;
 	bool meter = false;
+	bool agc = false;
 	std::set<uint32> refs;		// every ref that is open
 	uint32 next_ref = 1;
 	uint32 write_ref = 0;		// the ref with write permission, if any
@@ -251,6 +252,7 @@ struct Job {
 	bool stop_req = false;
 	bool to_file = false;		// SPBRecordToFile: the samples go to an open file
 	uint32 file_ref = 0;
+	bool owns_source = false;	// started the capture itself (no writer had the device)
 	bool done_pending = false;	// the recording is complete; the file write and the completion routine wait for a normal-context call
 };
 static Job job;
@@ -369,12 +371,10 @@ static void make_thunks(void)
 		0x4e, 0x91,		// jsr (a1)
 		0x4e, 0x75		// rts
 	};
-	static const uint8 intr[] = {	// A0 = SPB, A1 = routine, A2 = buffer, D1.w = peak, D2 = sample size
-		0x2f, 0x08,		// move.l a0,-(sp)
-		0x2f, 0x0a,		// move.l a2,-(sp)
-		0x3f, 0x01,		// move.w d1,-(sp)
-		0x2f, 0x02,		// move.l d2,-(sp)
-		0x4e, 0x91,		// jsr (a1)
+	/* The interrupt routine takes its arguments in registers: A0 = SPB, A1 = the buffer, D0 = peak amplitude,
+	 * D1 = bytes in the buffer. A2 = the routine. */
+	static const uint8 intr[] = {
+		0x4e, 0x92,		// jsr (a2)
 		0x4e, 0x75		// rts
 	};
 	th_completion = SheepProc(comp, sizeof comp);
@@ -392,17 +392,17 @@ static void call_completion(uint32 pb, uint32 proc)
 	Execute68k(th_completion, &r);
 }
 
-static void call_interrupt(uint32 pb, uint32 proc, uint32 buf, int peak, uint32 sample_size)
+static void call_interrupt(uint32 pb, uint32 proc, uint32 buf, int peak, uint32 bytes)
 {
 	if (proc == 0)
 		return;
 	M68kRegisters r;
 	memset(&r, 0, sizeof r);
 	r.a[0] = pb;
-	r.a[1] = proc;
-	r.a[2] = buf;
-	r.d[1] = (uint32)peak;
-	r.d[2] = sample_size;
+	r.a[1] = buf;
+	r.a[2] = proc;
+	r.d[0] = (uint32)peak;
+	r.d[1] = bytes;
 	Execute68k(th_interrupt, &r);
 }
 
@@ -463,6 +463,8 @@ static void finish_job(int16 err)
 	Job j = job;
 	job = Job();
 	file_q.clear();
+	if (j.owns_source)
+		source_stop();
 	NW_DIAG("NW-MIC: recording ends: error %d, %u bytes%s\n", (int)err, (unsigned)j.done, j.to_file ? ", to a file" : "");
 	WriteMacInt32(j.pb + SPBRec::count, j.done);
 	WriteMacInt32(j.pb + SPBRec::milliseconds, bytes_to_ms(j.done));
@@ -560,7 +562,7 @@ static void pump(void)
 				Job j = job;
 				int peak = job.peak;
 				job.peak = 0;
-				call_interrupt(j.pb, j.interrupt, j.buf, peak, (uint32)cfg.bits);
+				call_interrupt(j.pb, j.interrupt, j.buf, peak, j.fill);
 				job.in_callbacks = false;
 				if (!job.active)
 					return;
@@ -736,6 +738,9 @@ static int16 get_info(uint32 ref, uint32 type, uint32 data)
 		case siPlayThruOnOff:
 			WriteMacInt16(data, (uint16)cfg.playthru);
 			return noErr;
+		case siAGCOnOff:
+			WriteMacInt16(data, cfg.agc ? 1 : 0);
+			return noErr;
 		case siLevelMeterOnOff:
 			/* Two integers: the meter's state, then the level (0..255). A record window draws its level from this. */
 			WriteMacInt16(data, cfg.meter ? 1 : 0);
@@ -801,6 +806,11 @@ static int16 set_info(uint32 ref, uint32 type, uint32 data)
 			return noErr;
 		case siPlayThruOnOff:
 			cfg.playthru = (int16)ReadMacInt16(data);
+			return noErr;
+		case siAGCOnOff:		// remembered; the host's own input processing is what there is
+			cfg.agc = ReadMacInt16(data) != 0;
+			return noErr;
+		case siOSTypeInputSource:	// there is one source
 			return noErr;
 		case siLevelMeterOnOff:
 			cfg.meter = ReadMacInt16(data) != 0;
@@ -875,6 +885,21 @@ static int16 start_record(uint32 pb, bool async, bool to_file = false, uint32 fi
 	}
 	if (to_file && !file_prod_buf)
 		file_prod_buf = sys_alloc(4096);
+	if (!to_file && j.interrupt && (buf == 0 || buflen == 0)) {
+		/* An interrupt routine and no buffer (Speech Recognition): the routine is handed the device's own buffer,
+		 * about a sixteenth of a second at a time. */
+		static uint32 device_buf;
+		if (!device_buf)
+			device_buf = sys_alloc(8192);
+		if (!device_buf)
+			return memFullErr;
+		buf = j.buf = device_buf;
+		buflen = ((uint32)(rate_hz() / 16.0)) * frame_bytes();
+		if (buflen > 8192)
+			buflen = 8192 - 8192 % frame_bytes();
+		if (buflen < frame_bytes())
+			buflen = frame_bytes();
+	}
 	if (buf == 0)
 		return siNoBufferSpecified;
 	if (buflen == 0)
@@ -889,6 +914,10 @@ static int16 start_record(uint32 pb, bool async, bool to_file = false, uint32 fi
 	WriteMacInt16(pb + SPBRec::error, 0);
 	job = j;
 	job.active = true;
+	if (!cfg.write_ref) {		// recording on a reference opened for reading: the capture has to run for it too
+		job.owns_source = true;
+		source_start();
+	}
 	rs_reset();
 	ring_flush();
 	NW_DIAG("NW-MIC: record%s %s total=%u bufferLength=%u rate=%.1f bits=%d chans=%d interrupt=%s\n", to_file ? " to file" : "", async ? "async" : "sync",
@@ -924,7 +953,7 @@ static int16 start_record(uint32 pb, bool async, bool to_file = false, uint32 fi
 			break;
 		if (job.fill >= job.buflen) {
 			if (job.interrupt) {
-				call_interrupt(job.pb, job.interrupt, job.buf, job.peak, (uint32)cfg.bits);
+				call_interrupt(job.pb, job.interrupt, job.buf, job.peak, job.fill);
 				job.peak = 0;
 			}
 			job.fill = 0;
@@ -934,6 +963,8 @@ static int16 start_record(uint32 pb, bool async, bool to_file = false, uint32 fi
 	}
 	Job d = job;
 	job = Job();
+	if (d.owns_source)
+		source_stop();
 	WriteMacInt32(d.pb + SPBRec::count, d.done);
 	WriteMacInt32(d.pb + SPBRec::milliseconds, bytes_to_ms(d.done));
 	WriteMacInt16(d.pb + SPBRec::error, 0);
@@ -979,7 +1010,8 @@ static bool spb_call(uint32 selector, uint32 sp, uint16 *pop)
 		case 0x0518: {	// SPBOpenDevice(name, short permission, long *ref)
 			*pop = 10; res = args + 10;
 			uint32 refp = stk32(sp, 4);
-			int perm = (int16)stk16(sp, 8);
+			/* siReadPermission is 0. Anything else is a writer: Speech Recognition passes 0x8001, not 1. */
+			int perm = stk16(sp, 8) != 0 ? 1 : 0;
 			uint32 name = stk32(sp, 10);
 			if (!name_ok(name)) {
 				err = siBadDeviceName;

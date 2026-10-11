@@ -110,8 +110,8 @@ Code: `nw_sound_input.cpp` (the guest side and the sample ring), `MacOSX/mic_cap
 Checked: the Sound control panel's Input tab lists the device and its level meter moves (with the real microphone
 too); SimpleSound's File > New records, shows the level, plays the take back and saves it; `tools/shears/test.sh mic`
 (25 checks in a guest program) and `tools/shears/test.sh recdlg` (the Sound Manager's record window opened and
-cancelled by a guest program). Not working: Speech Recognition still says it cannot start; it opens the device, reads
-its name and source, closes it and never records.
+cancelled by a guest program). Speakable Items starts, shows its feedback and commands windows and records
+continuously from the input (test tone, scratch VM); whether it understands a spoken command has not been tried here.
 
 ### Why it is not a SheepBlaster input
 
@@ -183,6 +183,14 @@ Each of these broke something real.
   stopped ten milliseconds after it began.
 - **siNumberChannels is `'chan'`**; SPBGetIndexedDevice past the last device must return siBadSoundInDevice (-221), or the
   Sound panel walks the list for ever.
+- **Any permission other than 0 is a writer.** Speech Recognition opens the device with 0x8001, not 1. Counted as a
+  reader, it never started the capture: the host's microphone indicator stayed off when its listening key was pressed.
+- **The interrupt routine takes its arguments in registers** (A0 = the SPB, A1 = the buffer, D0 = peak, D1 = bytes in
+  the buffer), unlike the completion routine, which is Pascal. And it may come with no buffer at all (Speech
+  Recognition: count, milliseconds, bufferLength and bufferPtr all 0): the routine is then handed the device's own
+  buffer, here about a sixteenth of a second at a time. Refusing that with siNoBufferSpecified is what kept
+  Speech Recognition from listening.
+- Speech Recognition also sets siAGCOnOff (`'agc '`) and siOSTypeInputSource; both are accepted.
 - A record window asks for siAsync, siRecordingQuality, siOSTypeInputSource (`'inpt'`, answered `'mic '`),
   siDeviceConnected, siInputAvailable and the gain range (`'igmn'`, `'igmx'`).
 

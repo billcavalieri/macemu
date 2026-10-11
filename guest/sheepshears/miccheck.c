@@ -38,16 +38,17 @@ static pascal void Completion(MySPB *pb)
     gDone = 1;
 }
 
-static pascal void Interrupt(MySPB *pb, Ptr buf, short peak, long sampleSize)
+/* Called with its arguments in registers (A0, A1, D0, D1); the routine descriptor says so. */
+static void Interrupt(MySPB *pb, Ptr buf, short peak, long bytes)
 {
     gInterrupts++;
-    gInterruptBytes += pb->bufferLength;
+    gInterruptBytes += bytes;
 }
 
 /* ProcInfo: pascal stack-based; each parameter's size code (1 = 1 byte, 2 = 2, 3 = 4) is two bits from bit 6 up. */
 enum {
     uppCompletion = 0x00C0,            /* void (SPBPtr) */
-    uppInterrupt = 0x3BC0,             /* void (SPBPtr, Ptr, short, long) */
+    uppInterrupt = 0x1C579802,         /* register based: SPBPtr in A0, Ptr in A1, short in D0, long in D1 */
     siWritePermission = 1
 };
 
