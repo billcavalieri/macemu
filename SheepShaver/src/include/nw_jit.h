@@ -185,6 +185,8 @@ int nw_jit_op_dispatch(uint32_t op);
  * block). Stores do not end the block; a store into the executing page
  * sets fault SMC and the ON path commits pc = store+4. */
 int nw_jit_op_ends_block(uint32_t op);
+int nw_jit_op_falls_through(uint32_t op);
+int nw_jit_super_max(void);
 /* GPRs the opcode reads or writes. Unrecognized ops return ~0u. */
 uint32_t nw_jit_op_gpr_mask(uint32_t op);
 /* FPRs the opcode reads or writes. 0 if the op is not FP.
@@ -400,7 +402,10 @@ enum {
 	NW_JIT_LEGACY_D68 = 32768u,	/* the 68k dispatch always copies the cached block out and runs it through the hashing path */
 	NW_JIT_LEGACY_EPOCH = 65536u,	/* a store into translated code invalidates every direct link, not only the ones that cross pages */
 	NW_JIT_LEGACY_SYSNOP = 262144u,	/* sync, eieio, dcbst, dcbf, dcbt and dcbtst call the C system service like every other system instruction */
-	NW_JIT_LEGACY_ITLB = 524288u	/* one instruction TLB, emptied whenever MSR[PR] changes (see g_itlb_set) */
+	NW_JIT_LEGACY_ITLB = 524288u,	/* one instruction TLB, emptied whenever MSR[PR] changes (see g_itlb_set) */
+	NW_JIT_LEGACY_WORD = 1048576u,	/* word loads and stores use the older emitted sequence (see emit_word_access) */
+	NW_JIT_LEGACY_SUPER = 2097152u,	/* a block ends at every conditional branch (see nw_jit_op_falls_through) */
+	NW_JIT_LEGACY_C68 = 4194304u	/* the 68k layer probes every code word and resolves every read's byte key (see read_code) */
 };
 extern unsigned nw_jit_legacy;
 void nw_jit_dtlb_flush(void);

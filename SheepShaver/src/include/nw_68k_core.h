@@ -82,6 +82,8 @@ static inline bool nw68_page_translate_fast(nw68_page_cache &cache, void *opaque
 	return true;
 }
 bool nw68_hash_table_overlap(uint32_t pa, unsigned width, uint32_t sdr1);
+/* Set to resolve the byte key of every read, as before (a read with no staged write does not need it). */
+extern bool nw68_always_resolve;
 bool nw68_decode(uint32_t pc, const nw68_bus &, nw68_instruction &);
 nw68_policy nw68_opcode_policy(uint16_t opcode);
 bool nw68_condition(unsigned condition, uint8_t ccr);

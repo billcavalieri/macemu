@@ -629,7 +629,7 @@ bool NQD_fillmask_hook(uint32 p)
 			const int h = (int16)ReadMacInt16(p + acclDestRect + 4) - (int16)ReadMacInt16(p + acclDestRect + 0);
 			if (w > 0 && h > 0)
 				s.rejected_px[r] += (uint64_t)w * (uint64_t)h;
-			if (r == NQD_FM_REJ_MODE || r == NQD_FM_REJ_PATTERN || r == NQD_FM_REJ_NOT_SOLID || r == NQD_FM_REJ_BLACK || r == NQD_FM_REJ_SMALL) {
+			if (r == NQD_FM_REJ_MODE || r == NQD_FM_REJ_PATTERN || r == NQD_FM_REJ_TILED) {
 				// What will the ROM really draw? Rebuild the clip alone (no mode/pattern checks) and count its pixels.
 				NqdFillPolicy sv = nqd_fm_production_policy();
 				sv.survey = true;
@@ -705,8 +705,8 @@ void NQD_fillmask(uint32 p)
 			top.tile = pl->tile.data();
 			top.tile_w = pl->tile_w;
 			top.tile_h = pl->tile_h;
-			top.tile_ox = pl->dest_x;
-			top.tile_oy = pl->dest_y;
+			top.tile_ox = pl->tile_ox;
+			top.tile_oy = pl->tile_oy;
 			top.row_start = pl->spans.row_start.data();
 			top.runs = pl->spans.runs.data();
 			submitted = SheepForceTryFillTile(&top);
@@ -1595,11 +1595,11 @@ static bool nqd_pat_load(uint32 port, uint32 off, nqd_pat *out)
  */
 static void code3_prod_verify(const nqd_shadow_op &q)
 {
-	static const char *names[4] = { "A old-rule", "B skip-bad-regions", "C production", "D production+pixel-patterns" };
+	static const char *names[4] = { "A every-region", "B skip-bad-regions", "C production", "D production, solid colours only" };
 	static unsigned rej_n[4][NQD_FM_REJ_COUNT];
 	static unsigned long long rej_px[4][NQD_FM_REJ_COUNT];
-	static unsigned ex_n[4], bad_n[4], inc_n[4], shown[4];
-	static unsigned long long ex_px[4], bad_px[4], inc_px[4];
+	static unsigned ex_n[4], bad_n[4], inc_n[4], over_n[4], shown[4];
+	static unsigned long long ex_px[4], bad_px[4], inc_px[4], over_px[4];
 	static unsigned tick, shown_bad_region;
 	static unsigned mode_key[16][2], mode_n[16], mode_nk;
 	static unsigned long long mode_px[16];
@@ -1646,7 +1646,7 @@ static void code3_prod_verify(const nqd_shadow_op &q)
 			inc_px[pi] += area;
 			continue;
 		}
-		unsigned wrong = 0;
+		unsigned wrong = 0, untouched = 0;
 		struct bad_px_t { int x, y; uint32 pre, got, want; } list[20];
 		for (int y = 0; y < q.rh; y++)
 			for (int x = 0; x < q.rw; x++) {
@@ -1657,11 +1657,21 @@ static void code3_prod_verify(const nqd_shadow_op &q)
 					if (wrong < 20)
 						list[wrong] = { x, y, pre, got, want };
 					wrong++;
+					if (((got ^ pre) & 0xffffff00u) == 0)
+						untouched++;	// the plan paints here and the ROM left the pixel as it was
 				}
 			}
 		if (!wrong) {
 			ex_n[pi]++;
 			ex_px[pi] += area;
+			continue;
+		}
+		if (!untouched) {
+			// Every differing pixel was changed to something else. The comparison runs at the next hook call, so drawing
+			// that goes through no hook (an icon plotted on a freshly erased square) lands in between; where it did not,
+			// the plan matched. Counted apart from mismatches the ROM's fill itself contradicts.
+			over_n[pi]++;
+			over_px[pi] += area;
 			continue;
 		}
 		bad_n[pi]++;
@@ -1670,8 +1680,8 @@ static void code3_prod_verify(const nqd_shadow_op &q)
 			NW_DIAG("SheepForce shadow: %c-MISMATCH-LINE call %u rect %dx%d at %d,%d wrong %u of %d tiled %d pen %u regions %d spans %zu px\n", "ABCD"[pi], q.n, q.rw, q.rh,
 			       (int16)(q.w[0xd4 / 4] & 0xffff), (int16)(q.w[0xd4 / 4] >> 16), wrong, q.rw * q.rh, (int)pl.tiled, (unsigned)pl.pen, pl.regions, pl.spans.pixels());
 		if (shown[pi]++ < (pi >= 2 ? 12u : 4u)) {
-			NW_DIAG("SheepForce shadow: PRODUCTION RULE %s MISMATCH call %u: %u of %d pixels differ; rect %dx%d pen %u pattern %02x colour %08x regions %d (+%d skipped) spans %zu px\n",
-			       names[pi], q.n, wrong, q.rw * q.rh, q.rw, q.rh, (unsigned)pl.pen, pl.pattern, (unsigned)pl.colour, pl.regions, pl.skipped_regions, pl.spans.pixels());
+			NW_DIAG("SheepForce shadow: PRODUCTION RULE %s MISMATCH call %u: %u of %d pixels differ (%u the ROM left untouched); rect %dx%d pen %u tiled %d colour %08x regions %d (+%d skipped) spans %zu px\n",
+			       names[pi], q.n, wrong, q.rw * q.rh, untouched, q.rw, q.rh, (unsigned)pl.pen, (int)pl.tiled, (unsigned)pl.colour, pl.regions, pl.skipped_regions, pl.spans.pixels());
 			for (unsigned i = 0; i < wrong && i < 6; i++)
 				NW_DIAG("    pixel %d,%d pre %08x got %08x want %08x\n", list[i].x, list[i].y, (unsigned)list[i].pre, (unsigned)list[i].got, (unsigned)list[i].want);
 			if (pi == 0) {
@@ -1701,8 +1711,8 @@ static void code3_prod_verify(const nqd_shadow_op &q)
 	++tick;
 	if (tick == 5 || tick == 10 || tick == 20 || (tick % 40) == 0)
 		for (int pi = 0; pi < 4; pi++) {
-			NW_DIAG("SheepForce shadow: PRODUCTION RULE %s accepted: exact %u/%llu kpx, MISMATCH %u/%llu kpx, inconclusive %u/%llu kpx; rejected:",
-			       names[pi], ex_n[pi], ex_px[pi] / 1000, bad_n[pi], bad_px[pi] / 1000, inc_n[pi], inc_px[pi] / 1000);
+			NW_DIAG("SheepForce shadow: PRODUCTION RULE %s accepted: exact %u/%llu kpx, drawn over afterwards %u/%llu kpx, MISMATCH %u/%llu kpx, inconclusive %u/%llu kpx; rejected:",
+			       names[pi], ex_n[pi], ex_px[pi] / 1000, over_n[pi], over_px[pi] / 1000, bad_n[pi], bad_px[pi] / 1000, inc_n[pi], inc_px[pi] / 1000);
 			for (int i = 1; i < NQD_FM_REJ_COUNT; i++)
 				if (rej_n[pi][i])
 					NW_DIAG(" %s %u/%llu", nqd_fm_reject_name(i), rej_n[pi][i], rej_px[pi][i] / 1000);
@@ -2646,6 +2656,16 @@ static void probe_count(uint32 p, uint32 code, bool masked, bool screen)
 
 bool NQD_probe_hook(uint32 p, uint32 code)
 {
+	static int probing = -1;
+	if (probing < 0)
+		probing = PrefsFindBool("sheepforce_probe") ? 1 : 0;
+	if (!probing) {
+		// Planted under the codes nothing here accelerates (see NQD_init): the ROM is about to draw this one itself,
+		// so GPU work still in flight has to land first, or it would land on top of what the ROM draws now.
+		if (SheepForceEnabled())
+			SheepForceSync();
+		return false;
+	}
 	static unsigned calls[16];
 	shadow_flush();
 
@@ -2710,7 +2730,7 @@ bool NQD_probe_hook(uint32 p, uint32 code)
 			}
 			if (code == 3) {
 				// The production decision from the same builder the hook uses, before the ROM draws; B and C are candidate rules.
-				static const NqdFillPolicy pols[4] = { { false, false, false, false }, { true, false, false, false }, nqd_fm_production_policy(), { true, true, true, false } };
+				static const NqdFillPolicy pols[4] = { { false, false, false, false }, { true, false, false, false }, nqd_fm_production_policy(), { true, true, false, false } };
 				NqdGuestMem gm;
 				for (int pi = 0; pi < 4; pi++) {
 					auto plan = std::make_shared<NqdFillmaskPlan>();
@@ -2922,6 +2942,22 @@ void VideoInstallAccel(void)
 		NQDMisc(6, info);
 		atexit(NQD_fillmask_report);
 		NW_DIAG("SheepForce: fill-mask hook (code %d) planted\n", (int)ACCL_FILLMASK);
+	}
+	if (SheepForceQDEnabled() && !PrefsFindBool("sheepforce_probe")) {
+		// The ROM calls a code's sync routine before it draws that code itself, but only for codes that have a hook.
+		// Text, icons and masked blits come through codes nothing here takes (1, 4, 6, 7, 8); without a hook they
+		// were drawn while a GPU fill underneath them was still in flight, and the fill then wiped them (a window's
+		// title and scroll bars after its background was filled). A hook that waits and declines orders them.
+		static const uint32 codes[] = {1, 4, 6, 7, 8};
+		for (unsigned i = 0; i < sizeof codes / sizeof codes[0]; i++) {
+			uint32 tv = NativeSlotTVECT(NATIVE_NQD_PROBE_HOOK, (int)codes[i]);
+			if (tv == 0)
+				continue;
+			WriteMacInt32(info + 0, tv);
+			WriteMacInt32(info + 4, NativeTVECT(NATIVE_NQD_SYNC_HOOK));
+			WriteMacInt32(info + 8, codes[i]);
+			NQDMisc(6, info);
+		}
 	}
 	printf("SheepForce: QuickDraw hooks installed\n");
 }

@@ -191,9 +191,11 @@ struct FakeGuest {
 	void w32(uint32_t a, uint32_t v) { w16(a, v >> 16); w16(a + 2, v); }
 };
 
-static const uint32_t BLK = 0x2000, PORT = 0x3000, PORT_H = 0x3100, PAT = 0x3200;
+static const uint32_t BLK = 0x2000;
 
-/* A valid block: a rect (t,l,b,r) at the framebuffer origin in a W x H, 4-byte-pixel, ROW-stride destination. */
+/* A valid block: a rect (t,l,b,r) at the framebuffer origin in a W x H, 4-byte-pixel, ROW-stride destination, with the
+ * expanded pattern the ROM leaves for a solid colour: 16 one-pixel rows in the block itself. 'pat' picks the colour as
+ * QuickDraw would for patCopy (all bits set: fore; all clear: back). */
 static void fm_block(FakeGuest &g, int t, int l, int b, int r, uint32_t fore, uint32_t back, uint8_t pat)
 {
 	std::fill(g.mem.begin(), g.mem.end(), 0);
@@ -203,10 +205,10 @@ static void fm_block(FakeGuest &g, int t, int l, int b, int r, uint32_t fore, ui
 	g.w32(BLK + NQD_FM_DEST_PIXEL, 32);
 	g.w16(BLK + NQD_FM_DEST_RECT + 0, t); g.w16(BLK + NQD_FM_DEST_RECT + 2, l);
 	g.w16(BLK + NQD_FM_DEST_RECT + 4, b); g.w16(BLK + NQD_FM_DEST_RECT + 6, r);
-	g.w32(BLK + 4, PORT); g.w16(PORT + 6, 0xc000);
-	g.w32(PORT + 0x3e, PORT_H); g.w32(PORT_H, PAT);
-	g.w16(PAT, 0);
-	for (int i = 0; i < 8; i++) g.w8(PAT + 20 + i, pat);
+	g.w32(BLK + NQD_FM_EXPAT, BLK + 0x2ac); g.w32(BLK + NQD_FM_PATROW, 4);
+	g.w32(BLK + NQD_FM_PATHMASK, 0); g.w32(BLK + NQD_FM_PATVMASK, 0x3c);
+	g.w32(BLK + NQD_FM_PATHPOS, 0); g.w32(BLK + NQD_FM_PATVPOS, 0x24);
+	for (int i = 0; i < 16; i++) g.w32(BLK + 0x2ac + (uint32_t)i * 4, pat == 0xff ? fore : back);
 }
 /* Add a region (rect only, or from a mask) reachable from block word 'slot'. */
 static void fm_region(FakeGuest &g, int slot, uint32_t at, const std::vector<uint8_t> &rgn)
@@ -249,15 +251,16 @@ static void test_fillmask(uint8 *real_fb)
 	CHECK(pl.start == (uint64_t)2 * ROW + 16 && pl.end == pl.start + 7 * (uint64_t)ROW + 40, "basic plan extent");
 	cases++;
 
-	/* patCopy with an all-clear pattern paints the back colour; notPatCopy swaps */
+	/* the colour is the expanded pattern's, whatever the pens and the pen mode say; black is a colour like any other */
 	fm_block(g, 2, 4, 10, 14, 0x00dddddd, 0x00aaaaaa, 0x00); fm_region(g, 0, 0x5000, rect_region(0, 0, 100, 100));
-	CHECK(build(pl) == NQD_FM_OK && pl.colour == htonl(0x00aaaaaa), "clear pattern paints back");
-	fm_block(g, 2, 4, 72, 74, 0x00dddddd, 0x00aaaaaa, 0x00); fm_region(g, 0, 0x5000, rect_region(0, 0, 100, 100));	/* a large rect: small pen-12 draws are refused */
+	CHECK(build(pl) == NQD_FM_OK && pl.colour == htonl(0x00aaaaaa) && !pl.tiled, "the pattern's colour is painted");
 	g.w32(BLK + NQD_FM_PEN, 12);
-	CHECK(build(pl) == NQD_FM_OK && pl.colour == htonl(0x00dddddd), "notPatCopy with clear pattern paints fore");
-	fm_block(g, 2, 4, 72, 74, 0x00dddddd, 0x00aaaaaa, 0xff); fm_region(g, 0, 0x5000, rect_region(0, 0, 100, 100)); g.w32(BLK + NQD_FM_PEN, 12);
-	CHECK(build(pl) == NQD_FM_OK && pl.colour == htonl(0x00aaaaaa), "notPatCopy with set pattern paints back");
-	cases += 3;
+	CHECK(build(pl) == NQD_FM_OK && pl.colour == htonl(0x00aaaaaa), "pen 12 paints the same expanded pattern");
+	g.w32(BLK + NQD_FM_FORE, 0x00123456); g.w32(BLK + NQD_FM_BACK, 0x00654321);
+	CHECK(build(pl) == NQD_FM_OK && pl.colour == htonl(0x00aaaaaa), "the pens do not change it");
+	fm_block(g, 2, 4, 10, 14, 0x00000000, 0x00ffffff, 0xff); fm_region(g, 0, 0x5000, rect_region(0, 0, 100, 100));
+	CHECK(build(pl) == NQD_FM_OK && pl.colour == htonl(0x00000000), "black is painted");
+	cases += 4;
 
 	/* each rejection, one change at a time */
 	struct Rej { const char *name; int want; void (*mut)(FakeGuest &); };
@@ -276,14 +279,17 @@ static void test_fillmask(uint8 *real_fb)
 		{ "oversized rect", NQD_FM_REJ_RECT, [](FakeGuest &g) { g.w16(BLK + NQD_FM_DEST_RECT + 6, 4096 + 8); } },
 		{ "extent leaves the framebuffer", NQD_FM_REJ_BOUNDS, [](FakeGuest &g) { g.w16(BLK + NQD_FM_DEST_RECT + 4, H + 1); } },
 		{ "huge stride cannot wrap", NQD_FM_REJ_BOUNDS, [](FakeGuest &g) { g.w32(BLK + NQD_FM_DEST_ROW, 0x7fffffff); } },
-		{ "port not a colour port", NQD_FM_REJ_PORT, [](FakeGuest &g) { g.w16(PORT + 6, 0x0000); } },
-		{ "port pointer null", NQD_FM_REJ_PORT, [](FakeGuest &g) { g.w32(BLK + 4, 0); } },
-		{ "pattern handle null", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(PORT + 0x3e, 0); } },
-		{ "pixel pattern", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w16(PAT, 1); } },
-		{ "mixed pattern", NQD_FM_REJ_NOT_SOLID, [](FakeGuest &g) { g.w8(PAT + 23, 0x7f); } },
-		{ "stripe pattern", NQD_FM_REJ_NOT_SOLID, [](FakeGuest &g) { for (int i = 0; i < 8; i++) g.w8(PAT + 20 + i, 0xaa); } },
-		{ "black fore on a set pattern", NQD_FM_REJ_BLACK, [](FakeGuest &g) { g.w32(BLK + NQD_FM_FORE, 0); } },
-		{ "black back on a clear pattern", NQD_FM_REJ_BLACK, [](FakeGuest &g) { g.w32(BLK + NQD_FM_BACK, 0); for (int i = 0; i < 8; i++) g.w8(PAT + 20 + i, 0); } },
+		{ "pattern pointer null", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_EXPAT, 0); } },
+		{ "pattern pointer odd", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_EXPAT, BLK + 0x2ad); } },
+		{ "pattern row not a power of two", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_PATROW, 12); g.w32(BLK + NQD_FM_PATHMASK, 8); } },
+		{ "pattern row 0", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_PATROW, 0); } },
+		{ "pattern row too wide", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_PATROW, 2048); g.w32(BLK + NQD_FM_PATHMASK, 2044); g.w32(BLK + NQD_FM_PATVMASK, 2044); } },
+		{ "horizontal mask does not fit the row", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_PATHMASK, 4); } },
+		{ "vertical mask not a whole pattern", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_PATVMASK, 0x38); } },
+		{ "pattern too tall", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_PATVMASK, 4 * 512 - 4); } },
+		{ "horizontal position outside the row", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_PATHPOS, 4); } },
+		{ "vertical position outside the pattern", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_PATVPOS, 0x40); } },
+		{ "vertical position off a pixel", NQD_FM_REJ_PATTERN, [](FakeGuest &g) { g.w32(BLK + NQD_FM_PATVPOS, 0x22); } },
 		{ "no region", NQD_FM_REJ_NO_REGION, [](FakeGuest &g) { g.w32(BLK + 0x100, 0); } },
 		{ "region not overlapping", NQD_FM_REJ_NO_REGION, [](FakeGuest &g) { g.w16(0x5000 + 2, 200); g.w16(0x5000 + 6, 220); } },
 		{ "region truncated", NQD_FM_REJ_REGION_BAD, [](FakeGuest &g) { g.w16(0x5000, 12); } },
@@ -338,7 +344,7 @@ static void test_fillmask(uint8 *real_fb)
 		cases += 5;
 	}
 
-	/* the production default is policy C, and small pen-12 draws are refused */
+	/* the production default is policy C */
 	{
 		fm_block(g, 2, 4, 10, 14, 0x00dddddd, 0x00ffffff, 0xff);
 		fm_region(g, 0x2a, 0x5200, rect_region(0, 0, 100, 100));
@@ -346,38 +352,33 @@ static void test_fillmask(uint8 *real_fb)
 		fm_block(g, 2, 4, 10, 14, 0x00dddddd, 0x00ffffff, 0xff);
 		fm_region(g, 0, 0x5000, rect_region(0, 0, 100, 100));
 		CHECK(nqd_fillmask_build(g, BLK, &pl) == NQD_FM_REJ_NO_REGION, "production default ignores a region at another offset");
-		/* pen 12: a 32x32 draw (an icon) is refused, a 64x64 draw is accepted */
-		fm_block(g, 0, 0, 32, 32, 0x00dddddd, 0x00ffffff, 0xff);
-		fm_region(g, 0x2a, 0x5200, rect_region(0, 0, 100, 100));
-		g.w32(BLK + NQD_FM_PEN, 12);
-		CHECK(nqd_fillmask_build(g, BLK, &pl) == NQD_FM_REJ_MODE, "small pen-12 draw is refused");
-		g.w16(BLK + NQD_FM_DEST_RECT + 4, 64); g.w16(BLK + NQD_FM_DEST_RECT + 6, 64);
-		CHECK(nqd_fillmask_build(g, BLK, &pl) == NQD_FM_OK, "large pen-12 draw is accepted");
-		g.w32(BLK + NQD_FM_PEN, 8); g.w16(BLK + NQD_FM_DEST_RECT + 4, 32); g.w16(BLK + NQD_FM_DEST_RECT + 6, 32);
-		CHECK(nqd_fillmask_build(g, BLK, &pl) == NQD_FM_OK, "small pen-8 draw is still accepted");
-		cases += 5;
+		cases += 2;
 	}
 
-	/* pixel patterns: the 32-bit expansion tiled from the destination origin */
+	/* patterns of more than one colour: the expansion tiled from the position the block gives */
 	{
-		const uint32_t PM = 0x6000, PMH = 0x6100, XDH = 0x6200, XD = 0x7000;
-		const int TW = 6, TH = 5;
+		const uint32_t XD = 0x7000;
+		const int TW = 8, TH = 4, OX = 3, OY = 2;
 		auto pix_block = [&](int t, int l, int b, int r) {
 			fm_block(g, t, l, b, r, 0x00dddddd, 0x00ffffff, 0xff);
 			fm_region(g, 0x2a, 0x5200, rect_region(0, 0, 1000, 1000));
-			g.w16(PAT, 1);				/* a PixPat */
-			g.w32(PAT + 2, PMH); g.w32(PMH, PM);	/* patMap handle -> PixMap */
-			g.w16(PM + 6, 0); g.w16(PM + 8, 0); g.w16(PM + 10, TH); g.w16(PM + 12, TW);	/* bounds 0,0,TH,TW */
-			g.w32(PAT + 10, XDH); g.w32(XDH, XD);	/* patXData handle -> expanded tile */
-			g.w16(PAT + 14, 32);			/* patXValid */
+			g.w32(BLK + NQD_FM_EXPAT, XD); g.w32(BLK + NQD_FM_PATROW, TW * 4);
+			g.w32(BLK + NQD_FM_PATHMASK, TW * 4 - 4); g.w32(BLK + NQD_FM_PATVMASK, TW * 4 * TH - 4);
+			g.w32(BLK + NQD_FM_PATHPOS, OX * 4); g.w32(BLK + NQD_FM_PATVPOS, OY * TW * 4);
 			for (int i = 0; i < TW * TH; i++) g.w32(XD + (uint32_t)i * 4, 0x00112233u + (uint32_t)i * 0x01010100u);
 		};
 		pix_block(3, 5, 80, 110);
-		CHECK(nqd_fillmask_build(g, BLK, &pl, { true, true, true, false }) == NQD_FM_OK && pl.tiled && pl.tile_w == TW && pl.tile_h == TH, "pixel pattern is accepted and tiled");
+		CHECK(nqd_fillmask_build(g, BLK, &pl) == NQD_FM_OK && pl.tiled && pl.tile_w == TW && pl.tile_h == TH, "a pattern of several colours is accepted and tiled");
 		CHECK(pl.tile.size() == (size_t)TW * TH && pl.tile[7] == htonl(0x00112233u + 7u * 0x01010100u), "tile words are read in memory order");
-		CHECK(nqd_fm_pixel(pl, 0, 0) == pl.tile[(size_t)(pl.dest_y % TH) * TW + (size_t)(pl.dest_x % TW)] && nqd_fm_pixel(pl, TW, TH) == nqd_fm_pixel(pl, 0, 0),
-		      "the tile is anchored at the destination origin and repeats");
-		{ NqdFillmaskPlan scratch; CHECK(nqd_fillmask_build(g, BLK, &scratch) == NQD_FM_REJ_PATTERN, "the production policy does not accept pixel patterns yet"); }
+		CHECK(pl.tile_ox == OX && pl.tile_oy == OY && nqd_fm_pixel(pl, 0, 0) == pl.tile[(size_t)OY * TW + OX] && nqd_fm_pixel(pl, TW, TH) == nqd_fm_pixel(pl, 0, 0) &&
+		      nqd_fm_pixel(pl, TW - OX, TH - OY) == pl.tile[0],
+		      "the tile starts at the block's pattern position and repeats");
+		{ NqdFillmaskPlan scratch; CHECK(nqd_fillmask_build(g, BLK, &scratch, { true, true, false, false }) == NQD_FM_REJ_TILED, "the solid-only policy refuses it"); }
+		for (int i = 0; i < TW * TH; i++) g.w32(XD + (uint32_t)i * 4, 0x00445566u);
+		{ NqdFillmaskPlan scratch; CHECK(nqd_fillmask_build(g, BLK, &scratch, { true, true, false, false }) == NQD_FM_OK && !scratch.tiled && scratch.colour == htonl(0x00445566u), "a large pattern of one colour is a solid fill"); }
+		pix_block(3, 5, 80, 110);
+		CHECK(nqd_fillmask_build(g, BLK, &pl) == NQD_FM_OK && pl.tiled, "tiled plan for the executors");
+		cases += 6;
 		/* executors agree on a tiled plan */
 		{
 			const size_t fbn = (size_t)ROW * H;
@@ -392,7 +393,7 @@ static void test_fillmask(uint8 *real_fb)
 			memcpy(real_fb, orig.data(), fbn);
 			SheepForceTileFill op;
 			op.dest = real_fb + pl.start; op.rowbytes = pl.row_bytes; op.width = pl.width; op.height = pl.height;
-			op.tile = pl.tile.data(); op.tile_w = pl.tile_w; op.tile_h = pl.tile_h; op.tile_ox = pl.dest_x; op.tile_oy = pl.dest_y;
+			op.tile = pl.tile.data(); op.tile_w = pl.tile_w; op.tile_h = pl.tile_h; op.tile_ox = pl.tile_ox; op.tile_oy = pl.tile_oy;
 			op.row_start = pl.spans.row_start.data(); op.runs = pl.spans.runs.data();
 			CHECK(SheepForceTryFillTile(&op), "GPU accepts a tiled plan");
 			SheepForceFlushCPU(NULL, 0, 0, 0);
@@ -402,22 +403,6 @@ static void test_fillmask(uint8 *real_fb)
 			CHECK(!SheepForceTryFillTile(&bad), "GPU declines a zero-width tile");
 			for (size_t i = 0; i < fbn; i++) real_fb[i] = (uint8)rnd();
 		}
-		/* rejections specific to pixel patterns */
-		pix_block(3, 5, 80, 110); g.w16(PAT + 14, 8);
-		CHECK(nqd_fillmask_build(g, BLK, &pl, { true, true, true, false }) == NQD_FM_REJ_PATTERN, "expansion not for 32-bit pixels is rejected");
-		pix_block(3, 5, 80, 110); g.w16(PM + 12, 300);
-		CHECK(nqd_fillmask_build(g, BLK, &pl, { true, true, true, false }) == NQD_FM_REJ_PATTERN, "oversized tile is rejected");
-		pix_block(3, 5, 80, 110); g.w16(PM + 8, 2);
-		CHECK(nqd_fillmask_build(g, BLK, &pl, { true, true, true, false }) == NQD_FM_REJ_PATTERN, "tile bounds with a nonzero origin are rejected");
-		pix_block(3, 5, 80, 110); g.w32(XDH, 0);
-		CHECK(nqd_fillmask_build(g, BLK, &pl, { true, true, true, false }) == NQD_FM_REJ_PATTERN, "missing expansion data is rejected");
-		pix_block(3, 5, 80, 110); g.w32(BLK + NQD_FM_PEN, 12);
-		CHECK(nqd_fillmask_build(g, BLK, &pl, { true, true, true, false }) == NQD_FM_REJ_MODE, "pixel pattern with pen 12 is refused");
-		pix_block(3, 5, 12, 30);
-		CHECK(nqd_fillmask_build(g, BLK, &pl, { true, true, true, false }) == NQD_FM_REJ_SMALL, "a small pixel-pattern draw (an icon) is refused");
-		pix_block(3, 5, 80, 110); g.w16(PAT, 2);
-		CHECK(nqd_fillmask_build(g, BLK, &pl, { true, true, true, false }) == NQD_FM_REJ_PATTERN, "an RGB pattern (type 2) is refused");
-		cases += 13;
 	}
 
 	/* survey: count the clip of an op the hook refuses, ignoring mode, pattern and colour */
@@ -428,7 +413,7 @@ static void test_fillmask(uint8 *real_fb)
 		CHECK(nqd_fillmask_build(g, BLK, &pl) == NQD_FM_REJ_MODE, "XOR draw is refused by the hook");
 		NqdFillPolicy sv = nqd_fm_production_policy(); sv.survey = true;
 		CHECK(nqd_fillmask_build(g, BLK, &pl, sv) == NQD_FM_OK && pl.spans.pixels() == 40, "survey counts the clip of a refused XOR draw");
-		g.w32(PORT + 0x3e, 0);						/* no readable pattern either */
+		g.w32(BLK + NQD_FM_EXPAT, 0);					/* no readable pattern either */
 		CHECK(nqd_fillmask_build(g, BLK, &pl, sv) == NQD_FM_OK && pl.spans.pixels() == 40, "survey does not need a pattern");
 		fm_region(g, 0x2a, 0x5200, std::vector<uint8_t>());
 		g.w32(BLK + 0x100 + 0x2a * 4, 0);

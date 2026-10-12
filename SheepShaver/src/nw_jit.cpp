@@ -198,7 +198,7 @@ static unsigned nw_parse_legacy(void)
 	if (!e)
 		return 0;
 	if (strstr(e, "all"))
-		m = NW_JIT_LEGACY_CLOCK | NW_JIT_LEGACY_SYNC | NW_JIT_LEGACY_LOAD | NW_JIT_LEGACY_INDEX | NW_JIT_LEGACY_XLATE | NW_JIT_LEGACY_FP | NW_JIT_LEGACY_HOP | NW_JIT_LEGACY_SUBST | NW_JIT_LEGACY_LINK | NW_JIT_LEGACY_MEM | NW_JIT_LEGACY_BCLR | NW_JIT_LEGACY_IBTC | NW_JIT_LEGACY_DCOUNT | NW_JIT_LEGACY_ARENA | NW_JIT_LEGACY_REAL | NW_JIT_LEGACY_D68 | NW_JIT_LEGACY_EPOCH | NW_JIT_LEGACY_SYSNOP | NW_JIT_LEGACY_ITLB;
+		m = NW_JIT_LEGACY_CLOCK | NW_JIT_LEGACY_SYNC | NW_JIT_LEGACY_LOAD | NW_JIT_LEGACY_INDEX | NW_JIT_LEGACY_XLATE | NW_JIT_LEGACY_FP | NW_JIT_LEGACY_HOP | NW_JIT_LEGACY_SUBST | NW_JIT_LEGACY_LINK | NW_JIT_LEGACY_MEM | NW_JIT_LEGACY_BCLR | NW_JIT_LEGACY_IBTC | NW_JIT_LEGACY_DCOUNT | NW_JIT_LEGACY_ARENA | NW_JIT_LEGACY_REAL | NW_JIT_LEGACY_D68 | NW_JIT_LEGACY_EPOCH | NW_JIT_LEGACY_SYSNOP | NW_JIT_LEGACY_ITLB | NW_JIT_LEGACY_WORD | NW_JIT_LEGACY_SUPER | NW_JIT_LEGACY_C68;
 	if (strstr(e, "clock")) m |= NW_JIT_LEGACY_CLOCK;
 	if (strstr(e, "sync")) m |= NW_JIT_LEGACY_SYNC;
 	if (strstr(e, "load")) m |= NW_JIT_LEGACY_LOAD;
@@ -218,6 +218,9 @@ static unsigned nw_parse_legacy(void)
 	if (strstr(e, "epoch")) m |= NW_JIT_LEGACY_EPOCH;
 	if (strstr(e, "sysnop")) m |= NW_JIT_LEGACY_SYSNOP;
 	if (strstr(e, "itlb")) m |= NW_JIT_LEGACY_ITLB;
+	if (strstr(e, "word")) m |= NW_JIT_LEGACY_WORD;
+	if (strstr(e, "super")) m |= NW_JIT_LEGACY_SUPER;
+	if (strstr(e, "c68")) m |= NW_JIT_LEGACY_C68;
 	fprintf(stderr, "NW_JIT_LEGACY=%s (mask %u)\n", e, m);
 	return m;
 }
@@ -5587,6 +5590,32 @@ int nw_jit_op_ends_block(uint32_t op)
 	       (prim == 31 && (xo == 339 || xo == 467) && spr_num(op) == NW_PPC_SPR_DEC) ||
 	       (prim == 31 && xo == 339 &&
 		!spr_is_user(spr_num(op)) && !spr_is_mfspr_ext(spr_num(op)));
+}
+
+/* A conditional branch that does not link: its taken exit is emitted in the middle of a block and the instructions after
+ * it follow in the same translation (see the builder in ppc-cpu.cpp). Not for a branch that is always taken, and not when
+ * branches are helper calls. nw_jit_super_max() is how many of them one block may run through: NW_JIT_SUPER=<n>, default 4;
+ * NW_JIT_LEGACY=super makes it 0, which is one block per branch as before. */
+int nw_jit_op_falls_through(uint32_t op)
+{
+	if ((op >> 26) != 16 || (op & 1u))
+		return 0;
+	const unsigned bo = (op >> 21) & 31u;
+	if ((bo & 0x14u) == 0x14u)
+		return 0;
+	return !(nw_jit_legacy & (NW_JIT_LEGACY_LINK | NW_JIT_LEGACY_SUPER));
+}
+
+int nw_jit_super_max(void)
+{
+	static int n = -1;
+	if (n < 0) {
+		const char *e = getenv("NW_JIT_SUPER");
+		n = e ? atoi(e) : 4;
+		if (n < 0) n = 0;
+		if (n > 32) n = 32;
+	}
+	return (nw_jit_legacy & (NW_JIT_LEGACY_LINK | NW_JIT_LEGACY_SUPER)) ? 0 : n;
 }
 
 uint32_t nw_jit_op_gpr_mask(uint32_t op)
@@ -11470,6 +11499,249 @@ static int emit_mem_access(struct emit *e, uint32_t pc, int kind, int reg, int r
 	return 1;
 }
 
+/* Word loads and stores (lwz, stw, their update and indexed forms): a third of all guest instructions.
+ *
+ * The tests are the ones emit_dtlb_and_helpers makes, and the helpers and their arguments are the same; what changes is
+ * where things sit. The hit path falls straight through to the access and no longer writes cpu->pc, computes the
+ * physical address it does not need, moves the value through W0 or reloads and tests cpu->fault: all of that is now in
+ * the code after the access, reached only on a miss, with translation off, or for a page with no host pointer. A
+ * displacement that fits is one ADD or SUB. About 31 host instructions on a hit where there were 46.
+ * Kill switch: NW_JIT_LEGACY=word. */
+static int nw_word_inline_on(void)
+{
+	return !(nw_jit_legacy & NW_JIT_LEGACY_WORD);
+}
+
+static int emit_ea_disp(struct emit *e, int ra, int simm)
+{
+	if (ra == 0)
+		return emit_imm32(e, W8, (uint32_t)simm);
+	if (!emit_load_gpr(e, W8, ra))
+		return 0;
+	if (simm == 0)
+		return 1;
+	if (simm > 0 && simm < 4096)
+		return emit_w(e, 0x11000000u | ((uint32_t)simm << 10) | ((uint32_t)W8 << 5) | (uint32_t)W8);	/* add w8, w8, #simm */
+	if (simm < 0 && simm > -4096)
+		return emit_w(e, a64_sub_imm_w(W8, W8, (unsigned)-simm));
+	if (!emit_imm32(e, W9, (uint32_t)simm))
+		return 0;
+	return emit_w(e, a64_add_reg(W8, W8, W9));
+}
+
+static int emit_word_access(struct emit *e, uint32_t pc, int is_store, int reg, int ra, int simm, int rb, int indexed, int upd)
+{
+	static_assert((offsetof(struct nw_jit_cpu, jit_dtlb) & 7) == 0 && (offsetof(struct nw_jit_cpu, jit_sr_gen) & 7) == 0 &&
+		      (offsetof(struct nw_jit_cpu, jit_rtlb) & 7) == 0, "table pointers 8-aligned");
+	static_assert(NW_JIT_DTLB_N == 1024 && NW_JIT_DTLB_VALID == 1u && NW_JIT_DTLB_WRITE == 2u, "ubfx #12,#10; flag bits 0 and 1");
+	const uint32_t off_miss = is_store ? (uint32_t)offsetof(struct nw_jit_cpu, jit_stw) : (uint32_t)offsetof(struct nw_jit_cpu, jit_lwz);
+	const uint32_t off_pa = is_store ? (uint32_t)offsetof(struct nw_jit_cpu, jit_stw_pa) : (uint32_t)offsetof(struct nw_jit_cpu, jit_lwz_pa);
+	const uint32_t ld = a64_memx(0xb8600800u, 9, X12, 17);			/* ldr w9, [x12, w17, uxtw] */
+	const uint32_t st = a64_memx(0xb8200800u, 15, X12, 17);			/* str w15, [x12, w17, uxtw] */
+	const uint32_t rev_ld = 0x5ac00800u | (9u << 5) | 9u;			/* rev w9, w9 */
+	const uint32_t rev_st = 0x5ac00800u | ((uint32_t)W2 << 5) | 15u;	/* rev w15, w2 */
+	if (upd && !ra)
+		return 0;
+	if (indexed) {
+		if (!emit_helper_ea_idx(e, ra, rb))
+			return 0;
+	} else if (!emit_ea_disp(e, ra, simm)) {
+		return 0;
+	}
+	if (is_store && !emit_load_gpr(e, W2, reg))
+		return 0;
+	struct mem_fix fx[8];
+	int nfx = 0;
+	/* Probe. W16 = MSR, X11 = the entry, W12 = its flags then X12 = the host page, W17 = EA & 0xfff. */
+	if (!emit_w(e, a64_ldr_w(16, X19, (uint32_t)offsetof(struct nw_jit_cpu, msr))))
+		return 0;
+	uint32_t *dr_off = e->p;
+	if (!emit_w(e, a64_tbz(16, 4, 0)))						/* MSR[DR] off */
+		return 0;
+	if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_dtlb))) ||
+	    !emit_w(e, a64_ubfx(15, W8, 12, 10)) ||
+	    !emit_w(e, a64_add_x_lsl(X11, X10, 15, 6)) ||
+	    !emit_w(e, a64_and_imm_page(13, W8)) ||
+	    !emit_w(e, a64_ldr_w(W12, X11, 0)) ||
+	    !emit_w(e, a64_cmp_w(W12, 13)))
+		return 0;
+	uint32_t *way0 = e->p;
+	if (!emit_w(e, a64_b_cond(0, 0)))						/* b.eq way 0 */
+		return 0;
+	if (!emit_w(e, 0x9100816bu) ||							/* add x11, x11, #32 */
+	    !emit_w(e, a64_ldr_w(W12, X11, 0)) ||
+	    !emit_w(e, a64_cmp_w(W12, 13)))
+		return 0;
+	if (!mem_branch(e, fx, &nfx, MF_BCOND, 1, 0, a64_b_cond(1, 0)))		/* b.ne miss */
+		return 0;
+	*way0 = a64_b_cond(0, (int)(e->p - way0));
+	if (!emit_w(e, a64_ldr_w(W12, X11, 8)))						/* flags */
+		return 0;
+	if (is_store) {
+		if (!emit_w(e, a64_movz(15, NW_JIT_DTLB_VALID | NW_JIT_DTLB_WRITE, 0)) ||
+		    !emit_w(e, a64_bics_wzr(15, W12)))					/* need & ~flags */
+			return 0;
+		if (!mem_branch(e, fx, &nfx, MF_BCOND, 1, 0, a64_b_cond(1, 0)))
+			return 0;
+	} else if (!mem_branch(e, fx, &nfx, MF_TBZ, 0, W12, a64_tbz(W12, 0, 0))) {	/* not valid */
+		return 0;
+	}
+	if (!emit_w(e, 0x4a400000u | (16u << 16) | (11u << 10) | ((uint32_t)W12 << 5) | 15u))	/* eor w15, w12, w16, lsr #11 */
+		return 0;
+	if (!mem_branch(e, fx, &nfx, MF_TBNZ, 3, 15, a64_tbz(15, 3, 0) | 0x01000000u))	/* filled under the other MSR[PR] */
+		return 0;
+	if (!emit_w(e, a64_ldr_w(15, X11, 12)) ||					/* entry sr_gen */
+	    !emit_w(e, a64_lsr(13, W8, 28)) ||
+	    !emit_w(e, a64_ldr_x(17, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_sr_gen))) ||
+	    !emit_w(e, 0xb8600800u | (13u << 16) | (2u << 13) | (1u << 12) | (17u << 5) | 13u) ||	/* ldr w13, [x17, w13, uxtw #2] */
+	    !emit_w(e, a64_cmp_w(15, 13)))
+		return 0;
+	if (!mem_branch(e, fx, &nfx, MF_BCOND, 1, 0, a64_b_cond(1, 0)))		/* the segment register changed */
+		return 0;
+	if (!emit_w(e, a64_ldr_x(X12, X11, 16)))					/* host */
+		return 0;
+	uint32_t *no_host = e->p;
+	if (!emit_w(e, a64_cbz64(X12, 0)))
+		return 0;
+	if (!emit_w(e, a64_and_imm_off12(17, W8)))
+		return 0;
+	if (is_store ? (!emit_w(e, rev_st) || !emit_w(e, st)) : (!emit_w(e, ld) || !emit_w(e, rev_ld)))
+		return 0;
+	if (g_count_dtlb_hits || nw_jit_prof_on || (nw_jit_legacy & NW_JIT_LEGACY_DCOUNT)) {
+		if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_dtlb_hit))) ||
+		    !emit_w(e, 0xf940014du) ||						/* ldr x13, [x10] */
+		    !emit_w(e, 0x910005adu) ||						/* add x13, x13, #1 */
+		    !emit_w(e, 0xf900014du))						/* str x13, [x10] */
+			return 0;
+	}
+	uint32_t *to_join = e->p;
+	if (!emit_w(e, a64_b(0)))
+		return 0;
+
+	/* Everything below is off the hit path. The pin cache is the same on every way to the join: no register is loaded
+	 * or stored here through it, and the helpers leave cpu->gpr and x21-x24 alone. */
+	int pin_gpr[4];
+	const int pin_next = e->pin_next;
+	for (int i = 0; i < 4; i++)
+		pin_gpr[i] = e->pin_gpr[i];
+	/* MSR[DR] off: PA = EA. Plain RAM and ROM pages come from the real-mode page cache (nw_jit_rtlb_ent). */
+	uint32_t *rt_join = NULL, *rt_miss_tag = NULL, *rt_miss_host = NULL;
+	if (!(nw_jit_legacy & NW_JIT_LEGACY_REAL)) {
+		*dr_off = a64_tbz(16, 4, (int)(e->p - dr_off));
+		if (!emit_w(e, a64_ldr_x(X10, X19, (uint32_t)offsetof(struct nw_jit_cpu, jit_rtlb))) ||
+		    !emit_w(e, a64_ubfx(15, W8, 12, 10)) ||
+		    !emit_w(e, a64_add_x_lsl(X11, X10, 15, 5)) ||
+		    !emit_w(e, a64_and_imm_page(13, W8)) ||
+		    !emit_w(e, a64_ldr_w(W12, X11, 0)) ||
+		    !emit_w(e, a64_cmp_w(W12, 13)))
+			return 0;
+		rt_miss_tag = e->p;
+		if (!emit_w(e, a64_b_cond(1, 0)))
+			return 0;
+		if (!emit_w(e, a64_ldr_x(X12, X11, is_store ? (uint32_t)offsetof(struct nw_jit_rtlb_ent, host_w) : (uint32_t)offsetof(struct nw_jit_rtlb_ent, host_r))))
+			return 0;
+		rt_miss_host = e->p;
+		if (!emit_w(e, a64_cbz64(X12, 0)))
+			return 0;
+		if (!emit_w(e, a64_and_imm_off12(17, W8)))
+			return 0;
+		if (is_store ? (!emit_w(e, rev_st) || !emit_w(e, st)) : (!emit_w(e, ld) || !emit_w(e, rev_ld)))
+			return 0;
+		rt_join = e->p;
+		if (!emit_w(e, a64_b(0)))
+			return 0;
+	}
+	/* A hit on a page with no host pointer (I/O): the physical-address helper, PA from the entry. */
+	*no_host = a64_cbz64(X12, (int)(e->p - no_host));
+	if (!emit_w(e, a64_ldr_w(W12, X11, 4)) ||
+	    !emit_w(e, a64_and_imm_off12(W1, W8)) ||
+	    !emit_w(e, a64_orr_reg(W1, W1, W12)))
+		return 0;
+	uint32_t *to_pa = e->p;
+	if (!emit_w(e, a64_b(0)))
+		return 0;
+	/* Translation off and not served above: the same helper, PA = EA. */
+	uint32_t *ident = e->p;
+	if (nw_jit_legacy & NW_JIT_LEGACY_REAL) {
+		*dr_off = a64_tbz(16, 4, (int)(ident - dr_off));
+	} else {
+		*rt_miss_tag = a64_b_cond(1, (int)(ident - rt_miss_tag));
+		*rt_miss_host = a64_cbz64(X12, (int)(ident - rt_miss_host));
+	}
+	if (!emit_w(e, a64_orr_reg(W1, 31, W8)))
+		return 0;
+	*to_pa = a64_b((int)(e->p - to_pa));
+	if (upd && !emit_w(e, 0xb9001be8u))						/* str w8, [sp, #24]  the new RA */
+		return 0;
+	if (!emit_imm32(e, 9, pc) || !emit_w(e, a64_str_w(9, X19, (uint32_t)offsetof(struct nw_jit_cpu, pc))))
+		return 0;
+	if (!emit_w(e, a64_orr_reg(is_store ? W3 : W2, 31, W8)) ||			/* (cpu, pa, [value,] ea) */
+	    !emit_w(e, 0xaa1303e0u) ||							/* mov x0, x19 */
+	    !emit_blr_x19(e, off_pa))
+		return 0;
+	uint32_t *to_after = e->p;
+	if (!emit_w(e, a64_b(0)))
+		return 0;
+	/* Miss: the helper translates, fills the table and faults precisely. */
+	uint32_t *miss = e->p;
+	for (int i = 0; i < nfx; i++)
+		mem_fix_apply(&fx[i], miss);
+	if (upd && !emit_w(e, 0xb9001be8u))						/* str w8, [sp, #24] */
+		return 0;
+	if (!emit_imm32(e, 9, pc) || !emit_w(e, a64_str_w(9, X19, (uint32_t)offsetof(struct nw_jit_cpu, pc))))
+		return 0;
+	if (!emit_w(e, a64_orr_reg(W1, 31, W8)) ||					/* (cpu, ea[, value]) */
+	    !emit_w(e, 0xaa1303e0u) ||
+	    !emit_blr_x19(e, off_miss))
+		return 0;
+	*to_after = a64_b((int)(e->p - to_after));
+	if (!is_store && !emit_w(e, a64_orr_reg(W9, 31, W0)))				/* the value, before x0 is the cpu again */
+		return 0;
+	if (!emit_w(e, 0xaa1303e0u) ||
+	    !emit_w(e, a64_ldr_w(W10, X0, (uint32_t)offsetof(struct nw_jit_cpu, fault))))
+		return 0;
+	if (e->nfault >= NW_JIT_MAX_BLOCK - 1)
+		return 0;
+	if (is_store && upd) {
+		/* A fault stops the block; an SMC fault (3) is a store that succeeded, so the base register still updates
+		 * (skipping it left r1 stale after a stack push into the executing page). */
+		uint32_t *ok = e->p;
+		if (!emit_w(e, a64_cbz(W10, 0)))
+			return 0;
+		if (!emit_w(e, a64_cmp_imm(W10, NW_JIT_FAULT_SMC)))
+			return 0;
+		uint32_t *not_smc = e->p;
+		if (!emit_w(e, a64_b_cond(1, 0)))
+			return 0;
+		if (!emit_w(e, 0xb9401be8u) ||						/* ldr w8, [sp, #24] */
+		    !emit_w(e, a64_str_w(W8, X0, (uint32_t)offsetof(struct nw_jit_cpu, gpr) + (uint32_t)ra * 4u)))
+			return 0;
+		*not_smc = a64_b_cond(1, (int)(e->p - not_smc));
+		e->fault_br[e->nfault++] = e->p;
+		if (!emit_w(e, a64_cbnz(W10, 0)))
+			return 0;
+		*ok = a64_cbz(W10, (int)(e->p - ok));
+	} else {
+		e->fault_br[e->nfault++] = e->p;
+		if (!emit_w(e, a64_cbnz(W10, 0)))
+			return 0;
+	}
+	if (upd && !emit_w(e, 0xb9401be8u))						/* ldr w8, [sp, #24] */
+		return 0;
+	for (int i = 0; i < 4; i++)
+		e->pin_gpr[i] = pin_gpr[i];
+	e->pin_next = pin_next;
+	*to_join = a64_b((int)(e->p - to_join));
+	if (rt_join)
+		*rt_join = a64_b((int)(e->p - rt_join));
+	if (!is_store && !emit_store_gpr(e, W9, reg))
+		return 0;
+	if (upd && !emit_store_gpr(e, W8, ra))
+		return 0;
+	e->just_set_pc = 0;
+	return 1;
+}
+
 /* Single-precision arithmetic (fadds, fsubs, fmuls, fmadds, fmsubs, fnmadds, fnmsubs) without a C call.
  *
  * The out-of-line helpers spend most of their time switching the host FP control register (four serialising system
@@ -13840,6 +14112,14 @@ static int emit_op(struct emit *e, uint32_t op, uint32_t pc, int is_last)
 
 		return 1;
 	}
+	if (nw_word_inline_on()) {
+		if (prim == 32 || prim == 33)
+			return emit_word_access(e, pc, 0, rd, ra, simm, 0, 0, prim == 33 && ra);
+		if (prim == 36 || prim == 37)
+			return emit_word_access(e, pc, 1, rd, ra, simm, 0, 0, prim == 37 && ra);
+		if (prim == 31 && (xo == 23 || xo == 55 || xo == 151 || xo == 183))
+			return emit_word_access(e, pc, xo == 151 || xo == 183, rd, ra, 0, rb, 1, xo == 55 || xo == 183);
+	}
 	if (nw_mem_inline_on()) {
 		int mk = -1, upd = 0, idx = 0;
 		switch (prim) {
@@ -15580,7 +15860,7 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc,
 	}
 	g_link_body_off = (int)((uint8_t *)e.p - (uint8_t *)start);
 	prof_init();
-	const int prof_block = prof_begin_block(guest_pc);
+	int prof_block = prof_begin_block(guest_pc);
 	g_prof_in_compile = prof_block >= 0;
 	if (prof_block >= 0) {
 		/* ++counter[block], in the body so a direct link into it counts too */
@@ -15603,6 +15883,21 @@ static nw_jit_fn compile_block(const uint32_t *ops, int n, uint32_t guest_pc,
 		}
 		if (prof_block >= 0)
 			prof_note_op((uint32_t)prof_block, ops[i], op_from, e.p);
+		/* A conditional branch in the middle: what follows runs only when it is not taken, so the profiler counts it as
+		 * a block of its own. */
+		if (prof_block >= 0 && i < n - 1 && (ops[i] >> 26) == 16) {
+			prof_commit_block(prof_block);
+			prof_block = prof_begin_block(guest_pc + (uint32_t)(i + 1) * 4);
+			g_prof_in_compile = prof_block >= 0;
+			if (prof_block >= 0 &&
+			    (!emit_imm64(&e, X10, (uint64_t)(uintptr_t)&g_prof_count[prof_block]) || !emit_w(&e, a64_ldr_x(X11, X10, 0)) ||
+			     !emit_w(&e, 0x9100056bu) || !emit_w(&e, 0xf900014bu))) {
+#ifdef __APPLE__
+				pthread_jit_write_protect_np(1);
+#endif
+				return NULL;
+			}
+		}
 	}
 	prof_commit_block(prof_block);
 	g_prof_in_compile = 0;

@@ -21,6 +21,7 @@ mode selected_mode()
 {
 	static int selected = -1;
 	if (selected < 0) {
+		nw68_always_resolve = (nw_jit_legacy & NW_JIT_LEGACY_C68) != 0;
 		const char *e = getenv("NW_JIT68K_MODE");
 		selected = e ? (!strcmp(e, "on") ? ON : !strcmp(e, "verify") ? VERIFY : OFF) :
 			PrefsFindBool("jit68k_host") ? ON : OFF;
@@ -81,6 +82,8 @@ struct bus_context {
 	bool resolved_store, resolved_valid;
 	/* The last physical pages found to be plain memory for a load / a store: nw_pa_kind() once per page per dispatch. */
 	uint32_t plain_read_page, plain_write_page;
+	/* The page the last code word came from (see read_code). */
+	uint32_t code_ea_page, code_pa_page;
 };
 /* Only the counts and memos need clearing: every array is read up to its count. (A zero-initialised context was 750 bytes
  * written per dispatch.) */
@@ -91,6 +94,7 @@ inline void init_context(bus_context &c, powerpc_cpu *cpu, uint32_t pc, uint16_t
 	c.npages = c.nwrites = c.nreads = 0;
 	c.resolved_ea = c.resolved_pa = 0; c.resolved_width = 0; c.resolved_store = false; c.resolved_valid = false;
 	c.plain_read_page = c.plain_write_page = 1;	/* page addresses have their low 12 bits clear */
+	c.code_ea_page = c.code_pa_page = 1;
 }
 /* The context only grows during a dispatch (translations, code pages, write pages, recorded reads are appended), so
  * returning to an earlier point is resetting the counts. */
@@ -100,6 +104,7 @@ inline void restore_context(bus_context &c, const context_mark &m)
 {
 	c.translations.count = m.translations; c.npages = m.npages; c.nwrites = m.nwrites; c.nreads = m.nreads;
 	c.resolved_valid = false;
+	c.code_ea_page = c.code_pa_page = 1;	/* its page list and read record entries may be among those just dropped */
 }
 bool preview_page(void *opaque, uint32_t ea, bool store, uint32_t *pa)
 {
@@ -183,11 +188,23 @@ same_page:
 bool read_code(void *opaque, uint32_t ea, uint16_t *value, uint32_t *physical, bool snapshot)
 {
 	bus_context &c = *(bus_context *)opaque;
+	/* Every instruction ends by fetching the next opcode and its prefetch word, nearly always from the page the last
+	 * code word came from. That page has passed everything below in this dispatch: it translates, is plain memory, its
+	 * read is recorded, it is in the code page list, and it is not a page this dispatch writes (and cannot become one:
+	 * write_probe refuses a page in the code list). Nothing in the dispatch changes any of that, so the word needs none
+	 * of it again. NW_JIT_LEGACY=c68 checks every word as before. */
+	if ((ea & ~4095u) == c.code_ea_page && !(ea & 1)) {
+		c.resolved_valid = false;
+		*physical = c.code_pa_page | (ea & 4095u);
+		*value = snapshot && ea == c.pc ? c.opcode : snapshot && ea == c.pc + 2u ? c.prefetched : vm_read_memory_2(*physical);
+		return true;
+	}
 	if (!probe(c, ea, 2, false, physical) || !record_read(c, ea, 2)) return false;
 	const uint32_t page = *physical & ~4095u;
 	for (unsigned j = 0; j < c.nwrites; ++j) if (c.write_pages[j] == page) return false;
 	bool found = false; for (unsigned j = 0; j < c.npages; ++j) if (c.pages[j] == page) found = true;
 	if (!found) { if (c.npages == 8) return false; c.pages[c.npages++] = page; }
+	if (!(nw_jit_legacy & (NW_JIT_LEGACY_XLATE | NW_JIT_LEGACY_C68))) { c.code_ea_page = ea & ~4095u; c.code_pa_page = page; }
 	/* Preserve the NK's already-prefetched snapshot. */
 	*value = snapshot && ea == c.pc ? c.opcode : snapshot && ea == c.pc + 2u ? c.prefetched : vm_read_memory_2(*physical);
 	return true;

@@ -93,6 +93,45 @@ Tried and rejected: a 128 MB code arena (−2.2% on the busy desktop, but +64–
 need it); dropping a segment's TLB entries eagerly on `mtsr` instead of comparing a generation on every access (neutral:
 the NanoKernel rewrites all 16 segment registers 280 times a second, so the scan costs what the compare saved).
 
+## October 11 additions
+
+Three more changes, each with its switch, measured the same way (four alternating runs each; boot / busy desktop / idle).
+
+| change | switch | effect |
+|---|---|---|
+| 68k layer: the page a code word came from is remembered for the rest of the dispatch, so the two fetches that end every instruction (next opcode, prefetch word) skip the translation probe, the read record scan and the code/write page lists; a data read with nothing staged no longer calls back for its byte key | `c68` | **−10.1%** / −1.4% / idle within its spread ; boot CPU 21.1 s → 19.1 s in 12 more alternating boots |
+| Blocks continue through a conditional branch that is not taken (its taken exit is a side exit; up to 4 per block, `NW_JIT_SUPER=<n>`): one translation instead of a chain of 2–5 instruction blocks | `super` | −2.2% / 0.0% / −0.5% ; the compare-loop kernel of the loop bench 2,208 → 2,759 guest instructions per µs (+25%) |
+| Word loads and stores (`lwz`, `stw`, update and indexed forms: a third of all guest instructions): the hit path no longer writes `cpu->pc`, computes an unused physical address, moves the value through `W0` or re-reads the fault word; 46 → 31 host instructions | `word` | +0.1% / −1.3% / idle within its spread (inside the noise: correct, but nearly free on this workload) |
+
+All three together, five alternating runs against the same binary with `NW_JIT_LEGACY=word,super,c68`: **boot −11.6%
+(20.26 s → 17.90 s), busy desktop −2.6% (25.24 → 24.59), idle −1.1%** (medians of host CPU seconds).
+
+What these say about where time goes: generated PowerPC code is 22% of a boot and 35% of a busy desktop, and the host
+CPU hides most of a shorter instruction sequence, so polishing it buys about 1%. The 68k layer was 48% of a boot and a
+third of the desktop, and one memo there was worth ten times as much. The remaining items in the list below are ranked
+with that in mind.
+
+The idle phase is a fixed 15 s of wall time, so it measures how busy the guest keeps the emulator, not speed; its
+run-to-run spread on one binary was 6.1–7.1 s in these sessions.
+
+Checked: `tools/run_ppc_core_tests.py` (1,013,888,544), a new `--mode=--word-sweep` (20,000 random word accesses, old
+sequence against new: faults, fault addresses, registers, the pc left behind, RAM and table hits identical), the link,
+sub-word-store, FP-fast, raw-file-read and IBTC sweeps, `tools/run_nw68_tests.py` (143,361), and for the 68k change
+5.5 minutes of a boot in `NW_JIT68K_MODE=verify` (no mismatch) and `NW_JIT68K_CHECK_BLOCKS=1` (59.8 million blocks
+compared, no mismatch). Guest tests on the final build: `tools/shears/test.sh` unit, install, extfs, settings, shutdown,
+mic, recdlg and `tools/vms/test.sh` unit, settings, nvram, manager, control, display, mcp passed (`mic` failed once in
+three runs with "the test app never finished", no log kept, and passed twice after; `clip` and `embedded` were not run).
+
+**A boot stall found during this testing, and fixed.** Some boots never reached the Finder: the log ended at "video
+ndrv: VSL armed after Open" with the emulation thread busy. It was not caused by these changes (it happened with all three
+switches off) and it was not rare when the pointer was moving over the VM's window during the boot (about one boot in
+four). The guest's Memory Manager was walking the system heap (ROM 68k `ffc36502`-`ffc365a4`) from a block whose header
+had been zeroed, by an ADB Manager copy that ran past a device's data area. The emulated PMU was raising an ADB interrupt
+with no packet on every tick while autopoll was off and host input was waiting, about 6,000 of them before the guest's
+first ADB command. It no longer does (`nw_devices.cpp`, `adb_reply_guard`; `NW_ADB_RACE=1` restores the old behaviour).
+With pointer moves sent through the control socket during the boot: 0 stalls in 20 boots with the fix, 4 in 12 without.
+Diagnostics added on the way and kept: `NW_WATCH32=<hex address>` (who changed a guest RAM word), `NW_ADB_TRACE=1`.
+
 ## What was checked
 
 `tools/run_ppc_core_tests.py` (1,013,888,544 checks; one assertion about the old register-copy bookkeeping and one about the

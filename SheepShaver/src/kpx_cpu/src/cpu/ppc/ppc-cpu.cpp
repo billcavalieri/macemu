@@ -793,6 +793,11 @@ static void kdp_probe_dump(const char *why, uint32 kdp, uint32 vectbl)
 
 static bool nw_jit_peek(uint32 ea, uint32 *opcode);
 
+/* The addresses the execute loop last handed to the JIT (blocks reached through native links are not in it): printed with
+ * an illegal-instruction exception, to show how control got to an address that holds no code. */
+static uint32 nw_pc_ring[32];
+static unsigned nw_pc_ring_n;
+
 void powerpc_cpu::take_program(uint32 srr1_bits)
 {
 	/* SRR1[46] trap = 0x00020000, [45] privileged = 0x00040000,
@@ -813,6 +818,24 @@ void powerpc_cpu::take_program(uint32 srr1_bits)
 				const bool ok = nw_jit_peek(at, &op);
 				NW_DIAG("NW-BOOT program exception #%u pc=%08x srr1bits=%08x op=%s%08x\n", nseen, (unsigned)at,
 				       (unsigned)srr1_bits, ok ? "" : "?", (unsigned)op);
+				if (srr1_bits & 0x00080000u) {
+					/* An illegal instruction outside the 68k emulator: say where it came from. */
+					uint32 back = 0, back_lr = 0;
+					if (nw_jit_peek(gpr(1), &back) && back >= 0x1000 && !(back & 3))
+						(void)nw_jit_peek(back + 8, &back_lr);
+					NW_DIAG("NW-BOOT illegal instruction at %08x: lr=%08x ctr=%08x r1=%08x r2=%08x r12=%08x msr=%08x fetch_pa=%08x caller frame %08x lr %08x; last JIT entries:",
+					       (unsigned)at, (unsigned)lr(), (unsigned)ctr(), (unsigned)gpr(1), (unsigned)gpr(2), (unsigned)gpr(12),
+					       (unsigned)ppc32_guest_mmu().msr(), (unsigned)last_fetch_pa_, (unsigned)back, (unsigned)back_lr);
+					for (unsigned k = 0; k < 32; k++)
+						NW_DIAG(" %08x", (unsigned)nw_pc_ring[(nw_pc_ring_n + k) & 31u]);
+					NW_DIAG("\n");
+					uint32 w[8];
+					for (int k = 0; k < 8; k++)
+						if (!nw_jit_peek(at - 16 + (uint32)k * 4, &w[k])) w[k] = 0xdeadbeefu;
+					NW_DIAG("NW-BOOT illegal instruction: words at %08x: %08x %08x %08x %08x [%08x] %08x %08x %08x\n", (unsigned)(at - 16),
+					       (unsigned)w[0], (unsigned)w[1], (unsigned)w[2], (unsigned)w[3], (unsigned)w[4], (unsigned)w[5], (unsigned)w[6], (unsigned)w[7]);
+					fflush(stdout);
+				}
 			}
 		}
 	}
@@ -3187,6 +3210,10 @@ static int nw_jit_pa_ok(uint32 pa, int is_st)
 	return 1;
 }
 
+/* Set while the block builder looks at instructions after a conditional branch it continued through: they run only if
+ * that branch is not taken, so looking up their addresses must not mark a page referenced or changed. */
+static bool nw_jit_build_past_branch;
+
 static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 {
 	const int prim = (int)(op >> 26);
@@ -3202,7 +3229,7 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (!ppc->guest_data_probe(ea, 4, false, &pa))
+		if (!ppc->guest_data_probe(ea, 4, false, &pa, 0, !nw_jit_build_past_branch))
 			return 0;
 		return nw_jit_pa_ok(pa, 0);
 	}
@@ -3212,7 +3239,7 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (!ppc->guest_data_probe(ea, 1, false, &pa))
+		if (!ppc->guest_data_probe(ea, 1, false, &pa, 0, !nw_jit_build_past_branch))
 			return 0;
 		return nw_jit_pa_ok(pa, 0);
 	}
@@ -3222,7 +3249,7 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (!ppc->guest_data_probe(ea, 1, true, &pa))
+		if (!ppc->guest_data_probe(ea, 1, true, &pa, 0, !nw_jit_build_past_branch))
 			return 0;
 		return nw_jit_pa_ok(pa, 1);
 	}
@@ -3233,7 +3260,7 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (!ppc->guest_data_probe(ea, 4, true, &pa))
+		if (!ppc->guest_data_probe(ea, 4, true, &pa, 0, !nw_jit_build_past_branch))
 			return 0;
 		return nw_jit_pa_ok(pa, 1);
 	}
@@ -3243,7 +3270,7 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (!ppc->guest_data_probe(ea, 2, true, &pa))
+		if (!ppc->guest_data_probe(ea, 2, true, &pa, 0, !nw_jit_build_past_branch))
 			return 0;
 		return nw_jit_pa_ok(pa, 1);
 	}
@@ -3255,7 +3282,7 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (!ppc->guest_data_probe(ea, 2, false, &pa))
+		if (!ppc->guest_data_probe(ea, 2, false, &pa, 0, !nw_jit_build_past_branch))
 			return 0;
 		return nw_jit_pa_ok(pa, 0);
 	}
@@ -3264,7 +3291,7 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (!ppc->guest_data_probe(ea, 8, false, &pa))
+		if (!ppc->guest_data_probe(ea, 8, false, &pa, 0, !nw_jit_build_past_branch))
 			return 0;
 		return nw_jit_pa_ok(pa, 0);
 	}
@@ -3273,7 +3300,7 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 		const int rb = (int)((op >> 11) & 0x1f);
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (!ppc->guest_data_probe(ea, 8, true, &pa))
+		if (!ppc->guest_data_probe(ea, 8, true, &pa, 0, !nw_jit_build_past_branch))
 			return 0;
 		return nw_jit_pa_ok(pa, 1);
 	}
@@ -3306,7 +3333,7 @@ static int nw_jit_op_mem_ok(powerpc_cpu *ppc, uint32 op, const uint32 *sg)
 	const int simm = (int16_t)(op & 0xffffu);
 	const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
 	uint32 pa;
-	if (!ppc->guest_data_probe(ea, (unsigned)width, is_st, &pa))
+	if (!ppc->guest_data_probe(ea, (unsigned)width, is_st, &pa, 0, !nw_jit_build_past_branch))
 		return 0;
 	return nw_jit_pa_ok(pa, is_st);
 }
@@ -3426,7 +3453,7 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 	if (prim == 32 || prim == 33) {
 		const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0) == 1)
+		if (ppc->guest_data_probe(ea, 4, false, &pa, 0, !nw_jit_build_past_branch) && nw_jit_pa_ok(pa, 0) == 1)
 			sg[rd] = vm_read_memory_4(pa);
 		if (prim == 33 && ra)
 			sg[ra] = ea;
@@ -3435,21 +3462,21 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 	if (prim == 34) {
 		const uint32 ea = (ra ? sg[ra] : 0) + (uint32)simm;
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 1, false, &pa) && nw_jit_pa_ok(pa, 0) == 1)
+		if (ppc->guest_data_probe(ea, 1, false, &pa, 0, !nw_jit_build_past_branch) && nw_jit_pa_ok(pa, 0) == 1)
 			sg[rd] = vm_read_memory_1(pa);
 		return;
 	}
 	if (prim == 31 && xo == 87) {
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 1, false, &pa) && nw_jit_pa_ok(pa, 0) == 1)
+		if (ppc->guest_data_probe(ea, 1, false, &pa, 0, !nw_jit_build_past_branch) && nw_jit_pa_ok(pa, 0) == 1)
 			sg[rd] = vm_read_memory_1(pa);
 		return;
 	}
 	if (prim == 31 && xo == 119) {
 		const uint32 ea = sg[ra] + sg[rb];
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 1, false, &pa) && nw_jit_pa_ok(pa, 0) == 1) {
+		if (ppc->guest_data_probe(ea, 1, false, &pa, 0, !nw_jit_build_past_branch) && nw_jit_pa_ok(pa, 0) == 1) {
 			sg[rd] = vm_read_memory_1(pa);
 			if (ra)
 				sg[ra] = ea;
@@ -3459,7 +3486,7 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 	if (prim == 31 && xo == 311) {
 		const uint32 ea = sg[ra] + sg[rb];
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 2, false, &pa) && nw_jit_pa_ok(pa, 0) == 1) {
+		if (ppc->guest_data_probe(ea, 2, false, &pa, 0, !nw_jit_build_past_branch) && nw_jit_pa_ok(pa, 0) == 1) {
 			sg[rd] = vm_read_memory_2(pa);
 			if (ra)
 				sg[ra] = ea;
@@ -3475,7 +3502,7 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 		unsigned w = (prim == 41) ? 2u : (prim == 49) ? 4u : 8u;
 		int st = (prim == 55);
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, w, st != 0, &pa) && nw_jit_pa_ok(pa, st) == 1) {
+		if (ppc->guest_data_probe(ea, w, st != 0, &pa, 0, !nw_jit_build_past_branch) && nw_jit_pa_ok(pa, st) == 1) {
 			if (prim == 41)
 				sg[rd] = vm_read_memory_2(pa);
 			sg[ra] = ea;
@@ -3485,7 +3512,7 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 	if (prim == 31 && xo == 55) {
 		const uint32 ea = sg[ra] + sg[rb];
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0) == 1) {
+		if (ppc->guest_data_probe(ea, 4, false, &pa, 0, !nw_jit_build_past_branch) && nw_jit_pa_ok(pa, 0) == 1) {
 			sg[rd] = vm_read_memory_4(pa);
 			if (ra)
 				sg[ra] = ea;
@@ -3495,14 +3522,14 @@ static void nw_jit_sg_apply(powerpc_cpu *ppc, uint32 *sg, uint32 op)
 	if (prim == 31 && xo == 23) {
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 4, false, &pa) && nw_jit_pa_ok(pa, 0) == 1)
+		if (ppc->guest_data_probe(ea, 4, false, &pa, 0, !nw_jit_build_past_branch) && nw_jit_pa_ok(pa, 0) == 1)
 			sg[rd] = vm_read_memory_4(pa);
 		return;
 	}
 	if (prim == 31 && (xo == 343 || xo == 375)) {
 		const uint32 ea = (ra ? sg[ra] : 0) + sg[rb];
 		uint32 pa;
-		if (ppc->guest_data_probe(ea, 2, false, &pa) && nw_jit_pa_ok(pa, 0) == 1)
+		if (ppc->guest_data_probe(ea, 2, false, &pa, 0, !nw_jit_build_past_branch) && nw_jit_pa_ok(pa, 0) == 1)
 			sg[rd] = (uint32)(int32)(int16)vm_read_memory_2(pa);
 		if (xo == 375 && ra)
 			sg[ra] = ea;
@@ -3711,6 +3738,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 		return 0;
 
 	const uint32 guest_pc = pc();
+	nw_pc_ring[nw_pc_ring_n++ & 31u] = guest_pc;
 	const uint32 phys_page = last_fetch_pa_ & ~0xfffu;
 	const uint32 msr = ppc32_guest_mmu().msr();
 	const uint32 msr_ir = ((msr & ppc32_mmu::MSR_IR) ? 1u : 0u) |
@@ -3820,8 +3848,23 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 				nw_jit_note_cut(NW_JIT_CUT_FIRST_OP_IO);
 			} else {
 				int cut = -1;
-				while (n < NW_JIT_MAX_BLOCK && !nw_jit_op_ends_block(ops[n - 1])) {
+				/* A conditional branch does not have to end the block: its taken exit is a side exit and the
+				 * instructions after it follow in the same translation, so a branch that is not taken costs no
+				 * block exit. Verify mode keeps one block per branch (it replays whole blocks), and the
+				 * continuation must be an address a block exit could have chained to. */
+				int through = 0;
+				const int through_max = (mode == NW_JIT_VERIFY) ? 0 : nw_jit_super_max();
+				nw_jit_build_past_branch = false;
+				while (n < NW_JIT_MAX_BLOCK) {
 					const uint32 ea = guest_pc + (uint32)n * 4u;
+					if (nw_jit_op_ends_block(ops[n - 1])) {
+						if (through >= through_max || !nw_jit_op_falls_through(ops[n - 1]) ||
+						    (ea & ~0xfffu) != (guest_pc & ~0xfffu) || nw_68k_wants_boundary(ea) ||
+						    nw_aline_dispatch_pa((phys_page & ~0xfffu) | (ea & 0xfffu)))
+							break;
+						through++;
+						nw_jit_build_past_branch = true;
+					}
 					if ((ea & ~0xfffu) != (guest_pc & ~0xfffu)) {
 						cut = NW_JIT_CUT_PAGE_CROSS;
 						break;
@@ -3865,6 +3908,7 @@ int powerpc_cpu::nw_jit_try(uint32 first_opcode)
 						break;
 					}
 				}
+				nw_jit_build_past_branch = false;
 				if (cut < 0)
 					cut = (n >= NW_JIT_MAX_BLOCK) ? NW_JIT_CUT_MAX_BLOCK
 								      : NW_JIT_CUT_ENDS_BLOCK;
@@ -4490,6 +4534,31 @@ void powerpc_cpu::execute(uint32 entry)
 	for (;;) {
 #ifdef SHEEPSHAVER
 		nw_68k_observe(this, pc(), execute_depth);
+		/* Diagnostic, NW_WATCH32=<hex guest RAM address>: report every change of that word, with where the guest was. The
+		 * check runs once per trip through this loop, so it names the block or 68k dispatch that made the change. */
+		{
+			static int watch_on = -1;
+			static uint32 watch_at, watch_old;
+			static unsigned watch_n;
+			if (watch_on < 0 && nw_la_ram_size != 0) {
+				const char *e = getenv("NW_WATCH32");
+				watch_at = e ? (uint32)strtoul(e, NULL, 16) : 0;
+				watch_on = watch_at >= 0x100 && watch_at + 4 <= nw_la_ram_size ? 1 : 0;
+			}
+			if (watch_on > 0) {
+				const uint32 v = ReadMacInt32(watch_at);
+				if (v != watch_old && watch_n < 400) {
+					watch_n++;
+					printf("NW-WATCH %08x: %08x -> %08x  pc=%08x lr=%08x msr=%08x depth=%d 68kpc=%08x r29=%08x a7=%08x prev-entries",
+					       (unsigned)watch_at, (unsigned)watch_old, (unsigned)v, (unsigned)pc(), (unsigned)lr(),
+					       (unsigned)ppc32_guest_mmu().msr(), execute_depth, (unsigned)(gpr(24) - 2u), (unsigned)gpr(29), (unsigned)gpr(1));
+					for (unsigned k = 26; k < 32; k++)
+						printf(" %08x", (unsigned)nw_pc_ring[(nw_pc_ring_n + k) & 31u]);
+					printf("\n");
+					watch_old = v;
+				}
+			}
+		}
 #endif
 		uint32 opcode;
 		if (ppc32_guest_mmu_enabled()) {

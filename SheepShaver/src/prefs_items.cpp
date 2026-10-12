@@ -52,8 +52,8 @@ prefs_desc common_prefs_items[] = {
 	{"sheepforce", TYPE_BOOLEAN, false, "SheepForce Metal display"},
 	{"sheepforce_qd", TYPE_BOOLEAN, false, "SheepForce Metal QuickDraw acceleration (needs sheepforce)"},
 	{"sheepforce_rave", TYPE_BOOLEAN, false, "SheepForce Metal RAVE engine (needs sheepforce)"},
-	{"sheepforce_fillmask", TYPE_BOOLEAN, false, "accelerate QuickDraw solid pattern fills clipped by regions (hook 3); experimental, off until verified live"},
-	{"sheepforce_fillmask_tiles", TYPE_BOOLEAN, false, "also take pixel-pattern (desktop pattern) fills in the code-3 hook; needs sheepforce_fillmask; experimental"},
+	{"sheepforce_fillmask", TYPE_BOOLEAN, false, "accelerate QuickDraw pattern fills clipped by regions (hook 3): window backgrounds, frames, the desktop pattern; on by default"},
+	{"sheepforce_fillmask_tiles", TYPE_BOOLEAN, false, "with sheepforce_fillmask, also take patterns of more than one colour (the desktop pattern); on by default, false leaves only solid colours"},
 	{"sheepforce_lines", TYPE_BOOLEAN, false, "accelerate QuickDraw line/frame rectangles (hook 5); on by default, set false to bisect"},
 	{"sheepforce_probe", TYPE_BOOLEAN, false, "log which unplanted QuickDraw accelerator hook codes the ROM calls"},
 	{"qtcodec", TYPE_BOOLEAN, false,  "host Cinepak and Sorenson Video decode"},
@@ -108,8 +108,8 @@ void AddPrefsDefaults(void)
 	PrefsAddBool("sheepforce_qd", true);
 	PrefsAddBool("sheepforce_rave", true);
 	PrefsAddBool("sheepforce_lines", true);
-	PrefsAddBool("sheepforce_fillmask", false);
-	PrefsAddBool("sheepforce_fillmask_tiles", false);
+	PrefsAddBool("sheepforce_fillmask", true);
+	PrefsAddBool("sheepforce_fillmask_tiles", true);
 	PrefsAddBool("sheepforce_probe", false);
 	PrefsAddBool("qtcodec", false);
 	PrefsAddBool("nocdrom", false);

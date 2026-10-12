@@ -13,6 +13,7 @@ bool nw68_page_translate(nw68_page_cache &cache, void *opaque, nw68_page_probe p
 	if (cache.count < 16) cache.pages[cache.count++] = {page, *pa & ~4095u, store};
 	return true;
 }
+bool nw68_always_resolve;
 bool nw68_hash_table_overlap(uint32_t pa, unsigned width, uint32_t sdr1)
 {
 	const uint32_t base = sdr1 & 0xffff0000u;
@@ -31,7 +32,9 @@ bool read(nw68_frame &f, uint32_t ea, unsigned w, uint32_t &v) {
 	if ((uint64_t)ea + w > (uint64_t)UINT32_MAX + 1 || !f.bus.read || !f.bus.read(f.bus.opaque, ea, w, &v)) {
 		f.exit = NW68_EXIT_MEMORY; return false;
 	}
-	/* Forward staged bytes, so overlapping accesses observe program order. */
+	/* Forward staged bytes, so overlapping accesses observe program order. With nothing staged there is nothing to
+	 * forward and the byte key is not needed (most reads: the key costs a call back into the bus). */
+	if (!f.nwrite && !nw68_always_resolve) return true;
 	uint32_t key = ea;
 	if (f.bus.resolve && !f.bus.resolve(f.bus.opaque, ea, w, false, &key)) { f.exit = NW68_EXIT_MEMORY; return false; }
 	for (unsigned j = 0; j < w; ++j) {

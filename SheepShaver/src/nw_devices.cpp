@@ -1306,6 +1306,23 @@ static int adb_poll(uint8_t *obuf, uint16_t mask)
 	return 0;
 }
 
+/* A reply to a command the guest sent ({0x01, length, data} or {0x00}) and an autopoll packet ({command, data}, flagged
+ * NW_PMU_INT_ADB_AUTO) wait in the same buffer for the guest's interrupt acknowledge. Each used to be able to replace the
+ * other while it waited: a mouse packet arriving during the ADB Manager's set-up at boot was then read as the reply to
+ * its command (or the reply was read as a mouse packet, the AUTO flag being left over), the ADB Manager copied a length
+ * taken from the wrong byte into a device's small data area, and the block after it in the system heap lost its header
+ * (the boot then hung in the Memory Manager). Now a command reply clears the AUTO flag it replaces, and autopoll leaves a
+ * waiting command reply alone. NW_ADB_RACE=1 restores the old behaviour (A/B). */
+static int adb_reply_guard(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		const char *e = getenv("NW_ADB_RACE");
+		on = (e && e[0] == '1') ? 0 : 1;
+	}
+	return on;
+}
+
 /* PMU command 0x20: one ADB packet {command, flags, len, data...}. */
 static void pmu_cmd_adb(const uint8_t *in, int in_len)
 {
@@ -1342,6 +1359,8 @@ static void pmu_cmd_adb(const uint8_t *in, int in_len)
 	}
 	if ((via.intbits & NW_PMU_INT_ADB) == 0)
 		adb.irq_tb = tb_now();
+	if (adb_reply_guard())
+		via.intbits &= (uint8_t)~NW_PMU_INT_ADB_AUTO;	/* what waits now is this reply, not an autopoll packet */
 	via.intbits |= NW_PMU_INT_ADB;
 	pmu_update_extirq();
 }
@@ -1387,6 +1406,12 @@ static void pmu_adb_arm(uint64_t now, int with_data)
 		if ((via.intbits & NW_PMU_INT_ADB) == 0)
 			adb.irq_tb = now;
 		via.intbits |= extra | NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO;
+	} else if (adb_reply_guard()) {
+		/* Nothing to deliver: only the other interrupt bits come back. An ADB interrupt with no packet is not something
+		 * a PMU sends; with autopoll off (the whole early boot) and the pointer moving it was raised on every tick,
+		 * thousands of times before the guest's first ADB command, and the ADB Manager took each for a reply. Host
+		 * input stays queued until the guest turns autopoll on. */
+		via.intbits |= extra;
 	} else if (extra || adb_host_pending()) {
 		if (adb_host_pending() && (via.intbits & NW_PMU_INT_ADB) == 0)
 			adb.irq_tb = now;
@@ -1423,6 +1448,10 @@ static void pmu_adb_poll(uint64_t now)
 		via.busy_tb = 0;
 	}
 
+	/* A command reply the guest has not fetched yet stays as it is, whatever the interrupt mask says. */
+	if (adb_reply_guard() && (via.intbits & NW_PMU_INT_ADB) && !(via.intbits & NW_PMU_INT_ADB_AUTO) && !pmu_adb_stale(now))
+		return;
+
 	if (adb.edge_wait) {
 		adb.edge_wait = 0;
 		if (adb.autopoll) {
@@ -1442,7 +1471,7 @@ static void pmu_adb_poll(uint64_t now)
 		const int adb_bit = (via.intbits & NW_PMU_INT_ADB) != 0;
 		if (adb_bit && !pmu_adb_stale(now))
 			return;
-		if (!adb_bit && !adb_host_pending())
+		if (!adb_bit && (!adb_host_pending() || (adb_reply_guard() && !adb.autopoll)))
 			return;
 		adb.edge_kept = (uint8_t)(via.intbits & (uint8_t)~(NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO));
 		via.intbits = 0;
@@ -1454,7 +1483,7 @@ static void pmu_adb_poll(uint64_t now)
 	}
 
 	if (!adb.autopoll) {
-		if (!adb_host_pending())
+		if (adb_reply_guard() || !adb_host_pending())
 			return;
 		adb.reply_sz = 0;
 		pmu_adb_arm(now, 0);
@@ -1474,7 +1503,29 @@ static void pmu_adb_poll(uint64_t now)
 }
 
 /* Executes via.cmd on cmd_buf[0..cmd_pos); fills rsp/rsp_sz. */
+static void pmu_dispatch_inner(void);
+/* Diagnostic, NW_ADB_TRACE=1: every PMU command with its bytes and its response (the first 6000). */
 static void pmu_dispatch(void)
+{
+	static int trace = -1;
+	static unsigned n;
+	if (trace < 0) {
+		const char *e = getenv("NW_ADB_TRACE");
+		trace = (e && e[0] == '1') ? 1 : 0;
+	}
+	const uint8_t before = via.intbits;
+	pmu_dispatch_inner();
+	if (trace && n < 6000 && !(via.cmd == NW_PMU_INT_ACK && via.rsp_sz == 1 && !(via.rsp[0] & (NW_PMU_INT_ADB | NW_PMU_INT_ADB_AUTO)))) {
+		n++;
+		printf("NW-PMU cmd %02x in", via.cmd);
+		for (int i = 0; i < via.cmd_pos && i < 12; i++) printf(" %02x", via.cmd_buf[i]);
+		printf(" | rsp");
+		for (int i = 0; i < via.rsp_sz && i < 12; i++) printf(" %02x", via.rsp[i]);
+		printf(" | intbits %02x->%02x mask %02x autopoll %d reply_sz %d\n", before, via.intbits, via.intmask, (int)adb.autopoll, adb.reply_sz);
+	}
+}
+
+static void pmu_dispatch_inner(void)
 {
 	const uint8_t *in = via.cmd_buf;
 	const int in_len = via.cmd_pos;

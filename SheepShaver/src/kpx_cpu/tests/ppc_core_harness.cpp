@@ -67,6 +67,7 @@ struct ppc_core_test_access {
     static int multiply_p6(powerpc_cpu *);
     static int fp_fast_sweep(powerpc_cpu *);
     static int sub_store_sweep(powerpc_cpu *);
+    static int word_sweep(powerpc_cpu *);
     static int loop_bench(powerpc_cpu *);
     static int ibtc_remap(powerpc_cpu *);
     static int link_sweep(powerpc_cpu *);
@@ -895,6 +896,132 @@ int ppc_core_test_access::sub_store_sweep(powerpc_cpu *cpu)
     }
     printf("sub-store sweep: %zu ops, %u faults, %u data-TLB hits in the fast run\n", out[0].size(), faults, fast_hits_after - fast_hits_before);
     CHECK(fast_hits_after - fast_hits_before > 100);
+    mmu.reset(); nw_jit_set_code_pages(0,0,0,0); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,span + 0x2000);
+    return failed ? 1 : 0;
+}
+
+/* Word loads and stores (lwz stw and their update and indexed forms) through emit_word_access against the older
+ * emitted sequence (NW_JIT_LEGACY=word): the same random steps run under both and every result is compared (fault,
+ * fault address, the base and destination registers, the pc left behind and a hash of the RAM). The steps cover a
+ * read/write window, a read-only alias of the same RAM, an unmapped address, both privilege levels (an entry filled
+ * under the other one must miss), translation off (the real-mode page cache), the page edges, and table drops and
+ * flushes in between. */
+int ppc_core_test_access::word_sweep(powerpc_cpu *cpu)
+{
+    cpu->enable_guest_mmu(true); nw_jit_set_mode(NW_JIT_ON); nw_jit_set_host_chain(NULL);
+    ppc32_mmu &mmu = ppc32_guest_mmu();
+    const uint32 base = 0x10000000u, ro = 0x20000000u, hole = 0x30000000u, code = base + 0x3000u;
+    const unsigned span = 0x4000;
+    void *const wanted = (void *)(VMBaseDiff+base);
+    void *const ram = mmap(wanted,span + 0x2000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);	/* slack: a word on the last bytes of the bank runs past it */
+    CHECK(ram == wanted); if (ram != wanted) return 1;
+    nw_banks_set(NW_PA_RAM,base,span);
+    nw_jit_set_code_pages(base,span,0,0);
+    uint64 state = 0x6a09e667f3bcc909ULL;
+    auto next = [&]() { state ^= state >> 12; state ^= state << 25; state ^= state >> 27; return state * 0x2545f4914f6cdd1dULL; };
+    struct step { uint32 op, ra_val, rb_val, rs_val, msr; int kind; };	/* kind: 0 op, 1 drop the page of ra, 2 flush */
+    const unsigned steps = getenv("PPC_WORD_STEPS") ? unsigned(strtoul(getenv("PPC_WORD_STEPS"),NULL,10)) : 20000;
+    std::vector<step> seq;
+    unsigned nform[8] = {};
+    for (unsigned i = 0; i < steps; ++i) {
+        step st = {};
+        const unsigned form = unsigned(next() % 8);	/* 0 lwz 1 lwzu 2 lwzx 3 lwzux 4 stw 5 stwu 6 stwx 7 stwux */
+        const unsigned rs = 5, ra = 3, rb = 4, rd = 6;
+        static const int16 disps[] = {0, 4, 8, -4, -8, 0x7c, 0xfff, 0x1000, -0xfff, -0x1000, 0x7ffc, -0x8000, 1, -1, 0x124, -0x230};
+        const int16 disp = disps[next() % (sizeof disps / sizeof disps[0])];
+        uint32 op = 0;
+        switch (form) {
+        case 0: op = (32u<<26)|(rd<<21)|(ra<<16)|uint16(disp); break;
+        case 1: op = (33u<<26)|(rd<<21)|(ra<<16)|uint16(disp); break;
+        case 2: op = (31u<<26)|(rd<<21)|(ra<<16)|(rb<<11)|(23u<<1); break;
+        case 3: op = (31u<<26)|(rd<<21)|(ra<<16)|(rb<<11)|(55u<<1); break;
+        case 4: op = (36u<<26)|(rs<<21)|(ra<<16)|uint16(disp); break;
+        case 5: op = (37u<<26)|(rs<<21)|(ra<<16)|uint16(disp); break;
+        case 6: op = (31u<<26)|(rs<<21)|(ra<<16)|(rb<<11)|(151u<<1); break;
+        default: op = (31u<<26)|(rs<<21)|(ra<<16)|(rb<<11)|(183u<<1); break;
+        }
+        ++nform[form];
+        static const uint32 edge[] = {0, 1, 2, 3, 0xff8, 0xffc, 0xffd, 0xffe, 0xfff, 0x1000, 0x1ffc, 0x1ffe, 0x2000, 0x2ffc, 0x2fff, 0x3000, 0x3ff8, 0x3ffc};
+        uint32 off = next() % 5 ? (uint32(next()) % 0x3ff0) : edge[next() % (sizeof edge / sizeof edge[0])];
+        const unsigned w = unsigned(next() % 12);
+        const uint32 window = w == 0 ? hole : w <= 2 ? ro : base;
+        /* A word that would land on the instruction being run stays off it: the test is about the access, and the
+         * two runs must execute the same instruction. Stores elsewhere in the code page are kept (the SMC exit). */
+        if (form >= 4 && off + 4 > (code - base) && off < (code - base) + 8) off += 0x40;
+        const bool indexed = (form & 2) != 0;
+        st.op = op; st.rs_val = uint32(next());
+        const unsigned m = unsigned(next() % 10);
+        st.msr = 0x2000u | (m == 0 ? 0u : ppc32_mmu::MSR_DR) | (m == 1 || m == 2 ? 0x4000u : 0u);
+        if (indexed) { st.rb_val = uint32(next() & 0xffc) | uint32(next() % 4 == 0 ? next() & 3 : 0); st.ra_val = window + off - st.rb_val; }
+        else { st.rb_val = 0; st.ra_val = window + off - uint32(int32(disp)); }
+        seq.push_back(st);
+        const unsigned extra = unsigned(next() % 24);
+        if (extra == 0) { step d = {}; d.kind = 1; d.ra_val = (next() % 2 ? ro : base) + ((uint32(next()) % 4) << 12); seq.push_back(d); }
+        if (extra == 1) { step f = {}; f.kind = 2; seq.push_back(f); }
+    }
+    struct trace { uint32 fault, fault_ea, ra, rd, pc, hit; bool xlat; uint64 hash; };
+    std::vector<trace> out[2];
+    const unsigned saved_legacy = nw_jit_legacy;
+    unsigned hits[2] = {};
+    for (unsigned v = 0; v < 2; ++v) {
+        if (v) nw_jit_legacy |= NW_JIT_LEGACY_WORD; else nw_jit_legacy &= ~NW_JIT_LEGACY_WORD;
+        if (getenv("PPC_WORD_SELF")) nw_jit_legacy = (nw_jit_legacy & ~NW_JIT_LEGACY_WORD) | (saved_legacy & NW_JIT_LEGACY_WORD);
+        mmu.reset(); mmu.set_msr(0x2000u | ppc32_mmu::MSR_DR);
+        mmu.set_dbat(0, (base & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 2u);		/* read/write */
+        mmu.set_dbat(1, (ro & 0xfffe0000u) | 3u, (base & 0xfffe0000u) | 1u);		/* read only alias of the same RAM */
+        nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_BAT);
+        uint64 rs2 = 0x9e3779b97f4a7c15ULL;
+        for (unsigned i = 0; i < span; ++i) { rs2 ^= rs2 >> 12; rs2 ^= rs2 << 25; rs2 ^= rs2 >> 27; ((uint8 *)ram)[i] = uint8((rs2 * 0x2545f4914f6cdd1dULL) >> 56); }
+        for (const step &st : seq) {
+            if (st.kind == 1) { nw_jit_dtlb_drop_page(st.ra_val, NW_JIT_DTLB_FL_TLB); continue; }
+            if (st.kind == 2) { nw_jit_dtlb_flush_src(NW_JIT_DTLB_FL_TLB); continue; }
+            const uint32 ops[] = {st.op};
+            nw_jit_invalidate_all_src(NW_JIT_FL_OTHER);
+            nw_jit_fn fn = nw_jit_compile(ops,1,code,code,0,0);
+            CHECK(fn != NULL); if (!fn) continue;
+            nw_jit_cpu c = {};
+            c.pc = code; c.msr = st.msr; c.host = cpu;
+            c.gpr[3] = st.ra_val; c.gpr[4] = st.rb_val; c.gpr[5] = st.rs_val; c.gpr[6] = 0x5eed5eedu;
+            mmu.set_msr(c.msr); cpu->pc() = code; cpu->last_fetch_pa_ = code;
+            cpu->dec_ = 1000000; cpu->dec_tb_base_ = cpu->tb_host_ticks(); cpu->dec_pending_ = false; c.dec = cpu->dec_;
+            cpu->cr().set(0); cpu->xer().set(0); cpu->lr() = cpu->ctr() = 0; cpu->spcflags().init();
+            for (unsigned r = 0; r < 32; ++r) cpu->gpr(r) = c.gpr[r];
+            nw_jit_cpu_bind(&c); nw_jit_tail_begin();
+            const unsigned hb = unsigned(nw_jit_dtlb_hits());
+            fn(&c);
+            trace t = {};
+            /* Table hits are compared for translated accesses only: what the real-mode page cache holds carries over from
+             * the first run to the second (the same path run twice differs there too). */
+            t.xlat = (st.msr & ppc32_mmu::MSR_DR) != 0;
+            t.hit = t.xlat ? unsigned(nw_jit_dtlb_hits()) - hb : 0;
+            hits[v] += t.hit;
+            t.fault = c.fault; t.fault_ea = c.fault ? c.fault_ea : 0; t.ra = c.gpr[3]; t.rd = c.gpr[6]; t.pc = c.pc;
+            uint64 h = 1469598103934665603ULL;
+            for (unsigned i = 0; i < span; ++i) h = (h ^ ((uint8 *)ram)[i]) * 1099511628211ULL;
+            t.hash = h;
+            out[v].push_back(t);
+        }
+    }
+    nw_jit_legacy = saved_legacy;
+    CHECK(out[0].size() == out[1].size());
+    unsigned diffs = 0, faults = 0;
+    for (size_t i = 0; i < out[0].size() && i < out[1].size(); ++i) {
+        const trace &a = out[0][i], &b = out[1][i];
+        const bool same = a.fault == b.fault && a.fault_ea == b.fault_ea && a.ra == b.ra && a.rd == b.rd && a.pc == b.pc && a.hash == b.hash && a.hit == b.hit;
+        if (a.fault) ++faults;
+        CHECK(same);
+        if (!same && ++diffs <= 12) {
+            fprintf(stderr, "word step %zu: table hits %u/%u\n", i, a.hit, b.hit);
+            const step *st = NULL; size_t k = 0;
+            for (const step &q : seq) { if (q.kind == 0) { if (k == i) { st = &q; break; } ++k; } }
+            fprintf(stderr, "word step %zu op=%08x ra=%08x rb=%08x msr=%04x: fault %u/%u ea %08x/%08x ra' %08x/%08x rd %08x/%08x pc %08x/%08x hash %s\n", i, st ? st->op : 0,
+                st ? st->ra_val : 0, st ? st->rb_val : 0, st ? st->msr : 0, a.fault, b.fault, a.fault_ea, b.fault_ea, a.ra, b.ra, a.rd, b.rd, a.pc, b.pc, a.hash == b.hash ? "same" : "DIFF");
+        }
+    }
+    printf("word sweep: %zu ops (lwz %u lwzu %u lwzx %u lwzux %u stw %u stwu %u stwx %u stwux %u), %u faults, data-TLB hits %u new / %u old\n", out[0].size(),
+        nform[0], nform[1], nform[2], nform[3], nform[4], nform[5], nform[6], nform[7], faults, hits[0], hits[1]);
+    CHECK(hits[0] > 1000 && hits[0] == hits[1]);
+    CHECK(faults > 100);
     mmu.reset(); nw_jit_set_code_pages(0,0,0,0); nw_banks_set(NW_PA_RAM,0,0); munmap(ram,span + 0x2000);
     return failed ? 1 : 0;
 }
@@ -5036,6 +5163,7 @@ extern "C" int ppc_test_main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--link-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::link_sweep(cpu); printf("Link sweep: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--ibtc-remap")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::ibtc_remap(cpu); printf("IBTC remap: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--loop-bench")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::loop_bench(cpu); printf("Loop bench: %u passed, %u failed\n",passed,failed); return status; }
+    if (argc == 2 && !strcmp(argv[1], "--word-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::word_sweep(cpu); printf("Word sweep: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--sub-store-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::sub_store_sweep(cpu); printf("Sub-word store sweep: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--fp-fast-sweep")) { powerpc_cpu *cpu = new powerpc_cpu; int status = ppc_core_test_access::fp_fast_sweep(cpu); printf("FP fast sweep: %u passed, %u failed\n",passed,failed); return status; }
     if (argc == 2 && !strcmp(argv[1], "--multiply-p6")) { powerpc_cpu *cpu=new powerpc_cpu; int status=ppc_core_test_access::multiply_p6(cpu); printf("P6 multiply tests: %u passed, %u failed\n",passed,failed); return status; }
