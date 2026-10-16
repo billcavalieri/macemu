@@ -3,9 +3,9 @@
 # disposes of the channel, four times over. Disposing closes the output device component (SheepBlaster) and the Apple
 # Mixer. Passes when all four cycles run and the guest stays up.
 #
-# KNOWN TO FAIL NOW AND THEN (about one run in four when it was written, October 2026): the guest takes a system error
-# (reported at 68k pc 002029fa) during a cycle. It is the crash seen at the end of songs in iTunes, it has nothing to do
-# with sound input (which is off here), and this is the quickest way found to bring it out. It is not part of "all".
+# This used to crash about one run in four (a system error reported at 68k pc 002029fa, the crash seen at the end of
+# songs in iTunes): the host audio callback entered the guest while the mixer was closing. NW_SB_HOSTPULL=1 brings the
+# old behaviour back. See SHEEPBLASTER-SOUND.md.
 #
 #   tools/shears/tests/sndchan.sh [pref=value ...]     pref=value replaces or adds a prefs line (jit=false, ...)
 # Environment variables (NW_JIT_LEGACY=..., ...) are passed on to the emulator.

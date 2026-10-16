@@ -39,6 +39,7 @@
 #include "MacOSX_sound_if.h"
 #ifdef SHEEPSHAVER
 #include "nw_io.h"
+#include "rom_patches.h"
 #endif
 
 #define DEBUG 0
@@ -190,6 +191,22 @@ void AudioInterrupt(void)
 		if (soundOutput)
 			soundOutput->sendAudioBuffer(buf, frames);
 		return;
+	}
+	/* New World: this runs between two arbitrary guest instructions, so it must never enter the guest. The check
+	 * above is false for a moment while the component closes (its task removed, its mixer still open) and again
+	 * while it opens. Pulling the mixer here then ran 68k code in the middle of the mixer's own native close, and
+	 * the guest took a system error at the end of a sound. NW_SB_HOSTPULL=1 restores that (A/B). */
+	if (ROMType == ROMTYPE_NEWWORLD) {
+		static int old_way = -1;
+		if (old_way < 0) {
+			const char *e = getenv("NW_SB_HOSTPULL");
+			old_way = (e && e[0] == '1') ? 1 : 0;
+		}
+		if (!old_way) {
+			if (soundOutput)
+				soundOutput->sendAudioBuffer(NULL, 0);
+			return;
+		}
 	}
 #endif
 	uint32 apple_stream_info;

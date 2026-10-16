@@ -834,6 +834,22 @@ void powerpc_cpu::take_program(uint32 srr1_bits)
 						if (!nw_jit_peek(at - 16 + (uint32)k * 4, &w[k])) w[k] = 0xdeadbeefu;
 					NW_DIAG("NW-BOOT illegal instruction: words at %08x: %08x %08x %08x %08x [%08x] %08x %08x %08x\n", (unsigned)(at - 16),
 					       (unsigned)w[0], (unsigned)w[1], (unsigned)w[2], (unsigned)w[3], (unsigned)w[4], (unsigned)w[5], (unsigned)w[6], (unsigned)w[7]);
+					/* NW_ILL_DUMP=<path prefix>: all registers, and guest RAM and ROM written to <prefix>.ram / .rom, once. */
+					static bool dumped;
+					const char *dump = getenv("NW_ILL_DUMP");
+					if (dump && *dump && !dumped) {
+						dumped = true;
+						extern uint32 RAMSize;
+						extern uint8 *RAMBaseHost, *ROMBaseHost;
+						NW_DIAG("NW-BOOT illegal instruction gprs:");
+						for (int k = 0; k < 32; k++) NW_DIAG(" %08x", (unsigned)gpr(k));
+						NW_DIAG("\n");
+						char path[1024];
+						snprintf(path, sizeof path, "%s.ram", dump);
+						if (FILE *f = fopen(path, "wb")) { fwrite(RAMBaseHost, 1, RAMSize, f); fclose(f); }
+						snprintf(path, sizeof path, "%s.rom", dump);
+						if (FILE *f = fopen(path, "wb")) { fwrite(ROMBaseHost, 1, 0x400000, f); fclose(f); }
+					}
 					fflush(stdout);
 				}
 			}

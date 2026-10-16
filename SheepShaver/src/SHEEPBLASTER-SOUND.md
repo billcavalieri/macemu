@@ -208,11 +208,26 @@ Each of these broke something real.
   the reference numbers) hangs the guest after the first channel is disposed. `tools/shears/test.sh sndchan` shows it.
   The output code is as it was.
 
-### A crash this work did not cause and did not fix
+### The crash at the end of a sound (fixed)
 
 `tools/shears/test.sh sndchan` (a guest program that opens a sound channel, plays a quarter-second tone and disposes
-of the channel, four times, sound input off) took a system error in one run of four: reported at 68k pc 002029fa, like
-the crash at the end of songs in iTunes. It is the quickest way found so far to bring that crash out.
+of the channel, four times, sound input off) took a system error in about one run of four: reported at 68k pc
+002029fa, like the crash at the end of songs in iTunes.
+
+It was root cause 2 again, through a door left open. `AudioInterrupt` (audio_macosx.cpp) runs when the host audio
+callback wants data, between two arbitrary guest instructions. It takes the ring when `audio_sheepblaster_host_pull()`
+says the card is in use, and otherwise fell through to the old code, which calls the mixer's GetSourceData with
+Execute68k. While the component closes, the card is "not in use" (its Time Manager task is removed, no sources, ring
+empty) but the mixer is still open, because CloseMixer is running at that very moment. A host callback in that window
+ran 68k code in the middle of the mixer's native close code. What happened next depended on where it landed: a return
+through an overwritten stack slot, a jump to a stale address ending `cc78`, a bus error some time later.
+
+On New World that fall-through now sends nothing and returns. `NW_SB_HOSTPULL=1` restores it. 24 runs of the test
+passed with the fix; with the switch set, 4 of 12 crashed.
+
+How it was found: `NW_ILL_DUMP=<prefix>` writes all registers and guest RAM and ROM to files at the first illegal
+instruction outside the 68k emulator. In the saved registers a0 and a1 were still the arguments of our GetSourceData
+stub, and the stack held the frame Execute68k builds (the return address 0000284c) on top of a live native frame.
 
 ### Permission
 
