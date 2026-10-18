@@ -520,6 +520,10 @@ bool NQD_lines_hook(uint32 p)
 	const int h = (int16)ReadMacInt16(p + acclDestRect + 4) - (int16)ReadMacInt16(p + acclDestRect + 0);
 	if (w <= 0 || h <= 0)
 		return false;
+	/* Only rules: one pixel high or wide. The ROM also calls this hook for a diagonal LineTo with the line's bounding
+	 * box, and filling that box painted the whole rectangle (SheepBench's QuickDraw check found it). */
+	if (w != 1 && h != 1)
+		return false;
 	/* Direct region pointers matter: probe runs showed a rounded clip reached only that way. */
 	if (!nqd_clip_gate(p, NULL, GATE_DIRECT))
 		return false;

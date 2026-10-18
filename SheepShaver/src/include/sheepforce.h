@@ -26,6 +26,8 @@
 extern bool SheepForceEnabled(void);
 /* Per-feature kill switches; both imply SheepForceEnabled(). */
 extern bool SheepForceQDEnabled(void);
+extern void SheepForceSuspendQD(bool suspend);	// SheepBench: GPU QuickDraw off without touching the prefs
+extern bool SheepForceQDSuspended(void);
 extern bool SheepForceRaveEnabled(void);
 extern int SheepForcePageCount(void);
 extern uint32 SheepForcePageBytes(void);
@@ -163,6 +165,7 @@ struct RaveGuestResult {
 extern void SheepForceRaveMethod(uint32 slot, const RaveGuestCall *call, RaveGuestResult *res);
 extern bool SheepForceRaveSelfTest(void);
 extern void SheepForceRaveDisableEngine(void);
+extern const char *SheepForceRaveState(void);	// "registered", "disabled" or "not registered"
 extern void SheepForceRaveRegisterEngine(uint32 register_engine_tvect, uint32 register_draw_method_tvect);
 /* Runs as a native op (ExecuteNative(NATIVE_RAVE_REGISTER)): talks to the guest's RAVE manager. */
 extern void SheepForceRaveRegisterNative(void);

@@ -48,6 +48,17 @@ enum ShearsCommand: UInt32 {
     /// The guest's settings (control panel or the tool reading its preferences file): payload is a ShearsFeatures
     /// word, the features the user left on. The reply carries the word that is now in effect.
     case settings = 6
+    /// SheepBench (guest/sheepbench, BenchProtocol.swift). These do not count as the Shears tool calling.
+    /// The emulator's run report: "key=value" lines.
+    case benchInfo = 7
+    /// Run a measurement kernel natively: BenchNativeRequest.
+    case benchNative = 8
+    /// Switch the JIT and SheepForce QuickDraw for a comparison run: BenchModeRequest. Needs the pref bench_switch.
+    case benchSetJIT = 9
+    /// A piece of the finished report, written next to the VM's prefs as .tsv and .json: BenchResultChunk.
+    case benchResult = 10
+
+    var isBench: Bool { rawValue >= ShearsCommand.benchInfo.rawValue }
 }
 
 enum ShearsStatus: UInt32 {

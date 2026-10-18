@@ -33,7 +33,38 @@ enum ShearsInstallFlow {
         }
     }
 
+    /// Guest > Add SheepBench Disk: the benchmark app, on its own small disk, added like the installer disk.
+    static func addSheepBench(on window: NSWindow, prefsPath: String?, vmName: String) {
+        let alert = NSAlert()
+        alert.messageText = "Add the SheepBench disk"
+        alert.informativeText = "SheepBench measures Mac OS 9 in this emulator: the processor with the JIT on and off, memory, QuickDraw with SheepForce on and off, 3D and the disk, and compares the processor tests with this Mac running the same code. Its disk is added to this virtual machine; after the guest next starts, open SheepBench on the “SheepBench” disk. For the JIT and GPU comparisons, turn on “Allow SheepBench to change JIT and SheepForce while running” in the virtual machine's settings (Advanced)."
+        alert.addButton(withTitle: "Add Disk")
+        alert.addButton(withTitle: "Show Disk in Finder")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in
+            MainActor.assumeIsolated {
+                switch response {
+                case .alertFirstButtonReturn:
+                    addDisk(on: window, prefsPath: prefsPath, vmName: vmName, resource: SheepShearsInstaller.benchResource,
+                            diskName: SheepShearsInstaller.benchDiskName, open: "SheepBench", disk: "SheepBench")
+                case .alertSecondButtonReturn:
+                    if let url = try? SheepShearsInstaller.stagedCopy(resource: SheepShearsInstaller.benchResource,
+                                                                      diskName: SheepShearsInstaller.benchDiskName) {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                default: break
+                }
+            }
+        }
+    }
+
     private static func addInstallerDisk(on window: NSWindow, prefsPath: String?, vmName: String) {
+        addDisk(on: window, prefsPath: prefsPath, vmName: vmName, resource: "SheepShearsInstaller",
+                diskName: SheepShearsInstaller.diskName, open: "Install Sheep Shears", disk: "Sheep Shears")
+    }
+
+    private static func addDisk(on window: NSWindow, prefsPath: String?, vmName: String, resource: String,
+                                diskName: String, open: String, disk: String) {
         func report(_ title: String, _ text: String) {
             let note = NSAlert()
             note.messageText = title
@@ -41,16 +72,16 @@ enum ShearsInstallFlow {
             note.beginSheetModal(for: window)
         }
         guard let prefsPath, !prefsPath.isEmpty else {
-            return report("This virtual machine has no prefs file", "The installer disk is added to the prefs file the virtual machine was started with.")
+            return report("This virtual machine has no prefs file", "The disk is added to the prefs file the virtual machine was started with.")
         }
         do {
-            let url = try SheepShearsInstaller.stagedCopy()
+            let url = try SheepShearsInstaller.stagedCopy(resource: resource, diskName: diskName)
             let added = try SheepShearsInstaller.addDisk(url, toPrefsAt: prefsPath)
-            report(added ? "The installer disk was added" : "The installer disk is already added",
-                   added ? "Restart “\(vmName)” (shut it down and start it again). Then open “Install Sheep Shears” on the “Sheep Shears” disk."
-                         : "Open “Install Sheep Shears” on the “Sheep Shears” disk in the guest.")
+            report(added ? "The disk was added" : "The disk is already added",
+                   added ? "Restart “\(vmName)” (shut it down and start it again). Then open “\(open)” on the “\(disk)” disk."
+                         : "Open “\(open)” on the “\(disk)” disk in the guest.")
         } catch {
-            report("The installer disk could not be added", error.localizedDescription)
+            report("The disk could not be added", error.localizedDescription)
         }
     }
 }

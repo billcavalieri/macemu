@@ -17,9 +17,9 @@
 namespace {
 bool table(uint32_t pc) { return pc >= 0x68080000u && pc < 0x68100000u && !(pc & 7); }
 enum mode { OFF, ON, VERIFY };
+int selected = -1;	/* latched on first use; SheepBench can change it (nw_68k_set_host_mode) */
 mode selected_mode()
 {
-	static int selected = -1;
 	if (selected < 0) {
 		nw68_always_resolve = (nw_jit_legacy & NW_JIT_LEGACY_C68) != 0;
 		const char *e = getenv("NW_JIT68K_MODE");
@@ -403,6 +403,17 @@ void failure_trace(const nw68_nk_state &nk, const nw68_state &before,
 		fprintf(f, "write ea=%08x width=%u value=%08x\n", predicted.writes[j].ea, predicted.writes[j].width, predicted.writes[j].value);
 	fflush(f); if (f != stdout) fclose(f);
 }
+}
+
+int nw_68k_host_mode(void)
+{
+	return selected_mode();
+}
+
+void nw_68k_set_host_mode(int m)
+{
+	selected_mode();	/* latch the other start-up switches first */
+	selected = m == ON ? ON : OFF;
 }
 
 bool nw_68k_wants_boundary(uint32_t pc)

@@ -373,6 +373,7 @@ extension SettingsSheet {
                     toggle("jit68k", "JIT for 68k code (experimental)", false),
                     toggle("jit68k_host", "Host 68k JIT", true),
                     toggle("idlewait", "Use less processor time while the guest is idle", true),
+                    toggle("bench_switch", "Allow SheepBench to change JIT and SheepForce while running", false),
                     number("cpuclock", "CPU clock:", 0, help: "0 is automatic."),
                 ]),
                 Section(title: "Compatibility", settings: [

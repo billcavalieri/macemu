@@ -80,6 +80,7 @@ final class ShearsHost: @unchecked Sendable {
         if nwDiagnosticsOn, let raw = ProcessInfo.processInfo.environment["NW_SHEARS_SHUTDOWN_AFTER"] {
             testShutdownAfter = Double(raw)
         }
+        BenchHost.shared.install()
         ShearsHostSetHandler(shearsEntry)
         if statusTimer == nil {
             let timer = Timer(timeInterval: 1, repeats: true) { _ in
@@ -221,15 +222,21 @@ final class ShearsHost: @unchecked Sendable {
             noteBad("rejected a malformed mailbox: \(error)")
             return []
         }
+        let known = ShearsCommand(rawValue: request.command)
+        let bench = known?.isBench ?? false
         lock.lock()
         let on = enabled
-        if on { session.called(now: ProcessInfo.processInfo.systemUptime) }
+        if on && !bench { session.called(now: ProcessInfo.processInfo.systemUptime) }     // SheepBench is not the tool
         lock.unlock()
         func reply(_ status: ShearsStatus, _ payload: [UInt8] = []) -> [UInt8] {
             ShearsCodec.encodeReply(seq: request.seq, command: request.command, status: status, payload: payload)
         }
         guard on else { return reply(.disabled) }
-        guard let command = ShearsCommand(rawValue: request.command) else { return reply(.unsupported) }
+        guard let command = known else { return reply(.unsupported) }
+        if bench {
+            let (status, payload) = BenchHost.shared.handle(command, request.payload)
+            return reply(status, payload)
+        }
 
         switch command {
         case .hello:
@@ -291,6 +298,9 @@ final class ShearsHost: @unchecked Sendable {
             }
             ShearsHost.deliver(report)
             return reply(.ok, pollPayload())
+
+        case .benchInfo, .benchNative, .benchSetJIT, .benchResult:
+            return reply(.unsupported)      // answered above
         }
     }
 

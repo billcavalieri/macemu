@@ -40,10 +40,15 @@ enum SheepShearsInstaller {
         return true
     }
 
+    /// The SheepBench disk (guest/sheepbench), bundled the same way.
+    static let benchResource = "SheepBench"
+    static let benchDiskName = "SheepBench.hfv"
+
     /// The bundled disk copied to ~/Library/Application Support/SheepShaver, replaced when the app has a newer one.
-    static func stagedCopy(bundle: Bundle = .main) throws -> URL {
-        guard let source = bundle.url(forResource: "SheepShearsInstaller", withExtension: "hfv") else {
-            throw Failure(errorDescription: "This copy of SheepShaver does not contain the Sheep Shears installer disk.")
+    static func stagedCopy(bundle: Bundle = .main, resource: String = "SheepShearsInstaller",
+                           diskName: String = SheepShearsInstaller.diskName) throws -> URL {
+        guard let source = bundle.url(forResource: resource, withExtension: "hfv") else {
+            throw Failure(errorDescription: "This copy of SheepShaver does not contain the disk \(resource).hfv.")
         }
         let fm = FileManager.default
         let folder = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)

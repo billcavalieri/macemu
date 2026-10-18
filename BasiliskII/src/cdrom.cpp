@@ -30,6 +30,7 @@
 
 #include "sysdeps.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <vector>
 #include <map>
@@ -344,6 +345,29 @@ void CDROMDrop(const char *path) {
 		}
 	}
 }
+
+/*
+ *  One line per drive for reports (SheepBench): "cdrom drive=N kind=<format> ro=0|1 blocks=N file=<base name>"
+ */
+
+#if defined(SHEEPSHAVER) && !defined(_WIN32)
+int CDROMDescribe(char *out, int cap)
+{
+	int used = 0;
+	drive_vec::iterator info, end = drives.end();
+	for (info = drives.begin(); info != end && used < cap; ++info) {
+		const char *path = Sys_name(info->fh), *slash = strrchr(path, '/');
+		int n = snprintf(out + used, cap - used, "cdrom drive=%d kind=%s ro=%d blocks=%llu file=%s\n", info->num,
+		                 Sys_kind(info->fh), true ? 1 : 0, (unsigned long long)(SysGetFileSize(info->fh) / 512),
+		                 slash ? slash + 1 : path);
+		if (n < 0 || n >= cap - used)
+			break;
+		used += n;
+	}
+	return used;
+}
+#endif
+
 
 /*
  *  Deinitialization

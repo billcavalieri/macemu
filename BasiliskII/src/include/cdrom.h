@@ -30,6 +30,9 @@ extern uint32 CDROMIconAddr;			// Icon address (Mac address space, set by PatchR
 
 extern void CDROMInit(void);
 extern void CDROMExit(void);
+#if defined(SHEEPSHAVER) && !defined(_WIN32)
+extern int CDROMDescribe(char *out, int cap);	// one report line per drive (SheepBench)
+#endif
 
 extern void CDROMInterrupt(void);
 

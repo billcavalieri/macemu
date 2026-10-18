@@ -254,6 +254,8 @@ bool InitAll(const char *vmdir)
 	D(bug("Initializing Low Memory...\n"));
 	Mac_memset(0, 0, 0x3000);
 	WriteMacInt32(XLM_SIGNATURE, FOURCC('B','a','a','h'));			// Signature to detect SheepShaver
+	if (!getenv("NW_BENCH_NO_SIG"))		// test hook (tools/sheepbench/test.sh nosig): look like stock SheepShaver
+		WriteMacInt32(XLM_SHEARS_SIG, FOURCC('S','H','R','S'));		// Signature: the Sheep Shears mailbox is answered
 	WriteMacInt32(XLM_KERNEL_DATA, KernelDataAddr);					// For trap replacement routines
 	WriteMacInt32(XLM_PVR, PVR);									// Theoretical PVR
 	WriteMacInt32(XLM_BUS_CLOCK, (uint32)BusClockSpeed);					// For DriverServicesLib patch

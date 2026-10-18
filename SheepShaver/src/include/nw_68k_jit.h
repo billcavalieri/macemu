@@ -22,4 +22,8 @@ bool nw_68k_reference_active(const powerpc_cpu *);
 bool nw_68k_wants_boundary(uint32_t ppc_pc);
 void nw_68k_reference_chain(uint32_t ppc_pc, uint32_t opcode_pc, uint32_t dispatch);
 void nw_68k_jit_execute(powerpc_cpu *, uint32_t entry);
+/* The host 68k JIT's mode: 0 off, 1 on, 2 verify. Setting it (on or off only) is for a safe point on the emulation
+ * thread, followed by nw_jit_invalidate_all(): PPC blocks bake in where the 68k layer wants boundaries. */
+int nw_68k_host_mode(void);
+void nw_68k_set_host_mode(int mode);
 #endif

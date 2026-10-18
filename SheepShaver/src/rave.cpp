@@ -1337,9 +1337,18 @@ bool SheepForceRaveSelfTest(void)
 	return pass;
 }
 
+static bool g_disabled;
+
+/* For reports (SheepBench): "registered", "disabled" (the self-test failed) or "not registered". */
+const char *SheepForceRaveState(void)
+{
+	return g_disabled ? "disabled" : g_registered ? "registered" : "not registered";
+}
+
 /* Take our engine out of the manager's selection (QAEngineDisable(vendor, engineID)). */
 void SheepForceRaveDisableEngine(void)
 {
+	g_disabled = true;
 	static const char lib[] = "\x19QuickDraw\xaa 3D Accelerator";
 	static const char sym[] = "\x0fQAEngineDisable";
 	typedef uint32 (*fn2)(uint32, uint32);

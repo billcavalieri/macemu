@@ -140,6 +140,7 @@ enum AppMenu {
             b.item("Detach into Its Own Window", #selector(ManagerWindowController.toggleDetach(_:)), target: controller),
             .separator(),
             b.item("Install Sheep Shears…", #selector(ManagerWindowController.installSheepShears(_:)), target: controller),
+            b.item("Add SheepBench Disk…", #selector(ManagerWindowController.addSheepBench(_:)), target: controller),
             b.item("Shut Down Guest…", #selector(ManagerWindowController.shutDownSelected(_:)), target: controller),
         ])
         guest.submenu?.delegate = controller

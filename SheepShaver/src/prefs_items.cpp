@@ -56,6 +56,7 @@ prefs_desc common_prefs_items[] = {
 	{"sheepforce_fillmask_tiles", TYPE_BOOLEAN, false, "with sheepforce_fillmask, also take patterns of more than one colour (the desktop pattern); on by default, false leaves only solid colours"},
 	{"sheepforce_lines", TYPE_BOOLEAN, false, "accelerate QuickDraw line/frame rectangles (hook 5); on by default, set false to bisect"},
 	{"sheepforce_probe", TYPE_BOOLEAN, false, "log which unplanted QuickDraw accelerator hook codes the ROM calls"},
+	{"bench_switch", TYPE_BOOLEAN, false, "let SheepBench in the guest switch the JIT and SheepForce QuickDraw off and on while it runs"},
 	{"qtcodec", TYPE_BOOLEAN, false,  "host Cinepak and Sorenson Video decode"},
 	{"nocdrom", TYPE_BOOLEAN, false,    "don't install CD-ROM driver"},
 	{"nonet", TYPE_BOOLEAN, false,      "don't use Ethernet"},
@@ -111,6 +112,7 @@ void AddPrefsDefaults(void)
 	PrefsAddBool("sheepforce_fillmask", true);
 	PrefsAddBool("sheepforce_fillmask_tiles", true);
 	PrefsAddBool("sheepforce_probe", false);
+	PrefsAddBool("bench_switch", false);
 	PrefsAddBool("qtcodec", false);
 	PrefsAddBool("nocdrom", false);
 	PrefsAddBool("nonet", false);

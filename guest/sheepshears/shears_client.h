@@ -17,6 +17,8 @@
 #define SHEARS_MAGIC        0x53485253UL    /* 'SHRS' */
 #define SHEARS_OPCODE       0x18000B42UL    /* 0x18000000 | NATIVE_SHEARS (45) << 6 | 2, see shears.cpp */
 #define SHEEPSHAVER_SIG     0x42616168UL    /* 'Baah' at 0x2800, written by SheepShaver at start-up */
+#define SHEARS_SIG          0x53485253UL    /* 'SHRS' at 0x2860: this SheepShaver answers the mailbox. Stock
+                                               SheepShaver also writes 'Baah' but quits on the unknown selector. */
 #define CAP_POINTER         1UL
 #define CAP_SHUTDOWN        2UL
 #define FLAG_SHUTDOWN       2UL        /* in the second payload word of POLL and PTR_POS replies */
@@ -153,8 +155,8 @@ static OSErr PrefsWrite(unsigned long features)
 /* Allocates the mailbox (system heap, locked by nature). False on a machine that is not SheepShaver or without memory. */
 static Boolean ShearsOpen(void)
 {
-    if (*(volatile unsigned long *)0x2800 != SHEEPSHAVER_SIG)
-        return false;                   /* not SheepShaver: never execute the fake opcode */
+    if (*(volatile unsigned long *)0x2800 != SHEEPSHAVER_SIG || *(volatile unsigned long *)0x2860 != SHEARS_SIG)
+        return false;                   /* not a SheepShaver with Sheep Shears: never execute the fake opcode */
     gMailbox = (Mailbox *)NewPtrSysClear(sizeof(Mailbox));
     return gMailbox != NULL;
 }

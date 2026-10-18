@@ -11,6 +11,9 @@ the profiler on, as a profile dump of its own:
   gui    the same scripted Finder activity every time: menus, new windows, dragging, text entry, window close (Toolbox, QuickDraw)
   idle   the desktop doing nothing for 20 s (timers, interrupts, the idle loop)
 
+--windowless starts the VM without a window (no drawing to the screen, so the gui phase costs less than with one;
+compare windowless runs only with windowless runs).
+
 Outputs in OUTDIR: <label>.boot.prof, .gui.prof, .idle.prof (when profiling), <label>.sample.<phase>.txt (with --sample),
 <label>.json (the CPU numbers) and <label>.log (the emulator's log). Compare runs with `compare.py`.
 """
@@ -54,6 +57,8 @@ def main():
     ap.add_argument("--label", default="run")
     ap.add_argument("--idle", type=int, default=20)
     ap.add_argument("--gui-rounds", type=int, default=6)
+    ap.add_argument("--windowless", action="store_true",
+                    help="start the VM without a window (--embedded --background); nothing appears on the desktop")
     args = ap.parse_args()
     app = args.app or default_app()
     args.outdir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +104,10 @@ idlewait true
         k, v = kv.split("=", 1)
         env[k] = v
     log = open(args.outdir / f"{args.label}.log", "wb")
-    p = subprocess.Popen([app, "--config", str(vm / "prefs"), "--vm-id", "perf", "--vm-dir", str(vm)], env=env, stdout=log, stderr=subprocess.STDOUT)
+    cmd = [app, "--config", str(vm / "prefs"), "--vm-id", "perf", "--vm-dir", str(vm)]
+    if args.windowless:
+        cmd += ["--embedded", "--background"]
+    p = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
     results = {"label": args.label, "app": app, "env": args.env}
 
     def dump(phase):

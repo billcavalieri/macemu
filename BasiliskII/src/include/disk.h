@@ -30,6 +30,9 @@ extern uint32 DiskIconAddr;				// Icon address (Mac address space, set by PatchR
 
 extern void DiskInit(void);
 extern void DiskExit(void);
+#if defined(SHEEPSHAVER) && !defined(_WIN32)
+extern int DiskDescribe(char *out, int cap);	// one report line per drive (SheepBench)
+#endif
 
 extern void DiskInterrupt(void);
 

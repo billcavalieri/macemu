@@ -22,6 +22,7 @@
 #include "sheepforce.h"
 #include "prefs.h"
 #include "cpu_emulation.h"
+#include <atomic>
 
 static uint8 *g_host;
 static uint32 g_mac;
@@ -34,9 +35,23 @@ bool SheepForceEnabled(void)
 	return PrefsFindBool("sheepforce");
 }
 
+/* SheepBench turns GPU QuickDraw off for a comparison run without touching the prefs (they may be saved). Every
+ * planted hook checks SheepForceQDEnabled() and leaves the drawing to the ROM when it is false. */
+static std::atomic<bool> g_qd_suspended(false);
+
+void SheepForceSuspendQD(bool suspend)
+{
+	g_qd_suspended.store(suspend, std::memory_order_relaxed);
+}
+
+bool SheepForceQDSuspended(void)
+{
+	return g_qd_suspended.load(std::memory_order_relaxed);
+}
+
 bool SheepForceQDEnabled(void)
 {
-	return SheepForceEnabled() && PrefsFindBool("sheepforce_qd");
+	return SheepForceEnabled() && PrefsFindBool("sheepforce_qd") && !g_qd_suspended.load(std::memory_order_relaxed);
 }
 
 bool SheepForceRaveEnabled(void)

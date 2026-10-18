@@ -50,6 +50,8 @@
 #define XLM_R13 0x2854					// Pointer to .sdata section (Linux)
 #define XLM_GET_NAMED_RESOURCE 0x2858	// Pointer to native GetNamedResource() routine
 #define XLM_GET_1_NAMED_RESOURCE 0x285c	// Pointer to native Get1NamedResource() routine
+#define XLM_SHEARS_SIG 0x2860			// 'SHRS' when this SheepShaver answers the Sheep Shears mailbox (NATIVE_SHEARS).
+										// Stock SheepShaver also writes 'Baah' but quits on that selector: guests check both.
 
 #define XLM_ETHER_AO_GET_HWADDR 0x28b0	// Pointer to ethernet A0_get_ethernet_address() function
 #define XLM_ETHER_AO_ADD_MULTI 0x28b4	// Pointer to ethernet A0_enable_multicast() function

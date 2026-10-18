@@ -8,5 +8,5 @@ OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 mkdir -p "$OUT"
 cp "$ROOT/tools/shears/tests/unit_tests.swift" "$OUT/main.swift"
-swiftc -O -o "$OUT/shears_tests" "$D/ShearsProtocol.swift" "$D/ShearsPointer.swift" "$D/ShearsSession.swift" "$D/ShearsInstaller.swift" "$OUT/main.swift"
+swiftc -O -o "$OUT/shears_tests" "$D/ShearsProtocol.swift" "$D/ShearsPointer.swift" "$D/ShearsSession.swift" "$D/ShearsInstaller.swift" "$D/BenchProtocol.swift" "$OUT/main.swift"
 "$OUT/shears_tests"

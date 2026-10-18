@@ -52,6 +52,9 @@ extern void SysAddSerialPrefs(void);
 
 extern void *Sys_open(const char *name, bool read_only, bool is_cdrom = false);
 extern void Sys_close(void *fh);
+// Image format ("raw", "qcow2", "chd", ...) and path of an open handle, for reports. Unix only.
+extern const char *Sys_kind(void *fh);
+extern const char *Sys_name(void *fh);
 extern size_t Sys_read(void *fh, void *buffer, loff_t offset, size_t length);
 extern size_t Sys_write(void *fh, void *buffer, loff_t offset, size_t length);
 extern loff_t SysGetFileSize(void *fh);

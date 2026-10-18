@@ -281,7 +281,9 @@ do {
 // SYS_RESULT and the new reply format
 check(ShearsCommand(rawValue: 5) == .sysResult, "command 5 is SYS_RESULT")
 check(ShearsCommand(rawValue: 6) == .settings, "command 6 is SETTINGS")
-check(ShearsCommand(rawValue: 7) == nil, "command 7 is unknown")
+check(ShearsCommand(rawValue: 7) == .benchInfo && ShearsCommand(rawValue: 10) == .benchResult, "SheepBench commands are 7 to 10")
+check(ShearsCommand(rawValue: 11) == nil, "command 11 is unknown")
+check(ShearsCommand.benchNative.isBench && !ShearsCommand.settings.isBench, "only SheepBench commands are bench commands")
 check(Shears.flagShutdownRequested == 2 && Shears.capShutdown == 2, "flag and capability bit values are part of the guest ABI")
 
 // features: part of the guest ABI (the control panel writes these bits)
@@ -307,6 +309,37 @@ do {
     let again = SheepShearsInstaller.prefsText(SheepShearsInstaller.prefsText("disk /a\n", adding: path)!, adding: path)
     check(again == nil, "adding twice adds once")
 }
+
+// MARK: SheepBench (BenchProtocol.swift)
+
+check(BenchNativeRequest(payload: be(4) + be(1000) + be(64)) == BenchNativeRequest(kernel: 4, iterations: 1000, param: 64), "benchNative request decodes")
+check(BenchNativeRequest(payload: be(4) + be(1000)) == nil, "short benchNative request refused")
+check(BenchNativeRequest(payload: be(4) + be(0) + be(0)) == nil, "zero iterations refused")
+check(BenchNativeRequest.reply(picoseconds: 0x1_0000_0002, checksum: 0xABCD) == be(1) + be(2) + be(0xABCD), "benchNative reply: picoseconds high, low, checksum")
+check(BenchModeRequest(payload: be(1) + be(0) + be(1) + be(0)) == BenchModeRequest(ppcJIT: true, m68kJIT: false, quickDrawGPU: true, restore: false), "benchSetJIT decodes")
+check(BenchModeRequest(payload: be(2) + be(0) + be(1) + be(0)) == nil, "benchSetJIT values other than 0 and 1 refused")
+check(BenchModeRequest(payload: be(1) + be(1) + be(1)) == nil, "short benchSetJIT refused")
+do {
+    var a = BenchResultAssembler()
+    let t1 = Array("# build\tabc\rsuite\ttest\tvalue\r".utf8), t2 = Array("cpu\tint\t1.5\r".utf8)
+    check(a.add(BenchResultChunk(index: 0, last: false, text: t1)) == .partial, "first chunk is partial")
+    check(a.add(BenchResultChunk(index: 1, last: true, text: t2)) == .complete("# build\tabc\nsuite\ttest\tvalue\ncpu\tint\t1.5\n"), "chunks join; Mac line ends become Unix ones")
+    check(a.add(BenchResultChunk(index: 1, last: true, text: t2)) == .refused, "a chunk out of order is refused")
+    check(a.add(BenchResultChunk(index: 0, last: true, text: [0x41, 0x00, 0xFF, 0x09, 0x42])) == .complete("A\tB"), "non-printable bytes are dropped")
+    check(a.add(BenchResultChunk(index: 0, last: false, text: [UInt8](repeating: 0x41, count: BenchResultAssembler.maxBytes))) == .partial, "up to the maximum")
+    check(a.add(BenchResultChunk(index: 1, last: true, text: [0x41])) == .refused, "over the maximum is refused")
+    check(BenchResultChunk(payload: be(3) + be(1) + [0x41]) == BenchResultChunk(index: 3, last: true, text: [0x41]), "benchResult chunk decodes")
+    check(BenchResultChunk(payload: be(3)) == nil, "short benchResult chunk refused")
+}
+do {
+    let p = BenchReport.parse("# build\tabc\n# host\tSheepShaver\nsuite\ttest\tvalue\tstatus\ncpu\tint mix\t12.5\tok\nmemory\tcopy\t\tskipped: no memory\n")
+    check(p.info.count == 2 && p.info[0].0 == "build" && p.info[0].1 == "abc", "report info lines")
+    check(p.columns == ["suite", "test", "value", "status"] && p.rows.count == 2, "report columns and rows")
+    let json = try JSONSerialization.jsonObject(with: BenchReport.json(p)) as? [String: Any]
+    let results = json?["results"] as? [[String: Any]]
+    check((json?["info"] as? [String: String])?["host"] == "SheepShaver", "JSON info")
+    check(results?.count == 2 && results?[0]["value"] as? Double == 12.5 && results?[1]["value"] as? String == "", "JSON numbers stay numbers, empty cells stay strings")
+} catch { check(false, "report JSON threw \(error)") }
 
 print("shears tests: \(checks) checks, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

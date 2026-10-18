@@ -36,6 +36,7 @@
 #include "thunks.h"
 #include "shears.h"
 #include "sheepforce.h"
+#include "sheepbench_host.h"
 #include "nw_boot_contract.h"
 #include "nw_devices.h"
 #include "nw_io.h"
@@ -1416,6 +1417,8 @@ void HandleInterrupt(powerpc_registers *r)
 	 * events reach the guest through the device models instead.
 	 */
 	if (ROMType == ROMTYPE_NEWWORLD) {
+		/* A JIT or SheepForce switch that SheepBench asked for lands here: between blocks, on this thread. */
+		SheepBenchApplyPending();
 		/* The card hardware is in the device tree before the guest
 		 * runs. The Sound control panel lists a component, and the
 		 * Component Manager throws away registrations made before it
@@ -1617,9 +1620,11 @@ void sheepshaver_cpu::execute_native_op(uint32 selector)
 		break;
 	case NATIVE_NQD_LINES_HOOK:
 		gpr(3) = NQD_lines_hook(gpr(3));
+		sheepbench_hook_hits[5] += gpr(3) != 0;
 		break;
 	case NATIVE_NQD_FILLMASK_HOOK:
 		gpr(3) = NQD_fillmask_hook(gpr(3));
+		sheepbench_hook_hits[3] += gpr(3) != 0;
 		break;
 	case NATIVE_NQD_FILLMASK:
 		NQD_fillmask(gpr(3));
@@ -1629,12 +1634,14 @@ void sheepshaver_cpu::execute_native_op(uint32 selector)
 		break;
 	case NATIVE_NQD_BITBLT_HOOK:
 		gpr(3) = NQD_bitblt_hook(gpr(3));
+		sheepbench_hook_hits[0] += gpr(3) != 0;
 		break;
 	case NATIVE_NQD_BITBLT:
 		NQD_bitblt(gpr(3));
 		break;
 	case NATIVE_NQD_FILLRECT_HOOK:
 		gpr(3) = NQD_fillrect_hook(gpr(3));
+		sheepbench_hook_hits[2] += gpr(3) != 0;
 		break;
 	case NATIVE_NQD_INVRECT:
 		NQD_invrect(gpr(3));

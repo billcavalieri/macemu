@@ -129,6 +129,12 @@ const int CLUMP_SIZE = 0x4000;
 // Drive number of our pseudo-drive
 static int drive_number;
 
+// The shared folder's drive number, 0 when there is none (reports such as SheepBench's).
+int ExtFSDriveNumber(void)
+{
+	return drive_number;
+}
+
 
 // Disk/drive icon
 const uint8 ExtFSIcon[256] = {

@@ -14,6 +14,25 @@ Everything here runs **inside** the emulated Mac OS 9 and is built with Retro68,
 
 The host side is `SheepShaver/src/MacOSX/SheepApp/Shears/` (Swift) and `SheepShaver/src/shears.cpp`.
 
+## SheepBench (`sheepbench/`)
+
+A benchmark app you open inside the guest. It reports emulator measurements (raw units, JIT on vs off, percent of
+native ARM64 speed, SheepForce GPU on vs off) instead of a comparison with a G3. See
+`SheepShaver/src/MacOSX/SHEEPBENCH.md`.
+
+| Source | What it is |
+|---|---|
+| `main.c`, `textwin.c` | the app: main window, results, Save, Compare, About, auto mode for the tests |
+| `bench_host.c` | the link to the host (Sheep Shears mailbox commands 7-10), only used when low memory says the host answers |
+| `bench_time.c`, `bench_report.c` | the clock and measurement rule; result rows and the tab-separated report |
+| `suite_*.c` | the seven suites: CPU, 68k, memory, MMU, QuickDraw, 3D (RAVE and QuickDraw 3D), disk |
+| `kernels/` | C kernels shared with the host (`benchNative` runs the same code natively) and their build-time checksums |
+| `kernels68k.s`, `sb_altivec.c` | 68k loops (assembled into the app) and the AltiVec loop |
+
+`tools/sheepbench/build.sh` builds it and the disk the app bundles (`SheepShaver/src/MacOSX/SheepApp/SheepBench.hfv`,
+Guest > Add SheepBench Disk...) and `guest/dist/SheepBench-extfs.zip`; Xcode runs it with `--if-needed`, like the
+Sheep Shears build. `tools/sheepbench/test.sh` boots a scratch copy of the test disk and checks a run.
+
 ## Build and distribute
 
 **Xcode builds it.** The SheepShaver target has a "Build Sheep Shears guest tools" phase that runs

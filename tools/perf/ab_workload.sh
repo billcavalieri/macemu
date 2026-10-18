@@ -7,6 +7,7 @@
 #   e.g.  tools/perf/ab_workload.sh /tmp/ab 3 "base|/path/base.app/Contents/MacOS/SheepShaver|" "new|/path/new.app/Contents/MacOS/SheepShaver|"
 #         tools/perf/ab_workload.sh /tmp/ab 3 "old|$APP|NW_JIT_LEGACY=arena" "new|$APP|"
 # ENV is a space-separated list of K=V given to the emulator. Each run is a full boot + gui + idle (about 100 s).
+# AB_WINDOWLESS=1 runs the VMs without a window (workload.py --windowless).
 set -u
 OUT="$1"; RUNS="$2"; A="$3"; B="$4"
 mkdir -p "$OUT"
@@ -14,6 +15,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 run() {   # label app env round
     local label="$1" app="$2" envs="$3" round="$4" args=()
     for kv in $envs; do args+=(--env "$kv"); done
+    [ "${AB_WINDOWLESS:-0}" = 1 ] && args+=(--windowless)
     python3 "$HERE/workload.py" "$OUT" --app "$app" --label "$label.$round" --no-profile --gui-rounds 3 --idle 15 ${args[@]+"${args[@]}"} > /dev/null 2>&1
     python3 - "$OUT/$label.$round.json" <<'PY'
 import json, sys

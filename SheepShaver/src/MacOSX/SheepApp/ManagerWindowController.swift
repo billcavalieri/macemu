@@ -375,7 +375,7 @@ final class ManagerWindowController: NSWindowController, NSWindowDelegate, NSToo
             return selected != nil && selectedIsRunning
         case #selector(toggleEdgeRelease(_:)), #selector(toggleClipboard(_:)), #selector(toggleDetach(_:)):
             return selectedLink != nil
-        case #selector(installSheepShears(_:)):
+        case #selector(installSheepShears(_:)), #selector(addSheepBench(_:)):
             return selected != nil
         case #selector(removeSelected(_:)):
             return selected != nil
@@ -609,6 +609,11 @@ final class ManagerWindowController: NSWindowController, NSWindowDelegate, NSToo
     @objc func installSheepShears(_ sender: Any?) {
         guard let doc = selected, let window else { return }
         ShearsInstallFlow.run(on: window, prefsPath: doc.prefsPath, vmName: doc.name)
+    }
+
+    @objc func addSheepBench(_ sender: Any?) {
+        guard let doc = selected, let window else { return }
+        ShearsInstallFlow.addSheepBench(on: window, prefsPath: doc.prefsPath, vmName: doc.name)
     }
 
     /// SheepShaver > Quit: closing the library window, which asks what to do about embedded VMs that are still running.

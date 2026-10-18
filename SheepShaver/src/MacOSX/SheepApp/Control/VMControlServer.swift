@@ -215,7 +215,8 @@ final class VMControlServer: @unchecked Sendable {
         return ["id": context.id, "name": context.name(), "state": "running",
                 "width": s.w, "height": s.h, "depth": s.depth, "cursor": ["x": c.x, "y": c.y],
                 "sheep_shears": ["running": shears.toolRunning, "version": Int(shears.toolVersion), "shutdown": shutdown],
-                "display": SheepHost.displayMode.rawValue]
+                "display": SheepHost.displayMode.rawValue,
+                "bench_override": BenchHost.shared.overrideActive]
     }
 
     private func screenshot(maxWidth: Int?) throws -> [String: Any] {

@@ -23,6 +23,7 @@
 
 extern void ExtFSInit(void);
 extern void ExtFSExit(void);
+extern int ExtFSDriveNumber(void);	// 0 when no shared folder is mounted
 
 extern void InstallExtFS(void);
 

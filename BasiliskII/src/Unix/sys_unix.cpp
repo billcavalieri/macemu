@@ -105,6 +105,7 @@ struct mac_file_handle {
 
 	bool is_media_present;		// Flag: media is inserted and available
 	disk_generic *generic_disk;
+	const char *kind;		// Image format, for reports: "raw", "sparsebundle", "qcow2", "chd", "vhd", "bincue", "device"
 
 #if defined(__linux__)
 	int cdrom_cap;		// CD-ROM capability flags (only valid if is_cdrom is true)
@@ -548,6 +549,36 @@ static bool is_drive_mounted(const char *dev_name, char *mount_name)
 }
 
 
+// The name of the image format a factory opens (for reports such as SheepBench's).
+static const char *Sys_factory_kind(disk_factory *f)
+{
+#ifndef STANDALONE_GUI
+	if (f == disk_sparsebundle_factory) return "sparsebundle";
+#if defined(HAVE_QCOW2)
+	if (f == disk_qcow_factory) return "qcow2";
+#endif
+#if defined(HAVE_CHD)
+	if (f == disk_chd_factory) return "chd";
+#endif
+#if defined(HAVE_LIBVHD)
+	if (f == disk_vhd_factory) return "vhd";
+#endif
+#endif
+	return "other";
+}
+
+const char *Sys_kind(void *arg)
+{
+	mac_file_handle *fh = (mac_file_handle *)arg;
+	return fh && fh->kind ? fh->kind : "unknown";
+}
+
+const char *Sys_name(void *arg)
+{
+	mac_file_handle *fh = (mac_file_handle *)arg;
+	return fh && fh->name ? fh->name : "";
+}
+
 /*
  *  Open file/device, create new file handle (returns NULL on error)
  */
@@ -559,6 +590,7 @@ static mac_file_handle *open_filehandle(const char *name)
 		fh->name = strdup(name);
 		fh->fd = -1;
 		fh->generic_disk = NULL;
+		fh->kind = strncmp(name, "/dev/", 5) == 0 ? "device" : "raw";
 #if defined __MACOSX__
 		fh->ioctl_fd = -1;
 		fh->ioctl_name = NULL;
@@ -626,6 +658,7 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
 		D(bug("opening %s as bincue\n", name));
 		fh->bincue_fd = binfd;
 		fh->is_bincue = true;
+		fh->kind = "bincue";
 		fh->read_only = true;
 		fh->is_media_present = true;
 		sys_add_mac_file_handle(fh);
@@ -643,6 +676,7 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
 		if (st == disk_generic::DISK_VALID) {
 			mac_file_handle *fh = open_filehandle(name);
 			fh->generic_disk = generic;
+			fh->kind = Sys_factory_kind(f);
 			fh->file_size = generic->size();
 			fh->read_only = generic->is_read_only();
 			fh->is_media_present = true;

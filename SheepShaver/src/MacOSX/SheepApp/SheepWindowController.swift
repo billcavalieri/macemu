@@ -223,6 +223,12 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         ShearsInstallFlow.run(on: window, prefsPath: PrefsBridge.path(), vmName: vmName)
     }
 
+    /// Guest > Add SheepBench Disk: the benchmark app on its own disk, added like the Sheep Shears installer.
+    @objc private func addSheepBench(_ sender: Any?) {
+        guard let window else { return }
+        ShearsInstallFlow.addSheepBench(on: window, prefsPath: PrefsBridge.path(), vmName: vmName)
+    }
+
     /// Closing the window while Sheep Shears runs: offer a proper shutdown first. "Quit Now" is the old behaviour.
     private func askShutDownOnClose(_ window: NSWindow) {
         let alert = NSAlert()
@@ -292,6 +298,9 @@ final class SheepWindowController: NSWindowController, NSWindowDelegate, NSToolb
         let install = NSMenuItem(title: "Install Sheep Shears…", action: #selector(installSheepShears(_:)), keyEquivalent: "")
         install.target = self
         menu.addItem(install)
+        let bench = NSMenuItem(title: "Add SheepBench Disk…", action: #selector(addSheepBench(_:)), keyEquivalent: "")
+        bench.target = self
+        menu.addItem(bench)
         let shutdown = NSMenuItem(title: "Shut Down Guest…", action: #selector(shutDownGuest(_:)), keyEquivalent: "")
         shutdown.target = self
         menu.addItem(shutdown)
